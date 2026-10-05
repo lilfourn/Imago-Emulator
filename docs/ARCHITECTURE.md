@@ -26,7 +26,8 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-sched` | A priority queue of cycle-timestamped events. |
 | `emu-state` | The save-state container format. |
 | `emu-arm` | The ARM interpreter shared by the GBA and both DS CPUs. Empty until M7. |
-| `emu-gb`, `emu-gba`, `emu-nds` | One system each. Today: header validation and a test pattern. |
+| `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
+| `emu-gba`, `emu-nds` | One system each. Today: header validation and a test pattern. |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
@@ -90,8 +91,17 @@ pub trait Core: Send {
 - Dropping the `Emulator` handle closes its command channel. The thread
   finishes the frame, flushes the battery save, and is joined. The view
   drops it on app quit for the same reason.
-- Frame pacing today is a sleep to the next deadline. Audio-driven pacing
-  arrives with sound (M3).
+- Frame pacing is a sleep to the next deadline. Sound stays in sync through
+  a ring buffer and a resampler that nudges its ratio by up to ±0.5%
+  ([decision 0003](decisions/0003-frame-pacing.md)). The `cpal` stream lives
+  on the UI thread; the emulation thread owns the producer end.
+- A gamepad thread polls `gilrs` and sends plain `PadEvent`s ("South
+  pressed") to the view, which maps them through the same bindings as the
+  keyboard. `controls.rs` combines every held key and control, so releasing
+  one never cancels another that holds the same button.
+- The emulation thread records a save state after every frame into the
+  rewind history (`rewind.rs`): newest state whole, older ones as
+  LZ4-compressed XOR deltas, within 64 MiB.
 
 ## Video path
 

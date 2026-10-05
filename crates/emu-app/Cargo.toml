@@ -19,8 +19,10 @@ dirs.workspace = true
 emu-core.workspace = true
 emu-cores.workspace = true
 emu-state.workspace = true
+gilrs.workspace = true
 gpui.workspace = true
 image = { version = "0.25", default-features = false }
+lz4_flex.workspace = true
 rtrb.workspace = true
 serde.workspace = true
 thiserror.workspace = true
