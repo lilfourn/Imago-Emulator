@@ -118,6 +118,8 @@ pub(crate) struct Hardware {
     pub(crate) vcount: u16,
     /// Between HBlank and the next line's start.
     pub(crate) hblank: bool,
+    /// A display capture is writing this frame's lines.
+    pub(crate) capturing: bool,
     /// Raw values of I/O registers without side effects, for reading back:
     /// one 0x2000-byte page per CPU.
     pub(crate) io9: Box<[u8]>,
@@ -158,6 +160,7 @@ impl Hardware {
             exmemcnt: 0,
             vcount: 0,
             hblank: false,
+            capturing: false,
             io9: vec![0; 0x2000].into_boxed_slice(),
             io7: vec![0; 0x2000].into_boxed_slice(),
             scheduler: Scheduler::new(),

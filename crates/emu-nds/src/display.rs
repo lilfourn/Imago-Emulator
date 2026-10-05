@@ -4,6 +4,7 @@
 //! 192–262 are VBlank. Each CPU has its own DISPSTAT, so each decides which
 //! of the VBlank, HBlank and VCount-match interrupts it wants.
 
+use crate::capture::{self, Control};
 use crate::dma::Timing;
 use crate::gpu2d::WIDTH;
 use crate::hardware::{Event, Hardware};
@@ -61,7 +62,8 @@ impl Hardware {
         Moment::HBlank(self.vcount)
     }
 
-    /// Both 2D engines draw `line` into their screens.
+    /// Both 2D engines draw `line` into their screens; a running capture
+    /// takes engine A's line.
     fn draw_line(&mut self, line: u16) {
         let start = usize::from(line) * WIDTH;
         let mut out = [0; WIDTH];
@@ -74,15 +76,49 @@ impl Hardware {
             &mut out,
         );
         self.screen_a[start..start + WIDTH].copy_from_slice(&out);
+        if self.capturing {
+            self.capture(line);
+        }
         self.engine_b
-            .render_line(line, &vram.engine(Engine::B), |_| 0, None, &mut out);
+            .render_line(line, &self.vram.engine(Engine::B), |_| 0, None, &mut out);
         self.screen_b[start..start + WIDTH].copy_from_slice(&out);
+    }
+
+    /// DISPCAPCNT, kept with the raw I/O registers.
+    fn capture_control(&self) -> Control {
+        Control(u32::from_le_bytes([
+            self.io9[0x64],
+            self.io9[0x65],
+            self.io9[0x66],
+            self.io9[0x67],
+        ]))
+    }
+
+    /// Captures `line`, and finishes the capture after its last line.
+    fn capture(&mut self, line: u16) {
+        let control = self.capture_control();
+        let display_bank = u32::from(self.engine_a.read_register(0x02) >> 2) & 3;
+        capture::capture_line(
+            control,
+            line,
+            self.engine_a.capture_line(),
+            None,
+            display_bank,
+            &mut self.vram,
+        );
+        if line + 1 == control.size().1 {
+            self.capturing = false;
+            self.io9[0x67] &= 0x7F;
+        }
     }
 
     /// The line-start event at `time`.
     pub(crate) fn line_start(&mut self, time: u64) -> Moment {
         self.hblank = false;
         self.vcount = (self.vcount + 1) % LINES;
+        if self.vcount == 0 {
+            self.capturing = self.capture_control().enabled();
+        }
         if self.vcount == VISIBLE_LINES {
             self.request_display_interrupt(1 << 3, irq::VBLANK);
             self.trigger_dma(Timing::VBlank);

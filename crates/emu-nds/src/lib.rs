@@ -10,6 +10,7 @@
 mod bios;
 mod boot;
 mod bus;
+mod capture;
 mod cart;
 mod display;
 mod dma;
