@@ -93,8 +93,8 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | CORE-3 | `save_state` captures the complete machine (CPU, memory, scheduler queue, peripherals). States are versioned per core and wrapped in a container with system tag, ROM CRC-32 and checksum. ✅ container | P0 · M4 |
 | CORE-4 | Battery saves are exposed with a write counter. The frontend flushes them at most 1 s after a write, on quit, and atomically (write a temporary file, then rename). ✅ | P0 · M3 |
 | CORE-5 | The real-time clock starts at `Media::start_time` and advances with emulated cycles. Per-game RTC offsets are supported. | P0 · M5, M10 |
-| CORE-6 | No BIOS or firmware is required. Use an HLE GBA BIOS and DS direct boot by default; use the user's own dumps when provided. | P0 · M8, M13 |
-| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ interface | P1 · M11 |
+| CORE-6 | No BIOS or firmware is required. Use an HLE GBA BIOS ✅ and DS direct boot by default; use the user's own dumps when provided ✅ GBA. | P0 · M8, M13 |
+| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ `memory`, and `peek`/`poke` for plain RAM | P1 · M11 |
 
 ### 6.2 Systems
 
@@ -113,12 +113,12 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 
 | ID | Requirement | Priority |
 |---|---|---|
-| GBA-1 | ARM7TDMI interpreter: ARM and Thumb, barrel shifter, banked modes, exceptions, pipeline PC offsets. Lives in `emu-arm` for reuse by the DS. | P0 · M7 |
-| GBA-2 | Memory map with per-region wait states, DMA, timers, IRQs, HLE BIOS, event scheduler. | P0 · M8 |
-| GBA-3 | PPU modes 0–5, affine backgrounds, windows, blending, mosaic. APU with DMA sound FIFOs. | P0 · M9 |
-| GBA-4 | Backup: SRAM, EEPROM (512 B and 8 KB), Flash 64 KB and 128 KB with correct chip IDs (e.g. Macronix 0x09C2). Detect the type from `FLASH1M_V`/`FLASH512_V`/`SRAM_V`/`EEPROM_V` strings, with a game-code override table. | P0 · M10 |
-| GBA-5 | Seiko S-3511 RTC on GPIO, enabled automatically for Ruby, Sapphire and Emerald by game code. | P0 · M10 |
-| GBA-6 | SIO link cable between two instances. | P1 · M11 |
+| GBA-1 | ARM7TDMI interpreter: ARM and Thumb, barrel shifter, banked modes, exceptions, pipeline PC offsets. Lives in `emu-arm` for reuse by the DS. ✅ | P0 · M7 |
+| GBA-2 | Memory map with per-region wait states, DMA, timers, IRQs, HLE BIOS, event scheduler. ✅ | P0 · M8 |
+| GBA-3 | PPU modes 0–5, affine backgrounds, windows, blending, mosaic. APU with DMA sound FIFOs. ✅ | P0 · M9 |
+| GBA-4 | Backup: SRAM, EEPROM (512 B and 8 KB), Flash 64 KB and 128 KB with correct chip IDs (e.g. Macronix 0x09C2). Detect the type from `FLASH1M_V`/`FLASH512_V`/`SRAM_V`/`EEPROM_V` strings, with a game-code override table. ✅ | P0 · M10 |
+| GBA-5 | Seiko S-3511 RTC on GPIO, enabled automatically for Ruby, Sapphire and Emerald by game code. ✅ | P0 · M10 |
+| GBA-6 | SIO link cable between two instances. ✅ | P1 · M11 |
 
 **Nintendo DS (`emu-nds`, `emu-arm`)**
 
@@ -142,7 +142,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 |---|---|---|
 | UI-1 | Open a ROM from the File menu (⌘O), by drag and drop, or from the command line. ✅ | P0 · S |
 | UI-2 | DS screen layouts: stacked, side by side, single screen with swap. ✅ Hybrid (one large and one small screen), rotation and gap setting. | P0 · S / P1 · M13 |
-| UI-3 | Crisp scaling at any window size ("sharp bilinear"). ✅ Integer scaling, and GBA/GBC colour correction. | P0 · S / P1 · M11 |
+| UI-3 | Crisp scaling at any window size ("sharp bilinear"). ✅ Integer scaling, and GBA/GBC colour correction ✅. | P0 · S / P1 · M11 |
 | UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. | P2 |
 | UI-5 | Input action layer: physical input → action → core buttons. Keyboard bindings in TOML with several keys per action. ✅ | P0 · S |
 | UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides, turbo, hotkey chords. | P1 · M4 |
@@ -151,8 +151,8 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch), thumbnail and age shown when switching. | P0 · S / P1 · M4 |
 | UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap, slow motion. | P0 · S / P1 · M4 |
 | UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
-| UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor, tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |
-| UI-13 | Cheats: GameShark, Action Replay, CodeBreaker and raw patches. | P2 · M11 |
+| UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor (✅ viewer), tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |
+| UI-13 | Cheats: GameShark (✅ GB), Action Replay, CodeBreaker (✅ GBA, unencrypted) and raw patches ✅. | P2 · M11 |
 | UI-14 | Screenshots and video recording, RetroAchievements (rcheevos), Lua scripting hooks. | P2 |
 
 ### 6.4 Tooling
@@ -223,7 +223,7 @@ they are project policy, not legal advice.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | GPUI is young and pre-1.0. The crates.io release (0.2.2) trails Zed's main branch, and the API changes often. | Upgrades break the frontend. | Keep GPUI code inside `emu-app`. Pin the version. Upgrade on purpose, not in passing. |
-| GPUI samples images linearly and has no custom-shader hook. Its Metal atlas does not reclaim image tiles when other images share a texture. | Blurry pixels; possible memory growth; no shader chain. | CPU integer pre-scale (sharp bilinear), already done. Memory measured flat with the current one-image-per-screen design. Shader chain needs a separate Metal or wgpu path (decision record 0001, open question Q3). |
+| GPUI samples images linearly and has no custom-shader hook. Its Metal atlas does not reclaim image tiles when other images share a texture. | Blurry pixels; possible memory growth; no shader chain. | CPU integer pre-scale (sharp bilinear), already done. Memory measured flat with the current one-image-per-screen design. Filters run as CPU passes ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). |
 | DS scope (two CPUs, 3D, VRAM banking, cartridge protocol) | The DS phase stalls or takes years. | GBA first, sharing `emu-arm`. Software 3D first. Diff traces against melonDS. Treat DS as a stretch goal with its own milestones. |
 | Borrow checker vs. "everything points at the bus" designs | Slow progress on the first cores. | Each core owns its machine as one struct. The CPU borrows the bus per call (`cpu.step(&mut bus)`); no `Rc<RefCell<…>>` webs. |
 | Retrofitting determinism and save states | Rewind and netplay become impossible later. | The contract requires both from the first core. The scaffold's stub cores already save and load state. |
@@ -236,7 +236,7 @@ they are project policy, not legal advice.
 |---|---|---|
 | Q1 | Which license? GPL-3.0-or-later would allow porting code from melonDS; MPL-2.0 matches mGBA; MIT or Apache-2.0 keeps reuse open. Choose before accepting outside contributions. | Before first public push |
 | Q2 | Stay on crates.io GPUI 0.2.2, or pin a newer Zed git revision? | M3 |
-| Q3 | Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI? | M11 |
+| Q3 | ~~Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI?~~ Proposed: neither for now. Filters are CPU passes, and DS upscaling happens in the core ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | M11 |
 | Q4 | ~~Pace emulation from the audio clock or from display vsync?~~ Decided: a frame timer, with dynamic rate control on audio ([decision 0003](decisions/0003-frame-pacing.md)). | M3 |
 | Q5 | Bundle SameBoy's Expat-licensed open boot ROMs so the GB boots with an animation? | M2 |
 | Q6 | ~~Write the optional CHIP-8 warm-up (M0) or start straight on the SM83?~~ Decided: straight to the SM83. | — |
