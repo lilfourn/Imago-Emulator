@@ -72,6 +72,21 @@ pub trait Core: Send {
         let _ = (player, out);
     }
 
+    /// The byte at `address` in `player`'s CPU address space, for cheats
+    /// and debuggers, or `None` where that is not plain RAM (I/O registers,
+    /// ROM, unmapped space). Reading never has side effects.
+    fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        let _ = (player, address);
+        None
+    }
+
+    /// Writes the byte at `address` in `player`'s CPU address space, for
+    /// cheats and debuggers. Returns whether `address` is plain RAM.
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
+        let _ = (player, address, value);
+        false
+    }
+
     /// A read-only view of a memory region, for debuggers, cheat search and
     /// game tools.
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {

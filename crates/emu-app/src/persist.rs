@@ -1,8 +1,9 @@
 //! Where per-game files live on disk, and how they are written.
 //!
-//! Battery saves and save states sit next to the ROM, as in mGBA and
-//! melonDS: `game.nds` gets `game.sav` and `game.ss1`. A linked pair saves
-//! its states next to the first player's ROM as `game.ls1`.
+//! Battery saves, save states and cheats sit next to the ROM, as in mGBA
+//! and melonDS: `game.nds` gets `game.sav`, `game.ss1` and `game.cht`. A
+//! linked pair saves its states next to the first player's ROM as
+//! `game.ls1`.
 
 use std::fs;
 use std::io;
@@ -11,6 +12,11 @@ use std::path::{Path, PathBuf};
 /// The battery save file for `rom`.
 pub fn backup_path(rom: &Path) -> PathBuf {
     rom.with_extension("sav")
+}
+
+/// The cheat list for `rom`.
+pub fn cheats_path(rom: &Path) -> PathBuf {
+    rom.with_extension("cht")
 }
 
 /// The save state file in `slot` for a session of `roms`, one per player.

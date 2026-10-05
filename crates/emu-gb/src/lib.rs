@@ -248,6 +248,18 @@ impl Core for Gb {
         }
     }
 
+    fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        let address = u16::try_from(address).ok().filter(|_| player == 0)?;
+        self.machine.bus.peek_ram(address)
+    }
+
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
+        let Some(address) = u16::try_from(address).ok().filter(|_| player == 0) else {
+            return false;
+        };
+        self.machine.bus.poke_ram(address, value)
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         match region {
             MemoryRegion::MainRam => None,

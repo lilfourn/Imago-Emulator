@@ -233,6 +233,16 @@ impl Core for Gba {
         }
     }
 
+    fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        (player == 0)
+            .then(|| self.machine.bus.peek_ram(address))
+            .flatten()
+    }
+
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
+        player == 0 && self.machine.bus.poke_ram(address, value)
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         match region {
             MemoryRegion::MainRam => None,

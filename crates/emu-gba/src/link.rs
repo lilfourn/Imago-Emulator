@@ -188,6 +188,16 @@ impl Core for Linked {
         }
     }
 
+    fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        self.players.get(player)?.peek(0, address)
+    }
+
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
+        self.players
+            .get_mut(player)
+            .is_some_and(|gba| gba.poke(0, address, value))
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         self.players[0].memory(region)
     }

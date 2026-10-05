@@ -1589,6 +1589,7 @@ dependencies = [
  "cpal",
  "crc32fast",
  "dirs 7.0.0",
+ "emu-cheats",
  "emu-core",
  "emu-cores",
  "emu-state",
@@ -1607,6 +1608,14 @@ name = "emu-arm"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "emu-cheats"
+version = "0.1.0"
+dependencies = [
+ "emu-core",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

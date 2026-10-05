@@ -13,17 +13,19 @@ use gpui::{
 };
 
 use crate::app::{
-    ConnectLinkCable, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, NextStateSlot,
-    OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer, ToggleColorCorrection,
-    ToggleFastForward, TogglePause,
+    ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState,
+    NextStateSlot, OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer,
+    ToggleColorCorrection, ToggleFastForward, TogglePause,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
+use crate::cheats;
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement};
+use crate::persist;
 use crate::slots::{self, SlotPreview};
 use crate::video;
 
@@ -68,6 +70,8 @@ struct Session {
     rom_paths: Vec<PathBuf>,
     frames: Vec<Frame>,
     sequence: u64,
+    /// Per player: the cheat file's text when last sent to the emulator.
+    cheat_texts: Vec<Option<String>>,
     /// The system's colour correction, if it has one.
     correction: Option<Correction>,
     /// Per screen: the pre-scale factor and the image built with it.
@@ -85,10 +89,14 @@ impl EmulatorView {
 
         let loaded_bindings = bindings::default_path().map(|path| Bindings::load(&path));
         let subscriptions = vec![
-            // Keys released while another window has focus never send key-up.
-            cx.observe_window_activation(window, |this, window, _| {
+            cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
+                    // Keys released while another window has focus never
+                    // send key-up.
                     this.release_all();
+                } else if let Some(message) = this.reload_cheats() {
+                    // Back from editing a cheat file, perhaps.
+                    this.show_notice(message, cx);
                 }
             }),
             // Stop the emulation thread on quit so the battery save is flushed.
@@ -197,6 +205,7 @@ impl EmulatorView {
             rom_paths,
             frames: Vec::new(),
             sequence: 0,
+            cheat_texts: vec![None; info.players.max(1)],
             correction: Correction::for_system(info.system),
             images: Vec::new(),
             _events: task,
@@ -213,7 +222,67 @@ impl EmulatorView {
         } else {
             window.set_window_title(&format!("{name} — {}", info.system.name()));
         }
-        self.show_notice(format!("Running {name}"), cx);
+        let running = format!("Running {name}");
+        match self.reload_cheats() {
+            Some(cheats) => self.show_notice(format!("{running} · {cheats}"), cx),
+            None => self.show_notice(running, cx),
+        }
+    }
+
+    /// Re-reads each player's cheat file and sends the ones that changed to
+    /// the emulator. Returns a summary of the changes, if any.
+    fn reload_cheats(&mut self) -> Option<String> {
+        let session = self.session.as_mut()?;
+        let players = session.rom_paths.len();
+        let mut changes = Vec::new();
+        for (player, rom) in session.rom_paths.iter().enumerate() {
+            let text = cheats::read(&persist::cheats_path(rom));
+            if text == session.cheat_texts[player] {
+                continue;
+            }
+            let whose = if players > 1 {
+                format!("Player {} cheats", player + 1)
+            } else {
+                "Cheats".to_owned()
+            };
+            match emu_cheats::parse(session.info.system, text.as_deref().unwrap_or_default()) {
+                Ok(list) => {
+                    let on = list.iter().filter(|cheat| cheat.enabled).count();
+                    changes.push(format!("{whose}: {on} on"));
+                    session.emulator.send(Command::SetCheats {
+                        player,
+                        cheats: list,
+                    });
+                }
+                Err(error) => changes.push(format!("{whose} not applied: {error}")),
+            }
+            session.cheat_texts[player] = text;
+        }
+        (!changes.is_empty()).then(|| changes.join(" · "))
+    }
+
+    /// Opens the active player's cheat file in the text editor, creating it
+    /// from a template first if needed.
+    fn edit_cheats(&mut self, _: &EditCheats, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(rom) = self.session.as_ref().and_then(|session| {
+            let player = self.active_player.min(session.rom_paths.len() - 1);
+            session.rom_paths.get(player)
+        }) else {
+            self.show_notice("Open a game first, then edit its cheats", cx);
+            return;
+        };
+        let path = persist::cheats_path(rom);
+        let opened = cheats::create_if_missing(&path).and_then(|()| cheats::open_in_editor(&path));
+        match opened {
+            Ok(()) => self.show_notice(
+                format!(
+                    "Editing {}; save it and switch back to apply",
+                    file_name(&path)
+                ),
+                cx,
+            ),
+            Err(error) => self.show_notice(format!("Cannot open {}: {error}", path.display()), cx),
+        }
     }
 
     fn stop(&mut self, window: &mut Window) {
@@ -566,6 +635,7 @@ impl Render for EmulatorView {
             .text_color(rgb(0x00DD_DDDD))
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::connect_link_cable))
+            .on_action(cx.listener(Self::edit_cheats))
             .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
                 let players = this.session.as_ref().map_or(1, |s| s.info.players);
                 this.switch_player((this.active_player + 1) % players.max(1), cx);

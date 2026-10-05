@@ -7,6 +7,7 @@
 mod app;
 mod audio;
 mod bindings;
+mod cheats;
 mod color;
 mod controls;
 mod emulator;

@@ -473,6 +473,25 @@ impl Bus {
         }
     }
 
+    /// Reads EWRAM or IWRAM, for cheats; `None` elsewhere.
+    pub(crate) fn peek_ram(&self, address: u32) -> Option<u8> {
+        match address >> 24 {
+            0x02 => Some(self.ewram[(address & 0x3_FFFF) as usize]),
+            0x03 => Some(self.iwram[(address & 0x7FFF) as usize]),
+            _ => None,
+        }
+    }
+
+    /// Writes EWRAM or IWRAM, for cheats. Returns whether `address` is RAM.
+    pub(crate) fn poke_ram(&mut self, address: u32, value: u8) -> bool {
+        match address >> 24 {
+            0x02 => self.ewram[(address & 0x3_FFFF) as usize] = value,
+            0x03 => self.iwram[(address & 0x7FFF) as usize] = value,
+            _ => return false,
+        }
+        true
+    }
+
     /// Records an instruction fetch's value: the BIOS's last opcode for
     /// read protection, and the bus's open-bus value.
     fn note_fetch(&mut self, value: u32) {

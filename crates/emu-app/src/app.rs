@@ -14,6 +14,7 @@ actions!(
     [
         OpenRom,
         ConnectLinkCable,
+        EditCheats,
         SwitchPlayer,
         TogglePause,
         Reset,
@@ -92,6 +93,8 @@ fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Open ROM…", OpenRom),
                 MenuItem::action("Connect Link Cable…", ConnectLinkCable),
+                MenuItem::separator(),
+                MenuItem::action("Edit Cheats…", EditCheats),
             ],
         },
         Menu {
