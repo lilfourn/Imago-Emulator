@@ -6,17 +6,19 @@ A Game Boy, Game Boy Color, Game Boy Advance and Nintendo DS emulator for
 macOS, written in Rust with a [GPUI](https://gpui.rs) frontend. The goal is to
 play the Pokémon games of generations 1–5 from your own cartridge dumps.
 
-**Status: scaffold.** The frontend, core API, save states and test tooling
-work end to end. The cores validate cartridge headers and draw a test pattern;
-no CPU is emulated yet. Next up: the Game Boy's SM83 CPU
-([roadmap](docs/ROADMAP.md), milestone M1).
+**Status: Phase 1 (Game Boy).** The Game Boy core runs: CPU, video, sound,
+MBC1/2/3/5 cartridges with battery saves and the MBC3 clock. It passes 117 of
+139 open-source test ROMs, including all of Blargg's CPU tests and
+dmg-acid2. The app has sound, gamepads, save-state slots, rewind and
+fast-forward. The GBA and DS cores are still stubs that draw a test pattern.
+See the [roadmap](docs/ROADMAP.md).
 
 ## Docs
 
 - [PRD](docs/PRD.md): goals, requirements, legal policy, risks, open questions
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
-- [Decisions](docs/decisions/): why Rust and GPUI
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing
 
 ## Build and run
 
@@ -37,26 +39,48 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 
 ## Controls
 
-| Game | Key | | App | Shortcut |
-|---|---|---|---|---|
-| D-pad | Arrow keys | | Open ROM | ⌘O |
-| A / B | X / Z | | Pause / resume | ⌘P |
-| X / Y (DS) | S / A | | Reset | ⌘R |
-| L / R | Q / W | | Save / load state | ⌘S / ⌘L |
-| Start / Select | Return / Delete | | Stacked / side by side / one screen | ⌘1 / ⌘2 / ⌘3 |
-| Touchscreen | Click and drag | | Swap screens | ⌘E |
-| Fast-forward | Hold Tab | | Quit | ⌘Q |
+| Game | Key | Gamepad | | App | Shortcut |
+|---|---|---|---|---|---|
+| D-pad | Arrow keys | D-pad, left stick | | Open ROM | ⌘O |
+| A / B | X / Z | East / South | | Pause / resume | ⌘P |
+| X / Y (DS) | S / A | North / West | | Reset | ⌘R |
+| L / R | Q / W | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
+| Start / Select | Return / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
+| Touchscreen | Click and drag | | | Fast-forward on/off | ⌘F |
+| Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen | ⌘1 / ⌘2 / ⌘3 |
+| Rewind | Hold ` | Left trigger | | Swap screens / Quit | ⌘E / ⌘Q |
 
-Rebind game keys in `~/Library/Application Support/ds-emulator/bindings.toml`:
+Gamepad buttons are named by position, so A is the right face button as on a
+Nintendo controller. Rebind keys and gamepad controls in
+`~/Library/Application Support/ds-emulator/bindings.toml`:
 
 ```toml
 [keys]
-a = ["x", "k"]     # several keys per action
+a = ["x", "k"]          # several keys per action
 fast_forward = ["tab"]
+
+[gamepad]
+a = ["South"]           # Xbox-style: A on the bottom button
+b = ["East"]
+
+[gamepads.030000005e0400008e02000000007200]   # one controller, by UUID
+rewind = ["LeftTrigger"]
 ```
 
-Battery saves (`game.sav`) and save states (`game.ss1`) are written next to
-the ROM.
+Battery saves (`game.sav`) and save states (`game.ss1` to `game.ss4`) are
+written next to the ROM. Game Boy `.sav` files use the same layout as
+SameBoy, mGBA and BGB, including the MBC3 clock, so saves move between them.
+
+## Testing against test ROMs
+
+```sh
+scripts/fetch-test-roms.sh                                   # once
+cargo test -p emu-gb --test test_roms -- --nocapture         # pass table
+cargo run --release -p emu-gb --example trace -- rom.gb 1000 # CPU trace
+```
+
+`crates/emu-gb/tests/test-roms-passing.txt` lists every ROM known to pass;
+the test fails if one regresses. Record new passes with `UPDATE_PASSING=1`.
 
 ## Workspace
 
@@ -66,7 +90,8 @@ the ROM.
 | `emu-sched` | Cycle-timestamped event scheduler |
 | `emu-state` | Save-state container format |
 | `emu-arm` | ARM interpreter shared by GBA and DS (not started) |
-| `emu-gb`, `emu-gba`, `emu-nds` | One core per system (stubs today) |
+| `emu-gb` | Game Boy core |
+| `emu-gba`, `emu-nds` | GBA and DS cores (stubs today) |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-headless` | Windowless runner for test ROMs |
 | `emu-app` | The GPUI app (`ds-emulator` binary) |

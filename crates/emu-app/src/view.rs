@@ -1,11 +1,11 @@
 //! The main window: draws the running game's screens and turns keyboard,
-//! mouse and file events into emulator commands.
+//! gamepad, mouse and file events into emulator commands.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use emu_core::{Buttons, CoreInfo, Frame, Input, TouchPoint};
+use emu_core::{CoreInfo, Frame, Input, TouchPoint};
 use gpui::{
     Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
@@ -13,15 +13,21 @@ use gpui::{
 };
 
 use crate::app::{
-    LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, OpenRom, Reset, SaveState,
-    SwapScreens, TogglePause,
+    LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, NextStateSlot, OpenRom,
+    PreviousStateSlot, Reset, SaveState, SwapScreens, ToggleFastForward, TogglePause,
 };
-use crate::bindings::{self, Bindings, Held};
+use crate::audio::{self, AudioOutput};
+use crate::bindings::{self, Bindings};
+use crate::controls::{Controls, HeldState};
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
+use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement};
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
+
+/// Save-state slots, numbered from 1.
+const STATE_SLOTS: u8 = 4;
 
 /// The root view of the main window.
 pub struct EmulatorView {
@@ -31,10 +37,14 @@ pub struct EmulatorView {
     session: Option<Session>,
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
-    buttons: Buttons,
+    controls: Controls,
     touch: Option<TouchPoint>,
+    /// What the emulation thread was last told is held.
+    sent: HeldState,
+    state_slot: u8,
     notice: Option<SharedString>,
     notice_timer: Option<Task<()>>,
+    _gamepad: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -47,6 +57,8 @@ struct Session {
     /// Per screen: the pre-scale factor and the image built with it.
     images: Vec<Option<(usize, Arc<RenderImage>)>>,
     _events: Task<()>,
+    /// Dropped after `emulator`, so the thread stops before the device.
+    _audio: Option<AudioOutput>,
 }
 
 impl EmulatorView {
@@ -70,6 +82,24 @@ impl EmulatorView {
             }),
         ];
 
+        let (pad_events, pad_receiver) = async_channel::unbounded();
+        if let Err(error) = gamepad::spawn(pad_events) {
+            eprintln!("ds-emulator: cannot start gamepad thread: {error}");
+        }
+        let gamepad_task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = pad_receiver.recv().await {
+                let delivered = this.update_in(cx, |this, window, _| {
+                    // Gamepads are global; only the active window listens.
+                    if window.is_window_active() || !event.pressed {
+                        this.pad_event(&event);
+                    }
+                });
+                if delivered.is_err() {
+                    break;
+                }
+            }
+        });
+
         let mut view = Self {
             focus,
             bindings: Bindings::default(),
@@ -77,15 +107,18 @@ impl EmulatorView {
             session: None,
             loading: None,
             placements: Vec::new(),
-            buttons: Buttons::NONE,
+            controls: Controls::default(),
             touch: None,
+            sent: HeldState::default(),
+            state_slot: 1,
             notice: None,
             notice_timer: None,
+            _gamepad: gamepad_task,
             _subscriptions: subscriptions,
         };
         match loaded_bindings {
             Some(Ok(bindings)) => view.bindings = bindings,
-            Some(Err(error)) => view.show_notice(format!("{error}; using default keys"), cx),
+            Some(Err(error)) => view.show_notice(format!("{error}; using default bindings"), cx),
             None => {}
         }
         if let Some(rom) = rom {
@@ -115,8 +148,15 @@ impl EmulatorView {
         // Stop the previous game first so its battery save is flushed.
         self.stop(window);
         let info = loaded.info();
+        let (audio_output, audio_sink) = match audio::open(info.audio_sample_rate) {
+            Ok((output, sink)) => (Some(output), Some(sink)),
+            Err(error) => {
+                self.show_notice(format!("No sound: {error:#}"), cx);
+                (None, None)
+            }
+        };
         let (events, receiver) = async_channel::unbounded();
-        let emulator = Emulator::start(loaded, events);
+        let emulator = Emulator::start(loaded, events, audio_sink);
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
@@ -131,9 +171,12 @@ impl EmulatorView {
             sequence: 0,
             images: Vec::new(),
             _events: task,
+            _audio: audio_output,
         });
-        self.buttons = Buttons::NONE;
+        // The new emulator starts with nothing held; resend what is.
+        self.sent = HeldState::default();
         self.touch = None;
+        self.sync_held();
         window.set_window_title(&format!("{name} — {}", info.system.name()));
         self.show_notice(format!("Running {name}"), cx);
     }
@@ -175,39 +218,78 @@ impl EmulatorView {
 
     fn send_input(&self) {
         self.send(Command::SetInput(Input {
-            buttons: self.buttons,
+            buttons: self.sent.buttons,
             touch: self.touch,
         }));
     }
 
-    fn release_all(&mut self) {
-        self.buttons = Buttons::NONE;
-        self.touch = None;
-        self.send_input();
-        self.send(Command::SetFastForward(false));
+    /// Tells the emulation thread about any change in held inputs.
+    fn sync_held(&mut self) {
+        let state = self.controls.state();
+        if state.buttons != self.sent.buttons {
+            self.sent.buttons = state.buttons;
+            self.send_input();
+        }
+        if state.fast_forward != self.sent.fast_forward {
+            self.send(Command::SetFastForward(state.fast_forward));
+        }
+        if state.rewind != self.sent.rewind {
+            self.send(Command::SetRewind(state.rewind));
+        }
+        self.sent = state;
     }
 
-    fn set_held(&mut self, key: &str, held: bool) {
-        match self.bindings.action(key) {
-            Some(Held::Button(button)) => {
-                self.buttons.set(button, held);
-                self.send_input();
-            }
-            Some(Held::FastForward) => self.send(Command::SetFastForward(held)),
-            None => {}
-        }
+    fn release_all(&mut self) {
+        self.controls.release_all();
+        self.touch = None;
+        self.send_input();
+        self.sync_held();
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
         // Command and Control chords are menu shortcuts, not game input.
         if !modifiers.platform && !modifiers.control {
-            self.set_held(&event.keystroke.key, true);
+            let key = &event.keystroke.key;
+            let action = self.bindings.key_action(key);
+            self.controls.set(format!("key:{key}"), action, true);
+            self.sync_held();
         }
     }
 
     fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.set_held(&event.keystroke.key, false);
+        let key = &event.keystroke.key;
+        self.controls.set(format!("key:{key}"), None, false);
+        self.sync_held();
+    }
+
+    fn pad_event(&mut self, event: &PadEvent) {
+        let action = self.bindings.pad_action(&event.controller, &event.control);
+        let source = format!("pad:{}:{}", event.controller, event.control);
+        self.controls.set(source, action, event.pressed);
+        self.sync_held();
+    }
+
+    fn toggle_fast_forward(&mut self, cx: &mut Context<Self>) {
+        let on = self.controls.toggle_fast_forward();
+        self.sync_held();
+        self.show_notice(
+            if on {
+                "Fast-forward on"
+            } else {
+                "Fast-forward off"
+            },
+            cx,
+        );
+    }
+
+    fn change_state_slot(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.state_slot = if forward {
+            self.state_slot % STATE_SLOTS + 1
+        } else {
+            (self.state_slot + STATE_SLOTS - 2) % STATE_SLOTS + 1
+        };
+        self.show_notice(format!("State slot {}", self.state_slot), cx);
     }
 
     /// Points the stylus at `position`, or lifts it if that is off the
@@ -319,8 +401,21 @@ impl Render for EmulatorView {
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(|this, _: &TogglePause, _, _| this.send(Command::TogglePause)))
             .on_action(cx.listener(|this, _: &Reset, _, _| this.send(Command::Reset)))
-            .on_action(cx.listener(|this, _: &SaveState, _, _| this.send(Command::SaveState)))
-            .on_action(cx.listener(|this, _: &LoadState, _, _| this.send(Command::LoadState)))
+            .on_action(cx.listener(|this, _: &SaveState, _, _| {
+                this.send(Command::SaveState(this.state_slot));
+            }))
+            .on_action(cx.listener(|this, _: &LoadState, _, _| {
+                this.send(Command::LoadState(this.state_slot));
+            }))
+            .on_action(
+                cx.listener(|this, _: &NextStateSlot, _, cx| this.change_state_slot(true, cx)),
+            )
+            .on_action(cx.listener(|this, _: &PreviousStateSlot, _, cx| {
+                this.change_state_slot(false, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleFastForward, _, cx| this.toggle_fast_forward(cx)),
+            )
             .on_action(cx.listener(|this, _: &LayoutVertical, _, cx| {
                 this.arrange(Arrangement::Vertical, cx);
             }))

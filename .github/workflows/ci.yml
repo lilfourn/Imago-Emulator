@@ -12,6 +12,8 @@ jobs:
       - uses: actions/checkout@v5
       - name: No Nintendo files
         run: scripts/check-no-nintendo-files.sh
+      - name: Fetch test ROMs
+        run: scripts/fetch-test-roms.sh
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check

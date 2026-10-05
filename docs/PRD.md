@@ -102,9 +102,9 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 
 | ID | Requirement | Priority |
 |---|---|---|
-| GB-1 | SM83 CPU: all opcodes including CB-prefixed, flags, interrupts, HALT/STOP, the EI delay, the HALT bug. | P0 · M1 |
-| GB-2 | Timer/DIV, joypad, and a scanline PPU (background, window, sprites with priority and the 10-per-line limit). | P0 · M2 |
-| GB-3 | APU: two square channels (one with sweep), wave and noise, with length, envelope and frame sequencer. | P0 · M3 |
+| GB-1 | SM83 CPU: all opcodes including CB-prefixed, flags, interrupts, HALT/STOP, the EI delay, the HALT bug. ✅ | P0 · M1 |
+| GB-2 | Timer/DIV, joypad, and a scanline PPU (background, window, sprites with priority and the 10-per-line limit). ✅ | P0 · M2 |
+| GB-3 | APU: two square channels (one with sweep), wave and noise, with length, envelope and frame sequencer. ✅ | P0 · M3 |
 | GB-4 | Cartridges: MBC1, MBC3 with RTC, MBC5, battery RAM. MBC3 RTC is saved in the de facto 48-byte trailer; 44- and 48-byte trailers are both read. | P0 · M3, M5 |
 | GB-5 | CGB mode: palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. | P0 · M5 |
 | GB-6 | Serial link cable between two instances in one process. | P1 · M6 |
@@ -145,12 +145,12 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-3 | Crisp scaling at any window size ("sharp bilinear"). ✅ Integer scaling, and GBA/GBC colour correction. | P0 · S / P1 · M11 |
 | UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. | P2 |
 | UI-5 | Input action layer: physical input → action → core buttons. Keyboard bindings in TOML with several keys per action. ✅ | P0 · S |
-| UI-6 | Gamepads with per-controller profiles keyed by GUID, per-game overrides, turbo, analog-to-D-pad, hotkey chords. | P1 · M4 |
+| UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides, turbo, hotkey chords. | P1 · M4 |
 | UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. | P0 · S / P1 · M13 |
-| UI-8 | Audio output at the device rate with dynamic rate control (adjust the resample ratio by up to ±0.5% based on buffer fill). | P0 · M3 |
-| UI-9 | Save state slots with thumbnails. ✅ one slot (⌘S / ⌘L). | P0 · S / P1 · M4 |
-| UI-10 | Fast-forward while held (Tab). ✅ Toggle, speed cap, slow motion. | P0 · S / P1 · M4 |
-| UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. | P1 · M4 |
+| UI-8 | Audio output at the device rate with dynamic rate control (adjust the resample ratio by up to ±0.5% based on buffer fill). ✅ | P0 · M3 |
+| UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch); thumbnails pending. | P0 · S / P1 · M4 |
+| UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap, slow motion. | P0 · S / P1 · M4 |
+| UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
 | UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor, tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |
 | UI-13 | Cheats: GameShark, Action Replay, CodeBreaker and raw patches. | P2 · M11 |
 | UI-14 | Screenshots and video recording, RetroAchievements (rcheevos), Lua scripting hooks. | P2 |
@@ -160,8 +160,8 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | ID | Requirement | Priority |
 |---|---|---|
 | TOOL-1 | Headless runner: runs N frames and prints one `key=value` line per screen with a CRC-32, and optionally dumps PPM images. ✅ | P0 · S |
-| TOOL-2 | Test-ROM suite: a manifest of test ROMs and their pass criteria (serial output, Mooneye's Fibonacci registers, framebuffer CRC), a script that runs them all and prints a pass table, run in CI. Test ROMs are downloaded by script, never committed. | P0 · M1 |
-| TOOL-3 | Trace logger whose format can be diffed against mGBA, SameBoy and melonDS logs. | P1 · M1 |
+| TOOL-2 | Test-ROM suite: a manifest of test ROMs and their pass criteria (serial output, Mooneye's Fibonacci registers, framebuffer CRC), a script that runs them all and prints a pass table, run in CI. Test ROMs are downloaded by script, never committed. ✅ | P0 · M1 |
+| TOOL-3 | Trace logger whose format can be diffed against mGBA, SameBoy and melonDS logs. ✅ | P1 · M1 |
 | TOOL-4 | CI on macOS: rustfmt, clippy with warnings denied, tests, and a check that no Nintendo files are tracked. ✅ written, not yet run on a remote | P0 · S |
 
 ## 7. Non-functional requirements
@@ -237,6 +237,6 @@ they are project policy, not legal advice.
 | Q1 | Which license? GPL-3.0-or-later would allow porting code from melonDS; MPL-2.0 matches mGBA; MIT or Apache-2.0 keeps reuse open. Choose before accepting outside contributions. | Before first public push |
 | Q2 | Stay on crates.io GPUI 0.2.2, or pin a newer Zed git revision? | M3 |
 | Q3 | Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI? | M11 |
-| Q4 | Pace emulation from the audio clock or from display vsync? (Audio-driven with dynamic rate control is the report's default.) | M3 |
+| Q4 | ~~Pace emulation from the audio clock or from display vsync?~~ Decided: a frame timer, with dynamic rate control on audio ([decision 0003](decisions/0003-frame-pacing.md)). | M3 |
 | Q5 | Bundle SameBoy's Expat-licensed open boot ROMs so the GB boots with an animation? | M2 |
-| Q6 | Write the optional CHIP-8 warm-up (M0) or start straight on the SM83? | Now |
+| Q6 | ~~Write the optional CHIP-8 warm-up (M0) or start straight on the SM83?~~ Decided: straight to the SM83. | — |

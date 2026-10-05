@@ -50,10 +50,21 @@ pub trait Core: Send {
     /// error the core is left exactly as it was.
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
 
-    /// Battery-backed cartridge memory (SRAM, EEPROM or flash), if the game
-    /// has any.
-    fn backup(&self) -> Option<Backup<'_>> {
+    /// How many times the game has written to battery-backed memory (SRAM,
+    /// EEPROM, flash or a cartridge clock), or `None` if it has none.
+    ///
+    /// Frontends compare this with the value at their last flush and call
+    /// [`Core::save_backup`] only when it changed, on a timer rather than on
+    /// every write.
+    fn backup_generation(&self) -> Option<u64> {
         None
+    }
+
+    /// Appends the battery save to `out` in the de facto `.sav` layout for
+    /// the system (for example, Game Boy cartridge RAM followed by the
+    /// 48-byte MBC3 clock trailer). Appends nothing if there is no backup.
+    fn save_backup(&self, out: &mut Vec<u8>) {
+        let _ = out;
     }
 
     /// A read-only view of a memory region, for debuggers, cheat search and
@@ -116,17 +127,6 @@ impl FrameRate {
         let nanos = (u128::from(self.cycles_per_frame) * 1_000_000_000 + clock / 2) / clock;
         Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
-}
-
-/// Battery-backed save memory and a count of writes to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Backup<'a> {
-    /// The raw save bytes, in the de facto `.sav` layout for the system.
-    pub data: &'a [u8],
-    /// Increases whenever the game writes to `data`. Frontends compare it
-    /// with the last flushed value and write to disk on a timer instead of
-    /// on every write.
-    pub generation: u64,
 }
 
 /// A named memory region exposed through [`Core::memory`].

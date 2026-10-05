@@ -8,6 +8,11 @@ publish.workspace = true
 
 [dependencies]
 emu-core.workspace = true
+postcard.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+png.workspace = true
 
 [lints]
 workspace = true

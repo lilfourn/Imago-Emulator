@@ -69,7 +69,21 @@ Frontend work in this phase: audio output, gamepads, the test-ROM suite and
 the trace logger. Doing them now, while the core is small, is cheaper than
 retrofitting.
 
-### M1. SM83 CPU
+**Status (2026-10-05):** M1–M3 met on test ROMs; M4 met except state-slot
+thumbnails. 117 of 139 test ROMs pass
+(`crates/emu-gb/tests/test-roms-passing.txt`). The Pokémon checkpoints need
+your own cartridge dumps and have not been run.
+
+| Not yet passing | Why | Matters for games? |
+|---|---|---|
+| Mooneye PPU `intr_2_*`, `lcdon_*`, `stat_lyc_onoff` (7) | STAT mode bits lag the mode-2 interrupt by part of an M-cycle; the scanline renderer does not model it | Rarely; a few raster-effect demos |
+| Mooneye `boot_div`, `serial/boot_sclk_align` | Exact DIV and serial-clock phase left by the boot ROM | No |
+| Mooneye `timer/rapid_toggle` | TAC toggling glitch | No |
+| Mooneye MBC1 multicart | MBC1M wiring for compilation cartridges | Only those carts |
+| Blargg `dmg_sound` 09, 10, 12 | Wave-RAM access races while channel 3 plays | Rarely |
+| Blargg `oam_bug` | DMG OAM corruption bug | No (games avoid it) |
+
+### M1. SM83 CPU ✅
 
 - All opcodes and CB-prefixed opcodes, flags, interrupts, HALT/STOP, EI
   delay. Serial port output captured for tests (writes to 0xFF01/0xFF02).
@@ -79,23 +93,23 @@ retrofitting.
 - **Exit:** Blargg `cpu_instrs` prints "Passed" over serial in the headless
   runner, then `instr_timing` passes.
 
-### M2. Timer, PPU, joypad
+### M2. Timer, PPU, joypad ✅ (test ROMs)
 
 - Timer/DIV, interrupts, scanline PPU (background, window, sprites with
   priority and the 10-per-line limit), joypad. Replace the test pattern.
 - **Exit:** dmg-acid2 frame CRC matches the reference. Tetris and Pokémon
   Red/Blue reach the title screen.
 
-### M3. Cartridges, saves and sound
+### M3. Cartridges, saves and sound ✅ (test ROMs)
 
-- MBC1 and MBC3, battery RAM through `Core::backup`, APU (all four
-  channels).
+- MBC1, MBC2, MBC3 (with clock) and MBC5, battery RAM through
+  `Core::save_backup`, APU (all four channels).
 - **Frontend:** `cpal` audio output with resampling and dynamic rate
   control (UI-8); settle open question Q4 (audio- vs vsync-driven pacing).
 - **Exit:** Pokémon Red plays with sound; saving in game and restarting the
   app keeps the save. Most of Blargg `dmg_sound` passes.
 
-### M4. Save states, rewind and controllers
+### M4. Save states, rewind and controllers ✅ (thumbnails pending)
 
 - Complete `save_state`/`load_state` for the GB core.
 - **Frontend:** rewind ring buffer (UI-11), state slots with thumbnails
@@ -230,9 +244,10 @@ retrofitting.
 | Save/load state, one slot | UI-9 | S ✅ |
 | Fast-forward (hold) | UI-10 | S ✅ |
 | Battery saves, atomic and batched | CORE-4 | S ✅ |
-| Test-ROM suite, trace logger | TOOL-2, TOOL-3 | M1 |
-| Audio with dynamic rate control | UI-8 | M3 |
-| Rewind, state slots and thumbnails, gamepads | UI-6, UI-9–11 | M4 |
+| Test-ROM suite, trace logger | TOOL-2, TOOL-3 | M1 ✅ |
+| Audio with dynamic rate control | UI-8 | M3 ✅ |
+| Rewind, four state slots, fast-forward toggle, gamepads | UI-6, UI-9–11 | M4 ✅ |
+| State-slot thumbnails and picker, fast-forward speed cap | UI-9, UI-10 | Phase 2 |
 | Debugger panels | UI-12 | M7 → M11 |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gamepad touch | UI-2, UI-7 | M13 |
