@@ -15,6 +15,7 @@ mod cpu;
 mod hdma;
 mod interrupts;
 mod joypad;
+mod link;
 mod model;
 mod ppu;
 mod serial;
@@ -27,6 +28,7 @@ use emu_core::{
 use serde::{Deserialize, Serialize};
 
 pub use cpu::Registers;
+pub use link::Linked;
 pub use model::Model;
 
 use bus::Bus;
@@ -36,17 +38,18 @@ use cpu::Cpu;
 const SCREENS: [ScreenSize; 1] = [ScreenSize::new(160, 144)];
 
 /// Clock cycles in one video frame.
-const CYCLES_PER_FRAME: u64 = 70_224;
+pub(crate) const CYCLES_PER_FRAME: u64 = 70_224;
 
 /// Static facts about the Game Boy core.
 pub const INFO: CoreInfo = CoreInfo {
     system: System::Gb,
     screens: &SCREENS,
     touch_screen: None,
+    players: 1,
     frame_rate: FrameRate::new(4_194_304, 70_224),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 5,
+    state_version: 6,
 };
 
 /// A Game Boy with a cartridge inserted.
@@ -58,7 +61,7 @@ pub struct Gb {
 
 /// Everything a save state captures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Machine {
+pub(crate) struct Machine {
     cpu: Cpu,
     bus: Bus,
 }
@@ -176,7 +179,7 @@ impl Gb {
         self.machine.bus.cartridge.ram()
     }
 
-    fn present(&mut self) {
+    pub(crate) fn present(&mut self) {
         let [screen] = &mut self.screens;
         screen
             .pixels_mut()
@@ -189,8 +192,8 @@ impl Core for Gb {
         INFO
     }
 
-    fn run_frame(&mut self, input: &Input, audio: &mut Vec<StereoSample>) {
-        self.set_input(input);
+    fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
+        self.set_input(&inputs.first().copied().unwrap_or_default());
         let start = self.cycles();
         loop {
             self.machine.cpu.step(&mut self.machine.bus);
@@ -235,12 +238,14 @@ impl Core for Gb {
         Ok(())
     }
 
-    fn backup_generation(&self) -> Option<u64> {
-        self.machine.bus.cartridge.backup_generation()
+    fn backup_generation(&self, player: usize) -> Option<u64> {
+        (player == 0).then(|| self.machine.bus.cartridge.backup_generation())?
     }
 
-    fn save_backup(&self, out: &mut Vec<u8>) {
-        self.machine.bus.cartridge.save_backup(out);
+    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
+        if player == 0 {
+            self.machine.bus.cartridge.save_backup(out);
+        }
     }
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
@@ -285,9 +290,9 @@ mod tests {
         // JR -2: spin forever.
         let rom = rom_with_program(&[0x18, 0xFE]);
         let mut gb = Gb::new(&Media::new(&rom)).expect("valid rom");
-        gb.run_frame(&Input::default(), &mut Vec::new());
+        gb.run_frame(&[Input::default()], &mut Vec::new());
         let first = gb.cycles();
-        gb.run_frame(&Input::default(), &mut Vec::new());
+        gb.run_frame(&[Input::default()], &mut Vec::new());
         assert_eq!(gb.cycles() - first, CYCLES_PER_FRAME);
     }
 

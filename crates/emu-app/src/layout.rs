@@ -42,6 +42,14 @@ pub struct Rect {
     pub height: f32,
 }
 
+impl Rect {
+    /// Whether `point` lies inside.
+    pub fn contains(&self, point: (f32, f32)) -> bool {
+        (self.x..self.x + self.width).contains(&point.0)
+            && (self.y..self.y + self.height).contains(&point.1)
+    }
+}
+
 /// One screen's position in the window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Placement {

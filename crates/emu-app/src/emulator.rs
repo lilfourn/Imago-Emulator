@@ -17,7 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, ensure};
-use emu_core::{Core, CoreInfo, Frame, Input, Media};
+use emu_core::{Core, CoreInfo, Frame, Input, Media, System};
 
 use crate::audio::AudioSink;
 use crate::persist;
@@ -32,7 +32,9 @@ const REWIND_BUDGET_BYTES: usize = 64 << 20;
 /// A game ready to run: the core plus what is needed to save it.
 pub struct Loaded {
     core: Box<dyn Core>,
-    rom_path: PathBuf,
+    /// Each player's ROM file; battery saves sit next to them.
+    rom_paths: Vec<PathBuf>,
+    /// Identifies the ROMs in save states.
     rom_crc32: u32,
 }
 
@@ -42,21 +44,20 @@ impl Loaded {
         self.core.info()
     }
 
-    /// The ROM file the game was loaded from.
-    pub fn rom_path(&self) -> &Path {
-        &self.rom_path
+    /// Each player's ROM file.
+    pub fn rom_paths(&self) -> &[PathBuf] {
+        &self.rom_paths
     }
 }
 
-/// Reads `rom_path` and its battery save, and powers on the right core.
-///
-/// Blocking file I/O; call it off the UI thread.
-///
-/// # Errors
-///
-/// Fails if the file cannot be read, its system cannot be identified, or
-/// the core rejects it.
-pub fn load(rom_path: &Path) -> anyhow::Result<Loaded> {
+/// A ROM file read from disk, with its battery save.
+struct RomFile {
+    system: System,
+    rom: Vec<u8>,
+    backup: Option<Vec<u8>>,
+}
+
+fn read_rom(rom_path: &Path) -> anyhow::Result<RomFile> {
     let system = emu_cores::system_for_path(rom_path).with_context(|| {
         format!(
             "{} is not a .gb, .gbc, .gba or .nds file",
@@ -72,29 +73,77 @@ pub fn load(rom_path: &Path) -> anyhow::Result<Loaded> {
             return Err(error).with_context(|| format!("cannot read {}", backup_path.display()));
         }
     };
+    Ok(RomFile {
+        system,
+        rom,
+        backup,
+    })
+}
+
+/// Reads each player's ROM and battery save and powers on the right core:
+/// one game, or with two ROMs a pair joined by a link cable.
+///
+/// Blocking file I/O; call it off the UI thread.
+///
+/// # Errors
+///
+/// Fails if a file cannot be read, its system cannot be identified, linked
+/// ROMs are for different systems, or the core rejects them.
+pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
+    let files = rom_paths
+        .iter()
+        .map(|path| read_rom(path))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let system = files.first().context("no ROM given")?.system;
+    ensure!(
+        files.iter().all(|file| file.system == system),
+        "linked games must be for the same system"
+    );
     let start_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         });
-    let media = Media {
-        backup: backup.as_deref(),
-        start_time,
-        ..Media::new(&rom)
+    let media: Vec<Media<'_>> = files
+        .iter()
+        .map(|file| Media {
+            backup: file.backup.as_deref(),
+            start_time,
+            ..Media::new(&file.rom)
+        })
+        .collect();
+    let core = match media.as_slice() {
+        [one] => emu_cores::create(system, one)?,
+        players => emu_cores::create_linked(system, players)?,
     };
-    let core = emu_cores::create(system, &media)?;
+    // One ROM keeps the plain CRC so older save states still match.
+    let rom_crc32 = match files.as_slice() {
+        [one] => crc32fast::hash(&one.rom),
+        many => {
+            let crcs: Vec<u8> = many
+                .iter()
+                .flat_map(|file| crc32fast::hash(&file.rom).to_le_bytes())
+                .collect();
+            crc32fast::hash(&crcs)
+        }
+    };
     Ok(Loaded {
         core,
-        rom_path: rom_path.to_owned(),
-        rom_crc32: crc32fast::hash(&rom),
+        rom_paths: rom_paths.to_vec(),
+        rom_crc32,
     })
 }
 
 /// A request from the UI to the emulation thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    /// Replaces the input held from the next frame on.
-    SetInput(Input),
+    /// Replaces a player's input from the next frame on.
+    SetInput {
+        /// Index into the core's players.
+        player: usize,
+        /// What that player holds.
+        input: Input,
+    },
     /// Runs unthrottled while true.
     SetFastForward(bool),
     /// Steps backwards through recent frames while true.
@@ -143,10 +192,13 @@ impl Emulator {
     ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let latest = Arc::new(Latest::default());
+        let players = loaded.core.info().players.max(1);
         let runner = Runner {
-            flushed_generation: loaded.core.backup_generation().unwrap_or(0),
+            flushed_generations: (0..players)
+                .map(|player| loaded.core.backup_generation(player).unwrap_or(0))
+                .collect(),
             loaded,
-            input: Input::default(),
+            inputs: vec![Input::default(); players],
             paused: false,
             fast_forward: false,
             rewinding: false,
@@ -205,12 +257,14 @@ impl Drop for Emulator {
 /// State owned by the emulation thread.
 struct Runner {
     loaded: Loaded,
-    input: Input,
+    /// One per player.
+    inputs: Vec<Input>,
     paused: bool,
     fast_forward: bool,
     rewinding: bool,
     rewind: Rewind,
-    flushed_generation: u64,
+    /// Per player: the backup generation last written to disk.
+    flushed_generations: Vec<u64>,
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
     audio: Option<AudioSink>,
@@ -250,7 +304,7 @@ impl Runner {
                     self.publish();
                 }
             } else {
-                self.loaded.core.run_frame(&self.input, &mut audio);
+                self.loaded.core.run_frame(&self.inputs, &mut audio);
                 // Fast-forward plays silence rather than sped-up sound.
                 if !self.fast_forward
                     && let Some(sink) = &mut self.audio
@@ -287,7 +341,11 @@ impl Runner {
 
     fn apply(&mut self, command: Command) {
         match command {
-            Command::SetInput(input) => self.input = input,
+            Command::SetInput { player, input } => {
+                if let Some(slot) = self.inputs.get_mut(player) {
+                    *slot = input;
+                }
+            }
             Command::SetFastForward(on) => self.fast_forward = on,
             Command::SetRewind(on) => self.rewinding = on,
             Command::TogglePause => {
@@ -359,7 +417,7 @@ impl Runner {
             height: size.height,
             rgb: &rgb,
         };
-        let path = persist::state_path(&self.loaded.rom_path, slot);
+        let path = persist::state_path(&self.loaded.rom_paths, slot);
         persist::write_atomic(
             &path,
             &emu_state::encode(&header, &payload, Some(thumbnail)),
@@ -368,7 +426,7 @@ impl Runner {
     }
 
     fn load_state(&mut self, slot: u8) -> anyhow::Result<()> {
-        let path = persist::state_path(&self.loaded.rom_path, slot);
+        let path = persist::state_path(&self.loaded.rom_paths, slot);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let emu_state::Decoded {
             header, payload, ..
@@ -392,19 +450,22 @@ impl Runner {
         Ok(self.loaded.core.load_state(payload)?)
     }
 
+    /// Writes each player's battery save that changed since the last flush.
     fn flush_backup(&mut self) {
-        let Some(generation) = self.loaded.core.backup_generation() else {
-            return;
-        };
-        if generation == self.flushed_generation {
-            return;
-        }
-        let mut backup = Vec::new();
-        self.loaded.core.save_backup(&mut backup);
-        let path = persist::backup_path(&self.loaded.rom_path);
-        match persist::write_atomic(&path, &backup) {
-            Ok(()) => self.flushed_generation = generation,
-            Err(error) => self.notice(format!("Could not write {}: {error}", path.display())),
+        for player in 0..self.flushed_generations.len() {
+            let Some(generation) = self.loaded.core.backup_generation(player) else {
+                continue;
+            };
+            if generation == self.flushed_generations[player] {
+                continue;
+            }
+            let mut backup = Vec::new();
+            self.loaded.core.save_backup(player, &mut backup);
+            let path = persist::backup_path(&self.loaded.rom_paths[player]);
+            match persist::write_atomic(&path, &backup) {
+                Ok(()) => self.flushed_generations[player] = generation,
+                Err(error) => self.notice(format!("Could not write {}: {error}", path.display())),
+            }
         }
     }
 
@@ -445,6 +506,7 @@ mod tests {
                 system: System::Gb,
                 screens: &SCREENS,
                 touch_screen: None,
+                players: 1,
                 // 1000 frames per second keeps the test fast.
                 frame_rate: FrameRate::new(1000, 1),
                 audio_sample_rate: 48_000,
@@ -452,7 +514,7 @@ mod tests {
             }
         }
 
-        fn run_frame(&mut self, _: &Input, _: &mut Vec<StereoSample>) {
+        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {
             self.set(self.count() + 1);
         }
 
@@ -481,7 +543,7 @@ mod tests {
         });
         let loaded = Loaded {
             core,
-            rom_path,
+            rom_paths: vec![rom_path],
             rom_crc32: 0,
         };
         let (events, receiver) = async_channel::unbounded();

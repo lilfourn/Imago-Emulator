@@ -122,7 +122,13 @@ your own cartridge dumps and have not been run.
 
 ## Phase 2 — Game Boy Color
 
-### M5. CGB mode and the MBC3 clock
+**Status (2026-10-05):** M5 and M6 met on test ROMs and unit tests. 135 of
+158 test ROMs pass. New gaps: `cgb-acid-hell` (2 pixels, mid-scanline
+effects) and DMG games are not colourised as on a real GBC (that needs the
+CGB boot ROM's palette table; SameBoy's open boot ROM is a candidate, see
+PRD Q5). The Pokémon checkpoints still need your own dumps.
+
+### M5. CGB mode and the MBC3 clock ✅ (test ROMs)
 
 - Palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. MBC3
   RTC with the latch sequence and day-counter carry, saved as the 48-byte
@@ -130,9 +136,12 @@ your own cartridge dumps and have not been run.
 - **Exit:** cgb-acid2 passes. Pokémon Crystal's clock survives an emulator
   restart, day/night works, and Yellow runs with CGB palettes.
 
-### M6. Link cable
+### M6. Link cable ✅ (unit tests)
 
-- Serial transfer between two GB cores in one process.
+- Serial transfer between two GB cores in one process: `emu_gb::Linked`
+  runs both in 8-M-cycle lockstep slices ([decision 0004](decisions/0004-linked-cores.md)).
+  Open a game, then File > Connect Link Cable…, or pass two ROMs on the
+  command line. Click a screen or press ⌘T to control the other Game Boy.
 - **Exit:** trade a Pokémon between two instances of Red/Blue or
   Gold/Silver.
 
@@ -247,7 +256,9 @@ your own cartridge dumps and have not been run.
 | Test-ROM suite, trace logger | TOOL-2, TOOL-3 | M1 ✅ |
 | Audio with dynamic rate control | UI-8 | M3 ✅ |
 | Rewind, four state slots, fast-forward toggle, gamepads | UI-6, UI-9–11 | M4 ✅ |
-| State-slot thumbnails and picker, fast-forward speed cap | UI-9, UI-10 | Phase 2 |
+| State-slot thumbnails in the slot notice | UI-9 | Phase 2 ✅ |
+| Link cable, per-player input | GB-6 | M6 ✅ |
+| Fast-forward speed cap | UI-10 | Later |
 | Debugger panels | UI-12 | M7 → M11 |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gamepad touch | UI-2, UI-7 | M13 |

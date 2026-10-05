@@ -21,6 +21,7 @@ pub const INFO: CoreInfo = CoreInfo {
     system: System::Nds,
     screens: &SCREENS,
     touch_screen: Some(1),
+    players: 1,
     frame_rate: FrameRate::new(33_513_982, 560_190),
     audio_sample_rate: 32_768,
     state_version: 1,
@@ -68,7 +69,8 @@ impl Core for Nds {
         INFO
     }
 
-    fn run_frame(&mut self, input: &Input, _audio: &mut Vec<StereoSample>) {
+    fn run_frame(&mut self, inputs: &[Input], _audio: &mut Vec<StereoSample>) {
+        let input = inputs.first().copied().unwrap_or_default();
         self.frame_count += 1;
         let [top, bottom] = &mut self.screens;
         test_pattern::color_bars(top, self.frame_count);
@@ -127,7 +129,7 @@ mod tests {
             touch: Some(TouchPoint { x: 10, y: 20 }),
             ..Input::default()
         };
-        nds.run_frame(&input, &mut Vec::new());
+        nds.run_frame(&[input], &mut Vec::new());
         let bottom = &nds.screens()[1];
         assert_eq!(bottom.pixels()[20 * 256 + 10], rgb(0, 0, 0));
     }

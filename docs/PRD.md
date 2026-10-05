@@ -105,9 +105,9 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | GB-1 | SM83 CPU: all opcodes including CB-prefixed, flags, interrupts, HALT/STOP, the EI delay, the HALT bug. ✅ | P0 · M1 |
 | GB-2 | Timer/DIV, joypad, and a scanline PPU (background, window, sprites with priority and the 10-per-line limit). ✅ | P0 · M2 |
 | GB-3 | APU: two square channels (one with sweep), wave and noise, with length, envelope and frame sequencer. ✅ | P0 · M3 |
-| GB-4 | Cartridges: MBC1, MBC3 with RTC, MBC5, battery RAM. MBC3 RTC is saved in the de facto 48-byte trailer; 44- and 48-byte trailers are both read. | P0 · M3, M5 |
-| GB-5 | CGB mode: palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. | P0 · M5 |
-| GB-6 | Serial link cable between two instances in one process. | P1 · M6 |
+| GB-4 | Cartridges: MBC1, MBC3 with RTC, MBC5, battery RAM. MBC3 RTC is saved in the de facto 48-byte trailer; 44- and 48-byte trailers are both read. ✅ | P0 · M3, M5 |
+| GB-5 | CGB mode: palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. ✅ | P0 · M5 |
+| GB-6 | Serial link cable between two instances in one process. ✅ | P1 · M6 |
 
 **Game Boy Advance (`emu-gba`, `emu-arm`)**
 
@@ -148,7 +148,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides, turbo, hotkey chords. | P1 · M4 |
 | UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. | P0 · S / P1 · M13 |
 | UI-8 | Audio output at the device rate with dynamic rate control (adjust the resample ratio by up to ±0.5% based on buffer fill). ✅ | P0 · M3 |
-| UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch); thumbnails pending. | P0 · S / P1 · M4 |
+| UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch), thumbnail and age shown when switching. | P0 · S / P1 · M4 |
 | UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap, slow motion. | P0 · S / P1 · M4 |
 | UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
 | UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor, tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |

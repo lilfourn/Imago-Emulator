@@ -102,7 +102,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     let mut audio = Vec::new();
     for _ in 0..args.frames {
         let keep = audio.len();
-        core.run_frame(&input, &mut audio);
+        core.run_frame(&[input], &mut audio);
         if args.wav.is_none() {
             audio.truncate(keep);
         }

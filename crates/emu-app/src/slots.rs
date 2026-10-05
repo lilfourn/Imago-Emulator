@@ -1,7 +1,7 @@
 //! What a save-state slot holds, for showing it before loading.
 
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use crate::persist;
@@ -15,10 +15,10 @@ pub struct SlotPreview {
     pub saved: SystemTime,
 }
 
-/// Reads slot `slot` of the game at `rom_path`; `None` if it is empty or
-/// unreadable.
-pub fn preview(rom_path: &Path, slot: u8) -> Option<SlotPreview> {
-    let path = persist::state_path(rom_path, slot);
+/// Reads slot `slot` of the session of `rom_paths`; `None` if it is empty
+/// or unreadable.
+pub fn preview(rom_paths: &[PathBuf], slot: u8) -> Option<SlotPreview> {
+    let path = persist::state_path(rom_paths, slot);
     let saved = fs::metadata(&path).ok()?.modified().ok()?;
     let bytes = fs::read(&path).ok()?;
     let decoded = emu_state::decode(&bytes).ok()?;
@@ -55,6 +55,6 @@ mod tests {
 
     #[test]
     fn empty_slots_have_no_preview() {
-        assert_eq!(preview(Path::new("/nonexistent/game.gb"), 1), None);
+        assert_eq!(preview(&[PathBuf::from("/nonexistent/game.gb")], 1), None);
     }
 }
