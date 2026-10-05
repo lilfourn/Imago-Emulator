@@ -9,6 +9,7 @@
 
 mod cart;
 mod gpu2d;
+mod gpu3d;
 mod rtc;
 mod spi;
 mod vram;
