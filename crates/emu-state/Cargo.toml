@@ -1,0 +1,15 @@
+[package]
+name = "emu-state"
+description = "Save-state container format: a versioned, checksummed header around a core's state bytes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+emu-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

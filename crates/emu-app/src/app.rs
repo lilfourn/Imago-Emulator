@@ -1,0 +1,103 @@
+//! Application setup: actions, menus, shortcuts and the main window.
+
+use std::path::PathBuf;
+
+use gpui::{
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, prelude::*, px, size,
+};
+
+use crate::view::EmulatorView;
+
+actions!(
+    ds_emulator,
+    [
+        OpenRom,
+        TogglePause,
+        Reset,
+        SaveState,
+        LoadState,
+        LayoutVertical,
+        LayoutHorizontal,
+        LayoutSingle,
+        SwapScreens,
+        Quit,
+    ]
+);
+
+/// Runs the app until the user quits, opening `rom` at launch if given.
+pub fn run(rom: Option<PathBuf>) {
+    Application::new().run(move |cx: &mut App| {
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([
+            KeyBinding::new("cmd-o", OpenRom, None),
+            KeyBinding::new("cmd-p", TogglePause, None),
+            KeyBinding::new("cmd-r", Reset, None),
+            KeyBinding::new("cmd-s", SaveState, None),
+            KeyBinding::new("cmd-l", LoadState, None),
+            KeyBinding::new("cmd-1", LayoutVertical, None),
+            KeyBinding::new("cmd-2", LayoutHorizontal, None),
+            KeyBinding::new("cmd-3", LayoutSingle, None),
+            KeyBinding::new("cmd-e", SwapScreens, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
+        cx.set_menus(menus());
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
+        // Two DS screens stacked at 2x.
+        let bounds = Bounds::centered(None, size(px(512.0), px(768.0)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("ds-emulator".into()),
+                ..TitlebarOptions::default()
+            }),
+            window_min_size: Some(size(px(256.0), px(192.0))),
+            app_id: Some("ds-emulator".to_owned()),
+            ..WindowOptions::default()
+        };
+        cx.open_window(options, |window, cx| {
+            cx.new(|cx| EmulatorView::new(rom, window, cx))
+        })
+        .expect("opening the main window");
+        cx.activate(true);
+    });
+}
+
+fn menus() -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "ds-emulator".into(),
+            items: vec![MenuItem::action("Quit ds-emulator", Quit)],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![MenuItem::action("Open ROM…", OpenRom)],
+        },
+        Menu {
+            name: "Emulation".into(),
+            items: vec![
+                MenuItem::action("Pause / Resume", TogglePause),
+                MenuItem::action("Reset", Reset),
+                MenuItem::separator(),
+                MenuItem::action("Save State", SaveState),
+                MenuItem::action("Load State", LoadState),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Screens Stacked", LayoutVertical),
+                MenuItem::action("Screens Side by Side", LayoutHorizontal),
+                MenuItem::action("One Screen", LayoutSingle),
+                MenuItem::separator(),
+                MenuItem::action("Swap Screens", SwapScreens),
+            ],
+        },
+    ]
+}

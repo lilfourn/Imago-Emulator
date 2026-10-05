@@ -1,0 +1,20 @@
+/target
+.DS_Store
+
+# Never commit Nintendo files: games, BIOS/firmware dumps, saves, save states.
+# See docs/PRD.md#legal-policy. scripts/check-no-nintendo-files.sh enforces this in CI.
+*.gb
+*.gbc
+*.gba
+*.nds
+*.dsi
+*.srl
+*.zip
+*.7z
+*.sav
+*.rtc
+*.ss[0-9]
+*.state
+bios*.bin
+firmware*.bin
+/test-roms/

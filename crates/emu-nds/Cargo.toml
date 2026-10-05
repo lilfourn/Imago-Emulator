@@ -1,0 +1,13 @@
+[package]
+name = "emu-nds"
+description = "Nintendo DS core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+emu-core.workspace = true
+
+[lints]
+workspace = true

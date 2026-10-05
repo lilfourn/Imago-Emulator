@@ -1,0 +1,12 @@
+[package]
+name = "emu-arm"
+description = "ARMv4T/ARMv5TE interpreter shared by the GBA and DS cores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

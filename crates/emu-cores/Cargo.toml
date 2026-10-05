@@ -1,0 +1,16 @@
+[package]
+name = "emu-cores"
+description = "Picks and constructs the right core for a game."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+emu-core.workspace = true
+emu-gb.workspace = true
+emu-gba.workspace = true
+emu-nds.workspace = true
+
+[lints]
+workspace = true
