@@ -95,7 +95,11 @@ impl Bus {
     /// Advances every component by one M-cycle.
     fn step_components(&mut self) {
         self.cycles += 4;
+        let div_before = self.timer.counter();
         self.timer.tick(&mut self.interrupt_flag);
+        // The frame sequencer runs off falling edges of DIV bit 4.
+        let div_fell = div_before & 0x1000 != 0 && self.timer.counter() & 0x1000 == 0;
+        self.apu.tick(div_fell);
         self.serial.tick(&mut self.interrupt_flag);
         self.ppu.tick(&mut self.interrupt_flag);
         self.cartridge.tick();
@@ -179,7 +183,13 @@ impl Bus {
             0xFE00..=0xFE9F => self.ppu.write_oam(address, value),
             0xFF00 => self.joypad.write(value),
             0xFF01 | 0xFF02 => self.serial.write(address, value),
-            0xFF04..=0xFF07 => self.timer.write(address, value),
+            0xFF04..=0xFF07 => {
+                let div_before = self.timer.counter();
+                self.timer.write(address, value);
+                if div_before & 0x1000 != 0 && self.timer.counter() & 0x1000 == 0 {
+                    self.apu.clock_frame_sequencer();
+                }
+            }
             0xFF0F => self.interrupt_flag = value & 0x1F,
             0xFF10..=0xFF3F => self.apu.write(address, value),
             0xFF46 => {

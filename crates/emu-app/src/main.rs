@@ -4,10 +4,12 @@
 //! Usage: `ds-emulator [ROM]`
 
 mod app;
+mod audio;
 mod bindings;
 mod emulator;
 mod layout;
 mod persist;
+mod resample;
 mod video;
 mod view;
 

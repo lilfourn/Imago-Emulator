@@ -38,9 +38,9 @@ pub const INFO: CoreInfo = CoreInfo {
     screens: &SCREENS,
     touch_screen: None,
     frame_rate: FrameRate::new(4_194_304, 70_224),
-    audio_sample_rate: 48_000,
+    audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 2,
+    state_version: 3,
 };
 
 /// The four DMG shades, lightest first. Neutral greys match the reference
@@ -173,7 +173,7 @@ impl Core for Gb {
         INFO
     }
 
-    fn run_frame(&mut self, input: &Input, _audio: &mut Vec<StereoSample>) {
+    fn run_frame(&mut self, input: &Input, audio: &mut Vec<StereoSample>) {
         let bus = &mut self.machine.bus;
         bus.joypad
             .set_buttons(input.buttons, &mut bus.interrupt_flag);
@@ -193,6 +193,7 @@ impl Core for Gb {
                 break;
             }
         }
+        self.machine.bus.apu.drain_samples(audio);
     }
 
     fn screens(&self) -> &[Frame] {

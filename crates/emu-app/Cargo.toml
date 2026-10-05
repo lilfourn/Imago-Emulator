@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 async-channel = "2"
+cpal.workspace = true
 crc32fast.workspace = true
 dirs.workspace = true
 emu-core.workspace = true
@@ -20,6 +21,7 @@ emu-cores.workspace = true
 emu-state.workspace = true
 gpui.workspace = true
 image = { version = "0.25", default-features = false }
+rtrb.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true

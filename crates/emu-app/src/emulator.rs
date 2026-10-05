@@ -4,8 +4,9 @@
 //! finished frame into a shared slot and sends an [`Event`] to wake the UI.
 //! Wake-ups are coalesced, so a slow UI never queues stale frames.
 //!
-//! Pacing is a simple sleep to the next frame deadline. Audio-driven pacing
-//! replaces it once cores produce sound (see `docs/ROADMAP.md`).
+//! Pacing is a sleep to the next frame deadline. Sound stays in sync
+//! because the audio sink adjusts its resampling ratio to the buffer level
+//! (see `resample.rs`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, ensure};
 use emu_core::{Core, CoreInfo, Frame, Input, Media};
 
+use crate::audio::AudioSink;
 use crate::persist;
 
 /// How often dirty battery saves are written to disk.
@@ -124,8 +126,13 @@ pub struct Emulator {
 }
 
 impl Emulator {
-    /// Starts running `loaded` on a new thread. Events go to `events`.
-    pub fn start(loaded: Loaded, events: async_channel::Sender<Event>) -> Self {
+    /// Starts running `loaded` on a new thread. Events go to `events`;
+    /// sound goes to `audio`, if there is an output device.
+    pub fn start(
+        loaded: Loaded,
+        events: async_channel::Sender<Event>,
+        audio: Option<AudioSink>,
+    ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let latest = Arc::new(Latest::default());
         let runner = Runner {
@@ -136,6 +143,7 @@ impl Emulator {
             fast_forward: false,
             events,
             latest: Arc::clone(&latest),
+            audio,
         };
         let thread = thread::Builder::new()
             .name("emulation".to_owned())
@@ -193,6 +201,7 @@ struct Runner {
     flushed_generation: u64,
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
+    audio: Option<AudioSink>,
 }
 
 impl Runner {
@@ -221,6 +230,12 @@ impl Runner {
             }
 
             self.loaded.core.run_frame(&self.input, &mut audio);
+            // Fast-forward plays silence rather than sped-up sound.
+            if !self.fast_forward
+                && let Some(sink) = &mut self.audio
+            {
+                sink.push(&audio);
+            }
             audio.clear();
             self.publish();
 

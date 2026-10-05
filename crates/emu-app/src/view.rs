@@ -16,6 +16,7 @@ use crate::app::{
     LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, OpenRom, Reset, SaveState,
     SwapScreens, TogglePause,
 };
+use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Held};
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::layout::{self, Arrangement, Layout, Placement};
@@ -47,6 +48,8 @@ struct Session {
     /// Per screen: the pre-scale factor and the image built with it.
     images: Vec<Option<(usize, Arc<RenderImage>)>>,
     _events: Task<()>,
+    /// Dropped after `emulator`, so the thread stops before the device.
+    _audio: Option<AudioOutput>,
 }
 
 impl EmulatorView {
@@ -115,8 +118,15 @@ impl EmulatorView {
         // Stop the previous game first so its battery save is flushed.
         self.stop(window);
         let info = loaded.info();
+        let (audio_output, audio_sink) = match audio::open(info.audio_sample_rate) {
+            Ok((output, sink)) => (Some(output), Some(sink)),
+            Err(error) => {
+                self.show_notice(format!("No sound: {error:#}"), cx);
+                (None, None)
+            }
+        };
         let (events, receiver) = async_channel::unbounded();
-        let emulator = Emulator::start(loaded, events);
+        let emulator = Emulator::start(loaded, events, audio_sink);
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
@@ -131,6 +141,7 @@ impl EmulatorView {
             sequence: 0,
             images: Vec::new(),
             _events: task,
+            _audio: audio_output,
         });
         self.buttons = Buttons::NONE;
         self.touch = None;
