@@ -99,9 +99,13 @@ impl Bus {
             scheduler,
             cycles: 0,
         };
-        // RCNT and SOUNDBIAS as the BIOS leaves them.
+        // RCNT, SOUNDBIAS and the identity affine matrices, as the BIOS
+        // leaves them.
         bus.write_io_16(0x134, 0x8000);
         bus.write_io_16(0x088, 0x0200);
+        for offset in [0x20, 0x26, 0x30, 0x36] {
+            bus.write_io_16(offset, 0x0100);
+        }
         bus
     }
 
