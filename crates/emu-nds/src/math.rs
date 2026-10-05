@@ -44,7 +44,8 @@ impl Math {
     /// Writes the 32-bit register at `offset` from 0x04000280.
     pub(crate) fn write(&mut self, offset: u32, value: u32) {
         let set_low = |target: &mut u64| *target = (*target & !0xFFFF_FFFF) | u64::from(value);
-        let set_high = |target: &mut u64| *target = (*target & 0xFFFF_FFFF) | u64::from(value) << 32;
+        let set_high =
+            |target: &mut u64| *target = (*target & 0xFFFF_FFFF) | u64::from(value) << 32;
         match offset {
             0x00 => self.div_control = value & 3,
             0x10 => set_low(&mut self.numerator),
@@ -117,7 +118,8 @@ mod tests {
     use super::*;
 
     fn result(math: &Math) -> (u64, u64) {
-        let pair = |low: u32, high: u32| u64::from(math.read(low)) | u64::from(math.read(high)) << 32;
+        let pair =
+            |low: u32, high: u32| u64::from(math.read(low)) | u64::from(math.read(high)) << 32;
         (pair(0x20, 0x24), pair(0x28, 0x2C))
     }
 

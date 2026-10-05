@@ -152,7 +152,10 @@ impl Ipc {
     /// `side` reads IPCFIFORECV. Returns the word and the interrupts raised.
     pub(crate) fn receive(&mut self, side: Side) -> (u32, Raised) {
         if self.port(side).control & 0x8000 == 0 {
-            return (self.port(side.other()).send.front().copied().unwrap_or(0), [0; 2]);
+            return (
+                self.port(side.other()).send.front().copied().unwrap_or(0),
+                [0; 2],
+            );
         }
         let Some(value) = self.port_mut(side.other()).send.pop_front() else {
             // Reading an empty FIFO is an error and returns the last word.
