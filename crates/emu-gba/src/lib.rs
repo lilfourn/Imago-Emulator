@@ -6,10 +6,13 @@
 //! far.
 
 mod apu;
+mod backup;
 mod bios;
 mod bus;
+mod cartridge;
 mod dma;
 mod ppu;
+mod rtc;
 mod timer;
 mod timing;
 
@@ -21,6 +24,7 @@ use emu_core::{
 use serde::{Deserialize, Serialize};
 
 use bus::Bus;
+use cartridge::Cartridge;
 
 const SCREENS: [ScreenSize; 1] = [ScreenSize::new(240, 160)];
 
@@ -36,7 +40,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(16_777_216, 280_896),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 4,
+    state_version: 5,
 };
 
 /// A Game Boy Advance with a cartridge inserted.
@@ -62,7 +66,8 @@ impl Gba {
     ///
     /// With a BIOS dump in `media` the console boots through it, intro and
     /// all. Without one it starts the game directly, in the state the BIOS
-    /// would leave, and emulates BIOS calls itself.
+    /// would leave, and emulates BIOS calls itself. The save memory type
+    /// comes from the ROM, filled from `media.backup` if given.
     ///
     /// # Errors
     ///
@@ -80,7 +85,11 @@ impl Gba {
         if *fixed != 0x96 {
             return Err(invalid("header fixed value at 0xB2 is not 0x96"));
         }
-        let rom = media.rom.to_vec().into_boxed_slice();
+        let cartridge = Cartridge::new(
+            media.rom.to_vec().into_boxed_slice(),
+            media.backup,
+            media.start_time,
+        );
         let dump = media
             .system_file(SystemFileKind::GbaBios)
             .filter(|bios| bios.len() == 0x4000);
@@ -89,7 +98,7 @@ impl Gba {
         let mut gba = Self {
             machine: Machine {
                 cpu: Cpu::default(),
-                bus: Bus::new(rom, bios),
+                bus: Bus::new(cartridge, bios),
             },
             hle_bios,
             screens: [Frame::new(SCREENS[0])],
@@ -187,12 +196,10 @@ impl Core for Gba {
     }
 
     fn reset(&mut self) {
-        let mut fresh = Machine {
+        self.machine = Machine {
             cpu: Cpu::default(),
-            bus: Bus::new(Box::default(), Box::default()),
+            bus: Bus::reset_from(&mut self.machine.bus),
         };
-        fresh.bus.take_media_from(&mut self.machine.bus);
-        self.machine = fresh;
         self.power_on();
     }
 
@@ -208,6 +215,18 @@ impl Core for Gba {
         self.machine = machine;
         self.present();
         Ok(())
+    }
+
+    fn backup_generation(&self, player: usize) -> Option<u64> {
+        (player == 0)
+            .then(|| self.machine.bus.cartridge.backup_generation())
+            .flatten()
+    }
+
+    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
+        if player == 0 {
+            self.machine.bus.cartridge.save_backup(out);
+        }
     }
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {

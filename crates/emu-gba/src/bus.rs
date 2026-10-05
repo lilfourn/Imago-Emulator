@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::apu::{self, Apu};
 use crate::bios;
+use crate::cartridge::Cartridge;
 use crate::dma::{Dma, Timing};
 use crate::ppu::{self, Ppu};
 use crate::timer::Timers;
@@ -43,9 +44,7 @@ pub(crate) struct Bus {
     /// The BIOS: the HLE vector table or a user dump. Restored from media.
     #[serde(skip)]
     bios: Box<[u8]>,
-    /// Game Pak ROM. Restored from media.
-    #[serde(skip)]
-    rom: Box<[u8]>,
+    pub(crate) cartridge: Cartridge,
     ewram: Box<[u8]>,
     iwram: Box<[u8]>,
     pub(crate) ppu: Ppu,
@@ -78,13 +77,13 @@ fn default_waits() -> WaitStates {
 }
 
 impl Bus {
-    pub(crate) fn new(rom: Box<[u8]>, bios: Box<[u8]>) -> Self {
+    pub(crate) fn new(cartridge: Cartridge, bios: Box<[u8]>) -> Self {
         let mut scheduler = Scheduler::new();
         scheduler.schedule_at(ppu::HDRAW_CYCLES, Event::HBlank);
         scheduler.schedule_at(apu::CYCLES_PER_SAMPLE, Event::AudioSample);
         let mut bus = Self {
             bios,
-            rom,
+            cartridge,
             ewram: vec![0; 0x4_0000].into_boxed_slice(),
             iwram: vec![0; 0x8000].into_boxed_slice(),
             ppu: Ppu::new(),
@@ -115,10 +114,18 @@ impl Bus {
         bus
     }
 
+    /// A freshly powered-on bus for a console reset, taking the BIOS and
+    /// the cartridge (save memory and clock included) from `other`.
+    pub(crate) fn reset_from(other: &mut Self) -> Self {
+        let mut cartridge = std::mem::take(&mut other.cartridge);
+        cartridge.restart_cycles(other.cycles);
+        Self::new(cartridge, std::mem::take(&mut other.bios))
+    }
+
     /// Moves the ROM and BIOS out of `other`, which is about to be replaced
     /// by a loaded save state.
     pub(crate) fn take_media_from(&mut self, other: &mut Self) {
-        self.rom = std::mem::take(&mut other.rom);
+        self.cartridge.take_rom_from(&mut other.cartridge);
         self.bios = std::mem::take(&mut other.bios);
         self.waits = WaitStates::new(self.waitcnt);
     }
@@ -254,6 +261,10 @@ impl Bus {
         };
         let transfer = self.dma.transfer(index);
         let (mut source, mut destination) = (transfer.source, transfer.destination);
+        if self.cartridge.eeprom_at(destination) {
+            // The request's length tells the EEPROM's size.
+            self.cartridge.note_eeprom_dma(transfer.count);
+        }
         // Two internal cycles to start up.
         self.tick(2);
         for unit in 0..transfer.count {
@@ -360,7 +371,7 @@ impl Bus {
         (self.last_fetch >> ((address & 2) * 8)) as u16
     }
 
-    fn read_16_raw(&self, address: u32) -> u16 {
+    fn read_16_raw(&mut self, address: u32) -> u16 {
         let half =
             |memory: &[u8], index: usize| u16::from_le_bytes([memory[index], memory[index + 1]]);
         match address >> 24 {
@@ -377,16 +388,9 @@ impl Bus {
             0x05 => self.ppu.read_palette(address),
             0x06 => self.ppu.read_vram(address),
             0x07 => self.ppu.read_oam(address),
-            0x08..=0x0D => {
-                let index = (address & 0x01FF_FFFE) as usize;
-                if index + 1 < self.rom.len() {
-                    half(&self.rom, index)
-                } else {
-                    // Past the end, the cartridge bus returns the address.
-                    (address >> 1) as u16
-                }
-            }
-            0x0E | 0x0F => 0xFFFF,
+            0x08..=0x0D => self.cartridge.read_16(address),
+            // An 8-bit bus: the byte repeats across the halfword.
+            0x0E | 0x0F => u16::from(self.cartridge.read_backup(address)) * 0x0101,
             _ => self.open_bus_16(address),
         }
     }
@@ -402,13 +406,18 @@ impl Bus {
             0x05 => self.ppu.write_palette(address, value),
             0x06 => self.ppu.write_vram(address, value),
             0x07 => self.ppu.write_oam(address, value),
+            0x08..=0x0D => self.cartridge.write_16(address, value, self.cycles),
+            // Only the byte lane at the address reaches the 8-bit bus.
+            0x0E | 0x0F => self
+                .cartridge
+                .write_backup(address, (value >> ((address & 1) * 8)) as u8),
             _ => {}
         }
     }
 
-    fn read_8_raw(&self, address: u32) -> u8 {
+    fn read_8_raw(&mut self, address: u32) -> u8 {
         match address >> 24 {
-            0x0E | 0x0F => 0xFF,
+            0x0E | 0x0F => self.cartridge.read_backup(address),
             _ => (self.read_16_raw(address) >> ((address & 1) * 8)) as u8,
         }
     }
@@ -423,6 +432,7 @@ impl Bus {
                 .ppu
                 .write_palette(address, u16::from_le_bytes([value, value])),
             0x06 => self.ppu.write_vram_byte(address, value),
+            0x0E | 0x0F => self.cartridge.write_backup(address, value),
             _ => {}
         }
     }
@@ -437,8 +447,18 @@ impl Bus {
     }
 }
 
+/// Whether `address` is in the SRAM/Flash region, which sits on an 8-bit
+/// bus and sees unaligned addresses as they are.
+fn is_save_region(address: u32) -> bool {
+    matches!(address >> 24, 0x0E | 0x0F)
+}
+
 impl CpuBus for Bus {
     fn read_32(&mut self, address: u32, access: Access) -> u32 {
+        if is_save_region(address) {
+            self.tick(self.waits.cycles(address, Width::Word, false));
+            return u32::from(self.cartridge.read_backup(address)) * 0x0101_0101;
+        }
         let address = address & !3;
         self.tick(
             self.waits
@@ -461,6 +481,10 @@ impl CpuBus for Bus {
     }
 
     fn read_16(&mut self, address: u32, access: Access) -> u16 {
+        if is_save_region(address) {
+            self.tick(self.waits.cycles(address, Width::Half, false));
+            return u16::from(self.cartridge.read_backup(address)) * 0x0101;
+        }
         let address = address & !1;
         self.tick(
             self.waits
@@ -487,6 +511,13 @@ impl CpuBus for Bus {
     }
 
     fn write_32(&mut self, address: u32, value: u32, access: Access) {
+        if is_save_region(address) {
+            // The byte lane at the (unaligned) address reaches the 8-bit bus.
+            self.tick(self.waits.cycles(address, Width::Word, false));
+            let byte = value.rotate_right((address & 3) * 8) as u8;
+            self.cartridge.write_backup(address, byte);
+            return;
+        }
         let address = address & !3;
         self.tick(
             self.waits
@@ -497,6 +528,12 @@ impl CpuBus for Bus {
     }
 
     fn write_16(&mut self, address: u32, value: u16, access: Access) {
+        if is_save_region(address) {
+            self.tick(self.waits.cycles(address, Width::Half, false));
+            let byte = (value >> ((address & 1) * 8)) as u8;
+            self.cartridge.write_backup(address, byte);
+            return;
+        }
         let address = address & !1;
         self.tick(
             self.waits
@@ -515,5 +552,78 @@ impl CpuBus for Bus {
 
     fn idle(&mut self) {
         self.tick(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eeprom_bus() -> Bus {
+        let mut rom = vec![0; 0x400];
+        rom[0x200..0x208].copy_from_slice(b"EEPROM_V");
+        Bus::new(
+            Cartridge::new(rom.into_boxed_slice(), None, 0),
+            Box::default(),
+        )
+    }
+
+    /// Runs DMA 3 copying `count` halfwords from `source` to `destination`.
+    fn dma3(bus: &mut Bus, source: u32, destination: u32, count: u16) {
+        bus.write_io_16(0xD4, source as u16);
+        bus.write_io_16(0xD6, (source >> 16) as u16);
+        bus.write_io_16(0xD8, destination as u16);
+        bus.write_io_16(0xDA, (destination >> 16) as u16);
+        bus.write_io_16(0xDC, count);
+        bus.write_io_16(0xDE, 0x8000);
+        while bus.run_pending_dma() {}
+    }
+
+    /// Stores `bits`, one per halfword, at 0x02000000.
+    fn stage(bus: &mut Bus, bits: &[u16]) {
+        for (index, bit) in (0u32..).zip(bits) {
+            bus.write_16(0x0200_0000 + index * 2, *bit, Access::NONSEQUENTIAL);
+        }
+    }
+
+    #[test]
+    fn eeprom_round_trips_a_block_through_dma() {
+        let mut bus = eeprom_bus();
+        let data: Vec<u16> = (0..64).map(|bit| u16::from(bit % 3 == 0)).collect();
+        // Write block 5: 1 0, a 6-bit address, 64 data bits, 0.
+        let address = [0, 0, 0, 1, 0, 1];
+        let write: Vec<u16> = [1, 0]
+            .iter()
+            .chain(&address)
+            .chain(&data)
+            .chain(&[0])
+            .copied()
+            .collect();
+        stage(&mut bus, &write);
+        dma3(&mut bus, 0x0200_0000, 0x0D00_0000, 73);
+        assert_eq!(bus.cartridge.backup_generation(), Some(1));
+        // Read it back: 1 1, the address, 0; then 4 junk bits and the data.
+        let read: Vec<u16> = [1, 1].iter().chain(&address).chain(&[0]).copied().collect();
+        stage(&mut bus, &read);
+        dma3(&mut bus, 0x0200_0000, 0x0D00_0000, 9);
+        dma3(&mut bus, 0x0D00_0000, 0x0200_1000, 68);
+        let received: Vec<u16> = (0..68)
+            .map(|index| bus.read_16(0x0200_1000 + index * 2, Access::NONSEQUENTIAL) & 1)
+            .collect();
+        assert_eq!(received[4..], data[..]);
+    }
+
+    #[test]
+    fn sram_sees_one_byte_lane() {
+        let mut rom = vec![0; 0x400];
+        rom[0x200..0x206].copy_from_slice(b"SRAM_V");
+        let mut bus = Bus::new(
+            Cartridge::new(rom.into_boxed_slice(), None, 0),
+            Box::default(),
+        );
+        bus.write_32(0x0E00_0002, 0xAABB_CCDD, Access::NONSEQUENTIAL);
+        assert_eq!(bus.read_8(0x0E00_0002, Access::NONSEQUENTIAL), 0xBB);
+        assert_eq!(bus.read_8(0x0E00_0003, Access::NONSEQUENTIAL), 0xFF);
+        assert_eq!(bus.read_32(0x0E00_0002, Access::NONSEQUENTIAL), 0xBBBB_BBBB);
     }
 }

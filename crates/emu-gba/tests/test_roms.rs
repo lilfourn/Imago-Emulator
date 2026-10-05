@@ -31,12 +31,16 @@ fn target(name: &str) -> PathBuf {
 }
 
 /// ROMs that report through R12.
-const CASES: [&str; 5] = [
+const CASES: [&str; 9] = [
     "arm/arm.gba",
     "thumb/thumb.gba",
     "memory/memory.gba",
     "bios/bios.gba",
     "nes/nes.gba",
+    "save/none.gba",
+    "save/sram.gba",
+    "save/flash64.gba",
+    "save/flash128.gba",
 ];
 
 fn run(path: &str) -> Result<(), String> {

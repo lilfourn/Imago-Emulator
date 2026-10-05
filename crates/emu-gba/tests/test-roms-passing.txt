@@ -3,3 +3,7 @@ thumb/thumb.gba
 memory/memory.gba
 bios/bios.gba
 nes/nes.gba
+save/none.gba
+save/sram.gba
+save/flash64.gba
+save/flash128.gba
