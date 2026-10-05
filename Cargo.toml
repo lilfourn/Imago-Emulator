@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace.dependencies]
+emu-core = { path = "crates/emu-core" }
+emu-sched = { path = "crates/emu-sched" }
+emu-state = { path = "crates/emu-state" }
+emu-arm = { path = "crates/emu-arm" }
+emu-gb = { path = "crates/emu-gb" }
+emu-gba = { path = "crates/emu-gba" }
+emu-nds = { path = "crates/emu-nds" }
+emu-cores = { path = "crates/emu-cores" }
+
+anyhow = "1"
+crc32fast = "1"
+dirs = "7"
+# `runtime_shaders` compiles GPUI's Metal shaders at startup, so building does
+# not need the separately downloaded Xcode Metal Toolchain.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unexpected_cfgs = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Interpreters are unusably slow at opt-level 0; keep the cores optimized
+# even in debug builds so the app runs at full speed while debugging.
+[profile.dev.package.emu-gb]
+opt-level = 2
+[profile.dev.package.emu-gba]
+opt-level = 2
+[profile.dev.package.emu-nds]
+opt-level = 2
+[profile.dev.package.emu-arm]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
