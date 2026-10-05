@@ -1,9 +1,10 @@
 //! Cartridge save memory (GBATEK, "GBA Cart Backup IDs", "GBA Cart Backup
 //! SRAM/FRAM", "GBA Cart Backup Flash ROM", "GBA Cart Backup EEPROM").
 //!
-//! The kind is detected from the save library's ID string in the ROM
-//! (`SRAM_V`, `FLASH1M_V`, `EEPROM_V`, ...), which every game built with
-//! Nintendo's SDK contains. SRAM and Flash sit on an 8-bit bus at
+//! The kind comes from a table of game codes when the game is listed,
+//! otherwise from the save library's ID string in the ROM (`SRAM_V`,
+//! `FLASH1M_V`, `EEPROM_V`, ...), which every game built with Nintendo's
+//! SDK contains. SRAM and Flash sit on an 8-bit bus at
 //! 0x0E000000; EEPROM is reached bit by bit through DMA at the top of the
 //! ROM area.
 
@@ -13,6 +14,54 @@ use serde::{Deserialize, Serialize};
 /// parts, as in most commercial carts.
 const FLASH_64K_ID: (u8, u8) = (0xC2, 0x1C);
 const FLASH_128K_ID: (u8, u8) = (0xC2, 0x09);
+
+/// A save memory type and size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    None,
+    Sram,
+    Flash64,
+    Flash128,
+    Eeprom,
+}
+
+/// Save types by game code (header 0xAC, without the region letter), for
+/// games whose library strings mislead detection and for the games the
+/// project is tested against. Add a game here when detection gets it wrong.
+const OVERRIDES: [(&[u8; 3], Kind); 5] = [
+    (b"AXV", Kind::Flash128), // Pokémon Ruby
+    (b"AXP", Kind::Flash128), // Pokémon Sapphire
+    (b"BPE", Kind::Flash128), // Pokémon Emerald
+    (b"BPR", Kind::Flash128), // Pokémon FireRed
+    (b"BPG", Kind::Flash128), // Pokémon LeafGreen
+];
+
+/// The save type listed for `rom`'s game code, if any.
+fn listed(rom: &[u8]) -> Option<Kind> {
+    let code = rom.get(0xAC..0xAF)?;
+    OVERRIDES
+        .iter()
+        .find(|(game, _)| game.as_slice() == code)
+        .map(|&(_, kind)| kind)
+}
+
+/// The save type `rom`'s library ID string asks for. Games with several
+/// strings take the first in this order.
+fn from_library_string(rom: &[u8]) -> Kind {
+    // The strings start on word boundaries.
+    let has = |id: &[u8]| rom.windows(id.len()).step_by(4).any(|window| window == id);
+    if has(b"EEPROM_V") {
+        Kind::Eeprom
+    } else if has(b"SRAM_V") || has(b"SRAM_F_V") {
+        Kind::Sram
+    } else if has(b"FLASH1M_V") {
+        Kind::Flash128
+    } else if has(b"FLASH_V") || has(b"FLASH512_V") {
+        Kind::Flash64
+    } else {
+        Kind::None
+    }
+}
 
 /// Cartridge save memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,21 +73,14 @@ pub(crate) enum Backup {
 }
 
 impl Backup {
-    /// The save memory a ROM's library ID string asks for. Games with
-    /// several strings take the first in this order.
+    /// Blank save memory of the type `rom` uses.
     pub(crate) fn detect(rom: &[u8]) -> Self {
-        // The strings start on word boundaries.
-        let has = |id: &[u8]| rom.windows(id.len()).step_by(4).any(|window| window == id);
-        if has(b"EEPROM_V") {
-            Self::Eeprom(Eeprom::new())
-        } else if has(b"SRAM_V") || has(b"SRAM_F_V") {
-            Self::Sram(vec![0xFF; 0x8000])
-        } else if has(b"FLASH1M_V") {
-            Self::Flash(Flash::new(0x2_0000))
-        } else if has(b"FLASH_V") || has(b"FLASH512_V") {
-            Self::Flash(Flash::new(0x1_0000))
-        } else {
-            Self::None
+        match listed(rom).unwrap_or_else(|| from_library_string(rom)) {
+            Kind::None => Self::None,
+            Kind::Sram => Self::Sram(vec![0xFF; 0x8000]),
+            Kind::Flash64 => Self::Flash(Flash::new(0x1_0000)),
+            Kind::Flash128 => Self::Flash(Flash::new(0x2_0000)),
+            Kind::Eeprom => Self::Eeprom(Eeprom::new()),
         }
     }
 
@@ -316,6 +358,16 @@ mod tests {
         rom[0x100..0x109].copy_from_slice(b"SRAM_V103");
         assert!(matches!(Backup::detect(&rom), Backup::Sram(_)));
         assert!(matches!(Backup::detect(&[0; 0x100]), Backup::None));
+    }
+
+    #[test]
+    fn listed_game_codes_win_over_library_strings() {
+        let mut rom = vec![0u8; 0x400];
+        rom[0x100..0x106].copy_from_slice(b"SRAM_V");
+        rom[0xAC..0xB0].copy_from_slice(b"BPEE");
+        assert!(
+            matches!(Backup::detect(&rom), Backup::Flash(ref flash) if flash.memory.len() == 0x2_0000)
+        );
     }
 
     fn command(backup: &mut Backup, value: u8) {
