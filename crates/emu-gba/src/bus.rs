@@ -10,7 +10,9 @@ use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
 
 use crate::bios;
+use crate::dma::{Dma, Timing};
 use crate::ppu::{self, Ppu};
+use crate::timer::Timers;
 use crate::timing::{WaitStates, Width};
 
 /// Scheduled events.
@@ -20,10 +22,16 @@ pub(crate) enum Event {
     HBlank,
     /// The PPU starts the next line.
     LineStart,
+    /// A timer counts past 0xFFFF.
+    TimerOverflow(u8),
 }
 
 /// Interrupt request bits outside the PPU's.
 pub(crate) mod irq {
+    /// Timer `n` overflowed: bit 3 + n.
+    pub(crate) const TIMER0: u16 = 1 << 3;
+    /// DMA channel `n` finished: bit 8 + n.
+    pub(crate) const DMA0: u16 = 1 << 8;
     pub(crate) const KEYPAD: u16 = 1 << 12;
 }
 
@@ -38,6 +46,8 @@ pub(crate) struct Bus {
     ewram: Box<[u8]>,
     iwram: Box<[u8]>,
     pub(crate) ppu: Ppu,
+    dma: Dma,
+    timers: Timers,
     /// Raw values written to I/O registers, for byte merges and reading back
     /// registers without side effects.
     io: Box<[u8]>,
@@ -73,6 +83,8 @@ impl Bus {
             ewram: vec![0; 0x4_0000].into_boxed_slice(),
             iwram: vec![0; 0x8000].into_boxed_slice(),
             ppu: Ppu::new(),
+            dma: Dma::default(),
+            timers: Timers::default(),
             io: vec![0; 0x400].into_boxed_slice(),
             interrupt_enable: 0,
             interrupt_flag: 0,
@@ -169,21 +181,80 @@ impl Bus {
         while let Some(due) = self.scheduler.pop_due() {
             match due.event {
                 Event::HBlank => {
-                    let (request, _signals) = self.ppu.start_hblank();
+                    let (request, signals) = self.ppu.start_hblank();
                     self.request_interrupt(request);
+                    if signals.hblank {
+                        self.dma.trigger(Timing::HBlank);
+                    }
                     self.scheduler.schedule_at(
                         due.time + ppu::LINE_CYCLES - ppu::HDRAW_CYCLES,
                         Event::LineStart,
                     );
                 }
                 Event::LineStart => {
-                    let (request, _signals) = self.ppu.start_line();
+                    let (request, signals) = self.ppu.start_line();
                     self.request_interrupt(request);
+                    if signals.vblank {
+                        self.dma.trigger(Timing::VBlank);
+                    }
                     self.scheduler
                         .schedule_at(due.time + ppu::HDRAW_CYCLES, Event::HBlank);
                 }
+                Event::TimerOverflow(index) => self.timer_overflow(usize::from(index), due.time),
             }
         }
+    }
+
+    fn timer_overflow(&mut self, index: usize, time: u64) {
+        let overflowed = self.timers.overflow(index, time);
+        for timer in (0..4).filter(|timer| overflowed & (1 << timer) != 0) {
+            if self.timers.interrupt_enabled(timer) {
+                self.request_interrupt(irq::TIMER0 << timer);
+            }
+        }
+        self.schedule_timer(index);
+    }
+
+    /// Replaces timer `index`'s overflow event after it was reconfigured.
+    fn schedule_timer(&mut self, index: usize) {
+        let event = Event::TimerOverflow(index as u8);
+        self.scheduler.cancel(|pending| *pending == event);
+        if let Some(time) = self.timers.overflow_time(index) {
+            self.scheduler.schedule_at(time, event);
+        }
+    }
+
+    /// Runs the highest-priority pending DMA transfer, if any. The CPU waits
+    /// while it runs. Returns whether one ran.
+    pub(crate) fn run_pending_dma(&mut self) -> bool {
+        let Some(index) = self.dma.next_pending() else {
+            return false;
+        };
+        let transfer = self.dma.transfer(index);
+        let (mut source, mut destination) = (transfer.source, transfer.destination);
+        // Two internal cycles to start up.
+        self.tick(2);
+        for unit in 0..transfer.count {
+            let order = if unit == 0 {
+                Access::NONSEQUENTIAL
+            } else {
+                Access::SEQUENTIAL
+            };
+            let access = order | Access::DMA;
+            if transfer.words {
+                let value = self.read_32(source, access);
+                self.write_32(destination, value, access);
+            } else {
+                let value = self.read_16(source, access);
+                self.write_16(destination, value, access);
+            }
+            source = source.wrapping_add_signed(transfer.source_step);
+            destination = destination.wrapping_add_signed(transfer.destination_step);
+        }
+        if self.dma.finish(index, source, destination) {
+            self.request_interrupt(irq::DMA0 << index);
+        }
+        true
     }
 
     fn io_16(&self, offset: usize) -> u16 {
@@ -194,6 +265,8 @@ impl Bus {
         let offset = (offset & 0x3FE) as usize;
         match offset {
             0x000..=0x056 => self.ppu.read_register(offset),
+            0x0B0..=0x0DE => self.dma.read(offset as u32 - 0xB0),
+            0x100..=0x10E => self.timers.read(offset as u32 - 0x100, self.cycles),
             0x130 => self.keys,
             0x200 => self.interrupt_enable,
             0x202 => self.interrupt_flag,
@@ -212,6 +285,12 @@ impl Bus {
         }
         match offset {
             0x000..=0x056 => self.ppu.write_register(offset, value),
+            0x0B0..=0x0DE => self.dma.write(offset as u32 - 0xB0, value),
+            0x100..=0x10E => {
+                if let Some(timer) = self.timers.write(offset as u32 - 0x100, value, self.cycles) {
+                    self.schedule_timer(timer);
+                }
+            }
             0x132 => self.check_keypad_interrupt(),
             0x200 => self.interrupt_enable = value & 0x3FFF,
             0x202 => self.interrupt_flag &= !value,

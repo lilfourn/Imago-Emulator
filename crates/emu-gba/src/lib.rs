@@ -7,7 +7,9 @@
 
 mod bios;
 mod bus;
+mod dma;
 mod ppu;
+mod timer;
 mod timing;
 
 use emu_arm::{Access, Cpu, Mode, Registers};
@@ -33,7 +35,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(16_777_216, 280_896),
     audio_sample_rate: 32_768,
     // Bump whenever any serialized struct changes shape.
-    state_version: 2,
+    state_version: 3,
 };
 
 /// A Game Boy Advance with a cartridge inserted.
@@ -118,7 +120,9 @@ impl Gba {
     /// Runs one instruction (or one stretch of HALT, or one HLE BIOS call).
     pub fn step(&mut self) {
         let Machine { cpu, bus } = &mut self.machine;
-        if !bus.wake_if_requested() {
+        if bus.run_pending_dma() {
+            // The CPU waited for the transfer.
+        } else if !bus.wake_if_requested() {
             bus.idle_to_next_event();
         } else if self.hle_bios
             && cpu.reg(15) == bios::SWI_ENTERED_PC
