@@ -22,6 +22,9 @@ pub trait Bus {
     fn pending_interrupts(&self) -> u8;
     /// Clears the request flag `mask` in IF.
     fn acknowledge_interrupt(&mut self, mask: u8);
+    /// The STOP instruction ran: on CGB this switches CPU speed if KEY1
+    /// armed it.
+    fn stop(&mut self) {}
 }
 
 const FLAG_Z: u8 = 0x80;
@@ -55,6 +58,20 @@ pub struct Registers {
 }
 
 impl Registers {
+    /// The registers as the CGB boot ROM leaves them for a CGB game.
+    pub const CGB_AFTER_BOOT: Self = Self {
+        a: 0x11,
+        f: 0x80,
+        b: 0x00,
+        c: 0x00,
+        d: 0xFF,
+        e: 0x56,
+        h: 0x00,
+        l: 0x0D,
+        sp: 0xFFFE,
+        pc: 0x0100,
+    };
+
     /// The registers as the DMG boot ROM leaves them (Pan Docs, "Power Up
     /// Sequence").
     pub const DMG_AFTER_BOOT: Self = Self {
@@ -319,9 +336,10 @@ impl Cpu {
         match opcode {
             0x00 => {}
             0x10 => {
-                // STOP is two bytes long. Low-power mode and CGB speed
-                // switching arrive with CGB support.
+                // STOP is two bytes long. Low-power mode is not emulated;
+                // the bus handles CGB speed switching.
                 self.fetch(bus);
+                bus.stop();
             }
             0x01 | 0x11 | 0x21 | 0x31 => {
                 let value = self.fetch16(bus);

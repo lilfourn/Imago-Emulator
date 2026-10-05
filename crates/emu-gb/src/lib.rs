@@ -1,4 +1,7 @@
-//! Game Boy (DMG) core. Game Boy Color support arrives in Phase 2.
+//! Game Boy and Game Boy Color core.
+//!
+//! A cartridge whose header asks for CGB features runs on an emulated Game
+//! Boy Color in CGB mode; every other cartridge runs on a DMG.
 //!
 //! The CPU drives the machine: every memory access advances the timer,
 //! PPU, serial port, cartridge clock and OAM DMA by one M-cycle, so
@@ -9,19 +12,22 @@ mod apu;
 mod bus;
 mod cartridge;
 mod cpu;
+mod hdma;
 mod interrupts;
 mod joypad;
+mod model;
 mod ppu;
 mod serial;
 mod timer;
 
 use emu_core::{
     Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
-    StateError, StereoSample, System, SystemFileKind, rgb,
+    StateError, StereoSample, System, SystemFileKind,
 };
 use serde::{Deserialize, Serialize};
 
 pub use cpu::Registers;
+pub use model::Model;
 
 use bus::Bus;
 use cartridge::Cartridge;
@@ -40,17 +46,8 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(4_194_304, 70_224),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 3,
+    state_version: 5,
 };
-
-/// The four DMG shades, lightest first. Neutral greys match the reference
-/// screenshots of the common test-ROM suites.
-const SHADES: [u32; 4] = [
-    rgb(0xFF, 0xFF, 0xFF),
-    rgb(0xAA, 0xAA, 0xAA),
-    rgb(0x55, 0x55, 0x55),
-    rgb(0x00, 0x00, 0x00),
-];
 
 /// A Game Boy with a cartridge inserted.
 #[derive(Debug)]
@@ -68,16 +65,16 @@ struct Machine {
 
 impl Machine {
     /// A machine at power-on: running the boot ROM if there is one,
-    /// otherwise in the state the DMG boot ROM leaves.
-    fn power_on(cartridge: Cartridge, boot_rom: Option<Box<[u8]>>) -> Self {
-        let registers = if boot_rom.is_some() {
-            Registers::default()
-        } else {
-            Registers::DMG_AFTER_BOOT
+    /// otherwise in the state the boot ROM leaves.
+    fn power_on(model: Model, cartridge: Cartridge, boot_rom: Option<Box<[u8]>>) -> Self {
+        let registers = match (boot_rom.is_some(), model) {
+            (true, _) => Registers::default(),
+            (false, Model::Dmg) => Registers::DMG_AFTER_BOOT,
+            (false, Model::Cgb) => Registers::CGB_AFTER_BOOT,
         };
         Self {
             cpu: Cpu::new(registers),
-            bus: Bus::new(cartridge, boot_rom),
+            bus: Bus::new(model, cartridge, boot_rom),
         }
     }
 }
@@ -108,12 +105,17 @@ impl Gb {
             });
         }
 
+        let model = Model::for_rom(media.rom);
         let cartridge = Cartridge::new(media.rom, media.backup, media.start_time)?;
+        let boot_rom_kind = match model {
+            Model::Dmg => SystemFileKind::GbBootRom,
+            Model::Cgb => SystemFileKind::GbcBootRom,
+        };
         let boot_rom = media
-            .system_file(SystemFileKind::GbBootRom)
+            .system_file(boot_rom_kind)
             .map(|rom| rom.to_vec().into_boxed_slice());
         Ok(Self {
-            machine: Machine::power_on(cartridge, boot_rom),
+            machine: Machine::power_on(model, cartridge, boot_rom),
             screens: [Frame::new(SCREENS[0])],
         })
     }
@@ -127,6 +129,21 @@ impl Gb {
             self.present();
         }
         opcode
+    }
+
+    /// Sets the buttons held from now on. [`Core::run_frame`] calls this
+    /// with each frame's input; harnesses that drive the core with
+    /// [`Gb::step`] call it directly.
+    pub fn set_input(&mut self, input: &Input) {
+        let bus = &mut self.machine.bus;
+        bus.joypad
+            .set_buttons(input.buttons, &mut bus.interrupt_flag);
+    }
+
+    /// The hardware model being emulated.
+    #[must_use]
+    pub fn model(&self) -> Model {
+        self.machine.bus.model()
     }
 
     /// The CPU registers.
@@ -161,10 +178,9 @@ impl Gb {
 
     fn present(&mut self) {
         let [screen] = &mut self.screens;
-        let shades = self.machine.bus.ppu.shades();
-        for (pixel, shade) in screen.pixels_mut().iter_mut().zip(shades) {
-            *pixel = SHADES[usize::from(*shade)];
-        }
+        screen
+            .pixels_mut()
+            .copy_from_slice(self.machine.bus.ppu.pixels());
     }
 }
 
@@ -174,9 +190,7 @@ impl Core for Gb {
     }
 
     fn run_frame(&mut self, input: &Input, audio: &mut Vec<StereoSample>) {
-        let bus = &mut self.machine.bus;
-        bus.joypad
-            .set_buttons(input.buttons, &mut bus.interrupt_flag);
+        self.set_input(input);
         let start = self.cycles();
         loop {
             self.machine.cpu.step(&mut self.machine.bus);
@@ -201,9 +215,10 @@ impl Core for Gb {
     }
 
     fn reset(&mut self) {
+        let model = self.model();
         let (mut cartridge, boot_rom) = self.machine.bus.take_media();
         cartridge.power_cycle();
-        self.machine = Machine::power_on(cartridge, boot_rom);
+        self.machine = Machine::power_on(model, cartridge, boot_rom);
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
@@ -242,8 +257,16 @@ mod tests {
 
     /// A 32 KiB ROM-only cartridge running `program` at 0x0100.
     fn rom_with_program(program: &[u8]) -> Vec<u8> {
+        rom_for(Model::Dmg, program)
+    }
+
+    /// Like [`rom_with_program`], with the header asking for `model`.
+    fn rom_for(model: Model, program: &[u8]) -> Vec<u8> {
         let mut rom = vec![0; 0x8000];
         rom[0x100..0x100 + program.len()].copy_from_slice(program);
+        if model == Model::Cgb {
+            rom[0x143] = 0x80;
+        }
         rom[0x14D] = rom[0x134..0x14D]
             .iter()
             .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
@@ -266,6 +289,52 @@ mod tests {
         let first = gb.cycles();
         gb.run_frame(&Input::default(), &mut Vec::new());
         assert_eq!(gb.cycles() - first, CYCLES_PER_FRAME);
+    }
+
+    #[test]
+    fn cgb_flag_selects_the_model() {
+        let dmg = Gb::new(&Media::new(&rom_for(Model::Dmg, &[]))).expect("valid rom");
+        let cgb = Gb::new(&Media::new(&rom_for(Model::Cgb, &[]))).expect("valid rom");
+        assert_eq!((dmg.model(), cgb.model()), (Model::Dmg, Model::Cgb));
+        assert_eq!(cgb.registers().a, 0x11);
+    }
+
+    #[test]
+    fn stop_switches_to_double_speed_when_armed() {
+        // LD A,1; LDH (KEY1),A; STOP 0; NOP; NOP
+        let program = [0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x00, 0x00];
+        let mut gb = Gb::new(&Media::new(&rom_for(Model::Cgb, &program))).expect("valid rom");
+        for _ in 0..3 {
+            gb.step();
+        }
+        assert_eq!(gb.peek(0xFF4D), 0xFE);
+        // A NOP is one CPU M-cycle: half the real time at double speed.
+        let before = gb.cycles();
+        gb.step();
+        assert_eq!(gb.cycles() - before, 2);
+    }
+
+    #[test]
+    fn general_hdma_copies_to_the_selected_vram_bank() {
+        let program = [
+            0x3E, 0xC0, 0xE0, 0x51, // HDMA1 = 0xC0 (source 0xC000)
+            0xAF, 0xE0, 0x52, // HDMA2 = 0x00
+            0xE0, 0x53, // HDMA3 = 0x00 (destination 0x8000)
+            0xE0, 0x54, // HDMA4 = 0x00
+            0x3E, 0x01, 0xE0, 0x4F, // VBK = 1
+            0x3E, 0x7E, 0xEA, 0x0F, 0xC0, // (0xC00F) = 0x7E
+            0x3E, 0x00, 0xE0, 0x55, // HDMA5 = 0: one 16-byte block, now
+        ];
+        let mut gb = Gb::new(&Media::new(&rom_for(Model::Cgb, &program))).expect("valid rom");
+        for _ in 0..13 {
+            gb.step();
+        }
+        assert_eq!(gb.peek(0xFF55), 0xFF);
+        assert_eq!(gb.peek(0x800F), 0x7E);
+        assert_eq!(
+            gb.memory(MemoryRegion::VideoRam).map(|vram| vram[0x200F]),
+            Some(0x7E)
+        );
     }
 
     #[test]

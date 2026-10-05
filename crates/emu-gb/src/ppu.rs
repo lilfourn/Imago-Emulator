@@ -1,20 +1,36 @@
 //! The picture processing unit (Pan Docs, "Rendering", "LCD Control",
-//! "LCD Status Registers", "Scrolling", "OAM").
+//! "LCD Status Registers", "Scrolling", "OAM", "Palettes", "VRAM Banks").
 //!
 //! Timing follows the hardware's modes dot by dot (456 dots per line, 154
 //! lines per frame). Pixels are drawn a whole line at a time when mode 3
 //! starts, using the registers as they are at that moment. That is enough
 //! for nearly every game; mid-line register effects would need a pixel FIFO.
+//!
+//! In CGB mode the PPU has a second VRAM bank holding per-tile attributes
+//! (palette, bank, flips, priority), 8 background and 8 object palettes of
+//! four 15-bit colours, and draws objects in OAM order.
 
+use emu_core::rgb;
 use serde::{Deserialize, Serialize};
 
 use crate::interrupts;
+use crate::model::Model;
 
 pub(crate) const WIDTH: usize = 160;
 pub(crate) const HEIGHT: usize = 144;
 const DOTS_PER_LINE: u16 = 456;
 const LINES_PER_FRAME: u8 = 154;
 const OAM_SCAN_DOTS: u16 = 80;
+
+/// The four DMG shades, lightest first. Neutral greys match the reference
+/// screenshots of the common test-ROM suites.
+const DMG_SHADES: [u32; 4] = [
+    rgb(0xFF, 0xFF, 0xFF),
+    rgb(0xAA, 0xAA, 0xAA),
+    rgb(0x55, 0x55, 0x55),
+    rgb(0x00, 0x00, 0x00),
+];
+const WHITE: u32 = rgb(0xFF, 0xFF, 0xFF);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Mode {
@@ -26,7 +42,10 @@ enum Mode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Ppu {
+    model: Model,
+    /// Two 8 KiB banks; bank 1 exists only on CGB.
     vram: Box<[u8]>,
+    vram_bank: u8,
     oam: Box<[u8]>,
     lcdc: u8,
     /// STAT bits 3–6: which conditions raise the STAT interrupt.
@@ -40,6 +59,16 @@ pub(crate) struct Ppu {
     obp1: u8,
     wy: u8,
     wx: u8,
+    /// CGB palette RAM: 8 palettes x 4 colours x 2 bytes, little-endian
+    /// RGB555.
+    bg_palettes: Box<[u8]>,
+    obj_palettes: Box<[u8]>,
+    /// BCPS and OCPS: palette RAM index plus auto-increment (bit 7).
+    bg_palette_select: u8,
+    obj_palette_select: u8,
+    /// OPRI bit 0: objects prioritised by X coordinate (DMG style) rather
+    /// than OAM order.
+    priority_by_x: bool,
     mode: Mode,
     /// Dots elapsed in the current line.
     dot: u16,
@@ -52,17 +81,21 @@ pub(crate) struct Ppu {
     /// The OR of all enabled STAT conditions; the interrupt fires on its
     /// rising edge.
     stat_line: bool,
-    /// Shade (0 = lightest, 3 = darkest) of each pixel of the frame being
-    /// drawn.
-    shades: Box<[u8]>,
+    /// The frame being drawn, as `0xFFRRGGBB`.
+    pixels: Box<[u32]>,
     frame_ready: bool,
+    /// Mode 0 began on a visible line since the last call; drives HBlank
+    /// DMA.
+    hblank_started: bool,
 }
 
 impl Ppu {
-    /// The state the DMG boot ROM leaves: LCD on, BGP = 0xFC.
-    pub(crate) fn after_boot() -> Self {
+    /// The state the boot ROM leaves: LCD on, BGP = 0xFC.
+    pub(crate) fn after_boot(model: Model) -> Self {
         Self {
-            vram: vec![0; 0x2000].into_boxed_slice(),
+            model,
+            vram: vec![0; 0x4000].into_boxed_slice(),
+            vram_bank: 0,
             oam: vec![0; 0xA0].into_boxed_slice(),
             lcdc: 0x91,
             stat_select: 0,
@@ -75,29 +108,44 @@ impl Ppu {
             obp1: 0xFF,
             wy: 0,
             wx: 0,
+            bg_palettes: vec![0xFF; 64].into_boxed_slice(),
+            obj_palettes: vec![0xFF; 64].into_boxed_slice(),
+            bg_palette_select: 0,
+            obj_palette_select: 0,
+            priority_by_x: model == Model::Dmg,
             mode: Mode::OamScan,
             dot: 0,
             drawing_dots: 172,
             window_in_frame: false,
             window_line: 0,
             stat_line: false,
-            shades: vec![0; WIDTH * HEIGHT].into_boxed_slice(),
+            pixels: vec![WHITE; WIDTH * HEIGHT].into_boxed_slice(),
             frame_ready: false,
+            hblank_started: false,
         }
+    }
+
+    fn cgb(&self) -> bool {
+        self.model == Model::Cgb
     }
 
     fn lcd_enabled(&self) -> bool {
         self.lcdc & 0x80 != 0
     }
 
-    /// Shades of the last completed frame, row-major.
-    pub(crate) fn shades(&self) -> &[u8] {
-        &self.shades
+    /// Pixels of the last completed frame, row-major, as `0xFFRRGGBB`.
+    pub(crate) fn pixels(&self) -> &[u32] {
+        &self.pixels
     }
 
     /// Whether a frame finished since the last call.
     pub(crate) fn take_frame_ready(&mut self) -> bool {
         std::mem::take(&mut self.frame_ready)
+    }
+
+    /// Whether HBlank began on a visible line since the last call.
+    pub(crate) fn take_hblank_started(&mut self) -> bool {
+        std::mem::take(&mut self.hblank_started)
     }
 
     /// Whether the LCD is on; with it off no frames complete.
@@ -109,12 +157,12 @@ impl Ppu {
         &self.vram
     }
 
-    /// Advances one M-cycle (four dots).
-    pub(crate) fn tick(&mut self, interrupt_flag: &mut u8) {
+    /// Advances `dots` dots: four per M-cycle, or two in CGB double speed.
+    pub(crate) fn tick(&mut self, dots: u8, interrupt_flag: &mut u8) {
         if !self.lcd_enabled() {
             return;
         }
-        for _ in 0..4 {
+        for _ in 0..dots {
             self.advance_dot(interrupt_flag);
         }
         self.update_stat_line(interrupt_flag);
@@ -129,6 +177,7 @@ impl Ppu {
                 self.render_line();
             } else if self.dot == OAM_SCAN_DOTS + self.drawing_dots {
                 self.mode = Mode::HBlank;
+                self.hblank_started = true;
             }
         }
         if self.dot < DOTS_PER_LINE {
@@ -157,7 +206,7 @@ impl Ppu {
         let mode_selected = match self.mode {
             Mode::HBlank => self.stat_select & 0x08 != 0,
             // On DMG the mode 2 condition also fires as VBlank begins.
-            Mode::VBlank if self.ly == HEIGHT as u8 && self.dot == 0 => {
+            Mode::VBlank if !self.cgb() && self.ly == HEIGHT as u8 && self.dot == 0 => {
                 self.stat_select & 0x30 != 0
             }
             Mode::VBlank => self.stat_select & 0x10 != 0,
@@ -188,7 +237,10 @@ impl Ppu {
     }
 
     fn window_visible_on_line(&self) -> bool {
-        self.lcdc & 0x21 == 0x21 && self.window_in_frame && self.wx <= 166
+        // On DMG, LCDC bit 0 off also hides the window; on CGB it only
+        // removes background priority.
+        let enabled = self.lcdc & 0x20 != 0 && (self.cgb() || self.lcdc & 0x01 != 0);
+        enabled && self.window_in_frame && self.wx <= 166
     }
 
     /// Up to ten objects overlapping the current line, in OAM order.
@@ -231,57 +283,91 @@ impl Ppu {
         }
     }
 
+    /// The background or window pixel at (`x`, `y`) of the tile map at VRAM
+    /// offset `map`.
+    fn map_pixel(&self, map: usize, x: usize, y: usize) -> BgPixel {
+        let entry = map + (y / 8) * 32 + x / 8;
+        let index = self.vram[entry];
+        // Attributes live at the same offset in bank 1.
+        let attributes = if self.cgb() {
+            self.vram[0x2000 + entry]
+        } else {
+            0
+        };
+        let bank = if attributes & 0x08 != 0 { 0x2000 } else { 0 };
+        let row = if attributes & 0x40 != 0 {
+            7 - y % 8
+        } else {
+            y % 8
+        };
+        let column = if attributes & 0x20 != 0 {
+            7 - x % 8
+        } else {
+            x % 8
+        };
+        BgPixel {
+            color: self.tile_pixel(bank + self.bg_tile_address(index), row, column),
+            palette: attributes & 7,
+            priority: attributes & 0x80 != 0,
+        }
+    }
+
     fn render_line(&mut self) {
         let ly = usize::from(self.ly);
-        let mut bg_colors = [0u8; WIDTH];
-        let mut row = [0u8; WIDTH];
+        let mut background = [BgPixel::default(); WIDTH];
 
-        if self.lcdc & 0x01 != 0 {
+        // On DMG, LCDC bit 0 off blanks the background and window to colour 0.
+        if self.cgb() || self.lcdc & 0x01 != 0 {
             let map = if self.lcdc & 0x08 != 0 {
-                0x1C00
+                0x1800 + 0x400
             } else {
                 0x1800
             };
             let y = usize::from(self.ly.wrapping_add(self.scy));
-            for (x, color) in bg_colors.iter_mut().enumerate() {
-                let bx = (x + usize::from(self.scx)) & 0xFF;
-                let index = self.vram[map + (y / 8) * 32 + bx / 8];
-                *color = self.tile_pixel(self.bg_tile_address(index), y % 8, bx % 8);
+            for (x, pixel) in background.iter_mut().enumerate() {
+                *pixel = self.map_pixel(map, (x + usize::from(self.scx)) & 0xFF, y);
             }
 
             if self.window_visible_on_line() {
                 let map = if self.lcdc & 0x40 != 0 {
-                    0x1C00
+                    0x1800 + 0x400
                 } else {
                     0x1800
                 };
                 let start = usize::from(self.wx).saturating_sub(7);
-                let y = usize::from(self.window_line);
                 let skip = 7usize.saturating_sub(usize::from(self.wx));
-                for (x, color) in bg_colors.iter_mut().enumerate().skip(start) {
-                    let wx = x - start + skip;
-                    let index = self.vram[map + (y / 8) * 32 + wx / 8];
-                    *color = self.tile_pixel(self.bg_tile_address(index), y % 8, wx % 8);
+                let y = usize::from(self.window_line);
+                for (x, pixel) in background.iter_mut().enumerate().skip(start) {
+                    *pixel = self.map_pixel(map, x - start + skip, y);
                 }
                 self.window_line += 1;
             }
         }
-        for (shade, color) in row.iter_mut().zip(bg_colors) {
-            *shade = palette_shade(self.bgp, color);
-        }
 
-        if self.lcdc & 0x02 != 0 {
-            self.draw_sprites(&bg_colors, &mut row);
+        let mut row = [WHITE; WIDTH];
+        for (out, pixel) in row.iter_mut().zip(&background) {
+            *out = if self.cgb() {
+                cgb_color(&self.bg_palettes, pixel.palette, pixel.color)
+            } else {
+                DMG_SHADES[usize::from(palette_shade(self.bgp, pixel.color))]
+            };
         }
-        self.shades[ly * WIDTH..(ly + 1) * WIDTH].copy_from_slice(&row);
+        if self.lcdc & 0x02 != 0 {
+            self.draw_sprites(&background, &mut row);
+        }
+        self.pixels[ly * WIDTH..(ly + 1) * WIDTH].copy_from_slice(&row);
     }
 
-    fn draw_sprites(&self, bg_colors: &[u8; WIDTH], row: &mut [u8; WIDTH]) {
+    fn draw_sprites(&self, background: &[BgPixel; WIDTH], row: &mut [u32; WIDTH]) {
         let tall = self.lcdc & 0x04 != 0;
         let height = if tall { 16 } else { 8 };
         let mut sprites = self.line_sprites();
-        // DMG priority: smaller X wins, then lower OAM index.
-        sprites.sort_by_key(|sprite| (sprite.x, sprite.index));
+        if self.priority_by_x {
+            // DMG priority: smaller X wins, then lower OAM index.
+            sprites.sort_by_key(|sprite| (sprite.x, sprite.index));
+        }
+        // CGB with LCDC bit 0 clear: objects always draw over the background.
+        let background_can_win = !self.cgb() || self.lcdc & 0x01 != 0;
 
         let mut claimed = [false; WIDTH];
         for sprite in sprites {
@@ -294,12 +380,12 @@ impl Ppu {
             } else {
                 sprite.tile
             };
-            let tile_address = usize::from(tile) * 16;
-            let palette = if sprite.attributes & 0x10 != 0 {
-                self.obp1
+            let bank = if self.cgb() && sprite.attributes & 0x08 != 0 {
+                0x2000
             } else {
-                self.obp0
+                0
             };
+            let tile_address = bank + usize::from(tile) * 16;
             for column in 0..8 {
                 let Some(x) = (usize::from(sprite.x) + column).checked_sub(8) else {
                     continue;
@@ -319,20 +405,37 @@ impl Ppu {
                 // An opaque pixel hides lower-priority objects even when the
                 // background is drawn over it.
                 claimed[x] = true;
-                let behind_background = sprite.attributes & 0x80 != 0 && bg_colors[x] != 0;
-                if !behind_background {
-                    row[x] = palette_shade(palette, color);
+                let behind = background_can_win
+                    && background[x].color != 0
+                    && (sprite.attributes & 0x80 != 0 || background[x].priority);
+                if behind {
+                    continue;
                 }
+                row[x] = if self.cgb() {
+                    cgb_color(&self.obj_palettes, sprite.attributes & 7, color)
+                } else {
+                    let palette = if sprite.attributes & 0x10 != 0 {
+                        self.obp1
+                    } else {
+                        self.obp0
+                    };
+                    DMG_SHADES[usize::from(palette_shade(palette, color))]
+                };
             }
         }
     }
 
+    fn vram_index(&self, address: u16) -> usize {
+        usize::from(self.vram_bank) * 0x2000 + usize::from(address & 0x1FFF)
+    }
+
     pub(crate) fn read_vram(&self, address: u16) -> u8 {
-        self.vram[usize::from(address & 0x1FFF)]
+        self.vram[self.vram_index(address)]
     }
 
     pub(crate) fn write_vram(&mut self, address: u16, value: u8) {
-        self.vram[usize::from(address & 0x1FFF)] = value;
+        let index = self.vram_index(address);
+        self.vram[index] = value;
     }
 
     pub(crate) fn read_oam(&self, address: u16) -> u8 {
@@ -349,6 +452,7 @@ impl Ppu {
     }
 
     pub(crate) fn read_register(&self, address: u16) -> u8 {
+        let cgb = self.cgb();
         match address {
             0xFF40 => self.lcdc,
             0xFF41 => {
@@ -369,11 +473,18 @@ impl Ppu {
             0xFF49 => self.obp1,
             0xFF4A => self.wy,
             0xFF4B => self.wx,
+            0xFF4F if cgb => 0xFE | self.vram_bank,
+            0xFF68 if cgb => self.bg_palette_select | 0x40,
+            0xFF69 if cgb => self.bg_palettes[usize::from(self.bg_palette_select & 0x3F)],
+            0xFF6A if cgb => self.obj_palette_select | 0x40,
+            0xFF6B if cgb => self.obj_palettes[usize::from(self.obj_palette_select & 0x3F)],
+            0xFF6C if cgb => 0xFE | u8::from(self.priority_by_x),
             _ => 0xFF,
         }
     }
 
     pub(crate) fn write_register(&mut self, address: u16, value: u8, interrupt_flag: &mut u8) {
+        let cgb = self.cgb();
         match address {
             0xFF40 => {
                 let was_on = self.lcd_enabled();
@@ -383,7 +494,7 @@ impl Ppu {
                     self.dot = 0;
                     self.mode = Mode::HBlank;
                     self.stat_line = false;
-                    self.shades.fill(0);
+                    self.pixels.fill(WHITE);
                     self.frame_ready = true;
                 } else if !was_on && self.lcd_enabled() {
                     // The first line after switching on skips OAM scan.
@@ -397,19 +508,38 @@ impl Ppu {
             0xFF41 => self.stat_select = value & 0x78,
             0xFF42 => self.scy = value,
             0xFF43 => self.scx = value,
-            0xFF44 => {}
             0xFF45 => self.lyc = value,
             0xFF47 => self.bgp = value,
             0xFF48 => self.obp0 = value,
             0xFF49 => self.obp1 = value,
             0xFF4A => self.wy = value,
             0xFF4B => self.wx = value,
+            0xFF4F if cgb => self.vram_bank = value & 1,
+            0xFF68 if cgb => self.bg_palette_select = value & 0xBF,
+            0xFF69 if cgb => {
+                write_palette(&mut self.bg_palettes, &mut self.bg_palette_select, value);
+            }
+            0xFF6A if cgb => self.obj_palette_select = value & 0xBF,
+            0xFF6B if cgb => {
+                write_palette(&mut self.obj_palettes, &mut self.obj_palette_select, value);
+            }
+            0xFF6C if cgb => self.priority_by_x = value & 1 != 0,
             _ => {}
         }
         if self.lcd_enabled() {
             self.update_stat_line(interrupt_flag);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BgPixel {
+    /// Colour index 0–3 before the palette.
+    color: u8,
+    /// CGB palette number.
+    palette: u8,
+    /// CGB attribute bit 7: the background wins over objects.
+    priority: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -424,4 +554,46 @@ struct Sprite {
 /// Maps colour index `color` through a DMG palette register.
 fn palette_shade(palette: u8, color: u8) -> u8 {
     (palette >> (color * 2)) & 3
+}
+
+/// Colour `color` of CGB palette `palette`, widening each 5-bit channel to
+/// 8 bits as `(x << 3) | (x >> 2)`.
+fn cgb_color(palettes: &[u8], palette: u8, color: u8) -> u32 {
+    let index = usize::from(palette) * 8 + usize::from(color) * 2;
+    let value = u16::from_le_bytes([palettes[index], palettes[index + 1]]);
+    let channel = |shift: u16| {
+        let x = ((value >> shift) & 0x1F) as u8;
+        x << 3 | x >> 2
+    };
+    rgb(channel(0), channel(5), channel(10))
+}
+
+/// Writes palette RAM at the index in `select`, auto-incrementing if bit 7
+/// is set.
+fn write_palette(palettes: &mut [u8], select: &mut u8, value: u8) {
+    palettes[usize::from(*select & 0x3F)] = value;
+    if *select & 0x80 != 0 {
+        *select = 0x80 | ((*select + 1) & 0x3F);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cgb_colors_widen_five_bit_channels() {
+        let palettes = [0xFF, 0x7F, 0x1F, 0x00];
+        assert_eq!(cgb_color(&palettes, 0, 0), rgb(0xFF, 0xFF, 0xFF));
+        assert_eq!(cgb_color(&palettes, 0, 1), rgb(0xFF, 0x00, 0x00));
+    }
+
+    #[test]
+    fn palette_writes_auto_increment_and_wrap() {
+        let mut palettes = [0u8; 64];
+        let mut select = 0x80 | 63;
+        write_palette(&mut palettes, &mut select, 0x12);
+        write_palette(&mut palettes, &mut select, 0x34);
+        assert_eq!((palettes[63], palettes[0], select), (0x12, 0x34, 0x81));
+    }
 }

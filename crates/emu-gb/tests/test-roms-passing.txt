@@ -1,3 +1,16 @@
+blargg/cgb_sound/cgb_sound.gb
+blargg/cgb_sound/rom_singles/01-registers.gb
+blargg/cgb_sound/rom_singles/02-len ctr.gb
+blargg/cgb_sound/rom_singles/03-trigger.gb
+blargg/cgb_sound/rom_singles/04-sweep.gb
+blargg/cgb_sound/rom_singles/05-sweep details.gb
+blargg/cgb_sound/rom_singles/06-overflow on trigger.gb
+blargg/cgb_sound/rom_singles/07-len sweep period sync.gb
+blargg/cgb_sound/rom_singles/08-len ctr during power.gb
+blargg/cgb_sound/rom_singles/09-wave read while on.gb
+blargg/cgb_sound/rom_singles/10-wave trigger while on.gb
+blargg/cgb_sound/rom_singles/11-regs after power.gb
+blargg/cgb_sound/rom_singles/12-wave.gb
 blargg/cpu_instrs/cpu_instrs.gb
 blargg/cpu_instrs/individual/01-special.gb
 blargg/cpu_instrs/individual/02-interrupts.gb
@@ -31,7 +44,9 @@ blargg/mem_timing/individual/03-modify_timing.gb
 blargg/mem_timing/mem_timing.gb
 blargg/oam_bug/rom_singles/3-non_causes.gb
 blargg/oam_bug/rom_singles/6-timing_no_bug.gb
+cgb-acid2/cgb-acid2.gbc
 dmg-acid2/dmg-acid2.gb
+mbc3-tester/mbc3-tester.gb
 mooneye-test-suite/acceptance/add_sp_e_timing.gb
 mooneye-test-suite/acceptance/bits/mem_oam.gb
 mooneye-test-suite/acceptance/bits/reg_f.gb
@@ -115,3 +130,6 @@ mooneye-test-suite/emulator-only/mbc5/rom_4Mb.gb
 mooneye-test-suite/emulator-only/mbc5/rom_512kb.gb
 mooneye-test-suite/emulator-only/mbc5/rom_64Mb.gb
 mooneye-test-suite/emulator-only/mbc5/rom_8Mb.gb
+rtc3test/rtc3test.gb (basic)
+rtc3test/rtc3test.gb (range)
+rtc3test/rtc3test.gb (sub-second writes)
