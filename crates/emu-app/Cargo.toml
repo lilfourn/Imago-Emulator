@@ -16,6 +16,7 @@ async-channel = "2"
 cpal.workspace = true
 crc32fast.workspace = true
 dirs.workspace = true
+emu-cheats.workspace = true
 emu-core.workspace = true
 emu-cores.workspace = true
 emu-state.workspace = true

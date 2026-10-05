@@ -256,6 +256,21 @@ impl Bus {
         }
     }
 
+    /// Reads plain RAM (cartridge RAM, WRAM, HRAM), for cheats; `None`
+    /// elsewhere.
+    pub(crate) fn peek_ram(&self, address: u16) -> Option<u8> {
+        is_ram(address).then(|| self.peek(address))
+    }
+
+    /// Writes plain RAM, for cheats. Returns whether `address` is RAM.
+    pub(crate) fn poke_ram(&mut self, address: u16, value: u8) -> bool {
+        let ram = is_ram(address);
+        if ram {
+            self.poke(address, value);
+        }
+        ram
+    }
+
     fn boot_rom_byte(&self, address: u16) -> u8 {
         self.boot_rom
             .as_ref()
@@ -352,4 +367,9 @@ impl cpu::Bus for Bus {
             self.timer.write(0xFF04, 0);
         }
     }
+}
+
+/// Cartridge RAM, WRAM (with its echo) and HRAM.
+fn is_ram(address: u16) -> bool {
+    matches!(address, 0xA000..=0xFDFF | 0xFF80..=0xFFFE)
 }

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 emu-core.workspace = true
+emu-psg.workspace = true
 postcard.workspace = true
 serde.workspace = true
 

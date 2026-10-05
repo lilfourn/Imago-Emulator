@@ -14,6 +14,7 @@ actions!(
     [
         OpenRom,
         ConnectLinkCable,
+        EditCheats,
         SwitchPlayer,
         TogglePause,
         Reset,
@@ -26,12 +27,14 @@ actions!(
         LayoutHorizontal,
         LayoutSingle,
         SwapScreens,
+        ToggleColorCorrection,
+        ToggleMemoryViewer,
         Quit,
     ]
 );
 
 /// Runs the app until the user quits, opening `roms` at launch: one game,
-/// or two linked Game Boy games.
+/// or two linked Game Boy or Game Boy Advance games.
 pub fn run(roms: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -49,6 +52,8 @@ pub fn run(roms: Vec<PathBuf>) {
             KeyBinding::new("cmd-2", LayoutHorizontal, None),
             KeyBinding::new("cmd-3", LayoutSingle, None),
             KeyBinding::new("cmd-e", SwapScreens, None),
+            KeyBinding::new("cmd-shift-c", ToggleColorCorrection, None),
+            KeyBinding::new("cmd-shift-m", ToggleMemoryViewer, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.set_menus(menus());
@@ -90,6 +95,8 @@ fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Open ROM…", OpenRom),
                 MenuItem::action("Connect Link Cable…", ConnectLinkCable),
+                MenuItem::separator(),
+                MenuItem::action("Edit Cheats…", EditCheats),
             ],
         },
         Menu {
@@ -114,6 +121,9 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("One Screen", LayoutSingle),
                 MenuItem::separator(),
                 MenuItem::action("Swap Screens", SwapScreens),
+                MenuItem::separator(),
+                MenuItem::action("Colour Correction", ToggleColorCorrection),
+                MenuItem::action("Memory Viewer", ToggleMemoryViewer),
             ],
         },
     ]

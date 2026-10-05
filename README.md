@@ -6,20 +6,31 @@ A Game Boy, Game Boy Color, Game Boy Advance and Nintendo DS emulator for
 macOS, written in Rust with a [GPUI](https://gpui.rs) frontend. The goal is to
 play the Pokémon games of generations 1–5 from your own cartridge dumps.
 
-**Status: Phase 2 (Game Boy Color).** The Game Boy and Game Boy Color core
-runs: CPU, video, sound, MBC1/2/3/5/30 cartridges with battery saves and the
-MBC3 clock, and a link cable between two Game Boys. It passes 135 of 158
-open-source test ROMs, including all of Blargg's CPU tests, dmg-acid2 and
-cgb-acid2. The app has sound, gamepads, save-state slots with thumbnails,
-rewind and fast-forward. The GBA and DS cores are still stubs that draw a
-test pattern. See the [roadmap](docs/ROADMAP.md).
+**Status: Phase 3 (Game Boy Advance).** The Game Boy and Game Boy Color
+core passes 135 of 158 open-source test ROMs, including all of Blargg's CPU
+tests, dmg-acid2 and cgb-acid2. The Game Boy Advance core has:
+- an ARM7TDMI that passes all 2.25 million SingleStepTests cases;
+- video, sound, DMA, timers and an HLE BIOS;
+- SRAM, Flash and EEPROM saves;
+- the Pokémon real-time clock;
+- a link cable.
+It passes every jsmolka test ROM it runs, including the save tests. Neither
+core has been checked against commercial games yet; that needs your own
+dumps. The app has:
+- sound and gamepads;
+- save-state slots with thumbnails, rewind and fast-forward;
+- link play;
+- GBC/GBA colour correction;
+- cheats and a memory viewer.
+The DS core is still a stub that draws a test pattern. See the
+[roadmap](docs/ROADMAP.md).
 
 ## Docs
 
 - [PRD](docs/PRD.md): goals, requirements, legal policy, risks, open questions
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters
 
 ## Build and run
 
@@ -29,6 +40,7 @@ The separate Metal Toolchain download is not needed.
 ```sh
 cargo run --release -p emu-app -- path/to/game.nds   # or open one with ⌘O
 cargo run --release -p emu-app -- red.gb blue.gb     # two Game Boys, linked
+cargo run --release -p emu-app -- fr.gba em.gba      # two GBAs, linked
 cargo test --workspace
 ```
 
@@ -52,6 +64,8 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 | Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen | ⌘1 / ⌘2 / ⌘3 |
 | Rewind | Hold ` | Left trigger | | Swap screens / Quit | ⌘E / ⌘Q |
 | | | | | Switch player (link play) | ⌘T or click a screen |
+| | | | | Colour correction on/off | ⌘⇧C |
+| | | | | Memory viewer | ⌘⇧M |
 
 Gamepad buttons are named by position, so A is the right face button as on a
 Nintendo controller. Rebind keys and gamepad controls in
@@ -70,17 +84,39 @@ b = ["East"]
 rewind = ["LeftTrigger"]
 ```
 
-Battery saves (`game.sav`) and save states (`game.ss1` to `game.ss4`) are
-written next to the ROM. A linked pair keeps each game's `.sav` and saves
-its states next to the first ROM as `game.ls1` to `game.ls4`.
+Battery saves (`game.sav`), save states (`game.ss1` to `game.ss4`) and
+cheats (`game.cht`) live next to the ROM. A linked pair keeps each game's
+`.sav` and `.cht`, and saves its states next to the first ROM as `game.ls1`
+to `game.ls4`. GBA `.sav` files hold the raw save memory, as in mGBA.
 
 ## Link play
 
-Open a Game Boy game, choose File > Connect Link Cable…, and pick a second
-game (or the same one with another save). Both run side by side on one
-cable. Keyboard and gamepad control one Game Boy at a time: click its
-screen or press ⌘T to switch. Game Boy `.sav` files use the same layout as
-SameBoy, mGBA and BGB, including the MBC3 clock, so saves move between them.
+Open a Game Boy or Game Boy Advance game, choose File > Connect Link
+Cable…, and pick a second game for the same system (or the same one with
+another save). Both run side by side on one cable; on the GBA the first
+game is the parent. Keyboard and gamepad control one console at a time:
+click its screen or press ⌘T to switch. Game Boy `.sav` files use the same
+layout as SameBoy, mGBA and BGB, including the MBC3 clock, so saves move
+between them.
+
+## Cheats
+
+Choose File > Edit Cheats… to open the game's `game.cht` in your text
+editor. Save the file and switch back to apply it:
+
+```text
+[Infinite money]
+82025E30 270F
+[Walk through walls] off
+02000F04:01
+```
+
+Each cheat is a `[name]` line, with `off` to disable it, followed by its
+codes. Supported formats:
+- raw `ADDRESS:VALUE` (hex) everywhere;
+- GameShark `01VVAAAA` on Game Boy;
+- unencrypted CodeBreaker on GBA.
+Encrypted Action Replay and GameShark Advance codes are not supported yet.
 
 ## Testing against test ROMs
 
@@ -92,6 +128,13 @@ cargo run --release -p emu-gb --example trace -- rom.gb 1000 # CPU trace
 
 `crates/emu-gb/tests/test-roms-passing.txt` lists every ROM known to pass;
 the test fails if one regresses. Record new passes with `UPDATE_PASSING=1`.
+The GBA works the same way:
+
+```sh
+cargo test -p emu-gba --release --test test_roms -- --nocapture  # jsmolka
+scripts/fetch-arm-tests.sh                                       # ~900 MB, once
+cargo test -p emu-arm --release --test single_step               # ARM7TDMI
+```
 
 ## Workspace
 
@@ -100,9 +143,12 @@ the test fails if one regresses. Record new passes with `UPDATE_PASSING=1`.
 | `emu-core` | The `Core` trait and the plain data that crosses it |
 | `emu-sched` | Cycle-timestamped event scheduler |
 | `emu-state` | Save-state container format |
-| `emu-arm` | ARM interpreter shared by GBA and DS (not started) |
-| `emu-gb` | Game Boy core |
-| `emu-gba`, `emu-nds` | GBA and DS cores (stubs today) |
+| `emu-arm` | ARM7TDMI interpreter, shared by the GBA and (later) the DS |
+| `emu-psg` | The Game Boy family's sound generator, shared by GB and GBA |
+| `emu-gb` | Game Boy and Game Boy Color core |
+| `emu-gba` | Game Boy Advance core |
+| `emu-nds` | DS core (a stub today) |
+| `emu-cheats` | Cheat list parsing and application |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-headless` | Windowless runner for test ROMs |
 | `emu-app` | The GPUI app (`ds-emulator` binary) |

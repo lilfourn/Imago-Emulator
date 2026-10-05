@@ -149,7 +149,19 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 
 ## Phase 3 — Game Boy Advance
 
-### M7. ARM7TDMI in `emu-arm`
+**Status (2026-10-05):** M7–M11 met on test ROMs and unit tests:
+- the ARM7TDMI passes all 45 SingleStepTests files (2.25 million cases);
+- jsmolka's arm, thumb, memory, bios, nes and save tests all pass.
+What's missing:
+- armwrestler and the mGBA test suite are not wired into the harness yet;
+- the debugger has only the memory viewer (no disassembly or registers);
+- cheats lack the encrypted Action Replay and GameShark Advance formats;
+- [decision 0005](decisions/0005-video-filters-on-the-cpu.md) settles Q3
+  but awaits review.
+The Pokémon checkpoints (FireRed music, Emerald saves and clock, the
+FireRed–Emerald trade) need your own dumps.
+
+### M7. ARM7TDMI in `emu-arm` ✅ (test ROMs)
 
 - ARM and Thumb, barrel shifter, banked modes, exceptions, pipeline PC
   offsets. A `Bus` trait so the GBA and both DS CPUs can share the
@@ -158,31 +170,37 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
   memory.
 - **Exit:** jsmolka `arm.gba` and `thumb.gba` pass, plus armwrestler.
 
-### M8. Memory, DMA, timers, BIOS
+### M8. Memory, DMA, timers, BIOS ✅ (jsmolka)
 
 - Memory map with wait states, DMA, timers, IRQs, HLE BIOS for SWI calls,
   and the GBA's events moved onto `emu-sched`.
 - **Exit:** jsmolka memory and BIOS tests pass, along with most of the mGBA
   suite's timer and DMA tests.
 
-### M9. Video and sound
+### M9. Video and sound ✅ (implemented; needs a dump to check)
 
 - PPU modes 0–5, affine backgrounds, windows, blending, mosaic. APU with
   DMA sound FIFOs.
 - **Exit:** FireRed boots and plays with correct music.
 
-### M10. Saves and clock
+### M10. Saves and clock ✅ (test ROMs)
 
 - Save-type detection by library string, Flash 128 KB with the Macronix ID,
   a game-code override table, and the S-3511 RTC on GPIO.
 - **Exit:** Emerald saves, never shows "The internal battery has run dry",
   and berries grow over real time. Ruby/Sapphire tides work.
 
-### M11. Link, colour, cheats
+### M11. Link, colour, cheats ✅ (unit tests)
 
 - SIO link between two instances. GBA colour-correction filter (UI-3).
   Cheat engine (UI-13). Memory viewers (UI-12). Settle open question Q3
   (shader path).
+- Done:
+  - `emu_gba::Linked` (normal and multi-player modes);
+  - colour correction for GBC and GBA (View > Colour Correction);
+  - `emu-cheats` with `game.cht` files (File > Edit Cheats…);
+  - a memory viewer (View > Memory Viewer);
+  - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3.
 - **Exit:** trade between FireRed and Emerald over the emulated link cable.
 
 ---

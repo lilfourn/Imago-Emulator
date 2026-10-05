@@ -9,20 +9,25 @@ use emu_core::{CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pa
 use gpui::{
     Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
-    SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
+    ScrollWheelEvent, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb,
+    rgba,
 };
 
 use crate::app::{
-    ConnectLinkCable, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, NextStateSlot,
-    OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer, ToggleFastForward,
-    TogglePause,
+    ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState,
+    NextStateSlot, OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer,
+    ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
+use crate::cheats;
+use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
-use crate::emulator::{self, Command, Emulator, Event, Loaded};
+use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement};
+use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
+use crate::persist;
 use crate::slots::{self, SlotPreview};
 use crate::video;
 
@@ -36,6 +41,10 @@ pub struct EmulatorView {
     focus: FocusHandle,
     bindings: Bindings,
     layout: Layout,
+    /// Show GBC and GBA colours as their screens did.
+    color_correction: bool,
+    /// Where the memory viewer is looking, while it is open.
+    memory_viewer: Option<Viewer>,
     session: Option<Session>,
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
@@ -65,6 +74,10 @@ struct Session {
     rom_paths: Vec<PathBuf>,
     frames: Vec<Frame>,
     sequence: u64,
+    /// Per player: the cheat file's text when last sent to the emulator.
+    cheat_texts: Vec<Option<String>>,
+    /// The system's colour correction, if it has one.
+    correction: Option<Correction>,
     /// Per screen: the pre-scale factor and the image built with it.
     images: Vec<Option<(usize, Arc<RenderImage>)>>,
     _events: Task<()>,
@@ -80,10 +93,14 @@ impl EmulatorView {
 
         let loaded_bindings = bindings::default_path().map(|path| Bindings::load(&path));
         let subscriptions = vec![
-            // Keys released while another window has focus never send key-up.
-            cx.observe_window_activation(window, |this, window, _| {
+            cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
+                    // Keys released while another window has focus never
+                    // send key-up.
                     this.release_all();
+                } else if let Some(message) = this.reload_cheats() {
+                    // Back from editing a cheat file, perhaps.
+                    this.show_notice(message, cx);
                 }
             }),
             // Stop the emulation thread on quit so the battery save is flushed.
@@ -115,6 +132,8 @@ impl EmulatorView {
             focus,
             bindings: Bindings::default(),
             layout: Layout::default(),
+            color_correction: true,
+            memory_viewer: None,
             session: None,
             loading: None,
             placements: Vec::new(),
@@ -191,6 +210,8 @@ impl EmulatorView {
             rom_paths,
             frames: Vec::new(),
             sequence: 0,
+            cheat_texts: vec![None; info.players.max(1)],
+            correction: Correction::for_system(info.system),
             images: Vec::new(),
             _events: task,
             _audio: audio_output,
@@ -200,13 +221,74 @@ impl EmulatorView {
         self.touch = None;
         self.active_player = 0;
         self.sync_held();
+        self.watch_memory();
         if info.players > 1 {
             self.layout.arrangement = Arrangement::Horizontal;
             window.set_window_title(&format!("{name} — {} link", info.system.name()));
         } else {
             window.set_window_title(&format!("{name} — {}", info.system.name()));
         }
-        self.show_notice(format!("Running {name}"), cx);
+        let running = format!("Running {name}");
+        match self.reload_cheats() {
+            Some(cheats) => self.show_notice(format!("{running} · {cheats}"), cx),
+            None => self.show_notice(running, cx),
+        }
+    }
+
+    /// Re-reads each player's cheat file and sends the ones that changed to
+    /// the emulator. Returns a summary of the changes, if any.
+    fn reload_cheats(&mut self) -> Option<String> {
+        let session = self.session.as_mut()?;
+        let players = session.rom_paths.len();
+        let mut changes = Vec::new();
+        for (player, rom) in session.rom_paths.iter().enumerate() {
+            let text = cheats::read(&persist::cheats_path(rom));
+            if text == session.cheat_texts[player] {
+                continue;
+            }
+            let whose = if players > 1 {
+                format!("Player {} cheats", player + 1)
+            } else {
+                "Cheats".to_owned()
+            };
+            match emu_cheats::parse(session.info.system, text.as_deref().unwrap_or_default()) {
+                Ok(list) => {
+                    let on = list.iter().filter(|cheat| cheat.enabled).count();
+                    changes.push(format!("{whose}: {on} on"));
+                    session.emulator.send(Command::SetCheats {
+                        player,
+                        cheats: list,
+                    });
+                }
+                Err(error) => changes.push(format!("{whose} not applied: {error}")),
+            }
+            session.cheat_texts[player] = text;
+        }
+        (!changes.is_empty()).then(|| changes.join(" · "))
+    }
+
+    /// Opens the active player's cheat file in the text editor, creating it
+    /// from a template first if needed.
+    fn edit_cheats(&mut self, _: &EditCheats, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(rom) = self.session.as_ref().and_then(|session| {
+            let player = self.active_player.min(session.rom_paths.len() - 1);
+            session.rom_paths.get(player)
+        }) else {
+            self.show_notice("Open a game first, then edit its cheats", cx);
+            return;
+        };
+        let path = persist::cheats_path(rom);
+        let opened = cheats::create_if_missing(&path).and_then(|()| cheats::open_in_editor(&path));
+        match opened {
+            Ok(()) => self.show_notice(
+                format!(
+                    "Editing {}; save it and switch back to apply",
+                    file_name(&path)
+                ),
+                cx,
+            ),
+            Err(error) => self.show_notice(format!("Cannot open {}: {error}", path.display()), cx),
+        }
     }
 
     fn stop(&mut self, window: &mut Window) {
@@ -269,6 +351,7 @@ impl EmulatorView {
         });
         self.active_player = player;
         self.send_input();
+        self.watch_memory();
         self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
 
@@ -460,11 +543,15 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         let first = self.session.as_ref().and_then(|session| {
-            let single_game_boy = session.info.players == 1 && session.info.system == System::Gb;
-            single_game_boy.then(|| session.rom_paths[0].clone())
+            let has_cable = matches!(session.info.system, System::Gb | System::Gba);
+            let single = session.info.players == 1 && has_cable;
+            single.then(|| session.rom_paths[0].clone())
         });
         let Some(first) = first else {
-            self.show_notice("Open a Game Boy game first, then connect the cable", cx);
+            self.show_notice(
+                "Open a Game Boy or Game Boy Advance game first, then connect the cable",
+                cx,
+            );
             return;
         };
         self.prompt_for_rom("Connect", window, cx, move |this, second, window, cx| {
@@ -482,12 +569,142 @@ impl EmulatorView {
         self.layout.arrangement = arrangement;
         cx.notify();
     }
+
+    fn toggle_memory_viewer(&mut self, cx: &mut Context<Self>) {
+        self.memory_viewer = match self.memory_viewer {
+            Some(_) => None,
+            None => Some(Viewer::default()),
+        };
+        self.watch_memory();
+        cx.notify();
+    }
+
+    /// Tells the emulation thread which memory the viewer shows, if any.
+    fn watch_memory(&self) {
+        let span = self
+            .memory_viewer
+            .zip(self.session.as_ref())
+            .and_then(|(viewer, session)| {
+                let region = memory_viewer::regions(session.info.system).get(viewer.region)?;
+                let (start, length) = viewer.span(region);
+                Some(MemorySpan {
+                    player: self.active_player,
+                    start,
+                    length,
+                })
+            });
+        self.send(Command::WatchMemory(span));
+    }
+
+    fn select_memory_region(&mut self, region: usize, cx: &mut Context<Self>) {
+        if let Some(viewer) = &mut self.memory_viewer {
+            viewer.select(region);
+            self.watch_memory();
+            cx.notify();
+        }
+    }
+
+    fn scroll_memory(&mut self, rows: f32, cx: &mut Context<Self>) {
+        let length = self.session.as_ref().and_then(|session| {
+            let regions = memory_viewer::regions(session.info.system);
+            Some(regions.get(self.memory_viewer?.region)?.length)
+        });
+        if let (Some(viewer), Some(length)) = (&mut self.memory_viewer, length) {
+            let before = viewer.offset;
+            viewer.scroll(rows, length);
+            if viewer.offset != before {
+                self.watch_memory();
+                cx.notify();
+            }
+        }
+    }
+
+    /// The memory viewer overlay: region tabs over a hex dump.
+    fn memory_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        const ROW_HEIGHT: f32 = 13.0;
+        let viewer = self.memory_viewer?;
+        let session = self.session.as_ref()?;
+        let regions = memory_viewer::regions(session.info.system);
+        let tabs = regions.iter().enumerate().map(|(index, region)| {
+            let tab = div()
+                .id(index)
+                .px_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .child(region.name)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_memory_region(index, cx);
+                }));
+            if index == viewer.region {
+                tab.bg(rgba(0xFFFF_FF33))
+            } else {
+                tab
+            }
+        });
+        let rows: Vec<String> = match session.emulator.memory() {
+            Some((span, bytes)) => (0u32..)
+                .zip(bytes.chunks(BYTES_PER_ROW as usize))
+                .map(|(row, chunk)| memory_viewer::hex_row(span.start + row * BYTES_PER_ROW, chunk))
+                .collect(),
+            None if regions.is_empty() => vec!["No memory to show for this system yet".to_owned()],
+            None => Vec::new(),
+        };
+        Some(
+            div()
+                .id("memory-viewer")
+                .absolute()
+                .top(px(8.0))
+                .left(px(8.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .bg(rgba(0x0000_00DD))
+                .font_family("Menlo")
+                // Small enough that a row fits the default window.
+                .text_size(px(10.0))
+                .line_height(px(ROW_HEIGHT))
+                .whitespace_nowrap()
+                .child(div().flex().gap_2().children(tabs))
+                .child(div().children(rows))
+                // Clicks here are for the viewer, not the screen below.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                    let delta = event.delta.pixel_delta(px(ROW_HEIGHT)).y;
+                    this.scroll_memory(-f32::from(delta) / ROW_HEIGHT, cx);
+                })),
+        )
+    }
+
+    fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
+        self.color_correction = !self.color_correction;
+        if let Some(session) = &mut self.session {
+            // Rebuild every screen with the new colours.
+            let images = session.images.iter_mut().filter_map(Option::take);
+            self.stale_images.extend(images.map(|(_, image)| image));
+        }
+        self.show_notice(
+            if self.color_correction {
+                "Colour correction on"
+            } else {
+                "Colour correction off"
+            },
+            cx,
+        );
+    }
 }
 
 impl Session {
     /// Brings the images up to date with the latest frame and the size each
     /// screen is drawn at.
-    fn refresh_images(&mut self, placements: &[Placement], scale_factor: f32, window: &mut Window) {
+    fn refresh_images(
+        &mut self,
+        placements: &[Placement],
+        scale_factor: f32,
+        color_correction: bool,
+        window: &mut Window,
+    ) {
         if let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) {
             self.sequence = sequence;
             self.images.resize(self.frames.len(), None);
@@ -508,7 +725,11 @@ impl Session {
             if let Some((_, stale)) = slot.take() {
                 window.drop_image(stale).ok();
             }
-            *slot = Some((factor, video::render_image(frame, factor)));
+            let image = match self.correction.as_ref().filter(|_| color_correction) {
+                Some(correction) => video::render_image(&correction.frame(frame), factor),
+                None => video::render_image(frame, factor),
+            };
+            *slot = Some((factor, image));
         }
     }
 }
@@ -528,6 +749,7 @@ impl Render for EmulatorView {
             .text_color(rgb(0x00DD_DDDD))
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::connect_link_cable))
+            .on_action(cx.listener(Self::edit_cheats))
             .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
                 let players = this.session.as_ref().map_or(1, |s| s.info.players);
                 this.switch_player((this.active_player + 1) % players.max(1), cx);
@@ -562,6 +784,12 @@ impl Render for EmulatorView {
                 this.layout.swapped = !this.layout.swapped;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
+                this.toggle_color_correction(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMemoryViewer, _, cx| {
+                this.toggle_memory_viewer(cx);
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -571,7 +799,12 @@ impl Render for EmulatorView {
 
         if let Some(session) = self.session.as_mut() {
             self.placements = self.layout.place(session.info.screens, viewport);
-            session.refresh_images(&self.placements, scale_factor, window);
+            session.refresh_images(
+                &self.placements,
+                scale_factor,
+                self.color_correction,
+                window,
+            );
             for placement in &self.placements {
                 let Some(Some((_, image))) = session.images.get(placement.screen) else {
                     continue;
@@ -598,6 +831,9 @@ impl Render for EmulatorView {
         }
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
+        }
+        if let Some(panel) = self.memory_panel(cx) {
+            root = root.child(panel);
         }
         if let Some(notice) = &self.notice {
             let mut card = div()

@@ -9,7 +9,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 ```
                  emu-app (GPUI, binary: ds-emulator)     emu-headless (binary)
                     │        │                                 │
-                    │     emu-state                            │
+                    │  emu-state, emu-cheats                   │
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
                      ┌───────┼────────┐
@@ -25,18 +25,22 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-core` | The contract between cores and frontends: the `Core` trait and plain-data types. No dependencies beyond `thiserror`. |
 | `emu-sched` | A priority queue of cycle-timestamped events. |
 | `emu-state` | The save-state container format. |
-| `emu-arm` | The ARM interpreter shared by the GBA and both DS CPUs. Empty until M7. |
+| `emu-arm` | The ARM7TDMI interpreter (ARMv4T) shared by the GBA and both DS CPUs; ARMv5TE arrives with the DS. |
+| `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
-| `emu-gba`, `emu-nds` | One system each. Today: header validation and a test pattern. |
+| `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS, cartridge saves and RTC, serial port, and the linked pair. Event-driven by `emu-sched`. |
+| `emu-nds` | Nintendo DS. Today: header validation and a test pattern. |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
+| `emu-cheats` | Parses cheat lists into memory operations and applies them through a two-method `Memory` trait. Knows code formats, not cores. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
 Rules that keep this shape:
 
 - Cores depend on `emu-core`, never on each other or on a frontend.
-- Sharing between the GBA and DS stops at the CPU (`emu-arm`) and the
-  scheduler. Shared system code would tangle timing fixes across systems.
+- Sharing stops at self-contained chips: the CPU (`emu-arm`), the
+  scheduler, and the GB/GBA sound generator (`emu-psg`, the same silicon in
+  both). Shared system code would tangle timing fixes across systems.
 - GPUI types never leave `emu-app`. If GPUI is replaced, only that crate
   changes.
 
@@ -52,6 +56,8 @@ pub trait Core: Send {
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
     fn backup_generation(&self, player: usize) -> Option<u64>; // battery-save write counter
     fn save_backup(&self, player: usize, out: &mut Vec<u8>);   // .sav bytes
+    fn peek(&self, player: usize, address: u32) -> Option<u8>;  // plain RAM only
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool;
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
 }
 ```
@@ -79,6 +85,7 @@ pub trait Core: Send {
  main thread (GPUI)                         emulation thread
  ──────────────────                         ────────────────
  key/mouse events ──► Command (mpsc) ─────► apply between frames
+                                            apply cheats (Core::poke)
                                             run_frame()
  render(): copy latest frames ◄── Mutex ─── publish screens
            pre-scale to BGRA                 │
@@ -102,6 +109,10 @@ pub trait Core: Send {
   pressed") to the view, which maps them through the same bindings as the
   keyboard. `controls.rs` combines every held key and control, so releasing
   one never cancels another that holds the same button.
+- Cheats come from `game.cht`, which the view re-reads whenever the
+  window regains focus and sends as a `Command`. The memory viewer asks
+  the thread to copy a span of RAM (through `Core::peek`) into the shared
+  latest-frame slot after every frame.
 - The emulation thread records a save state after every frame into the
   rewind history (`rewind.rs`): newest state whole, older ones as
   LZ4-compressed XOR deltas, within 64 MiB.
@@ -114,11 +125,15 @@ fits the on-screen size in device pixels (capped at 6×), and lets GPUI's
 linear filter cover the remaining fraction. That is the "sharp bilinear"
 technique: crisp pixels without uneven pixel widths at non-integer sizes.
 
+Filters are CPU passes over frames before they become images
+([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). Today the
+only one is GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup
+table from each 15-bit console colour to its corrected pixel.
+
 Each new frame becomes a fresh `RenderImage`, and the previous one is
 removed from GPUI's atlas with `window.drop_image`. GPUI 0.2.2 only reclaims
 atlas space when every image in a texture is dropped, so the app keeps no
 other long-lived polychrome images. Memory measured flat over a 20 s run.
-A shader chain would need its own Metal or wgpu path (PRD open question Q3).
 
 ## On-disk files
 
@@ -126,6 +141,7 @@ A shader chain would need its own Metal or wgpu path (PRD open question Q3).
 |---|---|---|
 | Battery save | next to the ROM, `game.sav` | Raw backup bytes in the de facto layout for the system |
 | Save state | next to the ROM, `game.ss1` | `emu-state` container |
+| Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
 
 Writes go to `name.tmp` first and are renamed over the target.

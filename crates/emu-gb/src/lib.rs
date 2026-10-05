@@ -49,7 +49,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(4_194_304, 70_224),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 6,
+    state_version: 7,
 };
 
 /// A Game Boy with a cartridge inserted.
@@ -246,6 +246,18 @@ impl Core for Gb {
         if player == 0 {
             self.machine.bus.cartridge.save_backup(out);
         }
+    }
+
+    fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        let address = u16::try_from(address).ok().filter(|_| player == 0)?;
+        self.machine.bus.peek_ram(address)
+    }
+
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
+        let Some(address) = u16::try_from(address).ok().filter(|_| player == 0) else {
+            return false;
+        };
+        self.machine.bus.poke_ram(address, value)
     }
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {

@@ -5,9 +5,9 @@
 //! calls [`Ppu::start_hblank`] and [`Ppu::start_line`]; the PPU renders a
 //! visible line when its HBlank begins, using the registers at that moment.
 //!
-//! Bitmap modes 3–5 are drawn here; the tiled and affine modes 0–2, objects,
-//! windows and blending arrive in milestone M9 and draw the backdrop until
-//! then.
+//! Drawing itself is in [`render`].
+
+mod render;
 
 use emu_core::rgb;
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,10 @@ pub(crate) struct Ppu {
     registers: Box<[u8]>,
     vcount: u16,
     in_hblank: bool,
+    /// BG2 and BG3's internal affine reference points (X, Y), 20.8 fixed
+    /// point. Loaded from BGxX/BGxY when written and at each frame's start,
+    /// then stepped by PB/PD after every line.
+    affine_reference: [(i32, i32); 2],
     /// The frame being drawn, as `0xFFRRGGBB`.
     pixels: Box<[u32]>,
     frame_ready: bool,
@@ -68,6 +72,7 @@ impl Ppu {
             registers: vec![0; 0x58].into_boxed_slice(),
             vcount: 0,
             in_hblank: false,
+            affine_reference: [(0, 0); 2],
             pixels: vec![rgb(0xFF, 0xFF, 0xFF); WIDTH * HEIGHT].into_boxed_slice(),
             frame_ready: false,
         }
@@ -105,6 +110,7 @@ impl Ppu {
         let visible = usize::from(self.vcount) < HEIGHT;
         if visible {
             self.render_line();
+            self.step_affine_reference();
         }
         let request = if self.dispstat() & (1 << 4) != 0 {
             irq::HBLANK
@@ -124,6 +130,10 @@ impl Ppu {
     pub(crate) fn start_line(&mut self) -> (u16, Signals) {
         self.in_hblank = false;
         self.vcount = (self.vcount + 1) % LINES;
+        if self.vcount == 0 {
+            self.reload_affine_reference(0);
+            self.reload_affine_reference(1);
+        }
         let dispstat = self.dispstat();
         let mut request = 0;
         let mut signals = Signals::default();
@@ -169,6 +179,34 @@ impl Ppu {
             value
         };
         self.registers[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        match offset {
+            0x28..=0x2E => self.reload_affine_reference(0),
+            0x38..=0x3E => self.reload_affine_reference(1),
+            _ => {}
+        }
+    }
+
+    /// Copies BGxX/BGxY (28-bit signed) into the internal reference point.
+    fn reload_affine_reference(&mut self, index: usize) {
+        let base = 0x28 + index * 0x10;
+        let read = |offset: usize| {
+            let raw =
+                u32::from(self.register16(offset)) | u32::from(self.register16(offset + 2)) << 16;
+            ((raw << 4) as i32) >> 4
+        };
+        self.affine_reference[index] = (read(base), read(base + 4));
+    }
+
+    /// After each line the reference point moves by (PB, PD).
+    fn step_affine_reference(&mut self) {
+        for index in 0..2 {
+            let base = 0x20 + index * 0x10;
+            let pb = i32::from(self.register16(base + 2) as i16);
+            let pd = i32::from(self.register16(base + 6) as i16);
+            let (x, y) = &mut self.affine_reference[index];
+            *x = x.wrapping_add(pb);
+            *y = y.wrapping_add(pd);
+        }
     }
 
     pub(crate) fn read_palette(&self, offset: u32) -> u16 {
@@ -224,46 +262,14 @@ impl Ppu {
 
     fn render_line(&mut self) {
         let line = usize::from(self.vcount);
-        let dispcnt = self.dispcnt();
         let mut row = [0u32; WIDTH];
-        let backdrop = color(self.read_palette(0));
-
-        if dispcnt & (1 << 7) != 0 {
+        if self.dispcnt() & (1 << 7) != 0 {
             // Forced blank shows white.
             row.fill(rgb(0xFF, 0xFF, 0xFF));
         } else {
-            row.fill(backdrop);
-            if dispcnt & (1 << 10) != 0 {
-                self.render_bitmap(dispcnt, line, &mut row);
-            }
+            self.draw_line(line, &mut row);
         }
         self.pixels[line * WIDTH..(line + 1) * WIDTH].copy_from_slice(&row);
-    }
-
-    /// Modes 3–5: background 2 as a bitmap.
-    fn render_bitmap(&self, dispcnt: u16, line: usize, row: &mut [u32; WIDTH]) {
-        let frame = if dispcnt & (1 << 4) != 0 { 0xA000 } else { 0 };
-        match dispcnt & 7 {
-            3 => {
-                for (x, pixel) in row.iter_mut().enumerate() {
-                    *pixel = color(self.read_vram(((line * WIDTH + x) * 2) as u32));
-                }
-            }
-            4 => {
-                for (x, pixel) in row.iter_mut().enumerate() {
-                    let index = self.vram[frame + line * WIDTH + x];
-                    if index != 0 {
-                        *pixel = color(self.read_palette(u32::from(index) * 2));
-                    }
-                }
-            }
-            5 if line < 128 => {
-                for (x, pixel) in row.iter_mut().enumerate().take(160) {
-                    *pixel = color(self.read_vram((frame + (line * 160 + x) * 2) as u32));
-                }
-            }
-            _ => {}
-        }
     }
 }
 

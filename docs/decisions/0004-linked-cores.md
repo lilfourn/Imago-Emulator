@@ -36,3 +36,12 @@ puts them up to 16 ms (about 17,000 M-cycles) apart.
   `inputs[0]` and ignore the player index for backups.
 - Two-player local play on one keyboard means switching control. Mapping a
   second gamepad to player 2 is a later addition to the bindings.
+
+## Addendum (M11): the GBA pair
+
+`emu_gba::Linked` follows the same design with 128-cycle slices. Two
+things differ from the Game Boy pair:
+- It services the cable the moment either console starts a transfer,
+  instead of waiting for the slice to end. A normal-mode transfer at 2 MHz
+  lasts only 64 cycles.
+- Player 0 is the multi-player parent.

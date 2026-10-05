@@ -5,9 +5,17 @@
 //! provides a dump. See `docs/ROADMAP.md`, Phase 3, for what is emulated so
 //! far.
 
+mod apu;
+mod backup;
 mod bios;
 mod bus;
+mod cartridge;
+mod dma;
+mod link;
 mod ppu;
+mod rtc;
+mod sio;
+mod timer;
 mod timing;
 
 use emu_arm::{Access, Cpu, Mode, Registers};
@@ -18,6 +26,9 @@ use emu_core::{
 use serde::{Deserialize, Serialize};
 
 use bus::Bus;
+use cartridge::Cartridge;
+
+pub use link::Linked;
 
 const SCREENS: [ScreenSize; 1] = [ScreenSize::new(240, 160)];
 
@@ -31,9 +42,9 @@ pub const INFO: CoreInfo = CoreInfo {
     touch_screen: None,
     players: 1,
     frame_rate: FrameRate::new(16_777_216, 280_896),
-    audio_sample_rate: 32_768,
+    audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 2,
+    state_version: 6,
 };
 
 /// A Game Boy Advance with a cartridge inserted.
@@ -59,7 +70,8 @@ impl Gba {
     ///
     /// With a BIOS dump in `media` the console boots through it, intro and
     /// all. Without one it starts the game directly, in the state the BIOS
-    /// would leave, and emulates BIOS calls itself.
+    /// would leave, and emulates BIOS calls itself. The save memory type
+    /// comes from the ROM, filled from `media.backup` if given.
     ///
     /// # Errors
     ///
@@ -77,7 +89,11 @@ impl Gba {
         if *fixed != 0x96 {
             return Err(invalid("header fixed value at 0xB2 is not 0x96"));
         }
-        let rom = media.rom.to_vec().into_boxed_slice();
+        let cartridge = Cartridge::new(
+            media.rom.to_vec().into_boxed_slice(),
+            media.backup,
+            media.start_time,
+        );
         let dump = media
             .system_file(SystemFileKind::GbaBios)
             .filter(|bios| bios.len() == 0x4000);
@@ -86,7 +102,7 @@ impl Gba {
         let mut gba = Self {
             machine: Machine {
                 cpu: Cpu::default(),
-                bus: Bus::new(rom, bios),
+                bus: Bus::new(cartridge, bios),
             },
             hle_bios,
             screens: [Frame::new(SCREENS[0])],
@@ -118,7 +134,9 @@ impl Gba {
     /// Runs one instruction (or one stretch of HALT, or one HLE BIOS call).
     pub fn step(&mut self) {
         let Machine { cpu, bus } = &mut self.machine;
-        if !bus.wake_if_requested() {
+        if bus.run_pending_dma() {
+            // The CPU waited for the transfer.
+        } else if !bus.wake_if_requested() {
             bus.idle_to_next_event();
         } else if self.hle_bios
             && cpu.reg(15) == bios::SWI_ENTERED_PC
@@ -166,7 +184,7 @@ impl Core for Gba {
         INFO
     }
 
-    fn run_frame(&mut self, inputs: &[Input], _audio: &mut Vec<StereoSample>) {
+    fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
         self.set_input(&inputs.first().copied().unwrap_or_default());
         let start = self.cycles();
         let frame = self.frames;
@@ -174,6 +192,7 @@ impl Core for Gba {
         while self.frames == frame && self.cycles() - start < CYCLES_PER_FRAME {
             self.step();
         }
+        self.machine.bus.apu.drain_samples(audio);
     }
 
     fn screens(&self) -> &[Frame] {
@@ -181,12 +200,10 @@ impl Core for Gba {
     }
 
     fn reset(&mut self) {
-        let mut fresh = Machine {
+        self.machine = Machine {
             cpu: Cpu::default(),
-            bus: Bus::new(Box::default(), Box::default()),
+            bus: Bus::reset_from(&mut self.machine.bus),
         };
-        fresh.bus.take_media_from(&mut self.machine.bus);
-        self.machine = fresh;
         self.power_on();
     }
 
@@ -202,6 +219,28 @@ impl Core for Gba {
         self.machine = machine;
         self.present();
         Ok(())
+    }
+
+    fn backup_generation(&self, player: usize) -> Option<u64> {
+        (player == 0)
+            .then(|| self.machine.bus.cartridge.backup_generation())
+            .flatten()
+    }
+
+    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
+        if player == 0 {
+            self.machine.bus.cartridge.save_backup(out);
+        }
+    }
+
+    fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        (player == 0)
+            .then(|| self.machine.bus.peek_ram(address))
+            .flatten()
+    }
+
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
+        player == 0 && self.machine.bus.poke_ram(address, value)
     }
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {

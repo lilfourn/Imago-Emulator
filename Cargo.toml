@@ -16,7 +16,9 @@ emu-arm = { path = "crates/emu-arm" }
 emu-gb = { path = "crates/emu-gb" }
 emu-gba = { path = "crates/emu-gba" }
 emu-nds = { path = "crates/emu-nds" }
+emu-psg = { path = "crates/emu-psg" }
 emu-cores = { path = "crates/emu-cores" }
+emu-cheats = { path = "crates/emu-cheats" }
 
 anyhow = "1"
 cpal = "0.18"

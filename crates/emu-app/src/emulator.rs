@@ -17,6 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, ensure};
+use emu_cheats::Cheat;
 use emu_core::{Core, CoreInfo, Frame, Input, Media, System};
 
 use crate::audio::AudioSink;
@@ -135,7 +136,7 @@ pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
 }
 
 /// A request from the UI to the emulation thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Replaces a player's input from the next frame on.
     SetInput {
@@ -156,6 +157,26 @@ pub enum Command {
     SaveState(u8),
     /// Restores the save state in this slot's file.
     LoadState(u8),
+    /// Copies this span of memory for the UI after every frame, or stops.
+    WatchMemory(Option<MemorySpan>),
+    /// Replaces a player's cheats, applied before every frame.
+    SetCheats {
+        /// Index into the core's players.
+        player: usize,
+        /// The player's cheat list; disabled cheats are skipped.
+        cheats: Vec<Cheat>,
+    },
+}
+
+/// A span of one player's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemorySpan {
+    /// Index into the core's players.
+    pub player: usize,
+    /// First address.
+    pub start: u32,
+    /// Bytes.
+    pub length: u32,
 }
 
 /// A notification from the emulation thread to the UI.
@@ -167,10 +188,28 @@ pub enum Event {
     Notice(String),
 }
 
+/// One player's memory in a core, as cheats see it.
+struct PlayerMemory<'a> {
+    core: &'a mut dyn Core,
+    player: usize,
+}
+
+impl emu_cheats::Memory for PlayerMemory<'_> {
+    fn peek(&self, address: u32) -> Option<u8> {
+        self.core.peek(self.player, address)
+    }
+
+    fn poke(&mut self, address: u32, value: u8) -> bool {
+        self.core.poke(self.player, address, value)
+    }
+}
+
 /// The most recent frame, shared between the threads.
 #[derive(Default)]
 struct Latest {
     frames: Mutex<(u64, Vec<Frame>)>,
+    /// The watched memory as of that frame; `None` where unreadable.
+    memory: Mutex<Option<(MemorySpan, Vec<Option<u8>>)>>,
     unseen: AtomicBool,
 }
 
@@ -199,6 +238,8 @@ impl Emulator {
                 .collect(),
             loaded,
             inputs: vec![Input::default(); players],
+            cheats: vec![Vec::new(); players],
+            watch: None,
             paused: false,
             fast_forward: false,
             rewinding: false,
@@ -242,6 +283,16 @@ impl Emulator {
         frames.clone_from(latest_frames);
         Some(*sequence)
     }
+
+    /// The watched memory as of the latest frame: the span, and each byte
+    /// or `None` where it is not plain memory.
+    pub fn memory(&self) -> Option<(MemorySpan, Vec<Option<u8>>)> {
+        self.latest
+            .memory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Drop for Emulator {
@@ -259,6 +310,10 @@ struct Runner {
     loaded: Loaded,
     /// One per player.
     inputs: Vec<Input>,
+    /// One list per player.
+    cheats: Vec<Vec<Cheat>>,
+    /// Memory the UI is watching.
+    watch: Option<MemorySpan>,
     paused: bool,
     fast_forward: bool,
     rewinding: bool,
@@ -304,6 +359,7 @@ impl Runner {
                     self.publish();
                 }
             } else {
+                self.apply_cheats();
                 self.loaded.core.run_frame(&self.inputs, &mut audio);
                 // Fast-forward plays silence rather than sped-up sound.
                 if !self.fast_forward
@@ -361,6 +417,16 @@ impl Runner {
                 Ok(()) => self.notice(format!("Saved state {slot}")),
                 Err(error) => self.notice(format!("Could not save state: {error:#}")),
             },
+            Command::WatchMemory(span) => {
+                self.watch = span;
+                // Show it now, even while paused.
+                self.publish();
+            }
+            Command::SetCheats { player, cheats } => {
+                if let Some(slot) = self.cheats.get_mut(player) {
+                    *slot = cheats;
+                }
+            }
             Command::LoadState(slot) => match self.load_state(slot) {
                 Ok(()) => {
                     self.rewind.clear();
@@ -369,6 +435,17 @@ impl Runner {
                 }
                 Err(error) => self.notice(format!("Could not load state: {error:#}")),
             },
+        }
+    }
+
+    /// Runs each player's enabled cheats, as cheat devices did once a frame.
+    fn apply_cheats(&mut self) {
+        for (player, cheats) in self.cheats.iter().enumerate() {
+            let mut memory = PlayerMemory {
+                core: &mut *self.loaded.core,
+                player,
+            };
+            emu_cheats::apply(cheats, &mut memory);
         }
     }
 
@@ -388,6 +465,20 @@ impl Runner {
                 *frames = screens.to_vec();
             }
         }
+        let watched = self.watch.map(|span| {
+            let bytes = (0..span.length)
+                .map(|offset| {
+                    let address = span.start.wrapping_add(offset);
+                    self.loaded.core.peek(span.player, address)
+                })
+                .collect();
+            (span, bytes)
+        });
+        *self
+            .latest
+            .memory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = watched;
         if !self.latest.unseen.swap(true, Ordering::AcqRel) {
             self.events.try_send(Event::Frame).ok();
         }
@@ -535,6 +626,21 @@ mod tests {
             self.set(u32::from_le_bytes(bytes));
             Ok(())
         }
+
+        /// The counter is the only memory, at addresses 0-3.
+        fn peek(&self, _: usize, address: u32) -> Option<u8> {
+            self.count().to_le_bytes().get(address as usize).copied()
+        }
+
+        fn poke(&mut self, _: usize, address: u32, value: u8) -> bool {
+            let mut bytes = self.count().to_le_bytes();
+            let Some(byte) = bytes.get_mut(address as usize) else {
+                return false;
+            };
+            *byte = value;
+            self.set(u32::from_le_bytes(bytes));
+            true
+        }
     }
 
     fn start(rom_path: PathBuf) -> (Emulator, async_channel::Receiver<Event>) {
@@ -570,6 +676,16 @@ mod tests {
         emulator.send(Command::SetRewind(false));
         thread::sleep(Duration::from_millis(50));
         assert!(latest_count(&emulator) > rewound);
+    }
+
+    #[test]
+    fn cheats_run_before_every_frame() {
+        let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        let cheats = emu_cheats::parse(System::Gb, "[Hold]\n0000:00\n").expect("valid");
+        emulator.send(Command::SetCheats { player: 0, cheats });
+        thread::sleep(Duration::from_millis(50));
+        // The cheat zeroes the counter's low byte before each frame adds one.
+        assert_eq!(latest_count(&emulator) & 0xFF, 1);
     }
 
     #[test]

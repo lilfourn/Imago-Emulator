@@ -1589,6 +1589,7 @@ dependencies = [
  "cpal",
  "crc32fast",
  "dirs 7.0.0",
+ "emu-cheats",
  "emu-core",
  "emu-cores",
  "emu-state",
@@ -1607,6 +1608,14 @@ name = "emu-arm"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "emu-cheats"
+version = "0.1.0"
+dependencies = [
+ "emu-core",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1631,6 +1640,7 @@ name = "emu-gb"
 version = "0.1.0"
 dependencies = [
  "emu-core",
+ "emu-psg",
  "png 0.18.1",
  "postcard",
  "serde",
@@ -1642,6 +1652,7 @@ version = "0.1.0"
 dependencies = [
  "emu-arm",
  "emu-core",
+ "emu-psg",
  "emu-sched",
  "png 0.18.1",
  "postcard",
@@ -1663,6 +1674,13 @@ name = "emu-nds"
 version = "0.1.0"
 dependencies = [
  "emu-core",
+]
+
+[[package]]
+name = "emu-psg"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
