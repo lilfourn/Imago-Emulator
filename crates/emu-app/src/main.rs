@@ -13,6 +13,7 @@ mod controls;
 mod emulator;
 mod gamepad;
 mod layout;
+mod memory_viewer;
 mod persist;
 mod resample;
 mod rewind;

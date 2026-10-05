@@ -9,22 +9,24 @@ use emu_core::{CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pa
 use gpui::{
     Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
-    SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
+    ScrollWheelEvent, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb,
+    rgba,
 };
 
 use crate::app::{
     ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState,
     NextStateSlot, OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer,
-    ToggleColorCorrection, ToggleFastForward, TogglePause,
+    ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
 use crate::cheats;
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
-use crate::emulator::{self, Command, Emulator, Event, Loaded};
+use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement};
+use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
 use crate::persist;
 use crate::slots::{self, SlotPreview};
 use crate::video;
@@ -41,6 +43,8 @@ pub struct EmulatorView {
     layout: Layout,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
+    /// Where the memory viewer is looking, while it is open.
+    memory_viewer: Option<Viewer>,
     session: Option<Session>,
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
@@ -129,6 +133,7 @@ impl EmulatorView {
             bindings: Bindings::default(),
             layout: Layout::default(),
             color_correction: true,
+            memory_viewer: None,
             session: None,
             loading: None,
             placements: Vec::new(),
@@ -216,6 +221,7 @@ impl EmulatorView {
         self.touch = None;
         self.active_player = 0;
         self.sync_held();
+        self.watch_memory();
         if info.players > 1 {
             self.layout.arrangement = Arrangement::Horizontal;
             window.set_window_title(&format!("{name} — {} link", info.system.name()));
@@ -345,6 +351,7 @@ impl EmulatorView {
         });
         self.active_player = player;
         self.send_input();
+        self.watch_memory();
         self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
 
@@ -563,6 +570,113 @@ impl EmulatorView {
         cx.notify();
     }
 
+    fn toggle_memory_viewer(&mut self, cx: &mut Context<Self>) {
+        self.memory_viewer = match self.memory_viewer {
+            Some(_) => None,
+            None => Some(Viewer::default()),
+        };
+        self.watch_memory();
+        cx.notify();
+    }
+
+    /// Tells the emulation thread which memory the viewer shows, if any.
+    fn watch_memory(&self) {
+        let span = self
+            .memory_viewer
+            .zip(self.session.as_ref())
+            .and_then(|(viewer, session)| {
+                let region = memory_viewer::regions(session.info.system).get(viewer.region)?;
+                let (start, length) = viewer.span(region);
+                Some(MemorySpan {
+                    player: self.active_player,
+                    start,
+                    length,
+                })
+            });
+        self.send(Command::WatchMemory(span));
+    }
+
+    fn select_memory_region(&mut self, region: usize, cx: &mut Context<Self>) {
+        if let Some(viewer) = &mut self.memory_viewer {
+            viewer.select(region);
+            self.watch_memory();
+            cx.notify();
+        }
+    }
+
+    fn scroll_memory(&mut self, rows: f32, cx: &mut Context<Self>) {
+        let length = self.session.as_ref().and_then(|session| {
+            let regions = memory_viewer::regions(session.info.system);
+            Some(regions.get(self.memory_viewer?.region)?.length)
+        });
+        if let (Some(viewer), Some(length)) = (&mut self.memory_viewer, length) {
+            let before = viewer.offset;
+            viewer.scroll(rows, length);
+            if viewer.offset != before {
+                self.watch_memory();
+                cx.notify();
+            }
+        }
+    }
+
+    /// The memory viewer overlay: region tabs over a hex dump.
+    fn memory_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        const ROW_HEIGHT: f32 = 13.0;
+        let viewer = self.memory_viewer?;
+        let session = self.session.as_ref()?;
+        let regions = memory_viewer::regions(session.info.system);
+        let tabs = regions.iter().enumerate().map(|(index, region)| {
+            let tab = div()
+                .id(index)
+                .px_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .child(region.name)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_memory_region(index, cx);
+                }));
+            if index == viewer.region {
+                tab.bg(rgba(0xFFFF_FF33))
+            } else {
+                tab
+            }
+        });
+        let rows: Vec<String> = match session.emulator.memory() {
+            Some((span, bytes)) => (0u32..)
+                .zip(bytes.chunks(BYTES_PER_ROW as usize))
+                .map(|(row, chunk)| memory_viewer::hex_row(span.start + row * BYTES_PER_ROW, chunk))
+                .collect(),
+            None if regions.is_empty() => vec!["No memory to show for this system yet".to_owned()],
+            None => Vec::new(),
+        };
+        Some(
+            div()
+                .id("memory-viewer")
+                .absolute()
+                .top(px(8.0))
+                .left(px(8.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .bg(rgba(0x0000_00DD))
+                .font_family("Menlo")
+                // Small enough that a row fits the default window.
+                .text_size(px(10.0))
+                .line_height(px(ROW_HEIGHT))
+                .whitespace_nowrap()
+                .child(div().flex().gap_2().children(tabs))
+                .child(div().children(rows))
+                // Clicks here are for the viewer, not the screen below.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                    let delta = event.delta.pixel_delta(px(ROW_HEIGHT)).y;
+                    this.scroll_memory(-f32::from(delta) / ROW_HEIGHT, cx);
+                })),
+        )
+    }
+
     fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
         self.color_correction = !self.color_correction;
         if let Some(session) = &mut self.session {
@@ -673,6 +787,9 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
                 this.toggle_color_correction(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleMemoryViewer, _, cx| {
+                this.toggle_memory_viewer(cx);
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -714,6 +831,9 @@ impl Render for EmulatorView {
         }
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
+        }
+        if let Some(panel) = self.memory_panel(cx) {
+            root = root.child(panel);
         }
         if let Some(notice) = &self.notice {
             let mut card = div()

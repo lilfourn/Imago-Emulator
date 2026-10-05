@@ -157,6 +157,8 @@ pub enum Command {
     SaveState(u8),
     /// Restores the save state in this slot's file.
     LoadState(u8),
+    /// Copies this span of memory for the UI after every frame, or stops.
+    WatchMemory(Option<MemorySpan>),
     /// Replaces a player's cheats, applied before every frame.
     SetCheats {
         /// Index into the core's players.
@@ -164,6 +166,17 @@ pub enum Command {
         /// The player's cheat list; disabled cheats are skipped.
         cheats: Vec<Cheat>,
     },
+}
+
+/// A span of one player's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemorySpan {
+    /// Index into the core's players.
+    pub player: usize,
+    /// First address.
+    pub start: u32,
+    /// Bytes.
+    pub length: u32,
 }
 
 /// A notification from the emulation thread to the UI.
@@ -195,6 +208,8 @@ impl emu_cheats::Memory for PlayerMemory<'_> {
 #[derive(Default)]
 struct Latest {
     frames: Mutex<(u64, Vec<Frame>)>,
+    /// The watched memory as of that frame; `None` where unreadable.
+    memory: Mutex<Option<(MemorySpan, Vec<Option<u8>>)>>,
     unseen: AtomicBool,
 }
 
@@ -224,6 +239,7 @@ impl Emulator {
             loaded,
             inputs: vec![Input::default(); players],
             cheats: vec![Vec::new(); players],
+            watch: None,
             paused: false,
             fast_forward: false,
             rewinding: false,
@@ -267,6 +283,16 @@ impl Emulator {
         frames.clone_from(latest_frames);
         Some(*sequence)
     }
+
+    /// The watched memory as of the latest frame: the span, and each byte
+    /// or `None` where it is not plain memory.
+    pub fn memory(&self) -> Option<(MemorySpan, Vec<Option<u8>>)> {
+        self.latest
+            .memory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Drop for Emulator {
@@ -286,6 +312,8 @@ struct Runner {
     inputs: Vec<Input>,
     /// One list per player.
     cheats: Vec<Vec<Cheat>>,
+    /// Memory the UI is watching.
+    watch: Option<MemorySpan>,
     paused: bool,
     fast_forward: bool,
     rewinding: bool,
@@ -389,6 +417,11 @@ impl Runner {
                 Ok(()) => self.notice(format!("Saved state {slot}")),
                 Err(error) => self.notice(format!("Could not save state: {error:#}")),
             },
+            Command::WatchMemory(span) => {
+                self.watch = span;
+                // Show it now, even while paused.
+                self.publish();
+            }
             Command::SetCheats { player, cheats } => {
                 if let Some(slot) = self.cheats.get_mut(player) {
                     *slot = cheats;
@@ -432,6 +465,20 @@ impl Runner {
                 *frames = screens.to_vec();
             }
         }
+        let watched = self.watch.map(|span| {
+            let bytes = (0..span.length)
+                .map(|offset| {
+                    let address = span.start.wrapping_add(offset);
+                    self.loaded.core.peek(span.player, address)
+                })
+                .collect();
+            (span, bytes)
+        });
+        *self
+            .latest
+            .memory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = watched;
         if !self.latest.unseen.swap(true, Ordering::AcqRel) {
             self.events.try_send(Event::Frame).ok();
         }

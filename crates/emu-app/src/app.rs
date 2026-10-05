@@ -28,6 +28,7 @@ actions!(
         LayoutSingle,
         SwapScreens,
         ToggleColorCorrection,
+        ToggleMemoryViewer,
         Quit,
     ]
 );
@@ -52,6 +53,7 @@ pub fn run(roms: Vec<PathBuf>) {
             KeyBinding::new("cmd-3", LayoutSingle, None),
             KeyBinding::new("cmd-e", SwapScreens, None),
             KeyBinding::new("cmd-shift-c", ToggleColorCorrection, None),
+            KeyBinding::new("cmd-shift-m", ToggleMemoryViewer, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.set_menus(menus());
@@ -121,6 +123,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Swap Screens", SwapScreens),
                 MenuItem::separator(),
                 MenuItem::action("Colour Correction", ToggleColorCorrection),
+                MenuItem::action("Memory Viewer", ToggleMemoryViewer),
             ],
         },
     ]
