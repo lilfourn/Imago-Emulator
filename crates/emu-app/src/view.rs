@@ -467,11 +467,15 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         let first = self.session.as_ref().and_then(|session| {
-            let single_game_boy = session.info.players == 1 && session.info.system == System::Gb;
-            single_game_boy.then(|| session.rom_paths[0].clone())
+            let has_cable = matches!(session.info.system, System::Gb | System::Gba);
+            let single = session.info.players == 1 && has_cable;
+            single.then(|| session.rom_paths[0].clone())
         });
         let Some(first) = first else {
-            self.show_notice("Open a Game Boy game first, then connect the cable", cx);
+            self.show_notice(
+                "Open a Game Boy or Game Boy Advance game first, then connect the cable",
+                cx,
+            );
             return;
         };
         self.prompt_for_rom("Connect", window, cx, move |this, second, window, cx| {

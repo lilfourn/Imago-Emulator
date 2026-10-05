@@ -11,8 +11,10 @@ mod bios;
 mod bus;
 mod cartridge;
 mod dma;
+mod link;
 mod ppu;
 mod rtc;
+mod sio;
 mod timer;
 mod timing;
 
@@ -25,6 +27,8 @@ use serde::{Deserialize, Serialize};
 
 use bus::Bus;
 use cartridge::Cartridge;
+
+pub use link::Linked;
 
 const SCREENS: [ScreenSize; 1] = [ScreenSize::new(240, 160)];
 
@@ -40,7 +44,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(16_777_216, 280_896),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 5,
+    state_version: 6,
 };
 
 /// A Game Boy Advance with a cartridge inserted.

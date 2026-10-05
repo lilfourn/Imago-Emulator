@@ -59,7 +59,8 @@ pub fn create(system: System, media: &Media<'_>) -> Result<Box<dyn Core>, LoadEr
 pub fn create_linked(system: System, media: &[Media<'_>]) -> Result<Box<dyn Core>, LoadError> {
     match system {
         System::Gb => Ok(Box::new(emu_gb::Linked::new(media)?)),
-        System::Gba | System::Nds => Err(LoadError::Unsupported("link play for this system")),
+        System::Gba => Ok(Box::new(emu_gba::Linked::new(media)?)),
+        System::Nds => Err(LoadError::Unsupported("link play for this system")),
     }
 }
 

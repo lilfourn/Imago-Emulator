@@ -14,6 +14,7 @@ use crate::bios;
 use crate::cartridge::Cartridge;
 use crate::dma::{Dma, Timing};
 use crate::ppu::{self, Ppu};
+use crate::sio::{self, Sio};
 use crate::timer::Timers;
 use crate::timing::{WaitStates, Width};
 
@@ -28,12 +29,15 @@ pub(crate) enum Event {
     TimerOverflow(u8),
     /// Time for the next audio output sample.
     AudioSample,
+    /// The serial transfer in progress ends.
+    SerialDone,
 }
 
 /// Interrupt request bits outside the PPU's.
 pub(crate) mod irq {
     /// Timer `n` overflowed: bit 3 + n.
     pub(crate) const TIMER0: u16 = 1 << 3;
+    pub(crate) const SERIAL: u16 = 1 << 7;
     /// DMA channel `n` finished: bit 8 + n.
     pub(crate) const DMA0: u16 = 1 << 8;
     pub(crate) const KEYPAD: u16 = 1 << 12;
@@ -51,6 +55,7 @@ pub(crate) struct Bus {
     dma: Dma,
     timers: Timers,
     pub(crate) apu: Apu,
+    pub(crate) sio: Sio,
     /// Raw values written to I/O registers, for byte merges and reading back
     /// registers without side effects.
     io: Box<[u8]>,
@@ -90,6 +95,7 @@ impl Bus {
             dma: Dma::default(),
             timers: Timers::default(),
             apu: Apu::new(),
+            sio: Sio::default(),
             io: vec![0; 0x400].into_boxed_slice(),
             interrupt_enable: 0,
             interrupt_flag: 0,
@@ -223,6 +229,11 @@ impl Bus {
                     self.scheduler
                         .schedule_at(due.time + apu::CYCLES_PER_SAMPLE, Event::AudioSample);
                 }
+                Event::SerialDone => {
+                    if self.sio.finish() {
+                        self.request_interrupt(irq::SERIAL);
+                    }
+                }
             }
         }
     }
@@ -242,6 +253,26 @@ impl Bus {
             }
         }
         self.schedule_timer(index);
+    }
+
+    /// Ends the serial transfer just started (by this console or, through
+    /// the cable, by another) after `cycles`.
+    pub(crate) fn schedule_serial_done(&mut self, cycles: u64) {
+        self.scheduler
+            .cancel(|pending| *pending == Event::SerialDone);
+        self.scheduler
+            .schedule_at(self.cycles + cycles, Event::SerialDone);
+    }
+
+    fn serial_action(&mut self, action: sio::Action) {
+        match action {
+            sio::Action::None => {}
+            sio::Action::Started(cycles) => self.schedule_serial_done(cycles),
+            sio::Action::Cancelled => {
+                self.scheduler
+                    .cancel(|pending| *pending == Event::SerialDone);
+            }
+        }
     }
 
     /// Replaces timer `index`'s overflow event after it was reconfigured.
@@ -304,6 +335,7 @@ impl Bus {
             }
             0x0B0..=0x0DE => self.dma.read(offset as u32 - 0xB0),
             0x100..=0x10E => self.timers.read(offset as u32 - 0x100, self.cycles),
+            0x120..=0x12A | 0x134 => self.sio.read(offset as u32 - 0x120),
             0x130 => self.keys,
             0x200 => self.interrupt_enable,
             0x202 => self.interrupt_flag,
@@ -332,6 +364,10 @@ impl Bus {
                 if let Some(timer) = self.timers.write(offset as u32 - 0x100, value, self.cycles) {
                     self.schedule_timer(timer);
                 }
+            }
+            0x120..=0x12A | 0x134 => {
+                let action = self.sio.write(offset as u32 - 0x120, value);
+                self.serial_action(action);
             }
             0x132 => self.check_keypad_interrupt(),
             0x200 => self.interrupt_enable = value & 0x3FFF,

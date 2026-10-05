@@ -32,7 +32,7 @@ actions!(
 );
 
 /// Runs the app until the user quits, opening `roms` at launch: one game,
-/// or two linked Game Boy games.
+/// or two linked Game Boy or Game Boy Advance games.
 pub fn run(roms: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
