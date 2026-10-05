@@ -35,8 +35,11 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use serde::{Deserialize, Serialize};
+
 /// A priority queue of events keyed by the cycle they are due.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(serialize = "E: Serialize", deserialize = "E: Deserialize<'de>"))]
 pub struct Scheduler<E> {
     now: u64,
     next_seq: u64,
@@ -154,7 +157,7 @@ impl<E> Default for Scheduler<E> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry<E> {
     time: u64,
     seq: u64,

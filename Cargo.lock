@@ -1605,6 +1605,9 @@ dependencies = [
 [[package]]
 name = "emu-arm"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "emu-core"
@@ -1637,7 +1640,12 @@ dependencies = [
 name = "emu-gba"
 version = "0.1.0"
 dependencies = [
+ "emu-arm",
  "emu-core",
+ "emu-sched",
+ "png 0.18.1",
+ "postcard",
+ "serde",
 ]
 
 [[package]]
@@ -1660,6 +1668,9 @@ dependencies = [
 [[package]]
 name = "emu-sched"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "emu-state"
