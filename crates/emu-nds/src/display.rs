@@ -5,9 +5,11 @@
 //! of the VBlank, HBlank and VCount-match interrupts it wants.
 
 use crate::dma::Timing;
+use crate::gpu2d::WIDTH;
 use crate::hardware::{Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
+use crate::vram::{Engine, Region};
 
 /// Bus cycles per line.
 pub(crate) const LINE_CYCLES: u64 = 2130;
@@ -34,6 +36,8 @@ impl Hardware {
     pub(crate) fn start_display(&mut self) {
         let time = self.scheduler.now() + HBLANK_START;
         self.scheduler.schedule_at(time, Event::HBlank);
+        let sample = self.scheduler.now() + crate::sound::CYCLES_PER_SAMPLE;
+        self.scheduler.schedule_at(sample, Event::SoundSample);
     }
 
     fn request_display_interrupt(&mut self, enable_bit: u16, request: u32) {
@@ -49,11 +53,30 @@ impl Hardware {
         self.hblank = true;
         self.request_display_interrupt(1 << 4, irq::HBLANK);
         if self.vcount < VISIBLE_LINES {
+            self.draw_line(self.vcount);
             self.arm9.dma.trigger(Timing::HBlank);
         }
         self.scheduler
             .schedule_at(time + LINE_CYCLES - HBLANK_START, Event::LineStart);
         Moment::HBlank(self.vcount)
+    }
+
+    /// Both 2D engines draw `line` into their screens.
+    fn draw_line(&mut self, line: u16) {
+        let start = usize::from(line) * WIDTH;
+        let mut out = [0; WIDTH];
+        let vram = &self.vram;
+        self.engine_a.render_line(
+            line,
+            &vram.engine(Engine::A),
+            |offset| vram.read_16(Region::Lcdc, offset),
+            None,
+            &mut out,
+        );
+        self.screen_a[start..start + WIDTH].copy_from_slice(&out);
+        self.engine_b
+            .render_line(line, &vram.engine(Engine::B), |_| 0, None, &mut out);
+        self.screen_b[start..start + WIDTH].copy_from_slice(&out);
     }
 
     /// The line-start event at `time`.
@@ -71,7 +94,8 @@ impl Hardware {
                 self.cpu_mut(side).interrupts.request(irq::VCOUNT);
             }
         }
-        self.scheduler.schedule_at(time + HBLANK_START, Event::HBlank);
+        self.scheduler
+            .schedule_at(time + HBLANK_START, Event::HBlank);
         Moment::LineStart(self.vcount)
     }
 }
@@ -88,7 +112,7 @@ mod tests {
             moments.push(match due.event {
                 Event::HBlank => hw.hblank(due.time),
                 Event::LineStart => hw.line_start(due.time),
-                Event::TimerOverflow(..) => continue,
+                _ => continue,
             });
         }
         moments
@@ -107,7 +131,11 @@ mod tests {
         assert_eq!(starts, 263);
         assert!(moments.contains(&Moment::LineStart(192)));
         assert_ne!(hw.arm9.interrupts.flags & irq::VBLANK, 0);
-        assert_eq!(hw.arm7.interrupts.flags & irq::VBLANK, 0, "the ARM7 did not ask");
+        assert_eq!(
+            hw.arm7.interrupts.flags & irq::VBLANK,
+            0,
+            "the ARM7 did not ask"
+        );
         assert_eq!(hw.vcount, 0);
     }
 

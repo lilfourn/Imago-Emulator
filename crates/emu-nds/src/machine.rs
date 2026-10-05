@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::bios::{self, Call, Effects};
 use crate::boot::{self, ARM7_STACKS, ARM9_STACKS, Program};
 use crate::bus::{Arm7Bus, Arm9Bus};
+use crate::cart::Cart;
 use crate::display::Moment;
 use crate::hardware::{Event, Hardware};
 use crate::interrupt::irq;
@@ -24,15 +25,11 @@ const SLICE_CYCLES: u64 = 64;
 /// ARMv4T interpreter.
 pub(crate) type Arm9 = Cpu;
 
-/// What the machine needs from a CPU model.
+/// What a system call needs from either CPU model.
 pub(crate) trait Processor {
     fn reg(&self, index: usize) -> u32;
     fn set_reg(&mut self, index: usize, value: u32);
-    fn mode(&self) -> Mode;
-    fn thumb(&self) -> bool;
     fn saved_psr(&self) -> Option<u32>;
-    fn set_irq_line(&mut self, high: bool);
-    fn step<B: Bus>(&mut self, bus: &mut B);
     fn return_from_exception<B: Bus>(&mut self, bus: &mut B);
 }
 
@@ -43,20 +40,8 @@ impl Processor for Cpu {
     fn set_reg(&mut self, index: usize, value: u32) {
         Cpu::set_reg(self, index, value);
     }
-    fn mode(&self) -> Mode {
-        Cpu::mode(self)
-    }
-    fn thumb(&self) -> bool {
-        Cpu::thumb(self)
-    }
     fn saved_psr(&self) -> Option<u32> {
         Cpu::saved_psr(self)
-    }
-    fn set_irq_line(&mut self, high: bool) {
-        Cpu::set_irq_line(self, high);
-    }
-    fn step<B: Bus>(&mut self, bus: &mut B) {
-        Cpu::step(self, bus);
     }
     fn return_from_exception<B: Bus>(&mut self, bus: &mut B) {
         Cpu::return_from_exception(self, bus);
@@ -99,15 +84,12 @@ fn boot_registers(program: Program, stacks: (u32, u32, u32)) -> Registers {
 }
 
 impl Machine {
-    /// A machine that has direct-booted `rom`.
-    pub(crate) fn boot(
-        mut hw: Hardware,
-        rom: &[u8],
-        user_settings: &[u8],
-        chip_id: u32,
-        hle_bios: bool,
-    ) -> Self {
-        let header = boot::load(&mut hw, rom, user_settings, chip_id);
+    /// A machine that has direct-booted the cartridge in `hw`.
+    pub(crate) fn boot(mut hw: Hardware, hle_bios: bool) -> Self {
+        let cart = std::mem::replace(&mut hw.cart, Cart::new(Box::default(), None));
+        let user_settings = hw.spi.user_settings();
+        let header = boot::load(&mut hw, cart.rom(), &user_settings, cart.chip_id());
+        hw.cart = cart;
         hw.start_display();
         let mut arm9 = Arm9::from_registers(
             &boot_registers(header.arm9, ARM9_STACKS),
@@ -135,7 +117,10 @@ impl Machine {
     }
 
     /// Runs one slice. Returns what the events in it did.
-    pub(crate) fn run_slice(&mut self, mut on_moment: impl FnMut(&mut Hardware, Moment)) -> Progress {
+    pub(crate) fn run_slice(
+        &mut self,
+        mut on_moment: impl FnMut(&mut Hardware, Moment),
+    ) -> Progress {
         let now = self.hw.scheduler.now();
         let next = self.hw.scheduler.next_time().unwrap_or(u64::MAX);
         let target = next.clamp(now + 1, now + SLICE_CYCLES);
@@ -155,10 +140,24 @@ impl Machine {
                 }
                 Event::LineStart => {
                     let moment = self.hw.line_start(due.time);
-                    progress.frame_done |= moment == Moment::LineStart(crate::display::VISIBLE_LINES);
+                    progress.frame_done |=
+                        moment == Moment::LineStart(crate::display::VISIBLE_LINES);
                     on_moment(&mut self.hw, moment);
                 }
-                Event::TimerOverflow(side, index) => self.timer_overflow(side, usize::from(index), due.time),
+                Event::TimerOverflow(side, index) => {
+                    self.timer_overflow(side, usize::from(index), due.time)
+                }
+                Event::SoundSample => self.hw.sound_sample(due.time),
+                Event::CartStep => {
+                    let event = self.hw.cart.rom_step();
+                    self.hw.rom_event(event);
+                }
+                Event::CartSpiDone => self.hw.cart.finish_spi(),
+                Event::SpiDone => {
+                    if self.hw.spi.finish() {
+                        self.hw.arm7.interrupts.request(irq::SPI);
+                    }
+                }
             }
         }
         progress
@@ -195,7 +194,12 @@ impl Machine {
         if self.hle_bios && entered_swi {
             // The BIOS keeps its interrupt flags at the top of DTCM.
             let intr_flags = boot::DTCM_REGION & !0xFFF;
-            system_call(&mut self.arm9, &mut Arm9Bus(hw), Side::Arm9, intr_flags + 0x3FF8);
+            system_call(
+                &mut self.arm9,
+                &mut Arm9Bus(hw),
+                Side::Arm9,
+                intr_flags + 0x3FF8,
+            );
             return;
         }
         self.arm9.set_irq_line(hw.arm9.interrupts.line());

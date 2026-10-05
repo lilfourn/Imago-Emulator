@@ -9,12 +9,17 @@
 use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
 
-use crate::dma::{Dma, Owner};
-use crate::interrupt::Interrupts;
+use crate::cart::{Cart, RomEvent};
+use crate::dma::{Dma, Owner, Timing};
+use crate::gpu2d::Engine2d;
+use crate::interrupt::{Interrupts, irq};
 use crate::ipc::{Ipc, Side};
 use crate::math::Math;
+use crate::rtc::Rtc;
+use crate::sound::{self, Sound};
+use crate::spi::Spi;
 use crate::timer::Timers;
-use crate::vram::Vram;
+use crate::vram::{Engine, Vram};
 
 /// Main RAM: 4 MiB, mirrored through 0x02000000–0x02FFFFFF.
 pub(crate) const MAIN_RAM_SIZE: usize = 0x40_0000;
@@ -28,6 +33,14 @@ pub(crate) enum Event {
     LineStart,
     /// One CPU's timer counts past 0xFFFF.
     TimerOverflow(Side, u8),
+    /// Time for the next audio output sample.
+    SoundSample,
+    /// The game card's ROM transfer moves on.
+    CartStep,
+    /// A byte on the game card's SPI bus (its save chip) is done.
+    CartSpiDone,
+    /// A byte on the ARM7's SPI bus is done.
+    SpiDone,
 }
 
 /// One CPU's private devices and clock.
@@ -71,9 +84,14 @@ pub(crate) struct Hardware {
     pub(crate) vram: Vram,
     /// WRAMCNT: how the 32 KiB shared WRAM splits between the CPUs.
     pub(crate) wramcnt: u8,
-    /// Palette RAM and OAM, 1 KiB per engine each.
-    pub(crate) palette: Box<[u8]>,
-    pub(crate) oam: Box<[u8]>,
+    /// The 2D engines, which own their registers, palette RAM and OAM.
+    pub(crate) engine_a: Engine2d,
+    pub(crate) engine_b: Engine2d,
+    /// What each engine drew this frame, 256×192 pixels as 0xFFRRGGBB.
+    #[serde(skip, default = "blank_screen")]
+    pub(crate) screen_a: Box<[u32]>,
+    #[serde(skip, default = "blank_screen")]
+    pub(crate) screen_b: Box<[u32]>,
     /// The BIOS images: our HLE vectors, or the user's dumps. Restored
     /// from media.
     #[serde(skip)]
@@ -84,6 +102,10 @@ pub(crate) struct Hardware {
     pub(crate) arm7: CpuIo,
     pub(crate) ipc: Ipc,
     pub(crate) math: Math,
+    pub(crate) sound: Sound,
+    pub(crate) cart: Cart,
+    pub(crate) spi: Spi,
+    pub(crate) rtc: Rtc,
     /// KEYINPUT: A, B, Select, Start, Right, Left, Up, Down, R, L; active low.
     pub(crate) keys: u16,
     /// EXTKEYIN bits 0 (X), 1 (Y), 6 (pen down) and 7 (hinge), active low.
@@ -103,6 +125,10 @@ pub(crate) struct Hardware {
     pub(crate) scheduler: Scheduler<Event>,
 }
 
+fn blank_screen() -> Box<[u32]> {
+    vec![0xFF00_0000; 256 * 192].into_boxed_slice()
+}
+
 impl Hardware {
     pub(crate) fn new(arm9_bios: Box<[u8]>, arm7_bios: Box<[u8]>) -> Self {
         Self {
@@ -111,14 +137,20 @@ impl Hardware {
             arm7_wram: vec![0; 0x1_0000].into_boxed_slice(),
             vram: Vram::default(),
             wramcnt: 0,
-            palette: vec![0; 0x800].into_boxed_slice(),
-            oam: vec![0; 0x800].into_boxed_slice(),
+            engine_a: Engine2d::new(Engine::A),
+            engine_b: Engine2d::new(Engine::B),
+            screen_a: blank_screen(),
+            screen_b: blank_screen(),
             arm9_bios,
             arm7_bios,
             arm9: CpuIo::new(Owner::Arm9),
             arm7: CpuIo::new(Owner::Arm7),
             ipc: Ipc::default(),
             math: Math::default(),
+            sound: Sound::default(),
+            cart: Cart::new(Box::default(), None),
+            spi: Spi::new(None),
+            rtc: Rtc::new(0),
             keys: 0x03FF,
             ext_keys: 0x007F,
             powcnt1: 0,
@@ -132,11 +164,45 @@ impl Hardware {
         }
     }
 
-    /// Moves the BIOS images out of `other`, which is about to be replaced
-    /// by a loaded save state.
+    /// Moves the BIOS images and the ROM out of `other`, which is about to
+    /// be replaced by a loaded save state.
     pub(crate) fn take_media_from(&mut self, other: &mut Self) {
         self.arm9_bios = std::mem::take(&mut other.arm9_bios);
         self.arm7_bios = std::mem::take(&mut other.arm7_bios);
+        self.cart.take_rom_from(&mut other.cart);
+    }
+
+    /// The CPU that EXMEMCNT gives the game card slot.
+    pub(crate) fn cart_owner(&self) -> Side {
+        if self.exmemcnt & (1 << 11) != 0 {
+            Side::Arm7
+        } else {
+            Side::Arm9
+        }
+    }
+
+    /// Acts on what a game card ROM access asks for.
+    pub(crate) fn rom_event(&mut self, event: RomEvent) {
+        let owner = self.cart_owner();
+        match event {
+            RomEvent::None => {}
+            RomEvent::StepAfter(cycles) => {
+                let time = self.now(owner).max(self.scheduler.now()) + cycles;
+                self.scheduler.schedule_at(time, Event::CartStep);
+            }
+            RomEvent::WordReady => self.cpu_mut(owner).dma.trigger(Timing::Cart),
+            RomEvent::Finished { irq } => {
+                if irq {
+                    self.cpu_mut(owner).interrupts.request(irq::CART_TRANSFER);
+                }
+            }
+        }
+    }
+
+    /// Schedules `event` `cycles` after `side`'s current time.
+    pub(crate) fn schedule_after(&mut self, side: Side, cycles: u64, event: Event) {
+        let time = self.now(side).max(self.scheduler.now()) + cycles;
+        self.scheduler.schedule_at(time, event);
     }
 
     pub(crate) fn cpu(&self, side: Side) -> &CpuIo {
@@ -165,6 +231,16 @@ impl Hardware {
     pub(crate) fn raise(&mut self, bits: [u32; 2]) {
         self.arm9.interrupts.request(bits[0]);
         self.arm7.interrupts.request(bits[1]);
+    }
+
+    /// Mixes one audio sample, reading channel data as the ARM7 sees
+    /// memory, and schedules the next.
+    pub(crate) fn sound_sample(&mut self, time: u64) {
+        let mut sound = std::mem::take(&mut self.sound);
+        sound.sample(|address| self.arm7_read_8(address));
+        self.sound = sound;
+        self.scheduler
+            .schedule_at(time + sound::CYCLES_PER_SAMPLE, Event::SoundSample);
     }
 
     /// Replaces timer `index`'s overflow event on `side` after it changed.

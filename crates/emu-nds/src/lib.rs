@@ -23,6 +23,7 @@ mod machine;
 mod math;
 mod memory;
 mod rtc;
+mod sound;
 mod spi;
 mod timer;
 mod vram;
@@ -32,9 +33,12 @@ use emu_core::{
     StateError, StereoSample, System, SystemFileKind,
 };
 
+use cart::Cart;
 use display::FRAME_CYCLES;
 use hardware::Hardware;
 use machine::Machine;
+use rtc::Rtc;
+use spi::Spi;
 
 const SCREEN: ScreenSize = ScreenSize::new(256, 192);
 const SCREENS: [ScreenSize; 2] = [SCREEN, SCREEN];
@@ -60,15 +64,7 @@ const LOGO_CRC: u16 = 0xCF56;
 #[derive(Debug)]
 pub struct Nds {
     machine: Machine,
-    /// The cartridge image, for direct boot on reset.
-    rom: Box<[u8]>,
     screens: [Frame; 2],
-}
-
-/// The game card's chip ID: Macronix, and its size in megabytes less one.
-fn chip_id(rom: &[u8]) -> u32 {
-    let megabytes = rom.len().div_ceil(0x10_0000).next_power_of_two().max(1);
-    0xC2 | ((megabytes - 1).min(0xFF) as u32) << 8
 }
 
 impl Nds {
@@ -106,18 +102,14 @@ impl Nds {
             || (bios::arm9_image(), bios::arm7_image()),
             |(arm9, arm7)| (arm9.into(), arm7.into()),
         );
-        let rom: Box<[u8]> = media.rom.into();
-        let machine = Self::power_on(&rom, arm9_bios, arm7_bios, hle_bios);
+        let mut hw = Hardware::new(arm9_bios, arm7_bios);
+        hw.cart = Cart::new(media.rom.into(), media.backup);
+        hw.spi = Spi::new(media.system_file(SystemFileKind::NdsFirmware));
+        hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
-            machine,
-            rom,
+            machine: Machine::boot(hw, hle_bios),
             screens: [Frame::new(SCREEN), Frame::new(SCREEN)],
         })
-    }
-
-    fn power_on(rom: &[u8], arm9_bios: Box<[u8]>, arm7_bios: Box<[u8]>, hle_bios: bool) -> Machine {
-        let hw = Hardware::new(arm9_bios, arm7_bios);
-        Machine::boot(hw, rom, &[0; 0x70], chip_id(rom), hle_bios)
     }
 
     fn set_input(&mut self, input: &Input) {
@@ -132,7 +124,11 @@ impl Nds {
         if held(Button::Y) {
             ext_keys &= !2;
         }
-        if input.touch.is_some() {
+        let touch = input
+            .touch
+            .map(|point| (point.x.min(255) as u8, point.y.min(191) as u8));
+        hw.spi.set_touch(touch);
+        if hw.spi.pen_down() {
             ext_keys &= !(1 << 6);
         }
         hw.ext_keys = ext_keys;
@@ -140,7 +136,48 @@ impl Nds {
     }
 
     fn present(&mut self) {
-        // The 2D engines draw here once they are wired in.
+        let hw = &self.machine.hw;
+        // POWCNT1 bit 15 puts engine A on the top screen.
+        let (top, bottom) = if hw.powcnt1 & 0x8000 != 0 {
+            (&hw.screen_a, &hw.screen_b)
+        } else {
+            (&hw.screen_b, &hw.screen_a)
+        };
+        let [top_frame, bottom_frame] = &mut self.screens;
+        top_frame.pixels_mut().copy_from_slice(top);
+        bottom_frame.pixels_mut().copy_from_slice(bottom);
+    }
+
+    /// Both CPUs' program counters, modes and halt states, and the
+    /// interrupt registers, as one `key=value` line for debugging.
+    #[must_use]
+    pub fn debug_state(&self) -> String {
+        let hw = &self.machine.hw;
+        let cpu = |name: &str, pc: u32, cpsr: u32, io: &hardware::CpuIo| {
+            format!(
+                "{name}_pc={pc:08X} {name}_cpsr={cpsr:08X} {name}_halted={} {name}_ime={} {name}_ie={:08X} {name}_if={:08X}",
+                io.halted,
+                u8::from(io.interrupts.master_enable),
+                io.interrupts.enable,
+                io.interrupts.flags,
+            )
+        };
+        format!(
+            "{} {} vcount={}",
+            cpu(
+                "arm9",
+                self.machine.arm9.reg(15),
+                self.machine.arm9.cpsr(),
+                &hw.arm9
+            ),
+            cpu(
+                "arm7",
+                self.machine.arm7.reg(15),
+                self.machine.arm7.cpsr(),
+                &hw.arm7
+            ),
+            hw.vcount,
+        )
     }
 
     /// Bus cycles (33.51 MHz) since power-on.
@@ -155,7 +192,7 @@ impl Core for Nds {
         INFO
     }
 
-    fn run_frame(&mut self, inputs: &[Input], _audio: &mut Vec<StereoSample>) {
+    fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
         self.set_input(&inputs.first().copied().unwrap_or_default());
         let start = self.machine.now();
         // A frame ends at VBlank, or after a frame's time if that never
@@ -165,6 +202,7 @@ impl Core for Nds {
                 break;
             }
         }
+        self.machine.hw.sound.drain_samples(audio);
         self.present();
     }
 
@@ -173,10 +211,18 @@ impl Core for Nds {
     }
 
     fn reset(&mut self) {
-        let hle_bios = self.machine.hle_bios;
-        let arm9_bios = std::mem::take(&mut self.machine.hw.arm9_bios);
-        let arm7_bios = std::mem::take(&mut self.machine.hw.arm7_bios);
-        self.machine = Self::power_on(&self.rom, arm9_bios, arm7_bios, hle_bios);
+        // The cartridge (with its save), firmware and clock carry over.
+        let old = &mut self.machine.hw;
+        let mut hw = Hardware::new(
+            std::mem::take(&mut old.arm9_bios),
+            std::mem::take(&mut old.arm7_bios),
+        );
+        let now = old.scheduler.now();
+        std::mem::swap(&mut hw.cart, &mut old.cart);
+        std::mem::swap(&mut hw.spi, &mut old.spi);
+        std::mem::swap(&mut hw.rtc, &mut old.rtc);
+        hw.rtc.restart_cycles(now);
+        self.machine = Machine::boot(hw, self.machine.hle_bios);
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
@@ -191,6 +237,18 @@ impl Core for Nds {
         self.machine = machine;
         self.present();
         Ok(())
+    }
+
+    fn backup_generation(&self, player: usize) -> Option<u64> {
+        (player == 0)
+            .then(|| self.machine.hw.cart.backup_generation())
+            .flatten()
+    }
+
+    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
+        if player == 0 {
+            self.machine.hw.cart.save_backup(out);
+        }
     }
 
     fn peek(&self, player: usize, address: u32) -> Option<u8> {

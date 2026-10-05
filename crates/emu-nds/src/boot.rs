@@ -29,8 +29,9 @@ pub(crate) struct Header {
 }
 
 fn word(rom: &[u8], offset: usize) -> u32 {
-    rom.get(offset..offset + 4)
-        .map_or(0, |bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    rom.get(offset..offset + 4).map_or(0, |bytes| {
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    })
 }
 
 fn half(rom: &[u8], offset: usize) -> u16 {

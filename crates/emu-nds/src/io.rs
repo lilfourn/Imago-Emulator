@@ -6,7 +6,7 @@
 //! without side effects are kept raw so they read back what was written.
 
 use crate::dma::Timing;
-use crate::hardware::Hardware;
+use crate::hardware::{Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
 
@@ -72,6 +72,15 @@ impl Hardware {
             0x212 => (self.cpu(side).interrupts.enable >> 16) as u16,
             0x214 => self.cpu(side).interrupts.flags as u16,
             0x216 => (self.cpu(side).interrupts.flags >> 16) as u16,
+            // The game card belongs to one CPU at a time; the other reads
+            // nothing.
+            0x1A0..=0x1BB if self.cart_owner() != side => 0,
+            0x1A0 => self.cart.spi_control(),
+            0x1A2 => u16::from(self.cart.spi_data()),
+            0x1A4 => self.cart.rom_control() as u16,
+            0x1A6 => (self.cart.rom_control() >> 16) as u16,
+            // Command bytes and encryption seeds are write-only.
+            0x1A8..=0x1BB => 0,
             _ => return None,
         })
     }
@@ -116,7 +125,30 @@ impl Hardware {
                 interrupts.enable = (interrupts.enable & 0xFFFF) | u32::from(value) << 16;
             }
             0x214 => self.cpu_mut(side).interrupts.acknowledge(u32::from(value)),
-            0x216 => self.cpu_mut(side).interrupts.acknowledge(u32::from(value) << 16),
+            0x216 => self
+                .cpu_mut(side)
+                .interrupts
+                .acknowledge(u32::from(value) << 16),
+            0x1A0..=0x1BB if self.cart_owner() != side => {}
+            0x1A0 => self.cart.write_spi_control(value),
+            0x1A2 => {
+                if let Some(cycles) = self.cart.write_spi_data(value as u8) {
+                    self.schedule_after(side, cycles, Event::CartSpiDone);
+                }
+            }
+            0x1A4 | 0x1A6 => {
+                let shift = (offset & 2) * 8;
+                let current = self.cart.rom_control();
+                let merged = (current & !(0xFFFF << shift)) | u32::from(value) << shift;
+                let event = self.cart.write_rom_control(merged);
+                self.rom_event(event);
+            }
+            0x1A8..=0x1AF => {
+                let index = (offset - 0x1A8) as usize;
+                self.cart.write_command(index, value as u8);
+                self.cart.write_command(index + 1, (value >> 8) as u8);
+            }
+            0x1B0..=0x1BB => {}
             _ => return false,
         }
         true
@@ -150,7 +182,15 @@ impl Hardware {
                 self.raise(raised);
                 Some(value)
             }
-            0x0400_00B0..=0x0400_00DF => Some(self.cpu(side).dma.read((address - 0x0400_00B0) & !3)),
+            0x0410_0010 if self.cart_owner() == side => {
+                let (value, event) = self.cart.read_data();
+                self.rom_event(event);
+                Some(value)
+            }
+            0x0410_0010 => Some(0),
+            0x0400_00B0..=0x0400_00DF => {
+                Some(self.cpu(side).dma.read((address - 0x0400_00B0) & !3))
+            }
             0x0400_00E0..=0x0400_00EF if side == Side::Arm9 => {
                 Some(self.arm9.dma.fill[((address >> 2) & 3) as usize])
             }
@@ -168,6 +208,10 @@ impl Hardware {
             0x0400_0188 => {
                 let raised = self.ipc.send(side, value);
                 self.raise(raised);
+            }
+            0x0400_01A4 if self.cart_owner() == side => {
+                let event = self.cart.write_rom_control(value);
+                self.rom_event(event);
             }
             0x0400_00B0..=0x0400_00DF => {
                 self.cpu_mut(side).dma.write(address - 0x0400_00B0, value);
@@ -203,6 +247,8 @@ impl Hardware {
             return value;
         }
         match offset {
+            0x000..=0x05F | 0x06C..=0x06F => self.engine_a.read_register(offset),
+            0x1000..=0x106F => self.engine_b.read_register(offset - 0x1000),
             0x204 => self.exmemcnt,
             0x240..=0x249 => {
                 u16::from(self.io9_read_8(address)) | u16::from(self.io9_read_8(address + 1)) << 8
@@ -218,7 +264,11 @@ impl Hardware {
         let offset = address & IO_PAGE;
         match offset {
             0x240..=0x246 | 0x248 | 0x249 => {
-                let bank = if offset < 0x247 { offset - 0x240 } else { offset - 0x241 };
+                let bank = if offset < 0x247 {
+                    offset - 0x240
+                } else {
+                    offset - 0x241
+                };
                 self.vram.control(bank as usize)
             }
             0x247 => self.wramcnt,
@@ -244,6 +294,8 @@ impl Hardware {
             return;
         }
         match offset {
+            0x000..=0x05F | 0x06C..=0x06F => self.engine_a.write_register(offset, value),
+            0x1000..=0x106F => self.engine_b.write_register(offset - 0x1000, value),
             0x204 => self.exmemcnt = value,
             0x240..=0x249 => {
                 self.io9_write_8(address, value as u8);
@@ -266,7 +318,11 @@ impl Hardware {
         let offset = address & IO_PAGE;
         match offset {
             0x240..=0x246 | 0x248 | 0x249 => {
-                let bank = if offset < 0x247 { offset - 0x240 } else { offset - 0x241 };
+                let bank = if offset < 0x247 {
+                    offset - 0x240
+                } else {
+                    offset - 0x241
+                };
                 self.vram.set_control(bank as usize, value);
             }
             0x247 => self.wramcnt = value & 3,
@@ -303,7 +359,11 @@ impl Hardware {
             return value;
         }
         match offset {
+            0x400..=0x51F => (self.sound.read(offset & !3 & 0x1FF) >> ((offset & 2) * 8)) as u16,
             0x136 => self.ext_keys,
+            0x138 => self.rtc.read(),
+            0x1C0 => self.spi.control(),
+            0x1C2 => u16::from(self.spi.data()),
             // EXMEMSTAT: the ARM7's GBA-slot timing bits, then the ARM9's
             // EXMEMCNT.
             0x204 => (self.raw_16(Side::Arm7, 0x204) & 0x7F) | (self.exmemcnt & 0xFF80),
@@ -340,8 +400,27 @@ impl Hardware {
         if self.write_common_16(Side::Arm7, offset, value) {
             return;
         }
-        if offset == 0x304 {
-            self.powcnt2 = value & 3;
+        match offset {
+            0x304 => self.powcnt2 = value & 3,
+            0x138 => {
+                let now = self.now(Side::Arm7);
+                self.rtc.write(value, now);
+            }
+            0x1C0 => self.spi.write_control(value),
+            0x1C2 => {
+                if let Some(cycles) = self.spi.write_data(value as u8) {
+                    self.schedule_after(Side::Arm7, cycles, Event::SpiDone);
+                }
+            }
+            0x400..=0x51F => {
+                let shift = (offset & 2) * 8;
+                self.sound.write(
+                    offset & !3 & 0x1FF,
+                    u32::from(value) << shift,
+                    0xFFFF << shift,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -354,6 +433,15 @@ impl Hardware {
                 .acknowledge(u32::from(value) << ((offset - 0x214) * 8)),
             // POSTFLG can only be set, and only from the BIOS.
             0x300 => self.arm7.postflg |= value & 1,
+            // Sound registers take single bytes without touching neighbours.
+            0x400..=0x51F => {
+                let shift = (offset & 3) * 8;
+                self.sound.write(
+                    offset & !3 & 0x1FF,
+                    u32::from(value) << shift,
+                    0xFF << shift,
+                );
+            }
             // HALTCNT: 2 halts, 3 sleeps (treated as halting).
             0x301 => {
                 if value >> 6 >= 2 {
@@ -430,7 +518,11 @@ mod tests {
         hw.arm9_write_32(0x0400_0290, 100);
         hw.arm9_write_32(0x0400_0298, 7);
         assert_eq!(hw.arm9_read_32(0x0400_02A0), 14);
-        assert_eq!(hw.arm7_read_32(0x0400_02A0), 0, "the ARM7 has no maths unit");
+        assert_eq!(
+            hw.arm7_read_32(0x0400_02A0),
+            0,
+            "the ARM7 has no maths unit"
+        );
     }
 
     #[test]

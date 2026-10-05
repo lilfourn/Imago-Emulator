@@ -16,6 +16,7 @@
 use emu_arm::{Access, Bus};
 
 use crate::ipc::Side;
+use crate::spi::firmware::crc16;
 
 /// The ARM9 BIOS (4 KiB at 0xFFFF0000).
 pub(crate) fn arm9_image() -> Box<[u8]> {
@@ -133,7 +134,11 @@ pub(crate) fn run<B: Bus>(number: u8, call: &Call, bus: &mut B) -> Effects {
             ..Effects::default()
         },
         0x08 if arm7 => {
-            bus.write_16(0x0400_0504, if r0 != 0 { 0x200 } else { 0 }, Access::NONSEQUENTIAL);
+            bus.write_16(
+                0x0400_0504,
+                if r0 != 0 { 0x200 } else { 0 },
+                Access::NONSEQUENTIAL,
+            );
             Effects::default()
         }
         0x09 => set(&divide(r0 as i32, r1 as i32)),
@@ -225,22 +230,6 @@ fn divide(numerator: i32, denominator: i32) -> [(usize, u32); 3] {
     ]
 }
 
-/// The CRC-16 (polynomial 0xA001, reflected) of `bytes`, starting from
-/// `crc`, as GetCRC16 and the firmware compute it.
-pub(crate) fn crc16(mut crc: u16, bytes: impl IntoIterator<Item = u8>) -> u16 {
-    for byte in bytes {
-        crc ^= u16::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xA001
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc
-}
-
 /// GetCRC16 over `length` bytes (whole halfwords) at `address`. R3 gets the
 /// last halfword read.
 fn crc16_call<B: Bus>(bus: &mut B, initial: u16, address: u32, length: u32) -> [(usize, u32); 2] {
@@ -248,7 +237,7 @@ fn crc16_call<B: Bus>(bus: &mut B, initial: u16, address: u32, length: u32) -> [
     let mut last = 0;
     for offset in (0..length & !1).step_by(2) {
         last = bus.read_16(address.wrapping_add(offset), Access::SEQUENTIAL);
-        crc = crc16(crc, last.to_le_bytes());
+        crc = crc16(crc, &last.to_le_bytes());
     }
     [(0, u32::from(crc)), (3, u32::from(last))]
 }
@@ -368,7 +357,8 @@ fn lz77<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, _halfwords: 
                 let length = (high >> 4) + 3;
                 let distance = ((high & 0xF) << 8 | low) + 1;
                 for _ in 0..length.min(remaining) {
-                    let byte = bus.read_8(destination.wrapping_sub(distance), Access::NONSEQUENTIAL);
+                    let byte =
+                        bus.read_8(destination.wrapping_sub(distance), Access::NONSEQUENTIAL);
                     bus.write_8(destination, byte, Access::NONSEQUENTIAL);
                     destination += 1;
                     remaining -= 1;
@@ -512,8 +502,15 @@ mod tests {
     }
 
     #[test]
-    fn crc16_matches_the_standard_check_value() {
-        assert_eq!(crc16(0, *b"123456789"), 0xBB3D);
+    fn get_crc16_reads_halfwords_and_returns_the_last() {
+        let mut ram = Ram(vec![0; 0x1_0000]);
+        ram.0[0x100..0x10A].copy_from_slice(b"123456789\0");
+        let effects = run(0x0E, &call(Side::Arm7, [0, 0x100, 9, 0]), &mut ram);
+        // Nine bytes round down to four halfwords: "12345678".
+        assert_eq!(
+            effects.registers,
+            [(0, u32::from(crc16(0, b"12345678"))), (3, 0x3837)]
+        );
     }
 
     #[test]
@@ -524,7 +521,11 @@ mod tests {
         ram.write_32(0xFFF8, 1, Access::NONSEQUENTIAL);
         let effects = run(0x04, &call(Side::Arm7, [0, 1, 0, 0]), &mut ram);
         assert!(!effects.halt);
-        assert_eq!(ram.read_32(0xFFF8, Access::NONSEQUENTIAL), 0, "flag consumed");
+        assert_eq!(
+            ram.read_32(0xFFF8, Access::NONSEQUENTIAL),
+            0,
+            "flag consumed"
+        );
     }
 
     #[test]

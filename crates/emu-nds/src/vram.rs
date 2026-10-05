@@ -171,6 +171,16 @@ fn mapping(bank: usize, control: u8) -> Option<(Region, u32)> {
     })
 }
 
+/// `offset` wrapped to `region`'s size; most sizes are powers of two.
+fn wrap(region: Region, offset: u32) -> u32 {
+    let size = region.size();
+    if size.is_power_of_two() {
+        offset & (size - 1)
+    } else {
+        offset % size
+    }
+}
+
 impl Vram {
     /// VRAMCNT for `bank` (0 = A … 8 = I).
     pub(crate) fn control(&self, bank: usize) -> u8 {
@@ -211,7 +221,7 @@ impl Vram {
     /// The byte at `offset` in `region` (wrapped to its size), ORed over
     /// every bank mapped there.
     pub(crate) fn read_8(&self, region: Region, offset: u32) -> u8 {
-        let offset = offset % region.size();
+        let offset = wrap(region, offset);
         let mut mask = self.pages[region.index()][(offset / PAGE) as usize];
         let mut value = 0;
         while mask != 0 {
@@ -224,15 +234,29 @@ impl Vram {
         value
     }
 
-    /// The halfword at `offset` (aligned down) in `region`.
+    /// The halfword at `offset` (aligned down) in `region`. Renderers call
+    /// this per pixel, so the common case of one bank per page reads it
+    /// directly.
     pub(crate) fn read_16(&self, region: Region, offset: u32) -> u16 {
-        let offset = offset & !1;
+        let offset = wrap(region, offset & !1);
+        let mask = self.pages[region.index()][(offset / PAGE) as usize];
+        if mask.is_power_of_two() {
+            let bank = mask.trailing_zeros() as usize;
+            if let Some((_, start)) = self.mapped[bank] {
+                let index = (offset - start) as usize;
+                let bytes = &self.banks[bank];
+                return u16::from_le_bytes([bytes[index], bytes[index + 1]]);
+            }
+        }
+        if mask == 0 {
+            return 0;
+        }
         u16::from_le_bytes([self.read_8(region, offset), self.read_8(region, offset + 1)])
     }
 
     /// Writes the byte at `offset` in `region` to every bank mapped there.
     pub(crate) fn write_8(&mut self, region: Region, offset: u32, value: u8) {
-        let offset = offset % region.size();
+        let offset = wrap(region, offset);
         let mut mask = self.pages[region.index()][(offset / PAGE) as usize];
         while mask != 0 {
             let bank = mask.trailing_zeros() as usize;
@@ -340,7 +364,10 @@ mod tests {
         assert_eq!(vram.engine(Engine::A).bg(0x4_0100), 0x1234);
         assert_eq!(vram.read_16(Region::Lcdc, 0x100), 0);
         // CPU addresses mirror the 512 KiB BG region.
-        assert_eq!(Vram::arm9_region(0x0608_0100), Some((Region::BgA, 0x8_0100)));
+        assert_eq!(
+            Vram::arm9_region(0x0608_0100),
+            Some((Region::BgA, 0x8_0100))
+        );
         assert_eq!(vram.read_16(Region::BgA, 0x8_0100 + 0x4_0000), 0x1234);
     }
 

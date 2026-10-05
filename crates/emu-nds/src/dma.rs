@@ -119,7 +119,7 @@ impl Dma {
                 0 => Timing::Immediate,
                 1 => Timing::VBlank,
                 2 => Timing::Cart,
-                _ if index % 2 == 0 => Timing::Wireless,
+                _ if index.is_multiple_of(2) => Timing::Wireless,
                 _ => Timing::GbaCart,
             },
         }
@@ -235,7 +235,13 @@ impl Dma {
 
     /// Ends channel `index`'s run of `count` units with the addresses it
     /// reached. Returns whether it requests its interrupt.
-    pub(crate) fn finish(&mut self, index: usize, count: u32, source: u32, destination: u32) -> bool {
+    pub(crate) fn finish(
+        &mut self,
+        index: usize,
+        count: u32,
+        source: u32,
+        destination: u32,
+    ) -> bool {
         let timing = self.timing(index);
         let full_count = self.count(index);
         let channel = &mut self.channels[index];
@@ -274,7 +280,10 @@ mod tests {
         dma.write(8, ENABLE | WORDS | 16);
         assert_eq!(dma.next_pending(), Some(0));
         let transfer = dma.transfer(0);
-        assert_eq!((transfer.count, transfer.words, transfer.source_step), (16, true, 4));
+        assert_eq!(
+            (transfer.count, transfer.words, transfer.source_step),
+            (16, true, 4)
+        );
         assert!(!dma.finish(0, 16, 0x0200_0040, 0x0300_0040));
         assert_eq!(dma.read(8) & ENABLE, 0);
     }

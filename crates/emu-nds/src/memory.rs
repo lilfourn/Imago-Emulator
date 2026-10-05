@@ -46,8 +46,10 @@ enum Place {
     MainRam(usize),
     SharedWram(usize),
     Arm7Wram(usize),
-    Palette(usize),
-    Oam(usize),
+    /// Palette RAM: engine A below 0x400, engine B above.
+    Palette(u32),
+    /// OAM, split the same way.
+    Oam(u32),
     Vram(Region, u32),
     Arm9Bios(usize),
     Arm7Bios(usize),
@@ -57,6 +59,38 @@ enum Place {
 }
 
 impl Hardware {
+    fn read_palette(&self, offset: u32) -> u16 {
+        if offset < 0x400 {
+            self.engine_a.read_palette(offset)
+        } else {
+            self.engine_b.read_palette(offset & 0x3FF)
+        }
+    }
+
+    fn write_palette(&mut self, offset: u32, value: u16) {
+        if offset < 0x400 {
+            self.engine_a.write_palette(offset, value);
+        } else {
+            self.engine_b.write_palette(offset & 0x3FF, value);
+        }
+    }
+
+    fn read_oam(&self, offset: u32) -> u16 {
+        if offset < 0x400 {
+            self.engine_a.read_oam(offset)
+        } else {
+            self.engine_b.read_oam(offset & 0x3FF)
+        }
+    }
+
+    fn write_oam(&mut self, offset: u32, value: u16) {
+        if offset < 0x400 {
+            self.engine_a.write_oam(offset, value);
+        } else {
+            self.engine_b.write_oam(offset & 0x3FF, value);
+        }
+    }
+
     fn arm9_place(&self, address: u32) -> Place {
         match address >> 24 {
             0x02 => Place::MainRam(address as usize & 0x3F_FFFF),
@@ -67,12 +101,12 @@ impl Hardware {
                 _ => Place::Open,
             },
             0x04 => Place::Io,
-            0x05 => Place::Palette(address as usize & 0x7FF),
+            0x05 => Place::Palette(address & 0x7FF),
             0x06 => match Vram::arm9_region(address) {
                 Some((region, offset)) => Place::Vram(region, offset),
                 None => Place::Open,
             },
-            0x07 => Place::Oam(address as usize & 0x7FF),
+            0x07 => Place::Oam(address & 0x7FF),
             0xFF if address >= 0xFFFF_0000 => Place::Arm9Bios(address as usize & 0xFFF),
             _ => Place::Open,
         }
@@ -110,8 +144,13 @@ impl Hardware {
             Place::MainRam(index) => word(&self.main_ram, index),
             Place::SharedWram(index) => word(&self.shared_wram, index),
             Place::Arm7Wram(index) => word(&self.arm7_wram, index),
-            Place::Palette(index) => word(&self.palette, index),
-            Place::Oam(index) => word(&self.oam, index),
+            Place::Palette(offset) => {
+                u32::from(self.read_palette(offset))
+                    | u32::from(self.read_palette(offset + 2)) << 16
+            }
+            Place::Oam(offset) => {
+                u32::from(self.read_oam(offset)) | u32::from(self.read_oam(offset + 2)) << 16
+            }
             Place::Vram(region, offset) => {
                 u32::from(self.vram.read_16(region, offset))
                     | u32::from(self.vram.read_16(region, offset + 2)) << 16
@@ -135,8 +174,8 @@ impl Hardware {
             Place::MainRam(index) => half(&self.main_ram, index),
             Place::SharedWram(index) => half(&self.shared_wram, index),
             Place::Arm7Wram(index) => half(&self.arm7_wram, index),
-            Place::Palette(index) => half(&self.palette, index),
-            Place::Oam(index) => half(&self.oam, index),
+            Place::Palette(offset) => self.read_palette(offset),
+            Place::Oam(offset) => self.read_oam(offset),
             Place::Vram(region, offset) => self.vram.read_16(region, offset),
             Place::Arm9Bios(index) => half(&self.arm9_bios, index),
             Place::Arm7Bios(index) => half(&self.arm7_bios, index),
@@ -156,8 +195,8 @@ impl Hardware {
             Place::MainRam(index) => self.main_ram[index],
             Place::SharedWram(index) => self.shared_wram[index],
             Place::Arm7Wram(index) => self.arm7_wram[index],
-            Place::Palette(index) => self.palette[index],
-            Place::Oam(index) => self.oam[index],
+            Place::Palette(offset) => (self.read_palette(offset) >> ((offset & 1) * 8)) as u8,
+            Place::Oam(offset) => (self.read_oam(offset) >> ((offset & 1) * 8)) as u8,
             Place::Vram(region, offset) => self.vram.read_8(region, offset),
             Place::Arm9Bios(index) => self.arm9_bios[index],
             Place::Arm7Bios(index) => self.arm7_bios[index],
@@ -178,8 +217,14 @@ impl Hardware {
             Place::MainRam(index) => put_word(&mut self.main_ram, index, value),
             Place::SharedWram(index) => put_word(&mut self.shared_wram, index, value),
             Place::Arm7Wram(index) => put_word(&mut self.arm7_wram, index, value),
-            Place::Palette(index) => put_word(&mut self.palette, index, value),
-            Place::Oam(index) => put_word(&mut self.oam, index, value),
+            Place::Palette(offset) => {
+                self.write_palette(offset, value as u16);
+                self.write_palette(offset + 2, (value >> 16) as u16);
+            }
+            Place::Oam(offset) => {
+                self.write_oam(offset, value as u16);
+                self.write_oam(offset + 2, (value >> 16) as u16);
+            }
             Place::Vram(region, offset) => {
                 self.vram.write_16(region, offset, value as u16);
                 self.vram.write_16(region, offset + 2, (value >> 16) as u16);
@@ -201,8 +246,8 @@ impl Hardware {
             Place::MainRam(index) => put_half(&mut self.main_ram, index, value),
             Place::SharedWram(index) => put_half(&mut self.shared_wram, index, value),
             Place::Arm7Wram(index) => put_half(&mut self.arm7_wram, index, value),
-            Place::Palette(index) => put_half(&mut self.palette, index, value),
-            Place::Oam(index) => put_half(&mut self.oam, index, value),
+            Place::Palette(offset) => self.write_palette(offset, value),
+            Place::Oam(offset) => self.write_oam(offset, value),
             Place::Vram(region, offset) => self.vram.write_16(region, offset, value),
             Place::Io => {
                 if arm9 {
@@ -359,9 +404,13 @@ mod tests {
         let mut hw = hardware();
         hw.arm9_write_8(0x0500_0000, 0x12);
         hw.arm9_write_8(0x0700_0000, 0x12);
-        assert_eq!((hw.palette[0], hw.oam[0]), (0, 0));
+        assert_eq!(
+            (hw.arm9_read_16(0x0500_0000), hw.arm9_read_16(0x0700_0000)),
+            (0, 0)
+        );
         hw.arm9_write_16(0x0500_0402, 0x7FFF);
         assert_eq!(hw.arm9_read_16(0x0500_0402), 0x7FFF);
+        assert_eq!(hw.engine_b.read_palette(2), 0x7FFF);
     }
 
     #[test]
@@ -372,6 +421,10 @@ mod tests {
         assert_eq!(hw.arm9_read_8(0), 0xFF, "the ARM9 has no BIOS at zero");
         hw.vram.set_control(2, 0x82); // C to the ARM7
         hw.arm7_write_16(0x0600_0010, 0x55AA);
-        assert_eq!(hw.arm7_read_16(0x0604_0010), 0x55AA, "mirrors every 256 KiB");
+        assert_eq!(
+            hw.arm7_read_16(0x0604_0010),
+            0x55AA,
+            "mirrors every 256 KiB"
+        );
     }
 }
