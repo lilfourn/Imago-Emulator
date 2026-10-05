@@ -49,7 +49,8 @@ pub trait Core: Send {
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
-    fn backup(&self) -> Option<Backup<'_>>;            // battery save + write counter
+    fn backup_generation(&self) -> Option<u64>;        // battery-save write counter
+    fn save_backup(&self, out: &mut Vec<u8>);          // .sav bytes
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
 }
 ```

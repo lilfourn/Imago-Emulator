@@ -24,6 +24,8 @@ dirs = "7"
 # `runtime_shaders` compiles GPUI's Metal shaders at startup, so building does
 # not need the separately downloaded Xcode Metal Toolchain.
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+png = "0.18"
+postcard = { version = "1", features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1"

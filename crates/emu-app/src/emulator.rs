@@ -129,7 +129,7 @@ impl Emulator {
         let (commands, receiver) = mpsc::channel();
         let latest = Arc::new(Latest::default());
         let runner = Runner {
-            flushed_generation: loaded.core.backup().map_or(0, |backup| backup.generation),
+            flushed_generation: loaded.core.backup_generation().unwrap_or(0),
             loaded,
             input: Input::default(),
             paused: false,
@@ -327,15 +327,16 @@ impl Runner {
     }
 
     fn flush_backup(&mut self) {
-        let Some(backup) = self.loaded.core.backup() else {
+        let Some(generation) = self.loaded.core.backup_generation() else {
             return;
         };
-        if backup.generation == self.flushed_generation {
+        if generation == self.flushed_generation {
             return;
         }
-        let generation = backup.generation;
+        let mut backup = Vec::new();
+        self.loaded.core.save_backup(&mut backup);
         let path = persist::backup_path(&self.loaded.rom_path);
-        match persist::write_atomic(&path, backup.data) {
+        match persist::write_atomic(&path, &backup) {
             Ok(()) => self.flushed_generation = generation,
             Err(error) => self.notice(format!("Could not write {}: {error}", path.display())),
         }

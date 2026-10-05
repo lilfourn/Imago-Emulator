@@ -6,8 +6,8 @@ use crate::System;
 pub struct Media<'a> {
     /// The cartridge image.
     pub rom: &'a [u8],
-    /// The battery save previously written by [`crate::Core::backup`], if
-    /// one exists.
+    /// The battery save previously written by [`crate::Core::save_backup`],
+    /// if one exists.
     pub backup: Option<&'a [u8]>,
     /// BIOS and firmware dumped by the user. A core boots with high-level
     /// emulation or direct boot for anything missing here, and never ships

@@ -17,7 +17,7 @@ pub mod test_pattern;
 mod video;
 
 pub use audio::StereoSample;
-pub use core::{Backup, Core, CoreInfo, FrameRate, MemoryRegion, StateError};
+pub use core::{Core, CoreInfo, FrameRate, MemoryRegion, StateError};
 pub use input::{Button, Buttons, Input, ParseButtonError, TouchPoint};
 pub use media::{LoadError, Media, SystemFile, SystemFileKind};
 pub use system::{ParseSystemError, System};
