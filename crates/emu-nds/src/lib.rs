@@ -7,13 +7,17 @@
 //! banking, both 2D engines, the 3D engine, SPI devices, the cartridge
 //! protocol and sound. See `docs/ROADMAP.md`, Phase 4.
 
+mod bus;
 mod cart;
 mod dma;
 mod gpu2d;
 mod gpu3d;
+mod hardware;
 mod interrupt;
+mod io;
 mod ipc;
 mod math;
+mod memory;
 mod rtc;
 mod spi;
 mod timer;
