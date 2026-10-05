@@ -8,10 +8,15 @@
 //! protocol and sound. See `docs/ROADMAP.md`, Phase 4.
 
 mod cart;
+mod dma;
 mod gpu2d;
 mod gpu3d;
+mod interrupt;
+mod ipc;
+mod math;
 mod rtc;
 mod spi;
+mod timer;
 mod vram;
 
 use emu_core::{
