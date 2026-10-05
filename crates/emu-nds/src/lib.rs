@@ -7,6 +7,12 @@
 //! banking, both 2D engines, the 3D engine, SPI devices, the cartridge
 //! protocol and sound. See `docs/ROADMAP.md`, Phase 4.
 
+mod cart;
+mod gpu2d;
+mod rtc;
+mod spi;
+mod vram;
+
 use emu_core::{
     Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, ScreenSize, StateError,
     StereoSample, System, test_pattern,
