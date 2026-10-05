@@ -13,6 +13,8 @@ actions!(
     ds_emulator,
     [
         OpenRom,
+        ConnectLinkCable,
+        SwitchPlayer,
         TogglePause,
         Reset,
         SaveState,
@@ -28,12 +30,14 @@ actions!(
     ]
 );
 
-/// Runs the app until the user quits, opening `rom` at launch if given.
-pub fn run(rom: Option<PathBuf>) {
+/// Runs the app until the user quits, opening `roms` at launch: one game,
+/// or two linked Game Boy games.
+pub fn run(roms: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
             KeyBinding::new("cmd-o", OpenRom, None),
+            KeyBinding::new("cmd-t", SwitchPlayer, None),
             KeyBinding::new("cmd-p", TogglePause, None),
             KeyBinding::new("cmd-r", Reset, None),
             KeyBinding::new("cmd-s", SaveState, None),
@@ -68,7 +72,7 @@ pub fn run(rom: Option<PathBuf>) {
             ..WindowOptions::default()
         };
         cx.open_window(options, |window, cx| {
-            cx.new(|cx| EmulatorView::new(rom, window, cx))
+            cx.new(|cx| EmulatorView::new(roms, window, cx))
         })
         .expect("opening the main window");
         cx.activate(true);
@@ -83,7 +87,10 @@ fn menus() -> Vec<Menu> {
         },
         Menu {
             name: "File".into(),
-            items: vec![MenuItem::action("Open ROM…", OpenRom)],
+            items: vec![
+                MenuItem::action("Open ROM…", OpenRom),
+                MenuItem::action("Connect Link Cable…", ConnectLinkCable),
+            ],
         },
         Menu {
             name: "Emulation".into(),
@@ -91,6 +98,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Pause / Resume", TogglePause),
                 MenuItem::action("Reset", Reset),
                 MenuItem::action("Fast-Forward", ToggleFastForward),
+                MenuItem::action("Switch Player", SwitchPlayer),
                 MenuItem::separator(),
                 MenuItem::action("Save State", SaveState),
                 MenuItem::action("Load State", LoadState),

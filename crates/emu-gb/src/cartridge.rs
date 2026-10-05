@@ -203,10 +203,10 @@ impl Cartridge {
         }
     }
 
-    /// Advances one M-cycle (the MBC3 clock).
-    pub(crate) fn tick(&mut self) {
+    /// Advances the MBC3 clock by `cycles` real-time clock cycles.
+    pub(crate) fn tick(&mut self, cycles: u32) {
         if let Mbc::Mbc3 { rtc: Some(rtc), .. } = &mut self.mbc {
-            rtc.tick(4);
+            rtc.tick(cycles);
         }
     }
 
@@ -251,6 +251,11 @@ impl Cartridge {
 
     /// A write to 0x0000–0x7FFF: a bank controller register.
     pub(crate) fn write_rom(&mut self, address: u16, value: u8) {
+        let rom_bank_mask = if self.rom.len() > 0x20_0000 {
+            0xFF
+        } else {
+            0x7F
+        };
         match &mut self.mbc {
             Mbc::RomOnly => {}
             Mbc::Mbc1 {
@@ -284,7 +289,9 @@ impl Cartridge {
                 rtc,
             } => match address {
                 0x0000..=0x1FFF => *ram_enabled = value & 0x0F == 0x0A,
-                0x2000..=0x3FFF => *rom_bank = (value & 0x7F).max(1),
+                // ROMs over 2 MiB need the MBC30, whose bank register has all
+                // 8 bits (Japanese Pokémon Crystal).
+                0x2000..=0x3FFF => *rom_bank = (value & rom_bank_mask).max(1),
                 0x4000..=0x5FFF => *select = value,
                 _ => {
                     if let Some(rtc) = rtc {
@@ -400,8 +407,10 @@ struct Rtc {
     halted: bool,
     /// Set when the day counter overflows; cleared only by the game.
     day_carry: bool,
-    /// Clock cycles into the current second.
+    /// Clock cycles into the current RTC second. Frozen while halted.
     subsecond: u32,
+    /// Clock cycles into the current wall-clock second, for `unix_time`.
+    wall_subsecond: u32,
     /// Seconds, minutes, hours, DL, DH as last latched.
     latched: [u8; 5],
     /// The last latch-register write was 0x00.
@@ -420,6 +429,7 @@ impl Rtc {
             halted: false,
             day_carry: false,
             subsecond: 0,
+            wall_subsecond: 0,
             latched: [0; 5],
             latch_armed: false,
             unix_time: start_time,
@@ -433,13 +443,17 @@ impl Rtc {
     }
 
     fn tick(&mut self, cycles: u32) {
-        self.subsecond += cycles;
-        if self.subsecond < CYCLES_PER_SECOND {
+        self.wall_subsecond += cycles;
+        if self.wall_subsecond >= CYCLES_PER_SECOND {
+            self.wall_subsecond -= CYCLES_PER_SECOND;
+            self.unix_time += 1;
+        }
+        if self.halted {
             return;
         }
-        self.subsecond -= CYCLES_PER_SECOND;
-        self.unix_time += 1;
-        if !self.halted {
+        self.subsecond += cycles;
+        if self.subsecond >= CYCLES_PER_SECOND {
+            self.subsecond -= CYCLES_PER_SECOND;
             self.advance_second();
         }
     }
@@ -589,7 +603,7 @@ mod tests {
         let mut cart = Cartridge::new(&rom(0x10, 2, 4), None, 1_000).expect("valid");
         cart.write_rom(0x0000, 0x0A);
         for _ in 0..(CYCLES_PER_SECOND / 4) * 61 {
-            cart.tick();
+            cart.tick(4);
         }
         cart.write_rom(0x6000, 0);
         cart.write_rom(0x6000, 1);

@@ -11,6 +11,8 @@
 use emu_core::StereoSample;
 use serde::{Deserialize, Serialize};
 
+use crate::model::Model;
+
 const CLOCK_HZ: u32 = 4_194_304;
 /// Output sample rate in Hz.
 pub(crate) const SAMPLE_RATE: u32 = 48_000;
@@ -344,6 +346,7 @@ impl Noise {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Apu {
+    model: Model,
     powered: bool,
     /// Raw register values as written, for reading back.
     registers: Box<[u8]>,
@@ -370,8 +373,9 @@ pub(crate) struct Apu {
 impl Apu {
     /// The state the DMG boot ROM leaves: sound on, channel 1 having just
     /// played the boot chime.
-    pub(crate) fn after_boot() -> Self {
+    pub(crate) fn after_boot(model: Model) -> Self {
         let mut apu = Self {
+            model,
             powered: true,
             registers: vec![0; 0x20].into_boxed_slice(),
             wave_ram: vec![0; 0x10].into_boxed_slice(),
@@ -419,19 +423,21 @@ impl Apu {
         out.append(&mut self.samples);
     }
 
-    /// Advances one M-cycle. `frame_sequencer` is true when DIV's bit 4
-    /// fell during it (512 Hz).
-    pub(crate) fn tick(&mut self, frame_sequencer: bool) {
+    /// Advances `cycles` real-time clock cycles (one CPU M-cycle: 4, or 2
+    /// in CGB double speed). `frame_sequencer` is true when the DIV bit that
+    /// clocks it at 512 Hz fell.
+    pub(crate) fn tick(&mut self, cycles: u8, frame_sequencer: bool) {
         if frame_sequencer {
             self.clock_frame_sequencer();
         }
+        let cycles = u32::from(cycles);
         if self.powered {
-            self.pulse1.tick(4);
-            self.pulse2.tick(4);
-            self.wave.tick(4, &self.wave_ram);
-            self.noise.tick(4);
+            self.pulse1.tick(cycles);
+            self.pulse2.tick(cycles);
+            self.wave.tick(cycles, &self.wave_ram);
+            self.noise.tick(cycles);
         }
-        self.mix();
+        self.mix(cycles);
     }
 
     /// One 512 Hz frame-sequencer step. Also called when a DIV write makes
@@ -471,7 +477,7 @@ impl Apu {
         self.frame_step.is_multiple_of(2)
     }
 
-    fn mix(&mut self) {
+    fn mix(&mut self, cycles: u32) {
         // Each DAC maps a digital 0–15 to -15..=15; a DAC that is off
         // contributes nothing.
         let dac = |digital: u8, on: bool| if on { i32::from(digital) * 2 - 15 } else { 0 };
@@ -498,7 +504,7 @@ impl Apu {
         }
         self.accumulated_cycles += 1;
 
-        self.sample_clock += 4 * SAMPLE_RATE;
+        self.sample_clock += cycles * SAMPLE_RATE;
         if self.sample_clock < CLOCK_HZ {
             return;
         }
@@ -535,9 +541,10 @@ impl Apu {
             }
             _ => {
                 // While the wave channel plays, the CPU only reaches the
-                // byte the channel is reading, and only in that cycle.
+                // byte the channel is reading; on DMG only in the very cycle
+                // it is read.
                 if self.wave.enabled {
-                    if self.wave.just_read {
+                    if self.wave.just_read || self.model == Model::Cgb {
                         self.wave_ram[usize::from(self.wave.position / 2)]
                     } else {
                         0xFF
@@ -552,7 +559,7 @@ impl Apu {
     pub(crate) fn write(&mut self, address: u16, value: u8) {
         if (0xFF30..=0xFF3F).contains(&address) {
             if self.wave.enabled {
-                if self.wave.just_read {
+                if self.wave.just_read || self.model == Model::Cgb {
                     self.wave_ram[usize::from(self.wave.position / 2)] = value;
                 }
             } else {
@@ -566,6 +573,9 @@ impl Apu {
         }
         if !self.powered {
             // On DMG the length counters stay writable while powered off.
+            if self.model == Model::Cgb {
+                return;
+            }
             match address {
                 0xFF11 => self.pulse1.length.counter = 64 - u16::from(value & 0x3F),
                 0xFF16 => self.pulse2.length.counter = 64 - u16::from(value & 0x3F),
@@ -708,6 +718,7 @@ impl Apu {
         }
         // Powering off clears every register, but on DMG the length
         // counters survive.
+        let keep_lengths = self.model == Model::Dmg;
         let lengths = [
             self.pulse1.length.counter,
             self.pulse2.length.counter,
@@ -724,10 +735,12 @@ impl Apu {
         self.pulse2 = Pulse::default();
         self.wave = Wave::default();
         self.noise = Noise::default();
-        self.pulse1.length.counter = lengths[0];
-        self.pulse2.length.counter = lengths[1];
-        self.wave.length.counter = lengths[2];
-        self.noise.length.counter = lengths[3];
+        if keep_lengths {
+            self.pulse1.length.counter = lengths[0];
+            self.pulse2.length.counter = lengths[1];
+            self.wave.length.counter = lengths[2];
+            self.noise.length.counter = lengths[3];
+        }
         self.powered = false;
     }
 }
@@ -748,13 +761,13 @@ mod tests {
 
     fn run_cycles(apu: &mut Apu, m_cycles: u32) {
         for _ in 0..m_cycles {
-            apu.tick(false);
+            apu.tick(4, false);
         }
     }
 
     #[test]
     fn produces_48_khz_output() {
-        let mut apu = Apu::after_boot();
+        let mut apu = Apu::after_boot(Model::Dmg);
         run_cycles(&mut apu, CLOCK_HZ / 4);
         let mut samples = Vec::new();
         apu.drain_samples(&mut samples);
@@ -763,7 +776,7 @@ mod tests {
 
     #[test]
     fn a_triggered_square_wave_is_audible() {
-        let mut apu = Apu::after_boot();
+        let mut apu = Apu::after_boot(Model::Dmg);
         apu.write(0xFF25, 0x11); // channel 1 to both sides
         apu.write(0xFF12, 0xF0); // full volume, DAC on
         apu.write(0xFF13, 0x00);
@@ -782,13 +795,13 @@ mod tests {
 
     #[test]
     fn length_counter_silences_the_channel() {
-        let mut apu = Apu::after_boot();
+        let mut apu = Apu::after_boot(Model::Dmg);
         apu.write(0xFF12, 0xF0);
         apu.write(0xFF11, 0x3F); // length 1
         apu.write(0xFF14, 0xC0); // trigger with length enabled
         assert_eq!(apu.read(0xFF26) & 0x01, 0x01);
-        apu.tick(true);
-        apu.tick(true);
+        apu.tick(4, true);
+        apu.tick(4, true);
         assert_eq!(apu.read(0xFF26) & 0x01, 0x00);
     }
 }

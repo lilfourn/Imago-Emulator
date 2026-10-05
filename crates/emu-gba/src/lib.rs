@@ -17,6 +17,7 @@ pub const INFO: CoreInfo = CoreInfo {
     system: System::Gba,
     screens: &SCREENS,
     touch_screen: None,
+    players: 1,
     frame_rate: FrameRate::new(16_777_216, 280_896),
     audio_sample_rate: 32_768,
     state_version: 1,
@@ -60,7 +61,8 @@ impl Core for Gba {
         INFO
     }
 
-    fn run_frame(&mut self, input: &Input, _audio: &mut Vec<StereoSample>) {
+    fn run_frame(&mut self, inputs: &[Input], _audio: &mut Vec<StereoSample>) {
+        let input = inputs.first().copied().unwrap_or_default();
         self.frame_count += 1;
         let [screen] = &mut self.screens;
         test_pattern::color_bars(screen, self.frame_count);
@@ -115,7 +117,7 @@ mod tests {
     fn save_state_round_trips() {
         let rom = rom_with_valid_header();
         let mut gba = Gba::new(&Media::new(&rom)).expect("valid header");
-        gba.run_frame(&Input::default(), &mut Vec::new());
+        gba.run_frame(&[Input::default()], &mut Vec::new());
         let mut state = Vec::new();
         gba.save_state(&mut state);
         gba.reset();

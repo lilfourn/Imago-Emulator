@@ -45,13 +45,13 @@ Rules that keep this shape:
 ```rust
 pub trait Core: Send {
     fn info(&self) -> CoreInfo;                       // system, screens, timing, audio rate
-    fn run_frame(&mut self, input: &Input, audio: &mut Vec<StereoSample>);
+    fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>); // one per player
     fn screens(&self) -> &[Frame];                     // DS: [top, bottom]
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
-    fn backup_generation(&self) -> Option<u64>;        // battery-save write counter
-    fn save_backup(&self, out: &mut Vec<u8>);          // .sav bytes
+    fn backup_generation(&self, player: usize) -> Option<u64>; // battery-save write counter
+    fn save_backup(&self, player: usize, out: &mut Vec<u8>);   // .sav bytes
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
 }
 ```
@@ -59,7 +59,10 @@ pub trait Core: Send {
 - **Construction is per system** (`emu_gba::Gba::new(&Media)`), so a core
   always has a game loaded. `Media` carries the ROM, the battery save, any
   user-dumped BIOS/firmware, and the RTC start time.
-- **Input is per frame**: a 12-bit button mask (bit order follows the GBA
+- **Players**: `CoreInfo::players` is 1, or 2 for a linked pair
+  ([decision 0004](decisions/0004-linked-cores.md)). Each player has an
+  input and a cartridge; screens split evenly between players.
+- **Input is per frame and per player**: a 12-bit button mask (bit order follows the GBA
   `KEYINPUT` register, then DS X/Y) plus an optional touch point in
   bottom-screen pixels.
 - **Pixels** are `u32` `0xFFRRGGBB`. On little-endian hosts that is BGRA in

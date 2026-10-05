@@ -22,10 +22,12 @@ pub trait Core: Send {
 
     /// Emulates exactly one video frame.
     ///
-    /// `input` is held for the whole frame. Audio produced during the frame
-    /// is appended to `audio` at [`CoreInfo::audio_sample_rate`]. The caller
-    /// owns the buffer and clears it.
-    fn run_frame(&mut self, input: &Input, audio: &mut Vec<StereoSample>);
+    /// `inputs` holds one [`Input`] per player ([`CoreInfo::players`]),
+    /// held for the whole frame; missing players hold nothing. Audio
+    /// produced during the frame is appended to `audio` at
+    /// [`CoreInfo::audio_sample_rate`]. The caller owns the buffer and
+    /// clears it.
+    fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>);
 
     /// The screens as of the last completed frame, in [`CoreInfo::screens`]
     /// order. For the DS, index 0 is the top screen.
@@ -50,21 +52,24 @@ pub trait Core: Send {
     /// error the core is left exactly as it was.
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
 
-    /// How many times the game has written to battery-backed memory (SRAM,
-    /// EEPROM, flash or a cartridge clock), or `None` if it has none.
+    /// How many times `player`'s game has written to battery-backed memory
+    /// (SRAM, EEPROM, flash or a cartridge clock), or `None` if it has
+    /// none. Each player has their own cartridge.
     ///
     /// Frontends compare this with the value at their last flush and call
     /// [`Core::save_backup`] only when it changed, on a timer rather than on
     /// every write.
-    fn backup_generation(&self) -> Option<u64> {
+    fn backup_generation(&self, player: usize) -> Option<u64> {
+        let _ = player;
         None
     }
 
-    /// Appends the battery save to `out` in the de facto `.sav` layout for
-    /// the system (for example, Game Boy cartridge RAM followed by the
-    /// 48-byte MBC3 clock trailer). Appends nothing if there is no backup.
-    fn save_backup(&self, out: &mut Vec<u8>) {
-        let _ = out;
+    /// Appends `player`'s battery save to `out` in the de facto `.sav`
+    /// layout for the system (for example, Game Boy cartridge RAM followed
+    /// by the 48-byte MBC3 clock trailer). Appends nothing if there is no
+    /// backup.
+    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
+        let _ = (player, out);
     }
 
     /// A read-only view of a memory region, for debuggers, cheat search and
@@ -84,6 +89,10 @@ pub struct CoreInfo {
     pub screens: &'static [ScreenSize],
     /// Index into `screens` of the touchscreen, if the system has one.
     pub touch_screen: Option<usize>,
+    /// Independent players, each with their own input and cartridge: 1,
+    /// or 2 for a linked pair. Screens are split evenly between players in
+    /// order; see [`CoreInfo::player_for_screen`].
+    pub players: usize,
     /// Exact video refresh rate.
     pub frame_rate: FrameRate,
     /// Rate of the samples appended by [`Core::run_frame`], in Hz.
@@ -91,6 +100,14 @@ pub struct CoreInfo {
     /// Version of the bytes written by [`Core::save_state`]. Bump it whenever
     /// the layout changes.
     pub state_version: u16,
+}
+
+impl CoreInfo {
+    /// The player who sees screen `screen`.
+    #[must_use]
+    pub fn player_for_screen(&self, screen: usize) -> usize {
+        screen * self.players.max(1) / self.screens.len().max(1)
+    }
 }
 
 /// An exact video refresh rate: the master clock divided by the number of

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
 
-use emu_core::{Core, Media};
+use emu_core::{Button, Core, Input, Media};
 use emu_gb::Gb;
 
 const CYCLES_PER_SECOND: u64 = 4_194_304;
@@ -36,11 +36,21 @@ enum Check {
 }
 
 struct Case {
+    /// Name in the report and the ratchet: the path, plus the subtest for
+    /// ROMs run more than once.
+    label: String,
     /// Path relative to the bundle root.
     path: String,
     check: Check,
     timeout_seconds: u64,
+    /// Buttons to tap one after another, starting one second in; for test
+    /// ROMs with a menu.
+    presses: &'static [Button],
 }
+
+/// When scripted presses start, and how long each press and gap lasts.
+const PRESS_START: u64 = CYCLES_PER_SECOND;
+const PRESS_LENGTH: u64 = CYCLES_PER_SECOND / 8;
 
 fn bundle_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-roms/game-boy-test-roms")
@@ -86,9 +96,11 @@ fn cases() -> Vec<Case> {
     let mut cases = Vec::new();
     let mut add = |paths: Vec<String>, check, timeout_seconds| {
         cases.extend(paths.into_iter().map(|path| Case {
+            label: path.clone(),
             path,
             check,
             timeout_seconds,
+            presses: &[],
         }));
     };
     add(roms_in("blargg/cpu_instrs"), Check::Serial, 60);
@@ -113,7 +125,67 @@ fn cases() -> Vec<Case> {
         Check::Screenshot("dmg-acid2-dmg.png"),
         5,
     );
+    add(
+        vec!["cgb-acid2/cgb-acid2.gbc".to_owned()],
+        Check::Screenshot("cgb-acid2.png"),
+        5,
+    );
+    add(
+        vec!["cgb-acid-hell/cgb-acid-hell.gbc".to_owned()],
+        Check::Screenshot("cgb-acid-hell.png"),
+        5,
+    );
+    add(roms_in("blargg/cgb_sound"), Check::BlarggMemory, 40);
+    add(
+        vec!["mbc3-tester/mbc3-tester.gb".to_owned()],
+        Check::Screenshot("mbc3-tester-dmg.png"),
+        1,
+    );
+    // rtc3test picks a subtest from a menu, then runs it for a fixed time.
+    for (subtest, presses, png, seconds) in [
+        (
+            "basic",
+            &[Button::A][..],
+            "rtc3test-basic-tests-cgb.png",
+            13,
+        ),
+        (
+            "range",
+            &[Button::Down, Button::A][..],
+            "rtc3test-range-tests-cgb.png",
+            8,
+        ),
+        (
+            "sub-second writes",
+            &[Button::Down, Button::Down, Button::A][..],
+            "rtc3test-sub-second-writes-cgb.png",
+            26,
+        ),
+    ] {
+        cases.push(Case {
+            label: format!("rtc3test/rtc3test.gb ({subtest})"),
+            path: "rtc3test/rtc3test.gb".to_owned(),
+            check: Check::Screenshot(png),
+            timeout_seconds: seconds + 3,
+            presses,
+        });
+    }
     cases
+}
+
+/// The input a scripted case holds at `cycle`.
+fn scripted_input(presses: &[Button], cycle: u64) -> Input {
+    let mut input = Input::default();
+    if let Some(elapsed) = cycle.checked_sub(PRESS_START) {
+        let slot = elapsed / PRESS_LENGTH;
+        // Even slots hold a button, odd slots are gaps between presses.
+        if slot.is_multiple_of(2)
+            && let Some(button) = usize::try_from(slot / 2).ok().and_then(|i| presses.get(i))
+        {
+            input.buttons.set(*button, true);
+        }
+    }
+    input
 }
 
 /// Runs one ROM; `Ok(())` if it passes, otherwise why not.
@@ -124,7 +196,15 @@ fn run(case: &Case) -> Result<(), String> {
     let deadline = case.timeout_seconds * CYCLES_PER_SECOND;
     let mut next_poll = 0;
 
+    let mut held = Input::default();
     while gb.cycles() < deadline {
+        if !case.presses.is_empty() {
+            let input = scripted_input(case.presses, gb.cycles());
+            if input != held {
+                gb.set_input(&input);
+                held = input;
+            }
+        }
         let opcode = gb.step();
         match case.check {
             Check::Fibonacci | Check::Screenshot(_) if opcode == Some(0x40) => {
@@ -182,7 +262,15 @@ fn finish(check: Check, gb: &Gb, rom_path: &Path) -> Result<(), String> {
     match check {
         Check::Screenshot(png) => {
             let expected = rom_path.with_file_name(png);
-            compare_screen(gb, &expected)
+            let result = compare_screen(gb, &expected);
+            if result.is_err() {
+                // Keep what we drew next to the report, for comparing by eye.
+                let actual = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/gb-test-roms")
+                    .join(png.replace(".png", "-actual.png"));
+                write_screen(gb, &actual).ok();
+            }
+            result
         }
         _ => {
             let r = gb.registers();
@@ -194,6 +282,28 @@ fn finish(check: Check, gb: &Gb, rom_path: &Path) -> Result<(), String> {
             }
         }
     }
+}
+
+fn write_screen(gb: &Gb, path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path.parent().expect("has a parent"))?;
+    let screen = &gb.screens()[0];
+    let size = screen.size();
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(fs::File::create(path)?),
+        u32::from(size.width),
+        u32::from(size.height),
+    );
+    encoder.set_color(png::ColorType::Rgb);
+    let rgb: Vec<u8> = screen
+        .pixels()
+        .iter()
+        .flat_map(|pixel| {
+            let [b, g, r, _] = pixel.to_le_bytes();
+            [r, g, b]
+        })
+        .collect();
+    encoder.write_header()?.write_image_data(&rgb)?;
+    Ok(())
 }
 
 fn compare_screen(gb: &Gb, png_path: &Path) -> Result<(), String> {
@@ -208,11 +318,13 @@ fn compare_screen(gb: &Gb, png_path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let channels = info.color_type.samples();
     let screen = &gb.screens()[0];
-    let mismatches = screen
+    let width = usize::from(screen.size().width);
+    let mismatches: Vec<(usize, [u8; 3], [u8; 3])> = screen
         .pixels()
         .iter()
         .zip(buffer.chunks_exact(channels))
-        .filter(|(ours, theirs)| {
+        .enumerate()
+        .filter_map(|(index, (ours, theirs))| {
             let [b, g, r, _] = ours.to_le_bytes();
             // Greyscale PNGs have one or two channels.
             let expected = if channels < 3 {
@@ -220,17 +332,22 @@ fn compare_screen(gb: &Gb, png_path: &Path) -> Result<(), String> {
             } else {
                 [theirs[0], theirs[1], theirs[2]]
             };
-            [r, g, b] != expected
+            ([r, g, b] != expected).then_some((index, [r, g, b], expected))
         })
-        .count();
-    if mismatches == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "{mismatches} pixels differ from {}",
-            png_path.display()
-        ))
-    }
+        .collect();
+    let Some(&(index, ours, expected)) = mismatches.first() else {
+        return Ok(());
+    };
+    let hex = |[r, g, b]: [u8; 3]| format!("#{r:02x}{g:02x}{b:02x}");
+    Err(format!(
+        "{} pixels differ from {}; first at ({}, {}): ours {}, expected {}",
+        mismatches.len(),
+        png_path.display(),
+        index % width,
+        index / width,
+        hex(ours),
+        hex(expected),
+    ))
 }
 
 #[test]
@@ -254,7 +371,7 @@ fn test_roms() {
                     results
                         .lock()
                         .expect("lock")
-                        .push((case.path.clone(), result));
+                        .push((case.label.clone(), result));
                 }
             });
         }

@@ -1,7 +1,8 @@
 //! Where per-game files live on disk, and how they are written.
 //!
 //! Battery saves and save states sit next to the ROM, as in mGBA and
-//! melonDS: `game.nds` gets `game.sav` and `game.ss1`.
+//! melonDS: `game.nds` gets `game.sav` and `game.ss1`. A linked pair saves
+//! its states next to the first player's ROM as `game.ls1`.
 
 use std::fs;
 use std::io;
@@ -12,9 +13,14 @@ pub fn backup_path(rom: &Path) -> PathBuf {
     rom.with_extension("sav")
 }
 
-/// The save state file for `rom` in `slot`.
-pub fn state_path(rom: &Path, slot: u8) -> PathBuf {
-    rom.with_extension(format!("ss{slot}"))
+/// The save state file in `slot` for a session of `roms`, one per player.
+///
+/// # Panics
+///
+/// Panics if `roms` is empty.
+pub fn state_path(roms: &[PathBuf], slot: u8) -> PathBuf {
+    let extension = if roms.len() > 1 { "ls" } else { "ss" };
+    roms[0].with_extension(format!("{extension}{slot}"))
 }
 
 /// Replaces `path` with `bytes` so that a crash mid-write never leaves a
@@ -36,7 +42,15 @@ mod tests {
     fn save_files_sit_next_to_the_rom() {
         let rom = Path::new("/games/platinum.nds");
         assert_eq!(backup_path(rom), Path::new("/games/platinum.sav"));
-        assert_eq!(state_path(rom, 1), Path::new("/games/platinum.ss1"));
+        assert_eq!(
+            state_path(&[rom.to_owned()], 1),
+            Path::new("/games/platinum.ss1")
+        );
+        let linked = [
+            PathBuf::from("/games/red.gb"),
+            PathBuf::from("/games/blue.gb"),
+        ];
+        assert_eq!(state_path(&linked, 2), Path::new("/games/red.ls2"));
     }
 
     #[test]

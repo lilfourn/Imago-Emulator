@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use emu_core::{CoreInfo, Frame, Input, TouchPoint};
+use emu_core::{CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use gpui::{
     Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
@@ -13,8 +13,9 @@ use gpui::{
 };
 
 use crate::app::{
-    LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, NextStateSlot, OpenRom,
-    PreviousStateSlot, Reset, SaveState, SwapScreens, ToggleFastForward, TogglePause,
+    ConnectLinkCable, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, NextStateSlot,
+    OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer, ToggleFastForward,
+    TogglePause,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
@@ -22,6 +23,7 @@ use crate::controls::{Controls, HeldState};
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement};
+use crate::slots::{self, SlotPreview};
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -41,9 +43,16 @@ pub struct EmulatorView {
     touch: Option<TouchPoint>,
     /// What the emulation thread was last told is held.
     sent: HeldState,
+    /// The player keyboard and gamepads control, in multi-player sessions.
+    active_player: usize,
     state_slot: u8,
     notice: Option<SharedString>,
     notice_timer: Option<Task<()>>,
+    /// Screenshot of the selected save-state slot, shown with the notice.
+    slot_image: Option<Arc<RenderImage>>,
+    /// Images no longer shown, to remove from GPUI's atlas on next render.
+    stale_images: Vec<Arc<RenderImage>>,
+    slot_preview_task: Option<Task<()>>,
     _gamepad: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -52,6 +61,8 @@ pub struct EmulatorView {
 struct Session {
     emulator: Emulator,
     info: CoreInfo,
+    /// One ROM per player.
+    rom_paths: Vec<PathBuf>,
     frames: Vec<Frame>,
     sequence: u64,
     /// Per screen: the pre-scale factor and the image built with it.
@@ -62,8 +73,8 @@ struct Session {
 }
 
 impl EmulatorView {
-    /// Creates the view, loading `rom` straight away if given.
-    pub fn new(rom: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Creates the view, loading `roms` straight away if there are any.
+    pub fn new(roms: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
 
@@ -110,9 +121,13 @@ impl EmulatorView {
             controls: Controls::default(),
             touch: None,
             sent: HeldState::default(),
+            active_player: 0,
             state_slot: 1,
             notice: None,
             notice_timer: None,
+            slot_image: None,
+            stale_images: Vec::new(),
+            slot_preview_task: None,
             _gamepad: gamepad_task,
             _subscriptions: subscriptions,
         };
@@ -121,19 +136,24 @@ impl EmulatorView {
             Some(Err(error)) => view.show_notice(format!("{error}; using default bindings"), cx),
             None => {}
         }
-        if let Some(rom) = rom {
-            view.open(rom, window, cx);
+        if !roms.is_empty() {
+            view.open(roms, window, cx);
         }
         view
     }
 
-    /// Loads `path` off the UI thread, then starts it.
-    fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let name = file_name(&path);
+    /// Loads one ROM per player off the UI thread, then starts them; two
+    /// ROMs are joined by a link cable.
+    fn open(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let name = paths
+            .iter()
+            .map(|path| file_name(path))
+            .collect::<Vec<_>>()
+            .join(" + ");
         self.show_notice(format!("Loading {name}…"), cx);
         let load = cx
             .background_executor()
-            .spawn(async move { emulator::load(&path) });
+            .spawn(async move { emulator::load(&paths) });
         self.loading = Some(cx.spawn_in(window, async move |this, cx| {
             let loaded = load.await;
             this.update_in(cx, |this, window, cx| match loaded {
@@ -156,6 +176,7 @@ impl EmulatorView {
             }
         };
         let (events, receiver) = async_channel::unbounded();
+        let rom_paths = loaded.rom_paths().to_vec();
         let emulator = Emulator::start(loaded, events, audio_sink);
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
@@ -167,6 +188,7 @@ impl EmulatorView {
         self.session = Some(Session {
             emulator,
             info,
+            rom_paths,
             frames: Vec::new(),
             sequence: 0,
             images: Vec::new(),
@@ -176,8 +198,14 @@ impl EmulatorView {
         // The new emulator starts with nothing held; resend what is.
         self.sent = HeldState::default();
         self.touch = None;
+        self.active_player = 0;
         self.sync_held();
-        window.set_window_title(&format!("{name} — {}", info.system.name()));
+        if info.players > 1 {
+            self.layout.arrangement = Arrangement::Horizontal;
+            window.set_window_title(&format!("{name} — {} link", info.system.name()));
+        } else {
+            window.set_window_title(&format!("{name} — {}", info.system.name()));
+        }
         self.show_notice(format!("Running {name}"), cx);
     }
 
@@ -217,10 +245,31 @@ impl EmulatorView {
     }
 
     fn send_input(&self) {
-        self.send(Command::SetInput(Input {
-            buttons: self.sent.buttons,
-            touch: self.touch,
-        }));
+        self.send(Command::SetInput {
+            player: self.active_player,
+            input: Input {
+                buttons: self.sent.buttons,
+                touch: self.touch,
+            },
+        });
+    }
+
+    /// Hands keyboard and gamepad control to `player`, releasing everything
+    /// the previous player held.
+    fn switch_player(&mut self, player: usize, cx: &mut Context<Self>) {
+        let Some(players) = self.session.as_ref().map(|s| s.info.players) else {
+            return;
+        };
+        if players < 2 || player == self.active_player || player >= players {
+            return;
+        }
+        self.send(Command::SetInput {
+            player: self.active_player,
+            input: Input::default(),
+        });
+        self.active_player = player;
+        self.send_input();
+        self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
 
     /// Tells the emulation thread about any change in held inputs.
@@ -289,7 +338,44 @@ impl EmulatorView {
         } else {
             (self.state_slot + STATE_SLOTS - 2) % STATE_SLOTS + 1
         };
-        self.show_notice(format!("State slot {}", self.state_slot), cx);
+        let slot = self.state_slot;
+        self.show_notice(format!("State slot {slot}"), cx);
+        let Some(rom_paths) = self.session.as_ref().map(|s| s.rom_paths.clone()) else {
+            return;
+        };
+        let preview = cx
+            .background_executor()
+            .spawn(async move { slots::preview(&rom_paths, slot) });
+        self.slot_preview_task = Some(cx.spawn(async move |this, cx| {
+            let preview = preview.await;
+            this.update(cx, |this, cx| this.show_slot_preview(slot, preview, cx))
+                .ok();
+        }));
+    }
+
+    fn show_slot_preview(
+        &mut self,
+        slot: u8,
+        preview: Option<SlotPreview>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preview) = preview else {
+            self.show_notice(format!("State slot {slot} · empty"), cx);
+            return;
+        };
+        let age = preview.saved.elapsed().unwrap_or_default();
+        self.show_notice(
+            format!("State slot {slot} · saved {}", slots::describe_age(age)),
+            cx,
+        );
+        if let Some((width, height, rgb)) = preview.thumbnail {
+            let mut frame = Frame::new(ScreenSize::new(width, height));
+            for (pixel, color) in frame.pixels_mut().iter_mut().zip(rgb.chunks_exact(3)) {
+                *pixel = pack_rgb(color[0], color[1], color[2]);
+            }
+            let image = video::render_image(&frame, 2);
+            self.stale_images.extend(self.slot_image.replace(image));
+        }
     }
 
     /// Points the stylus at `position`, or lifts it if that is off the
@@ -308,7 +394,16 @@ impl EmulatorView {
         }
     }
 
-    fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // In a multi-player session, clicking a screen takes control of it.
+        let point = (f32::from(event.position.x), f32::from(event.position.y));
+        let clicked = self.session.as_ref().and_then(|session| {
+            let placement = self.placements.iter().find(|p| p.rect.contains(point))?;
+            Some(session.info.player_for_screen(placement.screen))
+        });
+        if let Some(player) = clicked {
+            self.switch_player(player, cx);
+        }
         self.touch_at(event.position);
     }
 
@@ -324,12 +419,19 @@ impl EmulatorView {
         }
     }
 
-    fn open_rom(&mut self, _: &OpenRom, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks for a ROM file, then calls `then` with it.
+    fn prompt_for_rom(
+        &mut self,
+        prompt: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open".into()),
+            prompt: Some(prompt.into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -338,15 +440,41 @@ impl EmulatorView {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            this.update_in(cx, |this, window, cx| this.open(path, window, cx))
+            this.update_in(cx, |this, window, cx| then(this, path, window, cx))
                 .ok();
         })
         .detach();
     }
 
+    fn open_rom(&mut self, _: &OpenRom, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_for_rom("Open", window, cx, |this, path, window, cx| {
+            this.open(vec![path], window, cx);
+        });
+    }
+
+    /// Restarts the running Game Boy game linked to a second one.
+    fn connect_link_cable(
+        &mut self,
+        _: &ConnectLinkCable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first = self.session.as_ref().and_then(|session| {
+            let single_game_boy = session.info.players == 1 && session.info.system == System::Gb;
+            single_game_boy.then(|| session.rom_paths[0].clone())
+        });
+        let Some(first) = first else {
+            self.show_notice("Open a Game Boy game first, then connect the cable", cx);
+            return;
+        };
+        self.prompt_for_rom("Connect", window, cx, move |this, second, window, cx| {
+            this.open(vec![first, second], window, cx);
+        });
+    }
+
     fn drop_files(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = paths.paths().first() {
-            self.open(path.clone(), window, cx);
+            self.open(vec![path.clone()], window, cx);
         }
     }
 
@@ -399,6 +527,11 @@ impl Render for EmulatorView {
             .bg(rgb(0x0011_1111))
             .text_color(rgb(0x00DD_DDDD))
             .on_action(cx.listener(Self::open_rom))
+            .on_action(cx.listener(Self::connect_link_cable))
+            .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
+                let players = this.session.as_ref().map_or(1, |s| s.info.players);
+                this.switch_player((this.active_player + 1) % players.max(1), cx);
+            }))
             .on_action(cx.listener(|this, _: &TogglePause, _, _| this.send(Command::TogglePause)))
             .on_action(cx.listener(|this, _: &Reset, _, _| this.send(Command::Reset)))
             .on_action(cx.listener(|this, _: &SaveState, _, _| {
@@ -459,19 +592,34 @@ impl Render for EmulatorView {
             root = root.child(welcome());
         }
 
+        // A preview only lives as long as its notice.
+        if self.notice.is_none() {
+            self.stale_images.extend(self.slot_image.take());
+        }
+        for image in self.stale_images.drain(..) {
+            window.drop_image(image).ok();
+        }
         if let Some(notice) = &self.notice {
-            root = root.child(
-                div()
-                    .absolute()
-                    .bottom(px(12.0))
-                    .left(px(12.0))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgba(0x0000_00CC))
-                    .text_sm()
-                    .child(notice.clone()),
-            );
+            let mut card = div()
+                .absolute()
+                .bottom(px(12.0))
+                .left(px(12.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgba(0x0000_00CC))
+                .text_sm();
+            if let Some(image) = &self.slot_image {
+                card = card.child(
+                    img(Arc::clone(image))
+                        .w(px(160.0))
+                        .object_fit(ObjectFit::Contain),
+                );
+            }
+            root = root.child(card.child(notice.clone()));
         }
         root
     }

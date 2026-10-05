@@ -49,6 +49,20 @@ pub fn create(system: System, media: &Media<'_>) -> Result<Box<dyn Core>, LoadEr
     })
 }
 
+/// Powers on `system` with one game per entry of `media`, joined by a
+/// link cable: one core with a player per game.
+///
+/// # Errors
+///
+/// Returns [`LoadError::Unsupported`] for systems without link play yet,
+/// or the core's error if it rejects a ROM.
+pub fn create_linked(system: System, media: &[Media<'_>]) -> Result<Box<dyn Core>, LoadError> {
+    match system {
+        System::Gb => Ok(Box::new(emu_gb::Linked::new(media)?)),
+        System::Gba | System::Nds => Err(LoadError::Unsupported("link play for this system")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
