@@ -53,12 +53,18 @@ const GBA: [Region; 2] = [
     },
 ];
 
+const NDS: [Region; 1] = [Region {
+    name: "Main RAM",
+    start: 0x0200_0000,
+    length: 0x40_0000,
+}];
+
 /// The regions the viewer offers for `system`.
 pub fn regions(system: System) -> &'static [Region] {
     match system {
         System::Gb => &GB,
         System::Gba => &GBA,
-        System::Nds => &[],
+        System::Nds => &NDS,
     }
 }
 
