@@ -14,11 +14,12 @@ use gpui::{
 
 use crate::app::{
     ConnectLinkCable, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState, NextStateSlot,
-    OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer, ToggleFastForward,
-    TogglePause,
+    OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer, ToggleColorCorrection,
+    ToggleFastForward, TogglePause,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
+use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::gamepad::{self, PadEvent};
@@ -36,6 +37,8 @@ pub struct EmulatorView {
     focus: FocusHandle,
     bindings: Bindings,
     layout: Layout,
+    /// Show GBC and GBA colours as their screens did.
+    color_correction: bool,
     session: Option<Session>,
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
@@ -65,6 +68,8 @@ struct Session {
     rom_paths: Vec<PathBuf>,
     frames: Vec<Frame>,
     sequence: u64,
+    /// The system's colour correction, if it has one.
+    correction: Option<Correction>,
     /// Per screen: the pre-scale factor and the image built with it.
     images: Vec<Option<(usize, Arc<RenderImage>)>>,
     _events: Task<()>,
@@ -115,6 +120,7 @@ impl EmulatorView {
             focus,
             bindings: Bindings::default(),
             layout: Layout::default(),
+            color_correction: true,
             session: None,
             loading: None,
             placements: Vec::new(),
@@ -191,6 +197,7 @@ impl EmulatorView {
             rom_paths,
             frames: Vec::new(),
             sequence: 0,
+            correction: Correction::for_system(info.system),
             images: Vec::new(),
             _events: task,
             _audio: audio_output,
@@ -482,12 +489,35 @@ impl EmulatorView {
         self.layout.arrangement = arrangement;
         cx.notify();
     }
+
+    fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
+        self.color_correction = !self.color_correction;
+        if let Some(session) = &mut self.session {
+            // Rebuild every screen with the new colours.
+            let images = session.images.iter_mut().filter_map(Option::take);
+            self.stale_images.extend(images.map(|(_, image)| image));
+        }
+        self.show_notice(
+            if self.color_correction {
+                "Colour correction on"
+            } else {
+                "Colour correction off"
+            },
+            cx,
+        );
+    }
 }
 
 impl Session {
     /// Brings the images up to date with the latest frame and the size each
     /// screen is drawn at.
-    fn refresh_images(&mut self, placements: &[Placement], scale_factor: f32, window: &mut Window) {
+    fn refresh_images(
+        &mut self,
+        placements: &[Placement],
+        scale_factor: f32,
+        color_correction: bool,
+        window: &mut Window,
+    ) {
         if let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) {
             self.sequence = sequence;
             self.images.resize(self.frames.len(), None);
@@ -508,7 +538,11 @@ impl Session {
             if let Some((_, stale)) = slot.take() {
                 window.drop_image(stale).ok();
             }
-            *slot = Some((factor, video::render_image(frame, factor)));
+            let image = match self.correction.as_ref().filter(|_| color_correction) {
+                Some(correction) => video::render_image(&correction.frame(frame), factor),
+                None => video::render_image(frame, factor),
+            };
+            *slot = Some((factor, image));
         }
     }
 }
@@ -562,6 +596,9 @@ impl Render for EmulatorView {
                 this.layout.swapped = !this.layout.swapped;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
+                this.toggle_color_correction(cx);
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -571,7 +608,12 @@ impl Render for EmulatorView {
 
         if let Some(session) = self.session.as_mut() {
             self.placements = self.layout.place(session.info.screens, viewport);
-            session.refresh_images(&self.placements, scale_factor, window);
+            session.refresh_images(
+                &self.placements,
+                scale_factor,
+                self.color_correction,
+                window,
+            );
             for placement in &self.placements {
                 let Some(Some((_, image))) = session.images.get(placement.screen) else {
                     continue;
