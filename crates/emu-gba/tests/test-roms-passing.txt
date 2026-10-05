@@ -1,0 +1,4 @@
+arm/arm.gba
+thumb/thumb.gba
+memory/memory.gba
+bios/bios.gba

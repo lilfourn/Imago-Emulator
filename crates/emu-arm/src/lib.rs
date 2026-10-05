@@ -279,6 +279,22 @@ impl Cpu {
         self.fetch_access
     }
 
+    /// The current mode's saved PSR, or `None` in User and System mode.
+    #[must_use]
+    pub fn saved_psr(&self) -> Option<u32> {
+        self.spsr()
+    }
+
+    /// Returns from an exception as `MOVS PC, LR` does: CPSR from SPSR, R15
+    /// from R14, and the pipeline refilled. For high-level emulation of
+    /// code that would end that way (a BIOS call).
+    pub fn return_from_exception<B: Bus>(&mut self, bus: &mut B) {
+        let target = self.r[14];
+        self.restore_cpsr();
+        self.r[15] = target & if self.thumb() { !1 } else { !3 };
+        self.reload_pipeline(bus);
+    }
+
     /// Sets the IRQ input. While it is high and CPSR.I is clear, the CPU
     /// takes the IRQ exception before the next instruction.
     pub fn set_irq_line(&mut self, high: bool) {
