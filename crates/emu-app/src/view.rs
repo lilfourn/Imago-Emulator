@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use emu_core::{CoreInfo, Frame, Input, TouchPoint};
+use emu_core::{CoreInfo, Frame, Input, ScreenSize, TouchPoint, rgb as pack_rgb};
 use gpui::{
     Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
@@ -22,6 +22,7 @@ use crate::controls::{Controls, HeldState};
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement};
+use crate::slots::{self, SlotPreview};
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -44,6 +45,11 @@ pub struct EmulatorView {
     state_slot: u8,
     notice: Option<SharedString>,
     notice_timer: Option<Task<()>>,
+    /// Screenshot of the selected save-state slot, shown with the notice.
+    slot_image: Option<Arc<RenderImage>>,
+    /// Images no longer shown, to remove from GPUI's atlas on next render.
+    stale_images: Vec<Arc<RenderImage>>,
+    slot_preview_task: Option<Task<()>>,
     _gamepad: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -52,6 +58,7 @@ pub struct EmulatorView {
 struct Session {
     emulator: Emulator,
     info: CoreInfo,
+    rom_path: PathBuf,
     frames: Vec<Frame>,
     sequence: u64,
     /// Per screen: the pre-scale factor and the image built with it.
@@ -113,6 +120,9 @@ impl EmulatorView {
             state_slot: 1,
             notice: None,
             notice_timer: None,
+            slot_image: None,
+            stale_images: Vec::new(),
+            slot_preview_task: None,
             _gamepad: gamepad_task,
             _subscriptions: subscriptions,
         };
@@ -156,6 +166,7 @@ impl EmulatorView {
             }
         };
         let (events, receiver) = async_channel::unbounded();
+        let rom_path = loaded.rom_path().to_owned();
         let emulator = Emulator::start(loaded, events, audio_sink);
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
@@ -167,6 +178,7 @@ impl EmulatorView {
         self.session = Some(Session {
             emulator,
             info,
+            rom_path,
             frames: Vec::new(),
             sequence: 0,
             images: Vec::new(),
@@ -289,7 +301,44 @@ impl EmulatorView {
         } else {
             (self.state_slot + STATE_SLOTS - 2) % STATE_SLOTS + 1
         };
-        self.show_notice(format!("State slot {}", self.state_slot), cx);
+        let slot = self.state_slot;
+        self.show_notice(format!("State slot {slot}"), cx);
+        let Some(rom_path) = self.session.as_ref().map(|s| s.rom_path.clone()) else {
+            return;
+        };
+        let preview = cx
+            .background_executor()
+            .spawn(async move { slots::preview(&rom_path, slot) });
+        self.slot_preview_task = Some(cx.spawn(async move |this, cx| {
+            let preview = preview.await;
+            this.update(cx, |this, cx| this.show_slot_preview(slot, preview, cx))
+                .ok();
+        }));
+    }
+
+    fn show_slot_preview(
+        &mut self,
+        slot: u8,
+        preview: Option<SlotPreview>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preview) = preview else {
+            self.show_notice(format!("State slot {slot} · empty"), cx);
+            return;
+        };
+        let age = preview.saved.elapsed().unwrap_or_default();
+        self.show_notice(
+            format!("State slot {slot} · saved {}", slots::describe_age(age)),
+            cx,
+        );
+        if let Some((width, height, rgb)) = preview.thumbnail {
+            let mut frame = Frame::new(ScreenSize::new(width, height));
+            for (pixel, color) in frame.pixels_mut().iter_mut().zip(rgb.chunks_exact(3)) {
+                *pixel = pack_rgb(color[0], color[1], color[2]);
+            }
+            let image = video::render_image(&frame, 2);
+            self.stale_images.extend(self.slot_image.replace(image));
+        }
     }
 
     /// Points the stylus at `position`, or lifts it if that is off the
@@ -459,19 +508,34 @@ impl Render for EmulatorView {
             root = root.child(welcome());
         }
 
+        // A preview only lives as long as its notice.
+        if self.notice.is_none() {
+            self.stale_images.extend(self.slot_image.take());
+        }
+        for image in self.stale_images.drain(..) {
+            window.drop_image(image).ok();
+        }
         if let Some(notice) = &self.notice {
-            root = root.child(
-                div()
-                    .absolute()
-                    .bottom(px(12.0))
-                    .left(px(12.0))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgba(0x0000_00CC))
-                    .text_sm()
-                    .child(notice.clone()),
-            );
+            let mut card = div()
+                .absolute()
+                .bottom(px(12.0))
+                .left(px(12.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgba(0x0000_00CC))
+                .text_sm();
+            if let Some(image) = &self.slot_image {
+                card = card.child(
+                    img(Arc::clone(image))
+                        .w(px(160.0))
+                        .object_fit(ObjectFit::Contain),
+                );
+            }
+            root = root.child(card.child(notice.clone()));
         }
         root
     }

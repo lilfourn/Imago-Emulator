@@ -13,6 +13,7 @@ mod layout;
 mod persist;
 mod resample;
 mod rewind;
+mod slots;
 mod video;
 mod view;
 

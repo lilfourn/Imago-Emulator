@@ -41,6 +41,11 @@ impl Loaded {
     pub fn info(&self) -> CoreInfo {
         self.core.info()
     }
+
+    /// The ROM file the game was loaded from.
+    pub fn rom_path(&self) -> &Path {
+        &self.rom_path
+    }
 }
 
 /// Reads `rom_path` and its battery save, and powers on the right core.
@@ -339,15 +344,35 @@ impl Runner {
             state_version: info.state_version,
             rom_crc32: self.loaded.rom_crc32,
         };
+        let screen = &self.loaded.core.screens()[0];
+        let size = screen.size();
+        let rgb: Vec<u8> = screen
+            .pixels()
+            .iter()
+            .flat_map(|pixel| {
+                let [b, g, r, _] = pixel.to_le_bytes();
+                [r, g, b]
+            })
+            .collect();
+        let thumbnail = emu_state::Thumbnail {
+            width: size.width,
+            height: size.height,
+            rgb: &rgb,
+        };
         let path = persist::state_path(&self.loaded.rom_path, slot);
-        persist::write_atomic(&path, &emu_state::encode(&header, &payload))
-            .with_context(|| format!("cannot write {}", path.display()))
+        persist::write_atomic(
+            &path,
+            &emu_state::encode(&header, &payload, Some(thumbnail)),
+        )
+        .with_context(|| format!("cannot write {}", path.display()))
     }
 
     fn load_state(&mut self, slot: u8) -> anyhow::Result<()> {
         let path = persist::state_path(&self.loaded.rom_path, slot);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let (header, payload) = emu_state::decode(&bytes)?;
+        let emu_state::Decoded {
+            header, payload, ..
+        } = emu_state::decode(&bytes)?;
         let info = self.loaded.core.info();
         ensure!(
             header.system == info.system,
