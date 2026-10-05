@@ -51,7 +51,7 @@ impl Timers {
     pub(crate) fn read(&self, offset: u32, now: u64) -> u16 {
         let index = (offset / 4) as usize;
         let timer = &self.timers[index];
-        if offset % 4 == 0 {
+        if offset.is_multiple_of(4) {
             timer.counter_at(index, now)
         } else {
             timer.control
@@ -63,7 +63,7 @@ impl Timers {
     pub(crate) fn write(&mut self, offset: u32, value: u16, now: u64) -> Option<usize> {
         let index = (offset / 4) as usize;
         let timer = &mut self.timers[index];
-        if offset % 4 == 0 {
+        if offset.is_multiple_of(4) {
             timer.reload = value;
             return None;
         }

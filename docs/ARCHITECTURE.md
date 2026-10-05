@@ -25,9 +25,11 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-core` | The contract between cores and frontends: the `Core` trait and plain-data types. No dependencies beyond `thiserror`. |
 | `emu-sched` | A priority queue of cycle-timestamped events. |
 | `emu-state` | The save-state container format. |
-| `emu-arm` | The ARM interpreter shared by the GBA and both DS CPUs. Empty until M7. |
+| `emu-arm` | The ARM7TDMI interpreter (ARMv4T) shared by the GBA and both DS CPUs; ARMv5TE arrives with the DS. |
+| `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
-| `emu-gba`, `emu-nds` | One system each. Today: header validation and a test pattern. |
+| `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS. Event-driven by `emu-sched`. |
+| `emu-nds` | Nintendo DS. Today: header validation and a test pattern. |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
@@ -35,8 +37,9 @@ How the workspace fits together. The *why* behind the big choices lives in
 Rules that keep this shape:
 
 - Cores depend on `emu-core`, never on each other or on a frontend.
-- Sharing between the GBA and DS stops at the CPU (`emu-arm`) and the
-  scheduler. Shared system code would tangle timing fixes across systems.
+- Sharing stops at self-contained chips: the CPU (`emu-arm`), the
+  scheduler, and the GB/GBA sound generator (`emu-psg`, the same silicon in
+  both). Shared system code would tangle timing fixes across systems.
 - GPUI types never leave `emu-app`. If GPUI is replaced, only that crate
   changes.
 

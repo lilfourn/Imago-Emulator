@@ -5,6 +5,7 @@
 //! provides a dump. See `docs/ROADMAP.md`, Phase 3, for what is emulated so
 //! far.
 
+mod apu;
 mod bios;
 mod bus;
 mod dma;
@@ -33,9 +34,9 @@ pub const INFO: CoreInfo = CoreInfo {
     touch_screen: None,
     players: 1,
     frame_rate: FrameRate::new(16_777_216, 280_896),
-    audio_sample_rate: 32_768,
+    audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 3,
+    state_version: 4,
 };
 
 /// A Game Boy Advance with a cartridge inserted.
@@ -170,7 +171,7 @@ impl Core for Gba {
         INFO
     }
 
-    fn run_frame(&mut self, inputs: &[Input], _audio: &mut Vec<StereoSample>) {
+    fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
         self.set_input(&inputs.first().copied().unwrap_or_default());
         let start = self.cycles();
         let frame = self.frames;
@@ -178,6 +179,7 @@ impl Core for Gba {
         while self.frames == frame && self.cycles() - start < CYCLES_PER_FRAME {
             self.step();
         }
+        self.machine.bus.apu.drain_samples(audio);
     }
 
     fn screens(&self) -> &[Frame] {

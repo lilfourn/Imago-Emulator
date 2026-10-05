@@ -9,6 +9,7 @@ use emu_arm::{Access, Bus as CpuBus};
 use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
 
+use crate::apu::{self, Apu};
 use crate::bios;
 use crate::dma::{Dma, Timing};
 use crate::ppu::{self, Ppu};
@@ -24,6 +25,8 @@ pub(crate) enum Event {
     LineStart,
     /// A timer counts past 0xFFFF.
     TimerOverflow(u8),
+    /// Time for the next audio output sample.
+    AudioSample,
 }
 
 /// Interrupt request bits outside the PPU's.
@@ -48,6 +51,7 @@ pub(crate) struct Bus {
     pub(crate) ppu: Ppu,
     dma: Dma,
     timers: Timers,
+    pub(crate) apu: Apu,
     /// Raw values written to I/O registers, for byte merges and reading back
     /// registers without side effects.
     io: Box<[u8]>,
@@ -77,6 +81,7 @@ impl Bus {
     pub(crate) fn new(rom: Box<[u8]>, bios: Box<[u8]>) -> Self {
         let mut scheduler = Scheduler::new();
         scheduler.schedule_at(ppu::HDRAW_CYCLES, Event::HBlank);
+        scheduler.schedule_at(apu::CYCLES_PER_SAMPLE, Event::AudioSample);
         let mut bus = Self {
             bios,
             rom,
@@ -85,6 +90,7 @@ impl Bus {
             ppu: Ppu::new(),
             dma: Dma::default(),
             timers: Timers::default(),
+            apu: Apu::new(),
             io: vec![0; 0x400].into_boxed_slice(),
             interrupt_enable: 0,
             interrupt_flag: 0,
@@ -205,6 +211,11 @@ impl Bus {
                         .schedule_at(due.time + ppu::HDRAW_CYCLES, Event::HBlank);
                 }
                 Event::TimerOverflow(index) => self.timer_overflow(usize::from(index), due.time),
+                Event::AudioSample => {
+                    self.apu.sample();
+                    self.scheduler
+                        .schedule_at(due.time + apu::CYCLES_PER_SAMPLE, Event::AudioSample);
+                }
             }
         }
     }
@@ -214,6 +225,13 @@ impl Bus {
         for timer in (0..4).filter(|timer| overflowed & (1 << timer) != 0) {
             if self.timers.interrupt_enabled(timer) {
                 self.request_interrupt(irq::TIMER0 << timer);
+            }
+            // Timers 0 and 1 clock the DMA sound FIFOs.
+            if timer < 2 {
+                let refill = self.apu.timer_overflow(timer);
+                for fifo in (0..2).filter(|fifo| refill & (1 << fifo) != 0) {
+                    self.dma.trigger_fifo(fifo);
+                }
             }
         }
         self.schedule_timer(index);
@@ -269,6 +287,10 @@ impl Bus {
         let offset = (offset & 0x3FE) as usize;
         match offset {
             0x000..=0x056 => self.ppu.read_register(offset),
+            0x060..=0x0A6 => {
+                let offset = offset as u32 - 0x60;
+                u16::from(self.apu.read_8(offset)) | u16::from(self.apu.read_8(offset + 1)) << 8
+            }
             0x0B0..=0x0DE => self.dma.read(offset as u32 - 0xB0),
             0x100..=0x10E => self.timers.read(offset as u32 - 0x100, self.cycles),
             0x130 => self.keys,
@@ -289,6 +311,11 @@ impl Bus {
         }
         match offset {
             0x000..=0x056 => self.ppu.write_register(offset, value),
+            0x060..=0x0A6 => {
+                let offset = offset as u32 - 0x60;
+                self.apu.write_8(offset, value as u8);
+                self.apu.write_8(offset + 1, (value >> 8) as u8);
+            }
             0x0B0..=0x0DE => self.dma.write(offset as u32 - 0xB0, value),
             0x100..=0x10E => {
                 if let Some(timer) = self.timers.write(offset as u32 - 0x100, value, self.cycles) {
@@ -314,6 +341,8 @@ impl Bus {
             0x202 => self.interrupt_flag &= !u16::from(value),
             0x203 => self.interrupt_flag &= !(u16::from(value) << 8),
             0x300 => self.io[0x300] = value,
+            // Sound registers take single bytes without touching neighbours.
+            0x060..=0x0A7 => self.apu.write_8(offset - 0x60, value),
             0x301 => {
                 // HALTCNT: bit 7 clear halts, set stops (treated as halt).
                 self.halted = true;
