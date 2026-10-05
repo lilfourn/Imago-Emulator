@@ -1605,6 +1605,9 @@ dependencies = [
 [[package]]
 name = "emu-arm"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "emu-core"
