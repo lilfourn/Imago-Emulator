@@ -17,6 +17,7 @@ mod memory_viewer;
 mod persist;
 mod resample;
 mod rewind;
+mod settings;
 mod slots;
 mod video;
 mod view;

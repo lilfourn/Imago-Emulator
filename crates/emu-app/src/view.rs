@@ -29,6 +29,7 @@ use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
 use crate::persist;
+use crate::settings::{self, Settings};
 use crate::slots::{self, SlotPreview};
 use crate::video;
 
@@ -42,6 +43,9 @@ pub struct EmulatorView {
     focus: FocusHandle,
     bindings: Bindings,
     layout: Layout,
+    /// Where the layout is saved for next launch, if there is a config
+    /// folder.
+    settings_path: Option<PathBuf>,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
     /// Where the memory viewer is looking, while it is open.
@@ -101,6 +105,8 @@ impl EmulatorView {
         focus.focus(window);
 
         let loaded_bindings = bindings::default_path().map(|path| Bindings::load(&path));
+        let settings_path = settings::default_path();
+        let loaded_settings = settings_path.as_deref().map(Settings::load);
         let subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
@@ -141,6 +147,7 @@ impl EmulatorView {
             focus,
             bindings: Bindings::default(),
             layout: Layout::default(),
+            settings_path,
             color_correction: true,
             memory_viewer: None,
             session: None,
@@ -162,6 +169,11 @@ impl EmulatorView {
         match loaded_bindings {
             Some(Ok(bindings)) => view.bindings = bindings,
             Some(Err(error)) => view.show_notice(format!("{error}; using default bindings"), cx),
+            None => {}
+        }
+        match loaded_settings {
+            Some(Ok(settings)) => view.layout = settings.layout,
+            Some(Err(error)) => view.show_notice(format!("{error}; using default layout"), cx),
             None => {}
         }
         if !roms.is_empty() {
@@ -626,10 +638,18 @@ impl EmulatorView {
         self.set_layout(Layout { gap, ..self.layout }, cx);
     }
 
-    /// Switches to `layout`.
+    /// Switches to `layout` and saves it for next launch, noting any
+    /// failure to save.
     fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
         self.layout = layout;
         cx.notify();
+        let Some(path) = &self.settings_path else {
+            return;
+        };
+        if let Err(error) = (Settings { layout }).save(path) {
+            let message = format!("Cannot save settings to {}: {error}", path.display());
+            self.show_notice(message, cx);
+        }
     }
 
     fn toggle_memory_viewer(&mut self, cx: &mut Context<Self>) {
