@@ -124,12 +124,12 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 
 | ID | Requirement | Priority |
 |---|---|---|
-| NDS-1 | ARMv5TE additions (CLZ, QADD/QSUB, DSP multiplies, BLX, LDRD/STRD) and CP15 (protection unit, TCM, cache control). | P0 · M12 |
-| NDS-2 | ARM9 and ARM7 run in interleaved slices, with IPC sync and FIFO. | P0 · M12 |
-| NDS-3 | Direct boot, VRAM bank mapping (banks A–I), both 2D engines, SPI touchscreen/firmware/power management, RTC, cartridge reads. | P0 · M13 |
-| NDS-4 | 3D: geometry engine (GXFIFO, matrix stacks, lighting, clipping) and a software rasterizer as the accuracy reference. | P0 · M14 |
-| NDS-5 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG) and sound capture. | P0 · M14 |
-| NDS-6 | 512 KB SPI flash saves for every DS Pokémon game. | P0 · M14 |
+| NDS-1 | ARMv5TE additions (CLZ, QADD/QSUB, DSP multiplies, BLX, LDRD/STRD) and CP15 (protection unit, TCM, cache control). ✅ (protection unit stored, not enforced) | P0 · M12 |
+| NDS-2 | ARM9 and ARM7 run in interleaved slices, with IPC sync and FIFO. ✅ | P0 · M12 |
+| NDS-3 | Direct boot, VRAM bank mapping (banks A–I), both 2D engines, SPI touchscreen/firmware/power management, RTC, cartridge reads. ✅ | P0 · M13 |
+| NDS-4 | 3D: geometry engine (GXFIFO, matrix stacks, lighting, clipping) and a software rasterizer as the accuracy reference. ✅ (no anti-aliasing yet) | P0 · M14 |
+| NDS-5 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG) ✅ and sound capture. | P0 · M14 |
+| NDS-6 | 512 KB SPI flash saves for every DS Pokémon game. ✅ (by game code, including the infrared carts) | P0 · M14 |
 | NDS-7 | No anti-piracy symptoms in HG/SS, B/W or B2/W2 without patches. Any trigger is an emulator bug. | P0 · M15 |
 | NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. | P1 · M15 |
 | NDS-9 | 3D upscaling (N× internal resolution, or a Metal compute rasterizer). | P1 · M16 |
