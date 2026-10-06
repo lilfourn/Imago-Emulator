@@ -13,8 +13,10 @@ pub struct Media<'a> {
     /// emulation or direct boot for anything missing here, and never ships
     /// these files itself.
     pub system_files: &'a [SystemFile<'a>],
-    /// Seconds since the Unix epoch at power-on. Seeds the cartridge or
-    /// console real-time clock. Tests pass a fixed value for determinism.
+    /// The local wall-clock time at power-on, counted in seconds from
+    /// 1970-01-01 00:00 as if that were local time too. Seeds the cartridge
+    /// or console real-time clock, which has no time zone and shows this
+    /// date and time as is. Tests pass a fixed value for determinism.
     pub start_time: i64,
 }
 

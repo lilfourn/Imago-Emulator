@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, ensure};
 use emu_cheats::Cheat;
@@ -56,6 +56,13 @@ struct RomFile {
     system: System,
     rom: Vec<u8>,
     backup: Option<Vec<u8>>,
+}
+
+/// The local date and time now, in the form [`Media::start_time`] wants:
+/// seconds from 1970-01-01 00:00, with the time-zone offset already added,
+/// since the emulated clocks have no time zone of their own.
+fn local_clock_seconds() -> i64 {
+    chrono::Local::now().naive_local().and_utc().timestamp()
 }
 
 fn read_rom(rom_path: &Path) -> anyhow::Result<RomFile> {
@@ -100,11 +107,7 @@ pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
         files.iter().all(|file| file.system == system),
         "linked games must be for the same system"
     );
-    let start_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-        });
+    let start_time = local_clock_seconds();
     let media: Vec<Media<'_>> = files
         .iter()
         .map(|file| Media {
