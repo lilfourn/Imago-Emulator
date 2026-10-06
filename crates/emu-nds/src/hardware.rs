@@ -250,11 +250,11 @@ impl Hardware {
         self.arm7.interrupts.request(bits[1]);
     }
 
-    /// Mixes one audio sample, reading channel data as the ARM7 sees
-    /// memory, and schedules the next.
+    /// Mixes one audio sample, with channels reading and captures writing
+    /// memory as the ARM7 sees it, and schedules the next.
     pub(crate) fn sound_sample(&mut self, time: u64) {
         let mut sound = std::mem::take(&mut self.sound);
-        sound.sample(|address| self.arm7_read_8(address));
+        sound.sample(self);
         self.sound = sound;
         self.scheduler
             .schedule_at(time + sound::CYCLES_PER_SAMPLE, Event::SoundSample);
@@ -267,5 +267,15 @@ impl Hardware {
         if let Some(time) = self.cpu(side).timers.overflow_time(index) {
             self.scheduler.schedule_at(time, event);
         }
+    }
+}
+
+impl sound::Memory for Hardware {
+    fn read_8(&mut self, address: u32) -> u8 {
+        self.arm7_read_8(address)
+    }
+
+    fn write_8(&mut self, address: u32, value: u8) {
+        self.arm7_write_8(address, value);
     }
 }
