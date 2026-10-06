@@ -213,7 +213,7 @@ parallel by several agents.
 - Pokémon White plays its opening movie, reaches the main menu and starts
   a new game.
 - RockPolish's rockwrestler test ROM (scripted through
-  `examples/probe.rs`) passes everything but the ARMv5 LDM/STM edge cases.
+  `examples/probe.rs`) passes every test.
 Still open:
 - armwrestler-DS and a libnds hello world;
 - frame-CRC comparison with melonDS;

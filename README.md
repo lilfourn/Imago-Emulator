@@ -14,8 +14,7 @@ menu and starts a new game, at well above full speed. It has:
 - 16-channel sound;
 - the game card with flash saves;
 - the touchscreen, firmware and RTC.
-It passes RockPolish's rockwrestler test ROM except its ARMv5 LDM/STM edge
-cases.
+It passes every test in RockPolish's rockwrestler test ROM.
 
 The Game Boy and Game Boy Color core passes 135 of 158 open-source test
 ROMs, including all of Blargg's CPU tests, dmg-acid2 and cgb-acid2. The Game
