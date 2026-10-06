@@ -90,9 +90,8 @@ pub(crate) struct Hardware {
     pub(crate) engine_b: Engine2d,
     pub(crate) gpu3d: Gpu3d,
     /// What each engine drew this frame, 256×192 pixels as 0xFFRRGGBB.
-    #[serde(skip, default = "blank_screen")]
+    /// Saved in states, so a state loaded while paused shows its frame.
     pub(crate) screen_a: Box<[u32]>,
-    #[serde(skip, default = "blank_screen")]
     pub(crate) screen_b: Box<[u32]>,
     /// The BIOS images: our HLE vectors, or the user's dumps. Restored
     /// from media.
