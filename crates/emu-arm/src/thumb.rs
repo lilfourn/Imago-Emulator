@@ -1,10 +1,11 @@
 //! The 16-bit Thumb instruction set (GBATEK, "THUMB Opcodes"), formats 1
-//! to 19. R15 reads as the instruction's address plus 4.
+//! to 19, plus ARMv5's BLX and BKPT. R15 reads as the instruction's
+//! address plus 4.
 
 use crate::alu::{self, Shift};
-use crate::{Access, Bus, Cpu, psr};
+use crate::{Access, Bus, Model, Processor, psr};
 
-impl Cpu {
+impl<M: Model> Processor<M> {
     pub(crate) fn execute_thumb<B: Bus>(&mut self, bus: &mut B, instruction: u16) {
         let op = u32::from(instruction);
         match op >> 8 {
@@ -26,10 +27,12 @@ impl Cpu {
             0xD0..=0xDE => self.thumb_conditional_branch(bus, op),
             0xDF => self.software_interrupt(bus),
             0xE0..=0xE7 => self.thumb_branch(bus, op),
+            0xE8..=0xEF if M::V5TE => self.thumb_branch_link_exchange(bus, op),
+            0xBE if M::V5TE => self.breakpoint(bus),
             0xF0..=0xF7 => self.thumb_branch_link_high(op),
             0xF8..=0xFF => self.thumb_branch_link_low(bus, op),
-            // 0xB1–0xB3, 0xB6–0xBB, 0xBE, 0xBF and 0xE8–0xEF (the ARMv5
-            // BLX suffix) are undefined on ARMv4T.
+            // 0xB1–0xB3, 0xB6–0xBB and 0xBF are undefined; so are 0xBE
+            // (BKPT) and 0xE8–0xEF (the BLX suffix) on ARMv4T.
             _ => self.undefined(bus),
         }
     }
@@ -148,7 +151,7 @@ impl Cpu {
         }
     }
 
-    /// Format 5: ADD, CMP, MOV with high registers, and BX.
+    /// Format 5: ADD, CMP, MOV with high registers, BX, and (ARMv5) BLX.
     fn thumb_high_register<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let rd = Self::low(op, 0) | if op & 0x80 != 0 { 8 } else { 0 };
         let rs = Self::low(op, 3) | if op & 0x40 != 0 { 8 } else { 0 };
@@ -174,6 +177,10 @@ impl Cpu {
                 }
             }
             _ => {
+                // ARMv4T ignores bit 7 (H1); on ARMv5 it makes BX a BLX.
+                if M::V5TE && op & 0x80 != 0 {
+                    self.r[14] = self.r[15].wrapping_sub(2) | 1;
+                }
                 self.set_flag(psr::T, value & 1 != 0);
                 self.r[15] = value & !1;
                 self.reload_pipeline(bus);
@@ -187,7 +194,7 @@ impl Cpu {
     fn thumb_load_pc_relative<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let address = (self.r[15] & !2).wrapping_add((op & 0xFF) * 4);
         self.advance_after_data();
-        let value = bus.read_32(address, Access::NONSEQUENTIAL);
+        let value = self.read_32(bus, address, Access::NONSEQUENTIAL);
         bus.idle();
         self.r[Self::low(op, 8)] = value;
     }
@@ -200,21 +207,21 @@ impl Cpu {
         let kind = (op >> 9) & 7;
         let value = match kind {
             0 => {
-                bus.write_32(address, self.r[rd], Access::NONSEQUENTIAL);
+                self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
                 return;
             }
             1 => {
-                bus.write_16(address, self.r[rd] as u16, Access::NONSEQUENTIAL);
+                self.write_16(bus, address, self.r[rd] as u16, Access::NONSEQUENTIAL);
                 return;
             }
             2 => {
-                bus.write_8(address, self.r[rd] as u8, Access::NONSEQUENTIAL);
+                self.write_8(bus, address, self.r[rd] as u8, Access::NONSEQUENTIAL);
                 return;
             }
             3 => self.read_byte_signed(bus, address),
             4 => self.read_word_rotated(bus, address, Access::NONSEQUENTIAL),
-            5 => self.read_half_rotated(bus, address, Access::NONSEQUENTIAL),
-            6 => u32::from(bus.read_8(address, Access::NONSEQUENTIAL)),
+            5 => self.read_half(bus, address, Access::NONSEQUENTIAL),
+            6 => u32::from(self.read_8(bus, address, Access::NONSEQUENTIAL)),
             _ => self.read_half_signed(bus, address),
         };
         bus.idle();
@@ -231,11 +238,11 @@ impl Cpu {
         let rd = Self::low(op, 0);
         self.advance_after_data();
         match (load, byte) {
-            (false, false) => bus.write_32(address, self.r[rd], Access::NONSEQUENTIAL),
-            (false, true) => bus.write_8(address, self.r[rd] as u8, Access::NONSEQUENTIAL),
+            (false, false) => self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL),
+            (false, true) => self.write_8(bus, address, self.r[rd] as u8, Access::NONSEQUENTIAL),
             (true, byte) => {
                 let value = if byte {
-                    u32::from(bus.read_8(address, Access::NONSEQUENTIAL))
+                    u32::from(self.read_8(bus, address, Access::NONSEQUENTIAL))
                 } else {
                     self.read_word_rotated(bus, address, Access::NONSEQUENTIAL)
                 };
@@ -251,11 +258,11 @@ impl Cpu {
         let rd = Self::low(op, 0);
         self.advance_after_data();
         if op & (1 << 11) != 0 {
-            let value = self.read_half_rotated(bus, address, Access::NONSEQUENTIAL);
+            let value = self.read_half(bus, address, Access::NONSEQUENTIAL);
             bus.idle();
             self.r[rd] = value;
         } else {
-            bus.write_16(address, self.r[rd] as u16, Access::NONSEQUENTIAL);
+            self.write_16(bus, address, self.r[rd] as u16, Access::NONSEQUENTIAL);
         }
     }
 
@@ -269,7 +276,7 @@ impl Cpu {
             bus.idle();
             self.r[rd] = value;
         } else {
-            bus.write_32(address, self.r[rd], Access::NONSEQUENTIAL);
+            self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
         }
     }
 
@@ -327,10 +334,9 @@ impl Cpu {
         load: bool,
         writeback: bool,
     ) {
+        // POP {PC} stays in Thumb on ARMv4T; on ARMv5 bit 0 of the loaded
+        // value picks the state, as for LDM.
         self.transfer_multiple(bus, rb, list, false, true, false, writeback, load);
-        // A Thumb POP into PC stays in Thumb unless bit 0 says otherwise; the
-        // ARMv4T ignores that bit, so the pipeline reload already ran in
-        // Thumb state.
     }
 
     /// PUSH: a descending store, lowest register at the lowest address.
@@ -369,6 +375,20 @@ impl Cpu {
         let target = self.r[14].wrapping_add((op & 0x7FF) << 1);
         self.r[14] = self.r[15].wrapping_sub(2) | 1;
         self.r[15] = target & !1;
+        self.reload_pipeline(bus);
+    }
+
+    /// ARMv5 BLX suffix: like format 19's second half, but to ARM state at
+    /// a word-aligned target. An odd offset is undefined.
+    fn thumb_branch_link_exchange<B: Bus>(&mut self, bus: &mut B, op: u32) {
+        if op & 1 != 0 {
+            self.undefined(bus);
+            return;
+        }
+        let target = self.r[14].wrapping_add((op & 0x7FF) << 1);
+        self.r[14] = self.r[15].wrapping_sub(2) | 1;
+        self.set_flag(psr::T, false);
+        self.r[15] = target & !3;
         self.reload_pipeline(bus);
     }
 

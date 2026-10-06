@@ -91,6 +91,26 @@ pub(crate) fn subtract_with_carry(a: u32, b: u32, carry_in: bool) -> (u32, bool,
     add_with_carry(a, !b, carry_in)
 }
 
+/// `a + b` as signed 32-bit values, clamped to the signed range (ARMv5TE
+/// QADD), with whether it clamped.
+pub(crate) fn saturating_add(a: u32, b: u32) -> (u32, bool) {
+    let (a, b) = (a as i32, b as i32);
+    match a.checked_add(b) {
+        Some(sum) => (sum as u32, false),
+        None => (a.saturating_add(b) as u32, true),
+    }
+}
+
+/// `a - b` as signed 32-bit values, clamped to the signed range (ARMv5TE
+/// QSUB), with whether it clamped.
+pub(crate) fn saturating_subtract(a: u32, b: u32) -> (u32, bool) {
+    let (a, b) = (a as i32, b as i32);
+    match a.checked_sub(b) {
+        Some(difference) => (difference as u32, false),
+        None => (a.saturating_sub(b) as u32, true),
+    }
+}
+
 /// Internal cycles a multiply spends, from the multiplier's leading bits:
 /// 1 if its top 24 bits are all zeros or all ones, 2 for the top 16, 3 for
 /// the top 8, else 4. Unsigned multiplies only stop early on zeros.
@@ -146,5 +166,18 @@ mod tests {
         );
         assert_eq!(subtract(0, 1), (u32::MAX, false, false));
         assert_eq!(subtract(5, 5), (0, true, false));
+    }
+
+    #[test]
+    fn saturation() {
+        assert_eq!(saturating_add(0x7FFF_FFFF, 1), (0x7FFF_FFFF, true));
+        assert_eq!(saturating_add(0x8000_0000, u32::MAX), (0x8000_0000, true));
+        assert_eq!(saturating_add(u32::MAX, 1), (0, false));
+        assert_eq!(saturating_subtract(0x8000_0000, 1), (0x8000_0000, true));
+        assert_eq!(
+            saturating_subtract(0x7FFF_FFFF, u32::MAX),
+            (0x7FFF_FFFF, true)
+        );
+        assert_eq!(saturating_subtract(0, 1), (u32::MAX, false));
     }
 }

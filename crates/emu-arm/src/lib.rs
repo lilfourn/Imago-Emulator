@@ -1,22 +1,42 @@
-//! ARM interpreter shared by the GBA and DS cores.
+//! ARM interpreters shared by the GBA and DS cores.
 //!
-//! This is the ARM7TDMI (ARMv4T): the ARM and Thumb instruction sets, the
-//! barrel shifter, banked registers for each CPU mode, exceptions, and the
+//! [`Processor`] implements the ARM and Thumb instruction sets, the barrel
+//! shifter, banked registers for each CPU mode, exceptions, and the
 //! two-stage prefetch that makes the PC read 8 (ARM) or 4 (Thumb) bytes
-//! ahead. References: ARM7TDMI Technical Reference Manual, GBATEK "ARM CPU
-//! Reference", and NanoBoyAdvance, whose bus timing the per-instruction
-//! tests in `tests/single_step.rs` were recorded from.
+//! ahead. A [`Model`] type parameter specialises it at compile time:
+//!
+//! - [`Cpu`] is the ARM7TDMI (ARMv4T) of the GBA and the DS's ARM7.
+//! - [`Arm9`] is the DS's ARM946E-S (ARMv5TE): the ARMv5TE instructions,
+//!   the CP15 system control coprocessor, tightly coupled memory, and
+//!   waiting for interrupts.
+//!
+//! References: ARM7TDMI and ARM946E-S Technical Reference Manuals, the ARM
+//! Architecture Reference Manual (ARMv5TE), GBATEK "ARM CPU Reference", and
+//! NanoBoyAdvance, whose bus timing the per-instruction tests in
+//! `tests/single_step.rs` were recorded from.
 //!
 //! The CPU reaches memory through [`Bus`], which each system implements and
 //! which also counts cycles: every access says whether it is sequential and
 //! whether it is an instruction fetch, which is what GBA wait states depend
-//! on. The DS's ARM946E-S (ARMv5TE) will extend this crate in Phase 4.
+//! on. The ARM9 keeps the ARM7TDMI's access pattern (one fetch per
+//! instruction, the same data accesses and internal cycles), which is not
+//! the ARM946E-S's five-stage pipeline and caches but keeps time moving in
+//! proportion; its new instructions spend the internal cycles GBATEK lists.
 
 mod alu;
 mod arm;
+mod arm9;
+mod armv5;
+pub mod cp15;
+mod model;
+mod tcm;
 mod thumb;
 
 use serde::{Deserialize, Serialize};
+
+pub use arm9::{Arm9, Arm946es};
+pub use cp15::Cp15;
+pub use model::{Arm7tdmi, Model};
 
 /// How a memory access relates to the previous one, as a bit set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -176,14 +196,21 @@ pub mod psr {
     pub const F: u32 = 1 << 6;
     /// Thumb state.
     pub const T: u32 = 1 << 5;
+    /// Sticky saturation (ARMv5TE): set by QADD and friends and by
+    /// overflowing SMLA multiplies, cleared only by writing the CPSR.
+    pub const Q: u32 = 1 << 27;
 }
 
-/// Exception vectors.
+/// Exception vectors, as offsets from the model's vector base.
 mod vector {
     pub const UNDEFINED: u32 = 0x04;
     pub const SWI: u32 = 0x08;
+    pub const PREFETCH_ABORT: u32 = 0x0C;
     pub const IRQ: u32 = 0x18;
 }
+
+/// CPSR after reset: Supervisor mode, ARM state, IRQs and FIQs off.
+const RESET_CPSR: u32 = Mode::Supervisor.bits() | psr::I | psr::F;
 
 /// Every register: the current mode's view plus every bank.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -208,9 +235,12 @@ pub struct Registers {
     pub spsr: [u32; 5],
 }
 
-/// An ARM7TDMI.
+/// An ARM7TDMI: the GBA's CPU and the DS's ARM7.
+pub type Cpu = Processor<Arm7tdmi>;
+
+/// An ARM processor of model `M`; use [`Cpu`] or [`Arm9`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Cpu {
+pub struct Processor<M> {
     /// R0–R15 of the current mode.
     r: [u32; 16],
     cpsr: u32,
@@ -225,24 +255,28 @@ pub struct Cpu {
     fetch_access: Access,
     /// The IRQ input line.
     irq_line: bool,
+    /// The model's own state. The ARM7TDMI's is empty, so its saved state
+    /// is unchanged by this field.
+    model: M,
 }
 
-impl Default for Cpu {
+impl<M: Model> Default for Processor<M> {
     fn default() -> Self {
         Self {
             r: [0; 16],
-            cpsr: Mode::Supervisor.bits() | psr::I | psr::F,
+            cpsr: RESET_CPSR,
             r8_12: [[0; 5]; 2],
             r13_14: [[0; 2]; 6],
             spsr: [0; 5],
             pipeline: [0; 2],
             fetch_access: Access::CODE,
             irq_line: false,
+            model: M::default(),
         }
     }
 }
 
-impl Cpu {
+impl<M: Model> Processor<M> {
     /// The current mode.
     #[must_use]
     pub fn mode(&self) -> Mode {
@@ -296,7 +330,8 @@ impl Cpu {
     }
 
     /// Sets the IRQ input. While it is high and CPSR.I is clear, the CPU
-    /// takes the IRQ exception before the next instruction.
+    /// takes the IRQ exception before the next instruction. A high line
+    /// also ends an ARM9's wait for an interrupt, whatever CPSR.I says.
     pub fn set_irq_line(&mut self, high: bool) {
         self.irq_line = high;
     }
@@ -304,33 +339,23 @@ impl Cpu {
     /// A snapshot of every register.
     #[must_use]
     pub fn registers(&self) -> Registers {
-        let mut copy = self.clone();
-        // Store the current mode's banked registers so every bank is current.
-        copy.store_bank(self.mode());
+        // Copy the banks with the current mode's live registers stored, so
+        // every bank is current.
+        let (mut r8_12, mut r13_14) = (self.r8_12, self.r13_14);
+        let mode = self.mode();
+        r8_12[usize::from(mode == Mode::Fiq)].copy_from_slice(&self.r[8..13]);
+        r13_14[mode.bank()] = [self.r[13], self.r[14]];
+        let r8_14 = |low: [u32; 5], high: [u32; 2]| {
+            [low[0], low[1], low[2], low[3], low[4], high[0], high[1]]
+        };
         Registers {
             r: self.r,
-            usr: [
-                copy.r8_12[0][0],
-                copy.r8_12[0][1],
-                copy.r8_12[0][2],
-                copy.r8_12[0][3],
-                copy.r8_12[0][4],
-                copy.r13_14[0][0],
-                copy.r13_14[0][1],
-            ],
-            fiq: [
-                copy.r8_12[1][0],
-                copy.r8_12[1][1],
-                copy.r8_12[1][2],
-                copy.r8_12[1][3],
-                copy.r8_12[1][4],
-                copy.r13_14[1][0],
-                copy.r13_14[1][1],
-            ],
-            svc: copy.r13_14[3],
-            abt: copy.r13_14[4],
-            irq: copy.r13_14[2],
-            und: copy.r13_14[5],
+            usr: r8_14(r8_12[0], r13_14[0]),
+            fiq: r8_14(r8_12[1], r13_14[1]),
+            svc: r13_14[3],
+            abt: r13_14[4],
+            irq: r13_14[2],
+            und: r13_14[5],
             cpsr: self.cpsr,
             spsr: self.spsr,
         }
@@ -349,6 +374,7 @@ impl Cpu {
             pipeline,
             fetch_access,
             irq_line: false,
+            model: M::default(),
         };
         let (usr, fiq) = (registers.usr, registers.fiq);
         cpu.r8_12[0] = [usr[0], usr[1], usr[2], usr[3], usr[4]];
@@ -364,10 +390,20 @@ impl Cpu {
         cpu
     }
 
-    /// Resets to Supervisor mode at address 0 and fills the pipeline.
+    /// Resets to Supervisor mode at the reset vector (address 0, or
+    /// 0xFFFF0000 for an ARM9 whose CP15 resets to high vectors) and fills
+    /// the pipeline. An ARM9's TCM keeps its contents.
     pub fn reset<B: Bus>(&mut self, bus: &mut B) {
-        *self = Self::default();
-        self.r[15] = 0;
+        self.r = [0; 16];
+        self.cpsr = RESET_CPSR;
+        self.r8_12 = [[0; 5]; 2];
+        self.r13_14 = [[0; 2]; 6];
+        self.spsr = [0; 5];
+        self.pipeline = [0; 2];
+        self.fetch_access = Access::CODE;
+        self.irq_line = false;
+        self.model.reset();
+        self.r[15] = self.model.vector_base();
         self.reload_pipeline(bus);
     }
 
@@ -394,8 +430,17 @@ impl Cpu {
         self.cpsr = value;
     }
 
-    /// Runs one instruction, or takes a pending IRQ.
+    /// Runs one instruction, or takes a pending IRQ. An ARM9 waiting for
+    /// an interrupt runs nothing: it spends one idle cycle, or wakes if the
+    /// IRQ line is high.
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
+        if self.model.halted() {
+            if !self.irq_line {
+                bus.idle();
+                return;
+            }
+            self.model.wake();
+        }
         if self.irq_line && self.cpsr & psr::I == 0 {
             self.take_irq(bus);
             return;
@@ -404,13 +449,18 @@ impl Cpu {
         self.pipeline[0] = self.pipeline[1];
         if self.thumb() {
             self.r[15] &= !1;
-            self.pipeline[1] = u32::from(bus.read_16(self.r[15], self.fetch_access | Access::CODE));
+            let access = self.fetch_access | Access::CODE;
+            self.pipeline[1] = u32::from(self.model.fetch_16(bus, self.r[15], access));
             self.execute_thumb(bus, instruction as u16);
         } else {
             self.r[15] &= !3;
-            self.pipeline[1] = bus.read_32(self.r[15], self.fetch_access | Access::CODE);
-            if self.condition_passed(instruction >> 28) {
+            let access = self.fetch_access | Access::CODE;
+            self.pipeline[1] = self.model.fetch_32(bus, self.r[15], access);
+            let condition = instruction >> 28;
+            if self.condition_passed(condition) {
                 self.execute_arm(bus, instruction);
+            } else if M::V5TE && condition == 0xF {
+                self.execute_unconditional(bus, instruction);
             } else {
                 self.advance();
             }
@@ -424,8 +474,8 @@ impl Cpu {
         self.fetch_access = Access::SEQUENTIAL;
     }
 
-    /// Like [`Cpu::advance`], but the bus was used for data, so the next
-    /// fetch is non-sequential.
+    /// Like [`Processor::advance`], but the bus was used for data, so the
+    /// next fetch is non-sequential.
     fn advance_after_data(&mut self) {
         self.advance();
         self.fetch_access = Access::NONSEQUENTIAL;
@@ -436,19 +486,62 @@ impl Cpu {
     /// aligned here (a jump to an odd address keeps its low bits until the
     /// next instruction starts), matching the hardware's PC register.
     fn reload_pipeline<B: Bus>(&mut self, bus: &mut B) {
+        let sequential = Access::CODE | Access::SEQUENTIAL;
         if self.thumb() {
-            self.pipeline[0] = u32::from(bus.read_16(self.r[15] & !1, Access::CODE));
+            self.pipeline[0] = u32::from(self.model.fetch_16(bus, self.r[15] & !1, Access::CODE));
             self.r[15] = self.r[15].wrapping_add(2);
-            self.pipeline[1] =
-                u32::from(bus.read_16(self.r[15] & !1, Access::CODE | Access::SEQUENTIAL));
+            self.pipeline[1] = u32::from(self.model.fetch_16(bus, self.r[15] & !1, sequential));
             self.r[15] = self.r[15].wrapping_add(2);
         } else {
-            self.pipeline[0] = bus.read_32(self.r[15] & !3, Access::CODE);
+            self.pipeline[0] = self.model.fetch_32(bus, self.r[15] & !3, Access::CODE);
             self.r[15] = self.r[15].wrapping_add(4);
-            self.pipeline[1] = bus.read_32(self.r[15] & !3, Access::CODE | Access::SEQUENTIAL);
+            self.pipeline[1] = self.model.fetch_32(bus, self.r[15] & !3, sequential);
             self.r[15] = self.r[15].wrapping_add(4);
         }
         self.fetch_access = Access::SEQUENTIAL;
+    }
+
+    /// Whether a load into R15 (LDR, LDM, Thumb POP) takes the state from
+    /// bit 0: ARMv5, unless CP15 asks for ARMv4 behaviour.
+    fn loads_interwork(&self) -> bool {
+        M::V5TE && self.model.loads_interwork()
+    }
+
+    /// After a load into R15 on ARMv5: bit 0 selects Thumb.
+    fn set_state_from_pc(&mut self) {
+        let pc = self.r[15];
+        self.set_flag(psr::T, pc & 1 != 0);
+        self.r[15] = pc & !1;
+    }
+
+    /// Reads a data word through the model (TCM or the bus).
+    fn read_32<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u32 {
+        self.model.read_32(bus, address, access)
+    }
+
+    /// Reads a data halfword through the model.
+    fn read_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u16 {
+        self.model.read_16(bus, address, access)
+    }
+
+    /// Reads a data byte through the model.
+    fn read_8<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u8 {
+        self.model.read_8(bus, address, access)
+    }
+
+    /// Writes a data word through the model.
+    fn write_32<B: Bus>(&mut self, bus: &mut B, address: u32, value: u32, access: Access) {
+        self.model.write_32(bus, address, value, access);
+    }
+
+    /// Writes a data halfword through the model.
+    fn write_16<B: Bus>(&mut self, bus: &mut B, address: u32, value: u16, access: Access) {
+        self.model.write_16(bus, address, value, access);
+    }
+
+    /// Writes a data byte through the model.
+    fn write_8<B: Bus>(&mut self, bus: &mut B, address: u32, value: u8, access: Access) {
+        self.model.write_8(bus, address, value, access);
     }
 
     fn condition_passed(&self, condition: u32) -> bool {
@@ -508,7 +601,7 @@ impl Cpu {
     }
 
     /// Enters an exception: saves CPSR, switches mode in ARM state with
-    /// IRQs off, sets LR, and jumps to `vector`.
+    /// IRQs off, sets LR, and jumps to `vector` from the model's base.
     fn enter_exception<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -520,7 +613,7 @@ impl Cpu {
         self.set_cpsr((old_cpsr & !0x3F) | mode.bits() | psr::I);
         self.set_spsr(old_cpsr);
         self.r[14] = return_address;
-        self.r[15] = vector;
+        self.r[15] = self.model.vector_base() | vector;
         self.reload_pipeline(bus);
     }
 
@@ -544,6 +637,17 @@ impl Cpu {
         let return_address = self.r[15].wrapping_sub(if self.thumb() { 2 } else { 4 });
         bus.idle();
         self.enter_exception(bus, Mode::Undefined, vector::UNDEFINED, return_address);
+    }
+
+    /// BKPT (ARMv5): a prefetch abort. LR is the breakpoint's address plus
+    /// 4 in either state, so `SUBS PC, LR, #4` retries it.
+    fn breakpoint<B: Bus>(&mut self, bus: &mut B) {
+        let return_address = if self.thumb() {
+            self.r[15]
+        } else {
+            self.r[15].wrapping_sub(4)
+        };
+        self.enter_exception(bus, Mode::Abort, vector::PREFETCH_ABORT, return_address);
     }
 
     fn set_nz(&mut self, value: u32) {
