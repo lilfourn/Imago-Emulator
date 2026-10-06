@@ -12,8 +12,6 @@ pub(crate) mod irq {
     pub(crate) const VCOUNT: u32 = 1 << 2;
     /// Timer `n`: bit 3 + n.
     pub(crate) const TIMER0: u32 = 1 << 3;
-    /// ARM7 only.
-    pub(crate) const RTC: u32 = 1 << 7;
     /// DMA channel `n`: bit 8 + n.
     pub(crate) const DMA0: u32 = 1 << 8;
     pub(crate) const KEYPAD: u32 = 1 << 12;

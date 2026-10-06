@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::cart::{Cart, RomEvent};
 use crate::dma::{Dma, Owner, Timing};
 use crate::gpu2d::Engine2d;
+use crate::gpu3d::Gpu3d;
 use crate::interrupt::{Interrupts, irq};
 use crate::ipc::{Ipc, Side};
 use crate::math::Math;
@@ -87,6 +88,7 @@ pub(crate) struct Hardware {
     /// The 2D engines, which own their registers, palette RAM and OAM.
     pub(crate) engine_a: Engine2d,
     pub(crate) engine_b: Engine2d,
+    pub(crate) gpu3d: Gpu3d,
     /// What each engine drew this frame, 256×192 pixels as 0xFFRRGGBB.
     #[serde(skip, default = "blank_screen")]
     pub(crate) screen_a: Box<[u32]>,
@@ -133,6 +135,17 @@ fn blank_screen() -> Box<[u32]> {
 
 impl Hardware {
     pub(crate) fn new(arm9_bios: Box<[u8]>, arm7_bios: Box<[u8]>) -> Self {
+        let mut hw = Self::unset(arm9_bios, arm7_bios);
+        // Both engines' affine BG matrices reset to identity (PA = PD = 1.0).
+        for engine in [&mut hw.engine_a, &mut hw.engine_b] {
+            for offset in [0x20, 0x26, 0x30, 0x36] {
+                engine.write_register(offset, 0x0100);
+            }
+        }
+        hw
+    }
+
+    fn unset(arm9_bios: Box<[u8]>, arm7_bios: Box<[u8]>) -> Self {
         Self {
             main_ram: vec![0; MAIN_RAM_SIZE].into_boxed_slice(),
             shared_wram: vec![0; 0x8000].into_boxed_slice(),
@@ -141,6 +154,7 @@ impl Hardware {
             wramcnt: 0,
             engine_a: Engine2d::new(Engine::A),
             engine_b: Engine2d::new(Engine::B),
+            gpu3d: Gpu3d::new(),
             screen_a: blank_screen(),
             screen_b: blank_screen(),
             arm9_bios,

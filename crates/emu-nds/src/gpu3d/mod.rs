@@ -1,2 +1,500 @@
-//! The 3D engine: geometry and rendering (GBATEK, "DS 3D Video"). Being
-//! written.
+//! The 3D engine: geometry and rendering (GBATEK, "DS 3D Video").
+//!
+//! The CPU, or DMA in geometry-FIFO mode, writes commands to GXFIFO or the
+//! command ports. [`fifo`] queues them and the [`geometry`] engine runs
+//! each as soon as it reaches the head, filling Polygon RAM. SWAP_BUFFERS
+//! halts command processing until [`Gpu3d::vblank`], which hands the
+//! polygon list to the rendering engine and resumes. [`Gpu3d::render_frame`]
+//! draws that list with the rendering registers, and [`Gpu3d::line`] reads
+//! the result for engine A's BG0: per pixel, 6-bit red, green and blue in
+//! bits 0–17 and a 5-bit alpha in bits 18–22 (0 where there is no 3D
+//! pixel).
+//!
+//! Commands execute instantly, so the FIFO only fills while a swap waits
+//! for VBlank, and the test and matrix busy flags never read as busy.
+
+mod color;
+mod fifo;
+mod geometry;
+mod polygon;
+mod registers;
+mod render;
+
+use serde::{Deserialize, Serialize};
+
+use self::fifo::{Assembler, FIFO_CAPACITY, Fifo, SWAP_BUFFERS};
+use self::geometry::Geometry;
+use self::polygon::PolygonList;
+use self::registers::RenderRegisters;
+use self::render::Renderer;
+use crate::vram::Vram;
+
+/// RDLINES_COUNT: the renderer never falls behind, so the line buffer
+/// always holds its maximum.
+const RDLINES_COUNT: u32 = 46;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Gpu3d {
+    registers: RenderRegisters,
+    fifo: Fifo,
+    assembler: Assembler,
+    geometry: Geometry,
+    /// SWAP_BUFFERS' parameter while the engine waits for VBlank.
+    swap_pending: Option<u32>,
+    /// GXSTAT bits 30–31: 1 interrupts while the FIFO is less than half
+    /// full, 2 while it is empty.
+    fifo_irq: u8,
+    /// The polygon list the rendering engine draws.
+    rendering: PolygonList,
+    /// Frame buffers; redrawn by the next `render_frame`.
+    #[serde(skip)]
+    renderer: Renderer,
+}
+
+impl Gpu3d {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// A 32-bit write at `offset` from 0x04000000: DISP3DCNT (0x060),
+    /// 0x320–0x3BF, GXFIFO, the command ports, GXSTAT and DISP_1DOT_DEPTH.
+    pub(crate) fn write_register(&mut self, offset: u32, value: u32) {
+        self.write(offset & !3, value, u32::MAX);
+    }
+
+    /// A 16-bit write. GXFIFO and the command ports take only 32-bit
+    /// writes; a narrower one counts as a whole word.
+    pub(crate) fn write_register_16(&mut self, offset: u32, value: u16) {
+        let shift = (offset & 2) * 8;
+        self.write(offset & !3, u32::from(value) << shift, 0xFFFF << shift);
+    }
+
+    /// An 8-bit write; see [`Self::write_register_16`].
+    pub(crate) fn write_register_8(&mut self, offset: u32, value: u8) {
+        let shift = (offset & 3) * 8;
+        self.write(offset & !3, u32::from(value) << shift, 0xFF << shift);
+    }
+
+    /// Writes the bytes of `value` selected by `mask` to the word at
+    /// `offset`.
+    fn write(&mut self, offset: u32, value: u32, mask: u32) {
+        match offset {
+            0x060 => {
+                let (value, mask) = (value as u16, mask as u16);
+                if value & mask & (1 << 13) != 0 {
+                    self.geometry.overflow = false;
+                }
+                self.registers.write_control(value, mask);
+            }
+            0x320..=0x3BC => {
+                for lane in 0..4 {
+                    if (mask >> (lane * 8)) & 0xFF != 0 {
+                        self.registers
+                            .write_byte(offset + lane, (value >> (lane * 8)) as u8);
+                    }
+                }
+            }
+            0x400..=0x43C => {
+                self.fifo.write_packed(value);
+                self.run();
+            }
+            0x440..=0x5FC => {
+                self.fifo.write_port(((offset - 0x400) >> 2) as u8, value);
+                self.run();
+            }
+            0x600 => {
+                if value & mask & (1 << 15) != 0 {
+                    self.geometry.acknowledge_stack_error();
+                }
+                if mask & (3 << 30) != 0 {
+                    self.fifo_irq = (value >> 30) as u8;
+                }
+            }
+            0x610 => {
+                let depth = self.geometry.one_dot_depth;
+                self.geometry.one_dot_depth = (depth & !mask | value & mask) & 0x7FFF;
+            }
+            _ => {}
+        }
+    }
+
+    /// The 32-bit word containing `offset`. Write-only registers read 0.
+    pub(crate) fn read_register(&self, offset: u32) -> u32 {
+        let offset = offset & !3;
+        let index = |base: u32, size: u32| ((offset - base) / size) as usize;
+        match offset {
+            0x060 => u32::from(self.registers.control()) | u32::from(self.geometry.overflow) << 13,
+            0x320 => RDLINES_COUNT,
+            0x600 => self.gxstat(),
+            0x604 => self.geometry.ram_count(),
+            0x620..=0x62C => self.geometry.pos_result(index(0x620, 4)),
+            0x630..=0x634 => {
+                let first = index(0x630, 2);
+                u32::from(self.geometry.vec_result(first))
+                    | u32::from(self.geometry.vec_result(first + 1)) << 16
+            }
+            0x640..=0x67C => self.geometry.clip_matrix_word(index(0x640, 4)),
+            0x680..=0x6A0 => self.geometry.vector_matrix_word(index(0x680, 4)),
+            _ => 0,
+        }
+    }
+
+    fn gxstat(&self) -> u32 {
+        let count = self.fifo.len() as u32;
+        let busy = self.swap_pending.is_some() || self.fifo.has_entries();
+        self.geometry.status()
+            | count << 16
+            | u32::from(count < FIFO_CAPACITY as u32 / 2) << 25
+            | u32::from(count == 0) << 26
+            | u32::from(busy) << 27
+            | u32::from(self.fifo_irq) << 30
+    }
+
+    /// Runs queued commands until the FIFO is empty or a swap waits.
+    fn run(&mut self) {
+        while self.swap_pending.is_none() {
+            let Some(entry) = self.fifo.pop() else {
+                break;
+            };
+            if let Some((command, params)) = self.assembler.push(entry) {
+                if command == SWAP_BUFFERS {
+                    self.swap_pending = Some(params[0]);
+                } else {
+                    self.geometry.execute(command, params);
+                }
+            }
+        }
+    }
+
+    /// The FIFO is less than half full: geometry-FIFO DMA should run (it
+    /// sends up to 112 words, then waits for this again).
+    pub(crate) fn fifo_wants_dma(&self) -> bool {
+        self.fifo.len() < FIFO_CAPACITY / 2
+    }
+
+    /// The FIFO is full: a CPU or DMA write now must wait until
+    /// [`Self::vblank`] lets commands run again.
+    #[cfg(test)]
+    pub(crate) fn fifo_full(&self) -> bool {
+        self.fifo.is_full()
+    }
+
+    /// The GXFIFO interrupt condition (IF bit 21). It is a level: while
+    /// true, IF bit 21 stays set however often the CPU acknowledges it.
+    pub(crate) fn irq_requested(&self) -> bool {
+        let count = self.fifo.len();
+        match self.fifo_irq {
+            1 => count < FIFO_CAPACITY / 2,
+            2 => count == 0,
+            _ => false,
+        }
+    }
+
+    /// VBlank begins (line 192): a pending SWAP_BUFFERS takes effect, the
+    /// new polygon list goes to the rendering engine, and commands resume.
+    pub(crate) fn vblank(&mut self) {
+        let Some(params) = self.swap_pending.take() else {
+            return;
+        };
+        let building = self.geometry.list_mut();
+        std::mem::swap(&mut self.rendering, building);
+        building.restart(params);
+        self.run();
+    }
+
+    /// Draws the current polygon list with the rendering registers as they
+    /// are now. Call once per frame, when the hardware starts rendering
+    /// (line 214), and before reading [`Self::line`].
+    pub(crate) fn render_frame(&mut self, vram: &Vram) {
+        let config = self.registers.config();
+        self.renderer.render(&self.rendering, &config, vram);
+    }
+
+    /// Row `y` (0–191) of the last frame drawn.
+    pub(crate) fn line(&self, y: u16) -> &[u32; 256] {
+        self.renderer.line(usize::from(y))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vram::Region;
+
+    const ONE: i32 = 1 << 12;
+
+    // Command ports.
+    const MTX_MODE: u32 = 0x440;
+    const MTX_IDENTITY: u32 = 0x454;
+    const MTX_SCALE: u32 = 0x46C;
+    const COLOR: u32 = 0x480;
+    const TEXCOORD: u32 = 0x488;
+    const VTX_16: u32 = 0x48C;
+    const POLYGON_ATTR: u32 = 0x4A4;
+    const TEXIMAGE_PARAM: u32 = 0x4A8;
+    const BEGIN_VTXS: u32 = 0x500;
+    const SWAP_BUFFERS_PORT: u32 = 0x540;
+    const BOX_TEST: u32 = 0x5C0;
+
+    const SOLID: u32 = 31 << 16 | 0xC0;
+
+    fn send(gpu: &mut Gpu3d, port: u32, params: &[u32]) {
+        if params.is_empty() {
+            gpu.write_register(port, 0);
+        }
+        for &param in params {
+            gpu.write_register(port, param);
+        }
+    }
+
+    fn vertex(gpu: &mut Gpu3d, x: i32, y: i32, z: i32) {
+        send(
+            gpu,
+            VTX_16,
+            &[(x as u32 & 0xFFFF) | (y as u32) << 16, z as u32 & 0xFFFF],
+        );
+    }
+
+    /// A quad from (x0, y0) to (x1, y1) in clip space at depth `z`.
+    fn quad(gpu: &mut Gpu3d, [x0, y0, x1, y1]: [i32; 4], z: i32) {
+        send(gpu, BEGIN_VTXS, &[1]);
+        vertex(gpu, x0, y1, z);
+        vertex(gpu, x0, y0, z);
+        vertex(gpu, x1, y0, z);
+        vertex(gpu, x1, y1, z);
+    }
+
+    /// DISP3DCNT, CLEAR_COLOR and CLEAR_DEPTH (farthest).
+    fn configure(gpu: &mut Gpu3d, control: u32, clear_color: u32) {
+        gpu.write_register(0x060, control);
+        gpu.write_register(0x350, clear_color);
+        gpu.write_register_16(0x354, 0x7FFF);
+    }
+
+    /// Swaps, starts VBlank and renders.
+    fn finish(gpu: &mut Gpu3d, vram: &Vram) {
+        send(gpu, SWAP_BUFFERS_PORT, &[0]);
+        gpu.vblank();
+        gpu.render_frame(vram);
+    }
+
+    fn pixel(gpu: &Gpu3d, x: usize, y: u16) -> u32 {
+        gpu.line(y)[x]
+    }
+
+    fn opaque(rgb: [u8; 3]) -> u32 {
+        color::pack(rgb, 31)
+    }
+
+    #[test]
+    fn a_flat_triangle_covers_the_expected_pixels() {
+        let mut gpu = Gpu3d::new();
+        let vram = Vram::default();
+        configure(&mut gpu, 0, 0);
+        // Packed through GXFIFO: POLYGON_ATTR, COLOR, BEGIN_VTXS.
+        gpu.write_register(0x400, 0x0040_2029);
+        gpu.write_register(0x400, SOLID);
+        gpu.write_register(0x400, 0x001F);
+        gpu.write_register(0x400, 0);
+        // The lower-left half of the screen.
+        vertex(&mut gpu, -ONE, ONE, 0);
+        vertex(&mut gpu, -ONE, -ONE, 0);
+        vertex(&mut gpu, ONE, -ONE, 0);
+        finish(&mut gpu, &vram);
+        assert_eq!(pixel(&gpu, 10, 100), opaque([63, 0, 0]));
+        assert_eq!(pixel(&gpu, 0, 191), opaque([63, 0, 0]));
+        assert_eq!(pixel(&gpu, 200, 10), 0, "no 3D pixel");
+        // Row 96 is covered up to the diagonal at x = 128.
+        assert_eq!(pixel(&gpu, 127, 96), opaque([63, 0, 0]));
+        assert_eq!(pixel(&gpu, 129, 96), 0);
+    }
+
+    #[test]
+    fn nearer_pixels_win_the_depth_test() {
+        let mut gpu = Gpu3d::new();
+        let vram = Vram::default();
+        configure(&mut gpu, 0, 0);
+        send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], -ONE / 2);
+        send(&mut gpu, COLOR, &[0x7C00]);
+        quad(&mut gpu, [-ONE, -ONE, ONE, ONE], ONE / 2);
+        finish(&mut gpu, &vram);
+        assert_eq!(pixel(&gpu, 128, 96), opaque([63, 0, 0]), "near red stays");
+        assert_eq!(
+            pixel(&gpu, 10, 10),
+            opaque([0, 0, 63]),
+            "far blue elsewhere"
+        );
+    }
+
+    #[test]
+    fn a_four_colour_texture_maps_across_a_quad() {
+        let mut gpu = Gpu3d::new();
+        let mut vram = Vram::default();
+        vram.set_control(0, 0x80 | 3); // A: texture slot 0.
+        vram.set_control(4, 0x80 | 3); // E: texture palettes.
+        // 8×8 texels, each row 0, 1, 2, 3, 0, 1, 2, 3.
+        for offset in 0..16 {
+            vram.write_8(Region::Texture, offset, 0b1110_0100);
+        }
+        for (index, color) in [0x0000, 0x001F, 0x03E0, 0x7C00].into_iter().enumerate() {
+            vram.write_16(Region::TexturePalette, index as u32 * 2, color);
+        }
+        configure(&mut gpu, 1, 0);
+        send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+        send(&mut gpu, TEXIMAGE_PARAM, &[2 << 26]);
+        send(&mut gpu, COLOR, &[0x7FFF]);
+        send(&mut gpu, BEGIN_VTXS, &[1]);
+        // Eight texels across 256 pixels: 32 pixels each.
+        for (s, t, x, y) in [(0, 0, -1, 1), (0, 8, -1, -1), (8, 8, 1, -1), (8, 0, 1, 1)] {
+            send(&mut gpu, TEXCOORD, &[(s << 4) | (t << 4) << 16]);
+            vertex(&mut gpu, x * ONE, y * ONE, 0);
+        }
+        finish(&mut gpu, &vram);
+        assert_eq!(pixel(&gpu, 16, 50), opaque([0, 0, 0]));
+        assert_eq!(pixel(&gpu, 48, 50), opaque([63, 0, 0]));
+        assert_eq!(pixel(&gpu, 80, 50), opaque([0, 63, 0]));
+        assert_eq!(pixel(&gpu, 112, 50), opaque([0, 0, 63]));
+        assert_eq!(pixel(&gpu, 176, 150), opaque([63, 0, 0]));
+    }
+
+    #[test]
+    fn translucent_polygons_blend_once_per_id() {
+        let mut gpu = Gpu3d::new();
+        let vram = Vram::default();
+        // Alpha blending on; an opaque blue rear plane.
+        configure(&mut gpu, 1 << 3, 0x7C00 | 31 << 16);
+        send(&mut gpu, POLYGON_ATTR, &[15 << 16 | 0xC0 | 1 << 24]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        quad(&mut gpu, [-ONE, -ONE, 0, ONE], 0);
+        // Same ID again over the left half: no second blend.
+        quad(&mut gpu, [-ONE, -ONE, ONE, ONE], -ONE / 2);
+        finish(&mut gpu, &vram);
+        // (63 * 16 + 0 * 16) / 32 = 31 red, (0 + 63 * 16) / 32 = 31 blue.
+        assert_eq!(pixel(&gpu, 64, 96), opaque([31, 0, 31]));
+        assert_eq!(pixel(&gpu, 192, 96), opaque([31, 0, 31]));
+    }
+
+    #[test]
+    fn fog_covers_fogged_polygons() {
+        let mut gpu = Gpu3d::new();
+        let vram = Vram::default();
+        configure(&mut gpu, 1 << 7, 0);
+        gpu.write_register(0x358, 0x03E0 | 31 << 16); // Green fog.
+        for offset in (0x360..0x380).step_by(4) {
+            gpu.write_register(offset, 0x7F7F_7F7F); // Full density.
+        }
+        send(&mut gpu, POLYGON_ATTR, &[SOLID | 1 << 15]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        quad(&mut gpu, [-ONE, -ONE, 0, ONE], 0);
+        send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+        quad(&mut gpu, [0, -ONE, ONE, ONE], 0);
+        finish(&mut gpu, &vram);
+        assert_eq!(pixel(&gpu, 64, 96), opaque([0, 63, 0]));
+        assert_eq!(pixel(&gpu, 192, 96), opaque([63, 0, 0]), "fog disabled");
+    }
+
+    #[test]
+    fn edge_marking_outlines_polygon_ids() {
+        let mut gpu = Gpu3d::new();
+        let vram = Vram::default();
+        configure(&mut gpu, 1 << 5, 0);
+        gpu.write_register(0x330, 0x7FFF << 16); // Edge colour 1: white.
+        send(&mut gpu, POLYGON_ATTR, &[SOLID | 8 << 24]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
+        finish(&mut gpu, &vram);
+        // The quad spans x 64..192, y 48..144.
+        assert_eq!(pixel(&gpu, 64, 96), opaque([63, 63, 63]), "left edge");
+        assert_eq!(pixel(&gpu, 100, 48), opaque([63, 63, 63]), "top edge");
+        assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
+    }
+
+    #[test]
+    fn swap_buffers_halts_the_fifo_until_vblank() {
+        let mut gpu = Gpu3d::new();
+        gpu.write_register(0x600, 2 << 30); // IRQ when empty.
+        assert!(gpu.irq_requested());
+        send(&mut gpu, SWAP_BUFFERS_PORT, &[0]);
+        let gxstat = gpu.read_register(0x600);
+        assert_ne!(gxstat & 1 << 27, 0, "busy while waiting");
+        assert_ne!(gxstat & 1 << 26, 0, "nothing queued yet");
+        // A triangle waits behind the swap.
+        send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+        send(&mut gpu, BEGIN_VTXS, &[0]);
+        vertex(&mut gpu, -ONE, ONE, 0);
+        vertex(&mut gpu, -ONE, -ONE, 0);
+        vertex(&mut gpu, ONE, -ONE, 0);
+        for _ in 0..200 {
+            send(&mut gpu, MTX_IDENTITY, &[]);
+        }
+        // 2 + 3 * 2 + 200 entries, four of them in the PIPE.
+        let gxstat = gpu.read_register(0x600);
+        assert_eq!((gxstat >> 16) & 0x1FF, 204);
+        assert_eq!(gxstat & (3 << 25), 0, "neither empty nor below half");
+        assert!(!gpu.fifo_wants_dma() && !gpu.irq_requested() && !gpu.fifo_full());
+        assert_eq!(gpu.read_register(0x604), 0, "no polygon yet");
+        gpu.vblank();
+        let gxstat = gpu.read_register(0x600);
+        assert_eq!(gxstat & (1 << 27 | 0x1FF << 16), 0);
+        assert_eq!(gxstat & (3 << 25), 3 << 25);
+        assert!(gpu.fifo_wants_dma() && gpu.irq_requested());
+        assert_eq!(gpu.read_register(0x604), 1 | 3 << 16);
+    }
+
+    #[test]
+    fn the_fifo_fills_at_260_entries() {
+        let mut gpu = Gpu3d::new();
+        send(&mut gpu, SWAP_BUFFERS_PORT, &[0]);
+        for _ in 0..259 {
+            send(&mut gpu, MTX_IDENTITY, &[]);
+        }
+        assert!(!gpu.fifo_full());
+        send(&mut gpu, MTX_IDENTITY, &[]);
+        assert!(gpu.fifo_full());
+        assert_eq!((gpu.read_register(0x600) >> 16) & 0x1FF, 256);
+    }
+
+    #[test]
+    fn box_test_and_matrix_reads_through_registers() {
+        let mut gpu = Gpu3d::new();
+        send(&mut gpu, MTX_MODE, &[1]);
+        send(&mut gpu, MTX_SCALE, &[2 << 12, 3 << 12, 4 << 12]);
+        assert_eq!(gpu.read_register(0x640), 2 << 12);
+        assert_eq!(gpu.read_register(0x654), 3 << 12);
+        assert_eq!(gpu.read_register(0x668), 4 << 12);
+        assert_eq!(gpu.read_register(0x680), 1 << 12, "mode 1 leaves vectors");
+        // A box at the origin, 0.25 on each side: scaled, still inside.
+        let quarter = (ONE / 4) as u32;
+        send(
+            &mut gpu,
+            BOX_TEST,
+            &[0, quarter << 16, quarter | quarter << 16],
+        );
+        assert_ne!(gpu.read_register(0x600) & 2, 0);
+        // Far off to the side.
+        send(
+            &mut gpu,
+            BOX_TEST,
+            &[(3 * ONE) as u32, quarter << 16, quarter | quarter << 16],
+        );
+        assert_eq!(gpu.read_register(0x600) & 2, 0);
+    }
+
+    #[test]
+    fn state_round_trips_through_postcard() {
+        let mut gpu = Gpu3d::new();
+        let vram = Vram::default();
+        configure(&mut gpu, 0, 0);
+        send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+        send(&mut gpu, COLOR, &[0x03E0]);
+        quad(&mut gpu, [-ONE, -ONE, ONE, ONE], 0);
+        send(&mut gpu, SWAP_BUFFERS_PORT, &[0]);
+        let bytes = postcard::to_stdvec(&gpu).expect("serializes");
+        let mut restored: Gpu3d = postcard::from_bytes(&bytes).expect("deserializes");
+        restored.vblank();
+        restored.render_frame(&vram);
+        assert_eq!(pixel(&restored, 100, 100), opaque([0, 63, 0]));
+    }
+}

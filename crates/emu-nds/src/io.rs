@@ -197,6 +197,9 @@ impl Hardware {
             0x0400_0280..=0x0400_02BF if side == Side::Arm9 => {
                 Some(self.math.read(address - 0x0400_0280))
             }
+            0x0400_0060 | 0x0400_0320..=0x0400_06A3 if side == Side::Arm9 => {
+                Some(self.gpu3d.read_register(address & 0xFFF))
+            }
             _ => None,
         }
     }
@@ -221,6 +224,9 @@ impl Hardware {
             }
             0x0400_0280..=0x0400_02BF if side == Side::Arm9 => {
                 self.math.write(address - 0x0400_0280, value);
+            }
+            0x0400_0060 | 0x0400_0320..=0x0400_06A3 if side == Side::Arm9 => {
+                self.gpu3d.write_register(address & 0xFFF, value);
             }
             _ => return false,
         }
@@ -247,13 +253,16 @@ impl Hardware {
             return value;
         }
         match offset {
+            0x060..=0x063 | 0x320..=0x6A3 => {
+                (self.gpu3d.read_register(offset & !3) >> ((offset & 2) * 8)) as u16
+            }
             0x000..=0x05F | 0x06C..=0x06F => self.engine_a.read_register(offset),
             0x1000..=0x106F => self.engine_b.read_register(offset - 0x1000),
             0x204 => self.exmemcnt,
             0x240..=0x249 => {
                 u16::from(self.io9_read_8(address)) | u16::from(self.io9_read_8(address + 1)) << 8
             }
-            0x280..=0x2BF => (self.math.read(offset & !3) >> ((offset & 2) * 8)) as u16,
+            0x280..=0x2BF => (self.math.read((offset - 0x280) & !3) >> ((offset & 2) * 8)) as u16,
             0x300 => u16::from(self.arm9.postflg),
             0x304 => self.powcnt1,
             _ => self.raw_16(Side::Arm9, offset),
@@ -294,6 +303,7 @@ impl Hardware {
             return;
         }
         match offset {
+            0x060..=0x063 | 0x320..=0x6A3 => self.gpu3d.write_register_16(offset, value),
             0x000..=0x05F | 0x06C..=0x06F => self.engine_a.write_register(offset, value),
             0x1000..=0x106F => self.engine_b.write_register(offset - 0x1000, value),
             0x204 => self.exmemcnt = value,
@@ -302,7 +312,7 @@ impl Hardware {
                 self.io9_write_8(address + 1, (value >> 8) as u8);
             }
             0x280..=0x2BF => {
-                let register = offset & !3;
+                let register = (offset - 0x280) & !3;
                 let shift = (offset & 2) * 8;
                 let current = self.math.read(register);
                 let merged = (current & !(0xFFFF << shift)) | u32::from(value) << shift;
@@ -332,6 +342,7 @@ impl Hardware {
                 .interrupts
                 .acknowledge(u32::from(value) << ((offset - 0x214) * 8)),
             0x300 => self.arm9.postflg = value & 3,
+            0x060..=0x063 | 0x320..=0x6A3 => self.gpu3d.write_register_8(offset, value),
             _ => {
                 let mut bytes = self.raw_16(Side::Arm9, offset & !1).to_le_bytes();
                 bytes[(offset & 1) as usize] = value;
@@ -510,6 +521,16 @@ mod tests {
         hw.arm9_write_16(0x0400_00BA, 0x8400); // enable, words
         assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x8400_0004);
         assert_eq!(hw.arm9.dma.next_pending(), Some(0));
+    }
+
+    #[test]
+    fn the_maths_unit_takes_halfword_control_writes() {
+        let mut hw = hardware();
+        hw.arm9_write_16(0x0400_02B0, 1); // SQRTCNT: 64-bit input
+        hw.arm9_write_32(0x0400_02B8, 0);
+        hw.arm9_write_32(0x0400_02BC, 1);
+        assert_eq!(hw.arm9_read_32(0x0400_02B4), 65_536);
+        assert_eq!(hw.arm9_read_16(0x0400_02B0), 1);
     }
 
     #[test]

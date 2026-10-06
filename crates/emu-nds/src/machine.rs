@@ -6,14 +6,15 @@
 //! the events due by then fire. A CPU therefore sees the other's writes at
 //! most a slice late, which the games' IPC handshakes tolerate.
 
-use emu_arm::{Bus, Cpu, Mode, Registers, psr};
+use emu_arm::{Cpu, Mode, Model, Processor, Registers, cp15, psr};
 use serde::{Deserialize, Serialize};
 
 use crate::bios::{self, Call, Effects};
 use crate::boot::{self, ARM7_STACKS, ARM9_STACKS, Program};
-use crate::bus::{Arm7Bus, Arm9Bus};
+use crate::bus::{Arm7Bus, Arm9Bus, Arm9TcmBus, CpuBus};
 use crate::cart::Cart;
 use crate::display::Moment;
+use crate::dma::Timing;
 use crate::hardware::{Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
@@ -21,32 +22,8 @@ use crate::ipc::Side;
 /// The longest slice, in bus cycles.
 const SLICE_CYCLES: u64 = 64;
 
-/// The ARM9's processor. Until the ARM946E-S model lands it runs on the
-/// ARMv4T interpreter.
-pub(crate) type Arm9 = Cpu;
-
-/// What a system call needs from either CPU model.
-pub(crate) trait Processor {
-    fn reg(&self, index: usize) -> u32;
-    fn set_reg(&mut self, index: usize, value: u32);
-    fn saved_psr(&self) -> Option<u32>;
-    fn return_from_exception<B: Bus>(&mut self, bus: &mut B);
-}
-
-impl Processor for Cpu {
-    fn reg(&self, index: usize) -> u32 {
-        Cpu::reg(self, index)
-    }
-    fn set_reg(&mut self, index: usize, value: u32) {
-        Cpu::set_reg(self, index, value);
-    }
-    fn saved_psr(&self) -> Option<u32> {
-        Cpu::saved_psr(self)
-    }
-    fn return_from_exception<B: Bus>(&mut self, bus: &mut B) {
-        Cpu::return_from_exception(self, bus);
-    }
-}
+/// The ARM9's processor, an ARM946E-S.
+pub(crate) type Arm9 = emu_arm::Arm9;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Machine {
@@ -55,6 +32,10 @@ pub(crate) struct Machine {
     pub(crate) hw: Hardware,
     /// System calls are emulated in Rust rather than run from BIOS dumps.
     pub(crate) hle_bios: bool,
+    /// How many times each CPU (ARM9, ARM7) called each BIOS function, for
+    /// debugging.
+    #[serde(skip)]
+    pub(crate) system_calls: [[u32; 0x20]; 2],
 }
 
 /// What happened while running, for the core to act on.
@@ -101,6 +82,13 @@ impl Machine {
             [0, 0],
             emu_arm::Access::NONSEQUENTIAL,
         );
+        // CP15 as the BIOS leaves it: high vectors, DTCM and ITCM on.
+        let cp15 = arm9.cp15_mut();
+        cp15.set_control(
+            cp15::control::RESET | cp15::control::DTCM_ENABLE | cp15::control::ITCM_ENABLE,
+        );
+        cp15.set_dtcm_region(boot::DTCM_REGION);
+        cp15.set_itcm_region(boot::ITCM_REGION);
         arm9.jump(&mut Arm9Bus(&mut hw), header.arm9.entry);
         arm7.jump(&mut Arm7Bus(&mut hw), header.arm7.entry);
         Self {
@@ -108,6 +96,7 @@ impl Machine {
             arm7,
             hw,
             hle_bios,
+            system_calls: [[0; 0x20]; 2],
         }
     }
 
@@ -131,6 +120,14 @@ impl Machine {
             self.step_arm7(target);
         }
         self.hw.scheduler.advance(target - now);
+        // The geometry FIFO's interrupt is a level, and its DMA runs while
+        // it is less than half full.
+        if self.hw.gpu3d.irq_requested() {
+            self.hw.arm9.interrupts.request(irq::GEOMETRY_FIFO);
+        }
+        if self.hw.gpu3d.fifo_wants_dma() {
+            self.hw.arm9.dma.trigger(Timing::GeometryFifo);
+        }
         let mut progress = Progress::default();
         while let Some(due) = self.hw.scheduler.pop_due() {
             match due.event {
@@ -181,25 +178,32 @@ impl Machine {
         if hw.run_dma(Side::Arm9) {
             return;
         }
-        if hw.arm9.halted {
+        // Halted by a BIOS call or by CP15's wait for interrupt.
+        if hw.arm9.halted || self.arm9.halted() {
             if !hw.arm9.interrupts.pending() {
                 hw.arm9.cycles = hw.arm9.cycles.max(target);
                 return;
             }
             hw.arm9.halted = false;
+            self.arm9.wake();
         }
         let entered_swi = self.arm9.reg(15) == bios::ARM9_SWI_ENTERED_PC
             && !self.arm9.thumb()
             && self.arm9.mode() == Mode::Supervisor;
         if self.hle_bios && entered_swi {
             // The BIOS keeps its interrupt flags at the top of DTCM.
-            let intr_flags = boot::DTCM_REGION & !0xFFF;
-            system_call(
-                &mut self.arm9,
-                &mut Arm9Bus(hw),
-                Side::Arm9,
-                intr_flags + 0x3FF8,
-            );
+            let dtcm = self.arm9.cp15().dtcm_region() & !0xFFF;
+            let trap = Trap::read(&self.arm9, Side::Arm9, dtcm + 0x3FF8);
+            let effects = {
+                let mut bus = Arm9TcmBus {
+                    cpu: &mut self.arm9,
+                    bus: Arm9Bus(hw),
+                };
+                trap.run(&mut bus)
+            };
+            self.system_calls[0][usize::from(effects.0 & 0x1F)] += 1;
+            let effects = effects.1;
+            trap.finish(&mut self.arm9, &mut Arm9Bus(hw), effects);
             return;
         }
         self.arm9.set_irq_line(hw.arm9.interrupts.line());
@@ -224,7 +228,10 @@ impl Machine {
             && !self.arm7.thumb()
             && self.arm7.mode() == Mode::Supervisor;
         if self.hle_bios && entered_swi {
-            system_call(&mut self.arm7, &mut Arm7Bus(hw), Side::Arm7, 0x0380_FFF8);
+            let trap = Trap::read(&self.arm7, Side::Arm7, 0x0380_FFF8);
+            let (number, effects) = trap.run(&mut Arm7Bus(hw));
+            self.system_calls[1][usize::from(number & 0x1F)] += 1;
+            trap.finish(&mut self.arm7, &mut Arm7Bus(hw), effects);
             return;
         }
         self.arm7.set_irq_line(hw.arm7.interrupts.line());
@@ -232,57 +239,54 @@ impl Machine {
     }
 }
 
-/// A bus that can halt and stall its CPU, for system calls.
-pub(crate) trait CpuBus: Bus {
-    fn halt(&mut self);
-    fn stall(&mut self, cycles: u64);
+/// A system call a CPU just trapped into, with its arguments.
+struct Trap {
+    call: Call,
+    return_address: u32,
+    thumb: bool,
 }
 
-impl CpuBus for Arm9Bus<'_> {
-    fn halt(&mut self) {
-        self.0.arm9.halted = true;
+impl Trap {
+    fn read<M: Model>(cpu: &Processor<M>, side: Side, intr_flags: u32) -> Self {
+        Self {
+            call: Call {
+                side,
+                args: [cpu.reg(0), cpu.reg(1), cpu.reg(2), cpu.reg(3)],
+                intr_flags,
+            },
+            return_address: cpu.reg(14),
+            thumb: cpu.saved_psr().is_some_and(|spsr| spsr & psr::T != 0),
+        }
     }
-    fn stall(&mut self, cycles: u64) {
-        self.0.arm9.cycles += cycles;
-    }
-}
 
-impl CpuBus for Arm7Bus<'_> {
-    fn halt(&mut self) {
-        self.0.arm7.halted = true;
+    /// Runs the call against memory as the calling CPU sees it. Returns
+    /// the function number and what it did.
+    fn run<B: CpuBus>(&self, bus: &mut B) -> (u8, Effects) {
+        let number = bios::number(bus, self.return_address, self.thumb);
+        (number, bios::run(number, &self.call, bus))
     }
-    fn stall(&mut self, cycles: u64) {
-        self.0.arm7.cycles += cycles;
-    }
-}
 
-/// Runs the system call `cpu` just entered and returns from it.
-fn system_call<C: Processor, B: CpuBus>(cpu: &mut C, bus: &mut B, side: Side, intr_flags: u32) {
-    let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & psr::T != 0);
-    let number = bios::number(bus, cpu.reg(14), thumb);
-    let call = Call {
-        side,
-        args: [cpu.reg(0), cpu.reg(1), cpu.reg(2), cpu.reg(3)],
-        intr_flags,
-    };
-    let Effects {
-        registers,
-        halt,
-        repeat,
-        stall,
-        soft_reset: _,
-    } = bios::run(number, &call, bus);
-    for (index, value) in registers {
-        cpu.set_reg(index, value);
+    /// Applies the call's effects to the CPU and returns from the SWI.
+    fn finish<M: Model, B: CpuBus>(&self, cpu: &mut Processor<M>, bus: &mut B, effects: Effects) {
+        let Effects {
+            registers,
+            halt,
+            repeat,
+            stall,
+            soft_reset: _,
+        } = effects;
+        for (index, value) in registers {
+            cpu.set_reg(index, value);
+        }
+        if repeat {
+            // Return to the SWI itself, so the call runs again after waking.
+            let length = if self.thumb { 2 } else { 4 };
+            cpu.set_reg(14, cpu.reg(14).wrapping_sub(length));
+        }
+        if halt {
+            bus.halt();
+        }
+        bus.stall(stall);
+        cpu.return_from_exception(bus);
     }
-    if repeat {
-        // Return to the SWI itself, so the call runs again after waking.
-        let length = if thumb { 2 } else { 4 };
-        cpu.set_reg(14, cpu.reg(14).wrapping_sub(length));
-    }
-    if halt {
-        bus.halt();
-    }
-    bus.stall(stall);
-    cpu.return_from_exception(bus);
 }

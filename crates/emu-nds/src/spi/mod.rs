@@ -15,7 +15,9 @@ mod touch;
 
 use serde::{Deserialize, Serialize};
 
-use firmware::{Calibration, Firmware, USER_SETTINGS_SIZE};
+#[cfg(test)]
+use firmware::Calibration;
+use firmware::{Firmware, USER_SETTINGS_SIZE};
 use power::Power;
 use touch::Touch;
 
@@ -168,6 +170,7 @@ impl Spi {
     }
 
     /// The touchscreen calibration in the user settings.
+    #[cfg(test)]
     pub(crate) fn calibration(&self) -> Calibration {
         self.firmware.calibration()
     }

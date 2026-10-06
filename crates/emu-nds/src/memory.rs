@@ -3,7 +3,7 @@
 //!
 //! The ARM9's tightly coupled memory never reaches here: the CPU serves it.
 //! Wait states are approximations: the ARM9's caches are not modelled, so
-//! its code fetches from main RAM are charged as if they mostly hit.
+//! its main RAM accesses are charged as if they hit.
 
 use emu_arm::Access;
 
@@ -334,11 +334,13 @@ impl Hardware {
         self.write_place_8(false, address, value);
     }
 
-    /// ARM9 cycles for an access, two per bus cycle.
+    /// ARM9 cycles for an access, two per bus cycle. The CPU's own main
+    /// RAM accesses are charged as cache hits, which nearly all of them are
+    /// on hardware; DMA bypasses the caches and pays the full cost.
     pub(crate) fn arm9_wait(&self, address: u32, width: Width, access: Access) -> u64 {
         let sequential = access.contains(Access::SEQUENTIAL);
         match self.arm9_place(address) {
-            Place::MainRam(_) if access.contains(Access::CODE) => 2,
+            Place::MainRam(_) if !access.contains(Access::DMA) => 2,
             Place::MainRam(_) => match (width, sequential) {
                 (Width::Word, false) => 20,
                 (_, false) => 18,

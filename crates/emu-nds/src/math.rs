@@ -84,14 +84,14 @@ impl Math {
     }
 }
 
-/// 32/32 division. By zero, the quotient is ±1 against the numerator's
-/// sign, with its high word of the other sign, and the remainder is the
-/// numerator.
+/// 32/32 division. By zero, the quotient's low word is ±1 against the
+/// numerator's sign and its high word is the inverse of that word's sign
+/// extension; the remainder is the numerator.
 fn divide_32(numerator: i32, denominator: i32) -> (i64, i64) {
     if denominator == 0 {
         let low: i32 = if numerator < 0 { 1 } else { -1 };
-        let quotient = i64::from(-low) << 32 | i64::from(low as u32);
-        return (quotient, i64::from(numerator));
+        let high: i64 = if low < 0 { 0 } else { -1 };
+        return (high << 32 | i64::from(low as u32), i64::from(numerator));
     }
     if numerator == i32::MIN && denominator == -1 {
         // The quotient overflows 32 bits but not the 64-bit result.
@@ -144,7 +144,7 @@ mod tests {
         math.write(0x18, 0);
         assert_ne!(math.read(0x00) & 1 << 14, 0);
         let (quotient, remainder) = result(&math);
-        assert_eq!(quotient, 0x0000_0001_FFFF_FFFF);
+        assert_eq!(quotient, 0x0000_0000_FFFF_FFFF);
         assert_eq!(remainder, 5);
     }
 

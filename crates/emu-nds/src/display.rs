@@ -20,6 +20,8 @@ pub(crate) const HBLANK_START: u64 = 256 * 6;
 pub(crate) const LINES: u16 = 263;
 /// Lines shown.
 pub(crate) const VISIBLE_LINES: u16 = 192;
+/// The line where the 3D engine renders the coming frame.
+const RENDER_3D_LINE: u16 = 214;
 /// Bus cycles per frame.
 pub(crate) const FRAME_CYCLES: u64 = LINE_CYCLES * LINES as u64;
 
@@ -64,15 +66,17 @@ impl Hardware {
 
     /// Both 2D engines draw `line` into their screens; a running capture
     /// takes engine A's line.
-    fn draw_line(&mut self, line: u16) {
+    pub(crate) fn draw_line(&mut self, line: u16) {
         let start = usize::from(line) * WIDTH;
         let mut out = [0; WIDTH];
         let vram = &self.vram;
+        // POWCNT1 bit 2 powers the 3D rendering engine.
+        let three_d = (self.powcnt1 & (1 << 2) != 0).then(|| self.gpu3d.line(line));
         self.engine_a.render_line(
             line,
             &vram.engine(Engine::A),
             |offset| vram.read_16(Region::Lcdc, offset),
-            None,
+            three_d,
             &mut out,
         );
         self.screen_a[start..start + WIDTH].copy_from_slice(&out);
@@ -102,7 +106,7 @@ impl Hardware {
             control,
             line,
             self.engine_a.capture_line(),
-            None,
+            Some(self.gpu3d.line(line)),
             display_bank,
             &mut self.vram,
         );
@@ -119,9 +123,17 @@ impl Hardware {
         if self.vcount == 0 {
             self.capturing = self.capture_control().enabled();
         }
-        if self.vcount == VISIBLE_LINES {
-            self.request_display_interrupt(1 << 3, irq::VBLANK);
-            self.trigger_dma(Timing::VBlank);
+        match self.vcount {
+            VISIBLE_LINES => {
+                self.request_display_interrupt(1 << 3, irq::VBLANK);
+                self.trigger_dma(Timing::VBlank);
+                // Swap buffers takes effect and geometry resumes.
+                self.gpu3d.vblank();
+            }
+            // The 3D engine starts drawing the next frame here, with the
+            // registers the VBlank handler set.
+            RENDER_3D_LINE => self.gpu3d.render_frame(&self.vram),
+            _ => {}
         }
         for side in [Side::Arm9, Side::Arm7] {
             let stored = self.cpu(side).dispstat;
@@ -173,6 +185,27 @@ mod tests {
             "the ARM7 did not ask"
         );
         assert_eq!(hw.vcount, 0);
+    }
+
+    #[test]
+    fn engine_a_draws_its_backdrop() {
+        let mut hw = Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into());
+        hw.arm9_write_32(0x0400_0000, 0x0001_0000); // display mode 1, no layers
+        hw.arm9_write_16(0x0500_0000, 0x7FFF);
+        hw.draw_line(0);
+        assert_eq!(hw.screen_a[0], 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn engine_a_draws_a_direct_colour_bitmap_like_pokemon_white() {
+        let mut hw = Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into());
+        hw.arm9_write_8(0x0400_0241, 0x81); // B to engine A BG at 0
+        hw.arm9_write_16(0x0600_0000, 0x801F); // an opaque red pixel
+        hw.arm9_write_32(0x0400_0000, 0x4001_0C05);
+        hw.arm9_write_16(0x0400_000C, 0x4084);
+        hw.arm9_write_16(0x0400_000E, 0x4885);
+        hw.draw_line(0);
+        assert_eq!(hw.screen_a[0], 0xFFFF_0000, "{:08X}", hw.screen_a[0]);
     }
 
     #[test]

@@ -254,6 +254,24 @@ impl Vram {
         u16::from_le_bytes([self.read_8(region, offset), self.read_8(region, offset + 1)])
     }
 
+    /// Copies `out.len()` bytes from `offset` in `region`, which must lie
+    /// within one 8 KiB page. Pages one bank covers copy in one go.
+    pub(crate) fn copy_page(&self, region: Region, offset: u32, out: &mut [u8]) {
+        let offset = wrap(region, offset);
+        let mask = self.pages[region.index()][(offset / PAGE) as usize];
+        if mask.is_power_of_two() {
+            let bank = mask.trailing_zeros() as usize;
+            if let Some((_, start)) = self.mapped[bank] {
+                let index = (offset - start) as usize;
+                out.copy_from_slice(&self.banks[bank][index..index + out.len()]);
+                return;
+            }
+        }
+        for (byte, value) in (offset..).zip(out.iter_mut()) {
+            *value = self.read_8(region, byte);
+        }
+    }
+
     /// Writes the byte at `offset` in `region` to every bank mapped there.
     pub(crate) fn write_8(&mut self, region: Region, offset: u32, value: u8) {
         let offset = wrap(region, offset);
@@ -394,6 +412,18 @@ mod tests {
         vram.write_16(Region::BgA, 0x1_4000, 7);
         assert_eq!(vram.engine(Engine::A).bg(0x1_4000), 7);
         assert_eq!(vram.engine(Engine::A).bg(0x1_0000), 0);
+    }
+
+    #[test]
+    fn page_copies_match_byte_reads() {
+        let mut vram = Vram::default();
+        vram.set_control(0, ENABLE | 3); // A to texture slot 0
+        vram.write_16(Region::Texture, 0x2002, 0xBEEF);
+        let mut page = [0; PAGE as usize];
+        vram.copy_page(Region::Texture, 0x2000, &mut page);
+        assert_eq!(&page[2..4], &[0xEF, 0xBE]);
+        vram.copy_page(Region::Texture, 0x2_2000, &mut page);
+        assert!(page.iter().all(|byte| *byte == 0), "slot 1 is unmapped");
     }
 
     #[test]

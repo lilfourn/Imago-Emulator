@@ -7,6 +7,7 @@ use emu_arm::{Access, Bus};
 use crate::hardware::Hardware;
 use crate::interrupt::irq;
 use crate::ipc::Side;
+use crate::machine::Arm9;
 use crate::memory::Width;
 
 /// The ARM9's bus. TCM accesses never reach it; the CPU serves them.
@@ -84,6 +85,120 @@ impl Bus for Arm7Bus<'_> {
 
     fn idle(&mut self) {
         self.0.arm7.cycles += 1;
+    }
+}
+
+/// A CPU's bus that can also halt and stall the CPU, for BIOS calls.
+pub(crate) trait CpuBus: Bus {
+    fn halt(&mut self);
+    fn stall(&mut self, cycles: u64);
+}
+
+impl CpuBus for Arm9Bus<'_> {
+    fn halt(&mut self) {
+        self.0.arm9.halted = true;
+    }
+    fn stall(&mut self, cycles: u64) {
+        self.0.arm9.cycles += cycles;
+    }
+}
+
+impl CpuBus for Arm7Bus<'_> {
+    fn halt(&mut self) {
+        self.0.arm7.halted = true;
+    }
+    fn stall(&mut self, cycles: u64) {
+        self.0.arm7.cycles += cycles;
+    }
+}
+
+/// Memory as the ARM9's own code sees it, TCM included, for the BIOS
+/// calls the machine runs outside the CPU. TCM accesses take a cycle.
+pub(crate) struct Arm9TcmBus<'a, 'b> {
+    pub(crate) cpu: &'a mut Arm9,
+    pub(crate) bus: Arm9Bus<'b>,
+}
+
+impl Arm9TcmBus<'_, '_> {
+    /// `N` bytes from TCM at `address`, if it is TCM.
+    fn tcm_read<const N: usize>(&mut self, address: u32) -> Option<[u8; N]> {
+        let first = self.cpu.tcm_read_8(address)?;
+        let mut bytes = [first; N];
+        for (offset, byte) in (0u32..).zip(bytes.iter_mut()).skip(1) {
+            *byte = self.cpu.tcm_read_8(address + offset).unwrap_or(0);
+        }
+        self.bus.idle();
+        Some(bytes)
+    }
+
+    /// Writes `bytes` to TCM at `address`; returns whether it is TCM.
+    fn tcm_write(&mut self, address: u32, bytes: &[u8]) -> bool {
+        if !self.cpu.tcm_write_8(address, bytes[0]) {
+            return false;
+        }
+        for (offset, byte) in (0u32..).zip(bytes).skip(1) {
+            self.cpu.tcm_write_8(address + offset, *byte);
+        }
+        self.bus.idle();
+        true
+    }
+}
+
+impl Bus for Arm9TcmBus<'_, '_> {
+    fn read_32(&mut self, address: u32, access: Access) -> u32 {
+        let address = address & !3;
+        match self.tcm_read::<4>(address) {
+            Some(bytes) => u32::from_le_bytes(bytes),
+            None => self.bus.read_32(address, access),
+        }
+    }
+
+    fn read_16(&mut self, address: u32, access: Access) -> u16 {
+        let address = address & !1;
+        match self.tcm_read::<2>(address) {
+            Some(bytes) => u16::from_le_bytes(bytes),
+            None => self.bus.read_16(address, access),
+        }
+    }
+
+    fn read_8(&mut self, address: u32, access: Access) -> u8 {
+        match self.tcm_read::<1>(address) {
+            Some([byte]) => byte,
+            None => self.bus.read_8(address, access),
+        }
+    }
+
+    fn write_32(&mut self, address: u32, value: u32, access: Access) {
+        let address = address & !3;
+        if !self.tcm_write(address, &value.to_le_bytes()) {
+            self.bus.write_32(address, value, access);
+        }
+    }
+
+    fn write_16(&mut self, address: u32, value: u16, access: Access) {
+        let address = address & !1;
+        if !self.tcm_write(address, &value.to_le_bytes()) {
+            self.bus.write_16(address, value, access);
+        }
+    }
+
+    fn write_8(&mut self, address: u32, value: u8, access: Access) {
+        if !self.tcm_write(address, &[value]) {
+            self.bus.write_8(address, value, access);
+        }
+    }
+
+    fn idle(&mut self) {
+        self.bus.idle();
+    }
+}
+
+impl CpuBus for Arm9TcmBus<'_, '_> {
+    fn halt(&mut self) {
+        self.bus.halt();
+    }
+    fn stall(&mut self, cycles: u64) {
+        self.bus.stall(cycles);
     }
 }
 

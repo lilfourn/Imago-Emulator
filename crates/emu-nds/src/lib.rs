@@ -57,10 +57,6 @@ pub const INFO: CoreInfo = CoreInfo {
     state_version: 2,
 };
 
-/// CRC-16 of the Nintendo logo in every licensed cartridge header (GBATEK,
-/// "DS Cartridge Header", 0x15C).
-const LOGO_CRC: u16 = 0xCF56;
-
 /// A Nintendo DS with a cartridge inserted.
 #[derive(Debug)]
 pub struct Nds {
@@ -77,18 +73,24 @@ impl Nds {
     /// # Errors
     ///
     /// Returns [`LoadError::InvalidRom`] if the cartridge header is missing
-    /// or its logo checksum is wrong.
+    /// or either program lies outside the ROM. The Nintendo logo is not
+    /// checked, so homebrew without it runs too.
     pub fn new(media: &Media<'_>) -> Result<Self, LoadError> {
         let invalid = |reason| LoadError::InvalidRom {
             system: System::Nds,
             reason,
         };
-        let logo_crc = media
-            .rom
-            .get(0x15C..0x15E)
-            .ok_or(invalid("shorter than the 0x180-byte header"))?;
-        if u16::from_le_bytes([logo_crc[0], logo_crc[1]]) != LOGO_CRC {
-            return Err(invalid("logo checksum at 0x15C is not 0xCF56"));
+        if media.rom.len() < 0x200 {
+            return Err(invalid("shorter than the 0x200-byte header"));
+        }
+        let header = boot::Header::parse(media.rom);
+        let fits = |program: boot::Program| {
+            (program.rom_offset as usize)
+                .checked_add(program.size as usize)
+                .is_some_and(|end| end <= media.rom.len())
+        };
+        if !fits(header.arm9) || !fits(header.arm7) {
+            return Err(invalid("a program in the header lies outside the ROM"));
         }
         let dumps = media
             .system_file(SystemFileKind::NdsBios9)
@@ -181,6 +183,55 @@ impl Nds {
         )
     }
 
+    /// BIOS functions each CPU has called, with counts, for debugging.
+    #[must_use]
+    pub fn debug_system_calls(&self) -> String {
+        let describe = |name: &str, counts: &[u32; 0x20]| {
+            let calls: Vec<String> = (0..0x20)
+                .filter(|number| counts[*number] > 0)
+                .map(|number| format!("{number:02X}x{}", counts[number]))
+                .collect();
+            format!("{name}_swi={}", calls.join(","))
+        };
+        let [arm9, arm7] = &self.machine.system_calls;
+        format!("{} {}", describe("arm9", arm9), describe("arm7", arm7))
+    }
+
+    /// Video registers, as one `key=value` line for debugging.
+    #[must_use]
+    pub fn debug_video(&self) -> String {
+        let hw = &self.machine.hw;
+        let dispcnt = |engine: &gpu2d::Engine2d| {
+            u32::from(engine.read_register(0)) | u32::from(engine.read_register(2)) << 16
+        };
+        let banks: Vec<String> = (0..9)
+            .map(|bank| format!("{:02X}", hw.vram.control(bank)))
+            .collect();
+        format!(
+            "powcnt1={:04X} dispcnt_a={:08X} dispcnt_b={:08X} bright_a={:04X} bright_b={:04X} vramcnt={} disp3dcnt={:04X} bgcnt_a={:04X},{:04X},{:04X},{:04X}",
+            hw.powcnt1,
+            dispcnt(&hw.engine_a),
+            dispcnt(&hw.engine_b),
+            hw.engine_a.read_register(0x6C),
+            hw.engine_b.read_register(0x6C),
+            banks.join(","),
+            hw.gpu3d.read_register(0x60) & 0xFFFF,
+            hw.engine_a.read_register(0x08),
+            hw.engine_a.read_register(0x0A),
+            hw.engine_a.read_register(0x0C),
+            hw.engine_a.read_register(0x0E),
+        )
+    }
+
+    /// The ARM9's and ARM7's R0–R15, for debugging.
+    #[must_use]
+    pub fn debug_registers(&self) -> [[u32; 16]; 2] {
+        [
+            std::array::from_fn(|index| self.machine.arm9.reg(index)),
+            std::array::from_fn(|index| self.machine.arm7.reg(index)),
+        ]
+    }
+
     /// Bus cycles (33.51 MHz) since power-on.
     #[must_use]
     pub fn cycles(&self) -> u64 {
@@ -195,6 +246,13 @@ impl Core for Nds {
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
         self.set_input(&inputs.first().copied().unwrap_or_default());
+        if self.machine.hw.spi.powered_off() {
+            // The game switched the console off: dark screens, no sound.
+            for screen in &mut self.screens {
+                screen.pixels_mut().fill(0xFF00_0000);
+            }
+            return;
+        }
         let start = self.machine.now();
         // A frame ends at VBlank, or after a frame's time if that never
         // comes.
@@ -236,6 +294,9 @@ impl Core for Nds {
             .map_err(|_| StateError::Malformed("not a Nintendo DS state"))?;
         machine.hw.take_media_from(&mut self.machine.hw);
         self.machine = machine;
+        // The rendered 3D image is not saved.
+        let hw = &mut self.machine.hw;
+        hw.gpu3d.render_frame(&hw.vram);
         self.present();
         Ok(())
     }
@@ -307,13 +368,15 @@ mod tests {
         {
             put(0x300 + index * 4, word);
         }
-        rom[0x15C..0x15E].copy_from_slice(&LOGO_CRC.to_le_bytes());
         rom
     }
 
     #[test]
-    fn rejects_a_bad_logo_checksum() {
-        assert!(Nds::new(&Media::new(&[0; 0x200])).is_err());
+    fn rejects_programs_outside_the_rom() {
+        assert!(Nds::new(&Media::new(&[0; 0x100])).is_err());
+        let mut rom = rom();
+        rom[0x2C..0x30].copy_from_slice(&0x1000u32.to_le_bytes());
+        assert!(Nds::new(&Media::new(&rom)).is_err());
     }
 
     #[test]
@@ -326,6 +389,31 @@ mod tests {
         };
         assert_eq!(word(0x0200_0000), 42);
         assert_eq!(word(0x0200_0004), 7);
+    }
+
+    #[test]
+    fn the_arm9_program_can_paint_the_top_screen() {
+        let mut rom = rom();
+        // MOV R0, #0x04000000; MOV R1, #0x10000; STR R1, [R0] (DISPCNT:
+        // display on); MOV R0, #0x05000000; MVN R1, #0; STRH R1, [R0]
+        // (white backdrop); B .
+        let program: [u32; 7] = [
+            0xE3A0_0301,
+            0xE3A0_1801,
+            0xE580_1000,
+            0xE3A0_0405,
+            0xE3E0_1000,
+            0xE1C0_10B0,
+            0xEAFF_FFFE,
+        ];
+        rom[0x2C..0x30].copy_from_slice(&28u32.to_le_bytes());
+        for (index, word) in program.into_iter().enumerate() {
+            rom[0x200 + index * 4..0x204 + index * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        nds.run_frame(&[], &mut Vec::new());
+        nds.run_frame(&[], &mut Vec::new());
+        assert_eq!(nds.screens()[0].pixels()[0], 0xFFFF_FFFF);
     }
 
     #[test]
