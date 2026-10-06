@@ -510,17 +510,20 @@ impl<M: Model> Processor<M> {
             address = address.wrapping_add(4);
             first = false;
         }
-        if M::V5TE && writeback {
+        let late_writeback = M::V5TE && writeback && {
             let base_loaded = load && list & (1 << rn) != 0;
             let base_last_of_several = list >> rn == 1 && list != 1 << rn;
-            if !(base_loaded && (self.thumb() || base_last_of_several)) {
-                self.r[rn] = final_base;
-            }
-        }
+            !(base_loaded && (self.thumb() || base_last_of_several))
+        };
 
         if switch_bank {
             self.store_bank(Mode::User);
             self.load_bank(mode);
+        }
+        // ARMv5 writes the base back to the current mode's register, even
+        // when the transfer itself used the User bank.
+        if late_writeback {
+            self.r[rn] = final_base;
         }
         if writeback && rn == 15 && !pc_load {
             self.reload_pipeline(bus);

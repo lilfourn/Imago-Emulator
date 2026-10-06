@@ -824,3 +824,23 @@ fn registers_round_trip_on_the_arm9() {
     let copy = Arm9::from_registers(&registers, cpu.pipeline(), cpu.fetch_access());
     assert_eq!(copy.registers(), registers);
 }
+
+#[test]
+fn user_bank_ldm_writes_the_base_back_to_the_current_mode() {
+    // LDMIA R13!, {R14}^ in IRQ mode: R14 comes from memory into the User
+    // bank, and the incremented base goes to R13_irq.
+    let mut ram = Ram::new();
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE8FD_4000]);
+    ram.poke_32(MAIN + 0x100, 0xC0FF_EEAB);
+    cpu.set_reg(13, 0xBAD0);
+    cpu.set_reg(14, 0);
+    cpu.set_cpsr(Mode::Irq.bits());
+    cpu.set_reg(13, MAIN + 0x100);
+    cpu.set_reg(14, 0);
+    cpu.step(&mut ram);
+    assert_eq!(cpu.reg(13), MAIN + 0x104, "R13_irq written back");
+    assert_eq!(cpu.reg(14), 0, "R14_irq untouched");
+    cpu.set_cpsr(Mode::System.bits());
+    assert_eq!(cpu.reg(14), 0xC0FF_EEAB, "loaded into the User bank");
+    assert_eq!(cpu.reg(13), 0xBAD0, "User R13 untouched");
+}
