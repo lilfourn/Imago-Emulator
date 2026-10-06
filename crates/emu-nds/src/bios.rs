@@ -11,12 +11,22 @@
 //! A call is a pure function of its register arguments and memory: it
 //! touches memory through the [`Bus`] it is given (which, for the ARM9,
 //! also reaches its TCM) and returns the register changes for the machine
-//! to apply.
+//! to apply. The exceptions are the decompressors that read through the
+//! game's callbacks (`callback.rs`): those return a game function for the
+//! machine to run, and resume when it returns to [`ARM9_CALLBACK_RETURN`]
+//! or [`ARM7_CALLBACK_RETURN`].
+
+mod callback;
+mod decompress;
 
 use emu_arm::{Access, Bus};
 
+pub(crate) use callback::{Decompression, GuestCall, Next};
+
 use crate::ipc::Side;
 use crate::spi::firmware::crc16;
+use callback::Format;
+use decompress::{Decoder, Lz77, RunLength};
 
 /// The ARM9 BIOS (4 KiB at 0xFFFF0000).
 pub(crate) fn arm9_image() -> Box<[u8]> {
@@ -40,6 +50,7 @@ pub(crate) fn arm9_image() -> Box<[u8]> {
     put(0x118, 0xE510_F004); // LDR PC, [R0, #-4]  (handler at DTCM + 0x3FFC)
     put(0x11C, 0xE8BD_500F); // LDMFD SP!, {R0-R3, R12, LR}
     put(0x120, 0xE25E_F004); // SUBS PC, LR, #4
+    put(CALLBACK_RETURN, 0xEAFF_FFFE); // B .  (see ARM9_CALLBACK_RETURN)
     image.into_boxed_slice()
 }
 
@@ -62,12 +73,25 @@ pub(crate) fn arm7_image() -> Box<[u8]> {
     put(0x10C, 0xE510_F004); // LDR PC, [R0, #-4]  (0x03FFFFFC mirrors 0x0380FFFC)
     put(0x110, 0xE8BD_500F); // LDMFD SP!, {R0-R3, R12, LR}
     put(0x114, 0xE25E_F004); // SUBS PC, LR, #4
+    put(CALLBACK_RETURN, 0xEAFF_FFFE); // B .  (see ARM7_CALLBACK_RETURN)
     image.into_boxed_slice()
 }
 
 /// R15 once a CPU has entered its SWI vector (the vector plus 8).
 pub(crate) const ARM9_SWI_ENTERED_PC: u32 = 0xFFFF_0008 + 8;
 pub(crate) const ARM7_SWI_ENTERED_PC: u32 = 0x08 + 8;
+
+/// Where a decompression callback returns to: the return address the
+/// machine gives the game function. The machine catches the CPU arriving
+/// there and resumes the BIOS call; the instruction there, a loop, never
+/// runs.
+const CALLBACK_RETURN: usize = 0x200;
+pub(crate) const ARM9_CALLBACK_RETURN: u32 = 0xFFFF_0000 + CALLBACK_RETURN as u32;
+pub(crate) const ARM7_CALLBACK_RETURN: u32 = CALLBACK_RETURN as u32;
+
+/// The ARM9's CP15 control register after SoftReset: DTCM on, ITCM,
+/// caches and protection unit off, high vectors (GBATEK).
+pub(crate) const ARM9_RESET_CONTROL: u32 = 0x0001_2078;
 
 /// A system call as the CPU made it.
 #[derive(Debug, Clone, Copy)]
@@ -91,8 +115,11 @@ pub(crate) struct Effects {
     pub(crate) repeat: bool,
     /// Extra cycles the call takes (WaitByLoop), in the CPU's clock.
     pub(crate) stall: u64,
-    /// SoftReset: restart the game from its entry point.
-    pub(crate) soft_reset: bool,
+    /// SoftReset: restart the CPU at this address (Thumb if bit 0 is set).
+    pub(crate) restart: Option<u32>,
+    /// A decompression that reads through the game's callbacks, and the
+    /// first game function it needs run.
+    pub(crate) callback: Option<(Decompression, GuestCall)>,
 }
 
 /// The function number from the SWI instruction that trapped: bits 16–23
@@ -113,11 +140,12 @@ pub(crate) fn run<B: Bus>(number: u8, call: &Call, bus: &mut B) -> Effects {
         registers: registers.to_vec(),
         ..Effects::default()
     };
+    let by_callback = |format, bus: &mut B| Effects {
+        callback: Some(Decompression::start(format, call.args, bus)),
+        ..Effects::default()
+    };
     match number {
-        0x00 => Effects {
-            soft_reset: true,
-            ..Effects::default()
-        },
+        0x00 => soft_reset(bus, call),
         0x03 => Effects {
             // Each iteration of the BIOS loop takes four cycles.
             stall: u64::from(r0) * 4,
@@ -158,13 +186,16 @@ pub(crate) fn run<B: Bus>(number: u8, call: &Call, bus: &mut B) -> Effects {
             Effects::default()
         }
         0x11 => {
-            lz77(bus, r0, r1, false);
+            decompress::read_normal(bus, r0, r1, Decoder::Lz77(Lz77::default()));
             Effects::default()
         }
+        0x12 => by_callback(Format::Lz77, bus),
+        0x13 => by_callback(Format::Huffman, bus),
         0x14 => {
-            run_length(bus, r0, r1, false);
+            decompress::read_normal(bus, r0, r1, Decoder::RunLength(RunLength::default()));
             Effects::default()
         }
+        0x15 => by_callback(Format::RunLength, bus),
         0x16 if !arm7 => {
             diff_unfilter(bus, r0, r1, false);
             Effects::default()
@@ -186,9 +217,29 @@ pub(crate) fn run<B: Bus>(number: u8, call: &Call, bus: &mut B) -> Effects {
             bus.write_8(0x0400_0301, r2 as u8, Access::NONSEQUENTIAL);
             Effects::default()
         }
-        // The callback decompressors (12h, 13h, 15h) need to run game code
-        // and are not emulated yet, nor are the rest.
+        // GetBootProcs (ARM7 1Dh) is not emulated, and invalid numbers
+        // (which jump to 0 on hardware) do nothing.
         _ => Effects::default(),
+    }
+}
+
+/// SoftReset (GBATEK, "BIOS Reset Functions"): clears the BIOS's 0x200
+/// bytes at the top of DTCM or ARM7 WRAM (the stacks, then the interrupt
+/// flags and the IRQ handler's address in the last 8 bytes) and restarts
+/// at the entry point in the header copy at 0x027FFE00. The machine sets
+/// the registers. Only the calling CPU resets.
+fn soft_reset<B: Bus>(bus: &mut B, call: &Call) -> Effects {
+    let start = call.intr_flags.wrapping_sub(0x1F8);
+    for offset in (0..0x200).step_by(4) {
+        bus.write_32(start.wrapping_add(offset), 0, Access::NONSEQUENTIAL);
+    }
+    let entry = match call.side {
+        Side::Arm9 => 0x027F_FE24,
+        Side::Arm7 => 0x027F_FE34,
+    };
+    Effects {
+        restart: Some(bus.read_32(entry, Access::NONSEQUENTIAL)),
+        ..Effects::default()
     }
 }
 
@@ -331,78 +382,6 @@ fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, info: 
     }
 }
 
-/// LZ77UnCompReadNormalWrite8bit: GBATEK's LZ77 format with a 4-byte
-/// header, written a byte at a time.
-fn lz77<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, _halfwords: bool) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source += 4;
-    while remaining > 0 {
-        let flags = bus.read_8(source, Access::NONSEQUENTIAL);
-        source += 1;
-        for bit in (0..8).rev() {
-            if remaining == 0 {
-                break;
-            }
-            if flags & (1 << bit) == 0 {
-                let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source += 1;
-                bus.write_8(destination, byte, Access::NONSEQUENTIAL);
-                destination += 1;
-                remaining -= 1;
-            } else {
-                let high = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-                let low = u32::from(bus.read_8(source + 1, Access::NONSEQUENTIAL));
-                source += 2;
-                let length = (high >> 4) + 3;
-                let distance = ((high & 0xF) << 8 | low) + 1;
-                for _ in 0..length.min(remaining) {
-                    let byte =
-                        bus.read_8(destination.wrapping_sub(distance), Access::NONSEQUENTIAL);
-                    bus.write_8(destination, byte, Access::NONSEQUENTIAL);
-                    destination += 1;
-                    remaining -= 1;
-                }
-            }
-        }
-    }
-}
-
-/// RLUnCompReadNormalWrite8bit: runs of repeated bytes and literal
-/// stretches.
-fn run_length<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, _halfwords: bool) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source += 4;
-    while remaining > 0 {
-        let flag = bus.read_8(source, Access::NONSEQUENTIAL);
-        source += 1;
-        let literal = flag & 0x80 == 0;
-        let length = if literal {
-            u32::from(flag & 0x7F) + 1
-        } else {
-            u32::from(flag & 0x7F) + 3
-        };
-        let repeated = if literal {
-            None
-        } else {
-            let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-            source += 1;
-            Some(byte)
-        };
-        for _ in 0..length.min(remaining) {
-            let byte = repeated.unwrap_or_else(|| {
-                let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source += 1;
-                byte
-            });
-            bus.write_8(destination, byte, Access::NONSEQUENTIAL);
-            destination += 1;
-            remaining -= 1;
-        }
-    }
-}
-
 /// Diff8bitUnFilterWrite8bit and Diff16bitUnFilter: running sums.
 fn diff_unfilter<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, sixteen: bool) {
     let header = bus.read_32(source, Access::NONSEQUENTIAL);
@@ -465,7 +444,13 @@ mod tests {
     use super::*;
 
     /// 64 KiB of flat memory for exercising calls.
-    struct Ram(Vec<u8>);
+    pub(super) struct Ram(pub(super) Vec<u8>);
+
+    impl Ram {
+        pub(super) fn new() -> Self {
+            Self(vec![0; 0x1_0000])
+        }
+    }
 
     impl Bus for Ram {
         fn read_32(&mut self, address: u32, _: Access) -> u32 {
@@ -503,7 +488,7 @@ mod tests {
 
     #[test]
     fn get_crc16_reads_halfwords_and_returns_the_last() {
-        let mut ram = Ram(vec![0; 0x1_0000]);
+        let mut ram = Ram::new();
         ram.0[0x100..0x10A].copy_from_slice(b"123456789\0");
         let effects = run(0x0E, &call(Side::Arm7, [0, 0x100, 9, 0]), &mut ram);
         // Nine bytes round down to four halfwords: "12345678".
@@ -515,7 +500,7 @@ mod tests {
 
     #[test]
     fn intr_wait_halts_until_the_flag_is_set() {
-        let mut ram = Ram(vec![0; 0x1_0000]);
+        let mut ram = Ram::new();
         let effects = run(0x05, &call(Side::Arm7, [0; 4]), &mut ram);
         assert!(effects.halt && effects.repeat);
         ram.write_32(0xFFF8, 1, Access::NONSEQUENTIAL);
@@ -530,13 +515,54 @@ mod tests {
 
     #[test]
     fn lz77_expands_back_references() {
-        let mut ram = Ram(vec![0; 0x1_0000]);
+        let mut ram = Ram::new();
         // Header: type 0x10, 6 bytes. Flags 0b0100_0000: literal, then a
         // reference of length 5 at distance 1.
         let packed = [0x10, 6, 0, 0, 0b0100_0000, b'A', 0x20, 0x00];
         ram.0[0x100..0x108].copy_from_slice(&packed);
         run(0x11, &call(Side::Arm9, [0x100, 0x200, 0, 0]), &mut ram);
         assert_eq!(&ram.0[0x200..0x206], b"AAAAAA");
+    }
+
+    #[test]
+    fn run_length_writes_a_byte_at_a_time() {
+        let mut ram = Ram::new();
+        // Header: type 0x30, 5 bytes. "x" five times, to an odd address.
+        ram.0[0x100..0x106].copy_from_slice(&[0x30, 5, 0, 0, 0x82, b'x']);
+        run(0x14, &call(Side::Arm7, [0x100, 0x201, 0, 0]), &mut ram);
+        assert_eq!(&ram.0[0x200..0x207], b"\0xxxxx\0");
+    }
+
+    #[test]
+    fn callback_decompressors_start_by_calling_open() {
+        let mut ram = Ram::new();
+        // The callback structure at 0x300 lists Open at 0x1001 (Thumb).
+        ram.write_32(0x300, 0x1001, Access::NONSEQUENTIAL);
+        for number in [0x12, 0x13, 0x15] {
+            let args = [0x100, 0x200, 0x55, 0x300];
+            let effects = run(number, &call(Side::Arm9, args), &mut ram);
+            let (_, open) = effects.callback.expect("a callback decompressor");
+            assert_eq!(open.function, 0x1001);
+            assert_eq!(open.args, [0x100, 0x200, 0x55]);
+        }
+    }
+
+    #[test]
+    fn soft_reset_clears_the_bios_area_and_finds_the_entry_point() {
+        let mut ram = Ram::new();
+        ram.0[0x3C00..0x4000].fill(0xAA);
+        // The ARM7's entry point in the header copy (0x027FFE34, which
+        // this RAM mirrors at 0xFE34).
+        ram.write_32(0xFE34, 0x0238_0001, Access::NONSEQUENTIAL);
+        let call = Call {
+            side: Side::Arm7,
+            args: [0; 4],
+            intr_flags: 0x3FF8,
+        };
+        let effects = run(0x00, &call, &mut ram);
+        assert_eq!(effects.restart, Some(0x0238_0001));
+        assert!(ram.0[0x3E00..0x4000].iter().all(|byte| *byte == 0));
+        assert_eq!(ram.0[0x3DFF], 0xAA, "below the area");
     }
 
     #[test]

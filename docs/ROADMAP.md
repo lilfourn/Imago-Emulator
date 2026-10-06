@@ -218,7 +218,6 @@ Still open:
 - armwrestler-DS and a libnds hello world;
 - frame-CRC comparison with melonDS;
 - sound capture, 3D anti-aliasing and the protection unit;
-- the BIOS callback decompressors;
 - the frontend items (hybrid layout, rotation, touch at cursor);
 - saves and checkpoints in Platinum, HeartGold/SoulSilver and Black
   2/White 2.

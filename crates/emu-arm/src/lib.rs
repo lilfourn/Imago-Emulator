@@ -319,6 +319,12 @@ impl<M: Model> Processor<M> {
         self.spsr()
     }
 
+    /// Sets the current mode's saved PSR; User and System mode have none.
+    /// For high-level emulation of code that resets the modes.
+    pub fn set_saved_psr(&mut self, value: u32) {
+        self.set_spsr(value);
+    }
+
     /// Returns from an exception as `MOVS PC, LR` does: CPSR from SPSR, R15
     /// from R14, and the pipeline refilled. For high-level emulation of
     /// code that would end that way (a BIOS call).
