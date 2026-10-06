@@ -127,8 +127,8 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | NDS-1 | ARMv5TE additions (CLZ, QADD/QSUB, DSP multiplies, BLX, LDRD/STRD) and CP15 (protection unit, TCM, cache control). ✅ (protection unit stored, not enforced) | P0 · M12 |
 | NDS-2 | ARM9 and ARM7 run in interleaved slices, with IPC sync and FIFO. ✅ | P0 · M12 |
 | NDS-3 | Direct boot, VRAM bank mapping (banks A–I), both 2D engines, SPI touchscreen/firmware/power management, RTC, cartridge reads. ✅ | P0 · M13 |
-| NDS-4 | 3D: geometry engine (GXFIFO, matrix stacks, lighting, clipping) and a software rasterizer as the accuracy reference. ✅ (no anti-aliasing yet) | P0 · M14 |
-| NDS-5 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG) ✅ and sound capture. | P0 · M14 |
+| NDS-4 | 3D: geometry engine (GXFIFO, matrix stacks, lighting, clipping) and a software rasterizer as the accuracy reference. ✅ | P0 · M14 |
+| NDS-5 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG) and sound capture. ✅ | P0 · M14 |
 | NDS-6 | 512 KB SPI flash saves for every DS Pokémon game. ✅ (by game code, including the infrared carts) | P0 · M14 |
 | NDS-7 | No anti-piracy symptoms in HG/SS, B/W or B2/W2 without patches. Any trigger is an emulator bug. | P0 · M15 |
 | NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. | P1 · M15 |
@@ -141,12 +141,12 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | ID | Requirement | Priority |
 |---|---|---|
 | UI-1 | Open a ROM from the File menu (⌘O), by drag and drop, or from the command line. ✅ | P0 · S |
-| UI-2 | DS screen layouts: stacked, side by side, single screen with swap. ✅ Hybrid (one large and one small screen), rotation and gap setting. | P0 · S / P1 · M13 |
+| UI-2 | DS screen layouts: stacked, side by side, single screen with swap. ✅ Hybrid (one large and one small screen), rotation and gap setting. ✅ | P0 · S / P1 · M13 |
 | UI-3 | Crisp scaling at any window size ("sharp bilinear"). ✅ Integer scaling, and GBA/GBC colour correction ✅. | P0 · S / P1 · M11 |
 | UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. | P2 |
 | UI-5 | Input action layer: physical input → action → core buttons. Keyboard bindings in TOML with several keys per action. ✅ | P0 · S |
 | UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides, turbo, hotkey chords. | P1 · M4 |
-| UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. | P0 · S / P1 · M13 |
+| UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. ✅ | P0 · S / P1 · M13 |
 | UI-8 | Audio output at the device rate with dynamic rate control (adjust the resample ratio by up to ±0.5% based on buffer fill). ✅ | P0 · M3 |
 | UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch), thumbnail and age shown when switching. | P0 · S / P1 · M4 |
 | UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap, slow motion. | P0 · S / P1 · M4 |

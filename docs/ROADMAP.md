@@ -207,20 +207,26 @@ FireRed–Emerald trade) need your own dumps.
 
 ## Phase 4 — Nintendo DS
 
-**Status (2026-10-06):** M12–M14 are largely implemented, built in
-parallel by several agents.
-- The DS core direct-boots retail games with an HLE BIOS.
-- Pokémon White plays its opening movie, reaches the main menu and starts
-  a new game.
-- RockPolish's rockwrestler test ROM (scripted through
-  `examples/probe.rs`) passes every test.
-Still open:
-- armwrestler-DS and a libnds hello world;
-- frame-CRC comparison with melonDS;
-- sound capture, 3D anti-aliasing and the protection unit;
-- the frontend items (hybrid layout, rotation, touch at cursor);
-- saves and checkpoints in Platinum, HeartGold/SoulSilver and Black
-  2/White 2.
+**Status (2026-10-06):** M12–M14 are implemented and M13's frontend items
+are done.
+- The DS core direct-boots retail games with an HLE BIOS, including the
+  callback decompressors and SoftReset.
+- Pokémon White plays from power-on through a new game to the 3D bedroom in
+  Nuvema Town, then on to Route 1. Battles give EXP, so there are no
+  anti-piracy symptoms. An in-game save survives a restart, and Continue
+  loads it. The run is scripted through `examples/probe.rs` with your own
+  dump, at about 3× full speed headless.
+- 3D has edge anti-aliasing, edge marking, fog, toon shading and shadows.
+  Sound has all 16 channels and both capture units.
+- RockPolish's rockwrestler test ROM passes every test.
+
+| M | Done | Left |
+|---|---|---|
+| M12 | ARMv5TE, CP15 with TCMs, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro); MPU enforcement |
+| M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS |
+| M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
+| M15 | Pokémon White shows no anti-piracy symptoms | Timing against melonDS traces; GBA slot (needs a decision on sharing GBA cartridge code across cores); HG/SS and B2/W2 |
+| M16 | — | 3D upscaling, microphone, local wireless |
 
 ### M12. Two CPUs
 
@@ -294,6 +300,6 @@ Still open:
 | Fast-forward speed cap | UI-10 | Later |
 | Debugger panels | UI-12 | M7 → M11 |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
-| Hybrid layout, rotation, gamepad touch | UI-2, UI-7 | M13 |
+| Hybrid layout, rotation, gap, gamepad touch | UI-2, UI-7 | M13 ✅ |
 | 3D upscaling | NDS-9 | M16 |
 | Shader chain, recording, achievements, scripting | UI-4, UI-14 | Later |

@@ -7,11 +7,11 @@ macOS, written in Rust with a [GPUI](https://gpui.rs) frontend. The goal is to
 play the Pokémon games of generations 1–5 from your own cartridge dumps.
 
 **Status: Phase 4 (Nintendo DS).** The DS core direct-boots retail games
-with an HLE BIOS. Pokémon White plays its opening movie, reaches the main
-menu and starts a new game, at well above full speed. It has:
+with an HLE BIOS. Pokémon White plays from power-on through a new game to
+Route 1, and its in-game save survives a restart. It has:
 - an ARM946E-S and an ARM7TDMI in lockstep, with IPC;
-- both 2D engines and a software 3D engine;
-- 16-channel sound;
+- both 2D engines and a software 3D engine with anti-aliasing;
+- 16-channel sound with capture;
 - the game card with flash saves;
 - the touchscreen, firmware and RTC.
 It passes every test in RockPolish's rockwrestler test ROM.
