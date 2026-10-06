@@ -1,9 +1,10 @@
 //! The cartridge's save chip on the AUXSPI bus (GBATEK, "DS Cartridge
 //! Backup", "DS Cart Infrared Cartridge SPI Commands").
 //!
-//! Nothing in the header says which chip a game has. A `.sav` file's size
-//! decides when one is given; otherwise a table of game codes; otherwise
-//! [`DEFAULT`], a 64 KiB EEPROM, the most common type.
+//! Nothing in the header says which chip a game has. A table of game codes
+//! decides for the games in it; otherwise a `.sav` file's size; otherwise
+//! [`DEFAULT`], a 64 KiB EEPROM, the most common type. See [`chip_kind`]
+//! for how the two combine.
 //!
 //! Games with an infrared port (game codes starting with `I`, such as
 //! Pokémon HeartGold and Black) put an infrared controller in front of the
@@ -108,6 +109,23 @@ fn listed(rom: &[u8]) -> Option<Kind> {
         .map(|&(_, kind)| kind)
 }
 
+/// The chip for `rom` given a save of `length` bytes (0 for none).
+///
+/// A game in the table gets its listed chip whenever the save fits in it.
+/// A short or stray `.sav` (say 512 bytes for a 512 KiB flash game) would
+/// otherwise turn the chip into a tiny EEPROM that the game cannot use;
+/// instead the save fills the start of the chip and the rest reads as
+/// erased. melonDS also lets its game list win, but it truncates a save
+/// that is too big. Here a save too big for the listed chip gets the
+/// smallest chip that holds all of it, so no byte of the file is dropped
+/// when it is written back. Other games go by the save's size.
+fn chip_kind(rom: &[u8], length: usize) -> Kind {
+    match listed(rom) {
+        Some(kind) if length <= size(kind) => kind,
+        listed => from_save_size(length).or(listed).unwrap_or(DEFAULT),
+    }
+}
+
 /// The JEDEC ID of an ST flash part of `size` bytes.
 fn flash_id(size: usize) -> [u8; 3] {
     match size {
@@ -143,12 +161,8 @@ pub(crate) struct Backup {
 impl Backup {
     /// The save chip for `rom`, holding `save` (a `.sav` file) if given.
     pub(crate) fn new(rom: &[u8], save: Option<&[u8]>) -> Self {
-        let save = save.map(raw_save);
-        let kind = save
-            .and_then(|data| from_save_size(data.len()))
-            .or_else(|| listed(rom))
-            .unwrap_or(DEFAULT);
-        let data = save.unwrap_or_default();
+        let data = save.map(raw_save).unwrap_or_default();
+        let kind = chip_kind(rom, data.len());
         let chip = match kind {
             Kind::Eeprom(size) => {
                 let mut eeprom = Eeprom::new(size);
@@ -239,20 +253,36 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_chip_from_the_save_size_then_the_game_code() {
+    fn picks_the_chip_from_the_game_code_then_the_save_size() {
         let pokemon = rom_with_code(b"ADAE");
         let backup = Backup::new(&pokemon, None);
         assert!(matches!(backup.chip, Chip::Flash(_)));
         assert_eq!(backup.data().len(), 512 * KIB);
         assert!(backup.infrared.is_none());
 
-        let backup = Backup::new(&pokemon, Some(&[0x12; 0x200]));
-        assert!(matches!(backup.chip, Chip::Eeprom(_)));
-        assert_eq!(backup.data(), [0x12; 0x200]);
-
         let unknown = rom_with_code(b"ZZZE");
         assert_eq!(Backup::new(&unknown, None).data().len(), 64 * KIB);
+        let backup = Backup::new(&unknown, Some(&[0x12; 0x200]));
+        assert!(matches!(backup.chip, Chip::Eeprom(_)));
+        assert_eq!(backup.data(), [0x12; 0x200]);
         assert_eq!(from_save_size(300 * KIB), Some(Kind::Flash(512 * KIB)));
+    }
+
+    #[test]
+    fn a_short_save_keeps_a_listed_games_chip() {
+        let backup = Backup::new(&rom_with_code(b"ADAE"), Some(&[0x12; 0x200]));
+        assert!(matches!(backup.chip, Chip::Flash(_)));
+        assert_eq!(backup.data().len(), 512 * KIB);
+        assert_eq!(backup.data()[..0x200], [0x12; 0x200]);
+        assert!(backup.data()[0x200..].iter().all(|&byte| byte == 0xFF));
+    }
+
+    #[test]
+    fn a_save_too_big_for_a_listed_games_chip_is_kept_whole() {
+        let file = vec![0x34; 128 * KIB];
+        let backup = Backup::new(&rom_with_code(b"ASME"), Some(&file));
+        assert!(matches!(backup.chip, Chip::Eeprom(_)));
+        assert_eq!(backup.data(), file, "not cut to the listed 8 KiB");
     }
 
     #[test]
