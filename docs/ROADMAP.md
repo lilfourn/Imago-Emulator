@@ -207,6 +207,22 @@ FireRed–Emerald trade) need your own dumps.
 
 ## Phase 4 — Nintendo DS
 
+**Status (2026-10-06):** M12–M14 are largely implemented, built in
+parallel by several agents.
+- The DS core direct-boots retail games with an HLE BIOS.
+- Pokémon White plays its opening movie, reaches the main menu and starts
+  a new game.
+- RockPolish's rockwrestler test ROM (scripted through
+  `examples/probe.rs`) passes every test.
+Still open:
+- armwrestler-DS and a libnds hello world;
+- frame-CRC comparison with melonDS;
+- sound capture, 3D anti-aliasing and the protection unit;
+- the BIOS callback decompressors;
+- the frontend items (hybrid layout, rotation, touch at cursor);
+- saves and checkpoints in Platinum, HeartGold/SoulSilver and Black
+  2/White 2.
+
 ### M12. Two CPUs
 
 - ARMv5TE instructions and CP15 in `emu-arm`. ARM9/ARM7 interleaved

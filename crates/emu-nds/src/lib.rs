@@ -1,16 +1,45 @@
 //! Nintendo DS core.
 //!
-//! Status: scaffold. It validates the cartridge header and draws a test
-//! pattern on both screens, with a crosshair at the touch point so the
-//! frontend's touch mapping can be checked. The ARM946E-S and ARM7TDMI will
-//! come from `emu-arm`; this crate will own dual-CPU scheduling, IPC, VRAM
-//! banking, both 2D engines, the 3D engine, SPI devices, the cartridge
-//! protocol and sound. See `docs/ROADMAP.md`, Phase 4.
+//! Two CPUs from `emu-arm` (the ARM9 and the ARM7) run in lockstep slices
+//! over the shared hardware in `hardware.rs`. The game direct-boots: the
+//! machine loads both programs from the cartridge and starts them as the
+//! BIOS and firmware would, and the BIOS is emulated at a high level
+//! unless the user provides dumps. See `docs/ROADMAP.md`, Phase 4, for what
+//! is emulated so far.
+
+mod bios;
+mod boot;
+mod bus;
+mod capture;
+mod cart;
+mod display;
+mod dma;
+mod gpu2d;
+mod gpu3d;
+mod hardware;
+mod interrupt;
+mod io;
+mod ipc;
+mod machine;
+mod math;
+mod memory;
+mod rtc;
+mod sound;
+mod spi;
+mod timer;
+mod vram;
 
 use emu_core::{
-    Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, ScreenSize, StateError,
-    StereoSample, System, test_pattern,
+    Button, Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
+    StateError, StereoSample, System, SystemFileKind,
 };
+
+use cart::Cart;
+use display::FRAME_CYCLES;
+use hardware::Hardware;
+use machine::Machine;
+use rtc::Rtc;
+use spi::Spi;
 
 const SCREEN: ScreenSize = ScreenSize::new(256, 192);
 const SCREENS: [ScreenSize; 2] = [SCREEN, SCREEN];
@@ -24,43 +53,189 @@ pub const INFO: CoreInfo = CoreInfo {
     players: 1,
     frame_rate: FrameRate::new(33_513_982, 560_190),
     audio_sample_rate: 32_768,
-    state_version: 1,
+    // Bump whenever any serialized struct changes shape.
+    state_version: 2,
 };
 
-/// CRC-16 of the Nintendo logo in every licensed cartridge header (GBATEK,
-/// "DS Cartridge Header", 0x15C).
-const LOGO_CRC: u16 = 0xCF56;
-
 /// A Nintendo DS with a cartridge inserted.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Nds {
+    machine: Machine,
     screens: [Frame; 2],
-    frame_count: u64,
 }
 
 impl Nds {
-    /// Powers on a DS with `media`'s cartridge.
+    /// Powers on a DS with `media`'s cartridge and direct-boots it.
+    ///
+    /// The BIOS is emulated unless `media` holds both the ARM9 (4 KiB) and
+    /// ARM7 (16 KiB) BIOS dumps.
     ///
     /// # Errors
     ///
     /// Returns [`LoadError::InvalidRom`] if the cartridge header is missing
-    /// or its logo checksum is wrong.
+    /// or either program lies outside the ROM. The Nintendo logo is not
+    /// checked, so homebrew without it runs too.
     pub fn new(media: &Media<'_>) -> Result<Self, LoadError> {
         let invalid = |reason| LoadError::InvalidRom {
             system: System::Nds,
             reason,
         };
-        let logo_crc = media
-            .rom
-            .get(0x15C..0x15E)
-            .ok_or(invalid("shorter than the 0x180-byte header"))?;
-        if u16::from_le_bytes([logo_crc[0], logo_crc[1]]) != LOGO_CRC {
-            return Err(invalid("logo checksum at 0x15C is not 0xCF56"));
+        if media.rom.len() < 0x200 {
+            return Err(invalid("shorter than the 0x200-byte header"));
         }
+        let header = boot::Header::parse(media.rom);
+        let fits = |program: boot::Program| {
+            (program.rom_offset as usize)
+                .checked_add(program.size as usize)
+                .is_some_and(|end| end <= media.rom.len())
+        };
+        if !fits(header.arm9) || !fits(header.arm7) {
+            return Err(invalid("a program in the header lies outside the ROM"));
+        }
+        let dumps = media
+            .system_file(SystemFileKind::NdsBios9)
+            .filter(|bios| bios.len() == 0x1000)
+            .zip(
+                media
+                    .system_file(SystemFileKind::NdsBios7)
+                    .filter(|bios| bios.len() == 0x4000),
+            );
+        let hle_bios = dumps.is_none();
+        let (arm9_bios, arm7_bios) = dumps.map_or_else(
+            || (bios::arm9_image(), bios::arm7_image()),
+            |(arm9, arm7)| (arm9.into(), arm7.into()),
+        );
+        let mut hw = Hardware::new(arm9_bios, arm7_bios);
+        hw.cart = Cart::new(media.rom.into(), media.backup);
+        hw.spi = Spi::new(media.system_file(SystemFileKind::NdsFirmware));
+        hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
+            machine: Machine::boot(hw, hle_bios),
             screens: [Frame::new(SCREEN), Frame::new(SCREEN)],
-            frame_count: 0,
         })
+    }
+
+    fn set_input(&mut self, input: &Input) {
+        let hw = &mut self.machine.hw;
+        // Button bit order matches KEYINPUT for the first ten buttons.
+        hw.keys = !input.buttons.bits() & 0x03FF;
+        let held = |button| input.buttons.contains(button);
+        let mut ext_keys = 0x007F;
+        if held(Button::X) {
+            ext_keys &= !1;
+        }
+        if held(Button::Y) {
+            ext_keys &= !2;
+        }
+        let touch = input
+            .touch
+            .map(|point| (point.x.min(255) as u8, point.y.min(191) as u8));
+        hw.spi.set_touch(touch);
+        if hw.spi.pen_down() {
+            ext_keys &= !(1 << 6);
+        }
+        hw.ext_keys = ext_keys;
+        hw.check_keypad_interrupt();
+    }
+
+    fn present(&mut self) {
+        let hw = &self.machine.hw;
+        // POWCNT1 bit 15 puts engine A on the top screen.
+        let (top, bottom) = if hw.powcnt1 & 0x8000 != 0 {
+            (&hw.screen_a, &hw.screen_b)
+        } else {
+            (&hw.screen_b, &hw.screen_a)
+        };
+        let [top_frame, bottom_frame] = &mut self.screens;
+        top_frame.pixels_mut().copy_from_slice(top);
+        bottom_frame.pixels_mut().copy_from_slice(bottom);
+    }
+
+    /// Both CPUs' program counters, modes and halt states, and the
+    /// interrupt registers, as one `key=value` line for debugging.
+    #[must_use]
+    pub fn debug_state(&self) -> String {
+        let hw = &self.machine.hw;
+        let cpu = |name: &str, pc: u32, cpsr: u32, io: &hardware::CpuIo| {
+            format!(
+                "{name}_pc={pc:08X} {name}_cpsr={cpsr:08X} {name}_halted={} {name}_ime={} {name}_ie={:08X} {name}_if={:08X}",
+                io.halted,
+                u8::from(io.interrupts.master_enable),
+                io.interrupts.enable,
+                io.interrupts.flags,
+            )
+        };
+        format!(
+            "{} {} vcount={}",
+            cpu(
+                "arm9",
+                self.machine.arm9.reg(15),
+                self.machine.arm9.cpsr(),
+                &hw.arm9
+            ),
+            cpu(
+                "arm7",
+                self.machine.arm7.reg(15),
+                self.machine.arm7.cpsr(),
+                &hw.arm7
+            ),
+            hw.vcount,
+        )
+    }
+
+    /// BIOS functions each CPU has called, with counts, for debugging.
+    #[must_use]
+    pub fn debug_system_calls(&self) -> String {
+        let describe = |name: &str, counts: &[u32; 0x20]| {
+            let calls: Vec<String> = (0..0x20)
+                .filter(|number| counts[*number] > 0)
+                .map(|number| format!("{number:02X}x{}", counts[number]))
+                .collect();
+            format!("{name}_swi={}", calls.join(","))
+        };
+        let [arm9, arm7] = &self.machine.system_calls;
+        format!("{} {}", describe("arm9", arm9), describe("arm7", arm7))
+    }
+
+    /// Video registers, as one `key=value` line for debugging.
+    #[must_use]
+    pub fn debug_video(&self) -> String {
+        let hw = &self.machine.hw;
+        let dispcnt = |engine: &gpu2d::Engine2d| {
+            u32::from(engine.read_register(0)) | u32::from(engine.read_register(2)) << 16
+        };
+        let banks: Vec<String> = (0..9)
+            .map(|bank| format!("{:02X}", hw.vram.control(bank)))
+            .collect();
+        format!(
+            "powcnt1={:04X} dispcnt_a={:08X} dispcnt_b={:08X} bright_a={:04X} bright_b={:04X} vramcnt={} disp3dcnt={:04X} bgcnt_a={:04X},{:04X},{:04X},{:04X}",
+            hw.powcnt1,
+            dispcnt(&hw.engine_a),
+            dispcnt(&hw.engine_b),
+            hw.engine_a.read_register(0x6C),
+            hw.engine_b.read_register(0x6C),
+            banks.join(","),
+            hw.gpu3d.read_register(0x60) & 0xFFFF,
+            hw.engine_a.read_register(0x08),
+            hw.engine_a.read_register(0x0A),
+            hw.engine_a.read_register(0x0C),
+            hw.engine_a.read_register(0x0E),
+        )
+    }
+
+    /// The ARM9's and ARM7's R0–R15, for debugging.
+    #[must_use]
+    pub fn debug_registers(&self) -> [[u32; 16]; 2] {
+        [
+            std::array::from_fn(|index| self.machine.arm9.reg(index)),
+            std::array::from_fn(|index| self.machine.arm7.reg(index)),
+        ]
+    }
+
+    /// Bus cycles (33.51 MHz) since power-on.
+    #[must_use]
+    pub fn cycles(&self) -> u64 {
+        self.machine.now()
     }
 }
 
@@ -69,18 +244,25 @@ impl Core for Nds {
         INFO
     }
 
-    fn run_frame(&mut self, inputs: &[Input], _audio: &mut Vec<StereoSample>) {
-        let input = inputs.first().copied().unwrap_or_default();
-        self.frame_count += 1;
-        let [top, bottom] = &mut self.screens;
-        test_pattern::color_bars(top, self.frame_count);
-        test_pattern::color_bars(bottom, self.frame_count.wrapping_mul(2));
-        if !input.buttons.is_empty() {
-            test_pattern::invert(top);
+    fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
+        self.set_input(&inputs.first().copied().unwrap_or_default());
+        if self.machine.hw.spi.powered_off() {
+            // The game switched the console off: dark screens, no sound.
+            for screen in &mut self.screens {
+                screen.pixels_mut().fill(0xFF00_0000);
+            }
+            return;
         }
-        if let Some(point) = input.touch {
-            test_pattern::crosshair(bottom, point);
+        let start = self.machine.now();
+        // A frame ends at VBlank, or after a frame's time if that never
+        // comes.
+        while self.machine.now() - start < FRAME_CYCLES {
+            if self.machine.run_slice(|_, _| {}).frame_done {
+                break;
+            }
         }
+        self.machine.hw.sound.drain_samples(audio);
+        self.present();
     }
 
     fn screens(&self) -> &[Frame] {
@@ -88,49 +270,172 @@ impl Core for Nds {
     }
 
     fn reset(&mut self) {
-        self.frame_count = 0;
+        // The cartridge (with its save), firmware and clock carry over.
+        let old = &mut self.machine.hw;
+        let mut hw = Hardware::new(
+            std::mem::take(&mut old.arm9_bios),
+            std::mem::take(&mut old.arm7_bios),
+        );
+        let now = old.scheduler.now();
+        std::mem::swap(&mut hw.cart, &mut old.cart);
+        std::mem::swap(&mut hw.spi, &mut old.spi);
+        std::mem::swap(&mut hw.rtc, &mut old.rtc);
+        hw.rtc.restart_cycles(now);
+        self.machine = Machine::boot(hw, self.machine.hle_bios);
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.frame_count.to_le_bytes());
+        let bytes = postcard::to_stdvec(&self.machine).expect("machine state always serializes");
+        out.extend_from_slice(&bytes);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let bytes: [u8; 8] = state
-            .try_into()
-            .map_err(|_| StateError::Malformed("scaffold state is 8 bytes"))?;
-        self.frame_count = u64::from_le_bytes(bytes);
+        let mut machine: Machine = postcard::from_bytes(state)
+            .map_err(|_| StateError::Malformed("not a Nintendo DS state"))?;
+        machine.hw.take_media_from(&mut self.machine.hw);
+        self.machine = machine;
+        // The rendered 3D image is not saved.
+        let hw = &mut self.machine.hw;
+        hw.gpu3d.render_frame(&hw.vram);
+        self.present();
         Ok(())
+    }
+
+    fn backup_generation(&self, player: usize) -> Option<u64> {
+        (player == 0)
+            .then(|| self.machine.hw.cart.backup_generation())
+            .flatten()
+    }
+
+    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
+        if player == 0 {
+            self.machine.hw.cart.save_backup(out);
+        }
+    }
+
+    fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        let main_ram = address >> 24 == 0x02;
+        (player == 0 && main_ram)
+            .then(|| self.machine.hw.main_ram[address as usize & (hardware::MAIN_RAM_SIZE - 1)])
+    }
+
+    fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
+        let main_ram = address >> 24 == 0x02;
+        if player == 0 && main_ram {
+            self.machine.hw.main_ram[address as usize & (hardware::MAIN_RAM_SIZE - 1)] = value;
+        }
+        player == 0 && main_ram
+    }
+
+    fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
+        match region {
+            MemoryRegion::MainRam => Some(&self.machine.hw.main_ram),
+            MemoryRegion::VideoRam => None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emu_core::{TouchPoint, rgb};
 
-    fn rom_with_valid_header() -> Vec<u8> {
-        let mut rom = vec![0; 0x200];
-        rom[0x15C..0x15E].copy_from_slice(&LOGO_CRC.to_le_bytes());
+    /// A cartridge whose ARM9 and ARM7 programs each store a value in main
+    /// RAM and loop.
+    fn rom() -> Vec<u8> {
+        let mut rom = vec![0; 0x400];
+        let mut put = |offset: usize, value: u32| {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put(0x20, 0x200);
+        put(0x24, 0x0200_4000);
+        put(0x28, 0x0200_4000);
+        put(0x2C, 16);
+        put(0x30, 0x300);
+        put(0x34, 0x0238_0000);
+        put(0x38, 0x0238_0000);
+        put(0x3C, 16);
+        // MOV R0, #0x02000000; MOV R1, #42; STR R1, [R0]; B .
+        for (index, word) in [0xE3A0_0402, 0xE3A0_102A, 0xE580_1000, 0xEAFF_FFFE]
+            .into_iter()
+            .enumerate()
+        {
+            put(0x200 + index * 4, word);
+        }
+        // MOV R0, #0x02000000; MOV R1, #7; STR R1, [R0, #4]; B .
+        for (index, word) in [0xE3A0_0402, 0xE3A0_1007, 0xE580_1004, 0xEAFF_FFFE]
+            .into_iter()
+            .enumerate()
+        {
+            put(0x300 + index * 4, word);
+        }
         rom
     }
 
     #[test]
-    fn rejects_a_bad_logo_checksum() {
-        assert!(Nds::new(&Media::new(&[0; 0x200])).is_err());
-        assert!(Nds::new(&Media::new(&rom_with_valid_header())).is_ok());
+    fn rejects_programs_outside_the_rom() {
+        assert!(Nds::new(&Media::new(&[0; 0x100])).is_err());
+        let mut rom = rom();
+        rom[0x2C..0x30].copy_from_slice(&0x1000u32.to_le_bytes());
+        assert!(Nds::new(&Media::new(&rom)).is_err());
     }
 
     #[test]
-    fn touch_draws_on_the_bottom_screen() {
-        let rom = rom_with_valid_header();
+    fn both_cpus_run_their_programs() {
+        let rom = rom();
         let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
-        let input = Input {
-            touch: Some(TouchPoint { x: 10, y: 20 }),
-            ..Input::default()
+        nds.run_frame(&[], &mut Vec::new());
+        let word = |address: u32| {
+            u32::from_le_bytes([0, 1, 2, 3].map(|byte| nds.peek(0, address + byte).unwrap_or(0)))
         };
-        nds.run_frame(&[input], &mut Vec::new());
-        let bottom = &nds.screens()[1];
-        assert_eq!(bottom.pixels()[20 * 256 + 10], rgb(0, 0, 0));
+        assert_eq!(word(0x0200_0000), 42);
+        assert_eq!(word(0x0200_0004), 7);
+    }
+
+    #[test]
+    fn the_arm9_program_can_paint_the_top_screen() {
+        let mut rom = rom();
+        // MOV R0, #0x04000000; MOV R1, #0x10000; STR R1, [R0] (DISPCNT:
+        // display on); MOV R0, #0x05000000; MVN R1, #0; STRH R1, [R0]
+        // (white backdrop); B .
+        let program: [u32; 7] = [
+            0xE3A0_0301,
+            0xE3A0_1801,
+            0xE580_1000,
+            0xE3A0_0405,
+            0xE3E0_1000,
+            0xE1C0_10B0,
+            0xEAFF_FFFE,
+        ];
+        rom[0x2C..0x30].copy_from_slice(&28u32.to_le_bytes());
+        for (index, word) in program.into_iter().enumerate() {
+            rom[0x200 + index * 4..0x204 + index * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        nds.run_frame(&[], &mut Vec::new());
+        nds.run_frame(&[], &mut Vec::new());
+        assert_eq!(nds.screens()[0].pixels()[0], 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn a_frame_takes_one_frame_of_cycles() {
+        let rom = rom();
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        nds.run_frame(&[], &mut Vec::new());
+        let first = nds.cycles();
+        nds.run_frame(&[], &mut Vec::new());
+        assert_eq!(nds.cycles() - first, FRAME_CYCLES);
+    }
+
+    #[test]
+    fn save_states_round_trip() {
+        let rom = rom();
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        nds.run_frame(&[], &mut Vec::new());
+        let mut state = Vec::new();
+        nds.save_state(&mut state);
+        let mut other = Nds::new(&Media::new(&rom)).expect("valid header");
+        other.load_state(&state).expect("loads");
+        assert_eq!(other.cycles(), nds.cycles());
+        assert_eq!(other.peek(0, 0x0200_0000), Some(42));
     }
 }

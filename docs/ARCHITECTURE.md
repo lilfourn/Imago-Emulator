@@ -25,11 +25,11 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-core` | The contract between cores and frontends: the `Core` trait and plain-data types. No dependencies beyond `thiserror`. |
 | `emu-sched` | A priority queue of cycle-timestamped events. |
 | `emu-state` | The save-state container format. |
-| `emu-arm` | The ARM7TDMI interpreter (ARMv4T) shared by the GBA and both DS CPUs; ARMv5TE arrives with the DS. |
+| `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. |
 | `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
 | `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS, cartridge saves and RTC, serial port, and the linked pair. Event-driven by `emu-sched`. |
-| `emu-nds` | Nintendo DS. Today: header validation and a test pattern. |
+| `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs. |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Parses cheat lists into memory operations and applies them through a two-method `Memory` trait. Knows code formats, not cores. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |

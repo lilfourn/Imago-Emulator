@@ -6,9 +6,19 @@ A Game Boy, Game Boy Color, Game Boy Advance and Nintendo DS emulator for
 macOS, written in Rust with a [GPUI](https://gpui.rs) frontend. The goal is to
 play the Pokémon games of generations 1–5 from your own cartridge dumps.
 
-**Status: Phase 3 (Game Boy Advance).** The Game Boy and Game Boy Color
-core passes 135 of 158 open-source test ROMs, including all of Blargg's CPU
-tests, dmg-acid2 and cgb-acid2. The Game Boy Advance core has:
+**Status: Phase 4 (Nintendo DS).** The DS core direct-boots retail games
+with an HLE BIOS. Pokémon White plays its opening movie, reaches the main
+menu and starts a new game, at well above full speed. It has:
+- an ARM946E-S and an ARM7TDMI in lockstep, with IPC;
+- both 2D engines and a software 3D engine;
+- 16-channel sound;
+- the game card with flash saves;
+- the touchscreen, firmware and RTC.
+It passes every test in RockPolish's rockwrestler test ROM.
+
+The Game Boy and Game Boy Color core passes 135 of 158 open-source test
+ROMs, including all of Blargg's CPU tests, dmg-acid2 and cgb-acid2. The Game
+Boy Advance core has:
 - an ARM7TDMI that passes all 2.25 million SingleStepTests cases;
 - video, sound, DMA, timers and an HLE BIOS;
 - SRAM, Flash and EEPROM saves;
@@ -22,8 +32,8 @@ dumps. The app has:
 - link play;
 - GBC/GBA colour correction;
 - cheats and a memory viewer.
-The DS core is still a stub that draws a test pattern. See the
-[roadmap](docs/ROADMAP.md).
+
+See the [roadmap](docs/ROADMAP.md).
 
 ## Docs
 
@@ -143,11 +153,11 @@ cargo test -p emu-arm --release --test single_step               # ARM7TDMI
 | `emu-core` | The `Core` trait and the plain data that crosses it |
 | `emu-sched` | Cycle-timestamped event scheduler |
 | `emu-state` | Save-state container format |
-| `emu-arm` | ARM7TDMI interpreter, shared by the GBA and (later) the DS |
+| `emu-arm` | ARM7TDMI (GBA, DS ARM7) and ARM946E-S (DS ARM9) interpreters |
 | `emu-psg` | The Game Boy family's sound generator, shared by GB and GBA |
 | `emu-gb` | Game Boy and Game Boy Color core |
 | `emu-gba` | Game Boy Advance core |
-| `emu-nds` | DS core (a stub today) |
+| `emu-nds` | Nintendo DS core |
 | `emu-cheats` | Cheat list parsing and application |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-headless` | Windowless runner for test ROMs |

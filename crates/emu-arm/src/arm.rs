@@ -6,12 +6,19 @@
 //! instruction runs; handlers advance it (or reload the pipeline) at the
 //! cycle the hardware does, which is visible to instructions that store
 //! R15 or read it after a register shift.
+//!
+//! ARMv5TE's additions are in `armv5.rs`; where it changes an ARMv4
+//! instruction (loads into R15, misaligned halfword loads, LDM/STM edge
+//! cases), the handler here checks `M::V5TE`, a constant per model.
 
 use crate::alu::{self, Shift};
-use crate::{Access, Bus, Cpu, Mode, psr};
+use crate::{Access, Bus, Mode, Model, Processor, psr};
 
-impl Cpu {
+impl<M: Model> Processor<M> {
     pub(crate) fn execute_arm<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
+        if M::V5TE && self.execute_arm_v5(bus, instruction) {
+            return;
+        }
         let key = instruction & 0x0FF0_00F0;
         if key & 0x0FF0_00F0 == 0x0120_0010 {
             self.branch_exchange(bus, instruction);
@@ -40,7 +47,8 @@ impl Cpu {
         } else if key & 0x0F00_0000 == 0x0F00_0000 {
             self.software_interrupt(bus);
         } else {
-            // Coprocessor instructions: the GBA has no coprocessor.
+            // Coprocessor instructions: the ARM7TDMI has no coprocessor, and
+            // the ARM9's only one (CP15) takes no CDP, LDC or STC.
             self.undefined(bus);
         }
     }
@@ -279,12 +287,12 @@ impl Cpu {
         let address = self.r[rn];
         let source = self.r[rm];
         let loaded = if instruction & (1 << 22) != 0 {
-            let value = bus.read_8(address, Access::NONSEQUENTIAL);
-            bus.write_8(address, source as u8, Access::LOCK);
+            let value = self.read_8(bus, address, Access::NONSEQUENTIAL);
+            self.write_8(bus, address, source as u8, Access::LOCK);
             u32::from(value)
         } else {
             let value = self.read_word_rotated(bus, address, Access::NONSEQUENTIAL);
-            bus.write_32(address, source, Access::LOCK);
+            self.write_32(bus, address, source, Access::LOCK);
             value
         };
         bus.idle();
@@ -328,7 +336,7 @@ impl Cpu {
         self.advance_after_data();
         if load {
             let value = if byte {
-                u32::from(bus.read_8(address, Access::NONSEQUENTIAL))
+                u32::from(self.read_8(bus, address, Access::NONSEQUENTIAL))
             } else {
                 self.read_word_rotated(bus, address, Access::NONSEQUENTIAL)
             };
@@ -338,14 +346,17 @@ impl Cpu {
             }
             self.r[rd] = value;
             if rd == 15 {
+                if self.loads_interwork() {
+                    self.set_state_from_pc();
+                }
                 self.reload_pipeline(bus);
             }
         } else {
             let value = self.r[rd];
             if byte {
-                bus.write_8(address, value as u8, Access::NONSEQUENTIAL);
+                self.write_8(bus, address, value as u8, Access::NONSEQUENTIAL);
             } else {
-                bus.write_32(address, value, Access::NONSEQUENTIAL);
+                self.write_32(bus, address, value, Access::NONSEQUENTIAL);
             }
             if writeback || !pre {
                 self.write_back(bus, rn, offset_address);
@@ -356,7 +367,7 @@ impl Cpu {
     /// Writes a transfer's updated base address. Writing back to R15 (an
     /// unpredictable encoding) jumps, as the ARM7TDMI does, to the address
     /// plus 4.
-    fn write_back<B: Bus>(&mut self, bus: &mut B, rn: usize, address: u32) {
+    pub(crate) fn write_back<B: Bus>(&mut self, bus: &mut B, rn: usize, address: u32) {
         if rn == 15 {
             self.r[15] = address.wrapping_add(4);
             self.reload_pipeline(bus);
@@ -393,7 +404,7 @@ impl Cpu {
             let value = match kind {
                 2 => self.read_byte_signed(bus, address),
                 3 => self.read_half_signed(bus, address),
-                _ => self.read_half_rotated(bus, address, Access::NONSEQUENTIAL),
+                _ => self.read_half(bus, address, Access::NONSEQUENTIAL),
             };
             bus.idle();
             if (writeback || !pre) && rn != rd {
@@ -405,7 +416,8 @@ impl Cpu {
             }
         } else {
             // ARMv4 has only STRH; the signed forms store a halfword too.
-            bus.write_16(address, self.r[rd] as u16, Access::NONSEQUENTIAL);
+            // (ARMv5TE's LDRD and STRD use them; see `armv5.rs`.)
+            self.write_16(bus, address, self.r[rd] as u16, Access::NONSEQUENTIAL);
             if writeback || !pre {
                 self.write_back(bus, rn, offset_address);
             }
@@ -424,6 +436,14 @@ impl Cpu {
     }
 
     /// LDM/STM, shared with Thumb's PUSH, POP, LDMIA and STMIA.
+    ///
+    /// ARMv5 (GBATEK, "Strange Effects on Invalid Rlist's"): an empty list
+    /// transfers nothing but still moves the base by 0x40; STM with the
+    /// base in the list stores its old value; ARM LDM with the base in the
+    /// list writes the new base back unless the base is the last of several
+    /// registers, when the loaded value stays (Thumb LDMIA always keeps the
+    /// loaded value). A load into R15 takes the state from bit 0 unless it
+    /// is an exception return (S bit).
     #[allow(clippy::too_many_arguments)] // Mirrors the instruction's fields.
     pub(crate) fn transfer_multiple<B: Bus>(
         &mut self,
@@ -436,10 +456,10 @@ impl Cpu {
         writeback: bool,
         load: bool,
     ) {
-        // An empty list transfers R15 and moves the base by 0x40 (ARMv4).
+        // An empty list moves the base by 0x40; ARMv4 also transfers R15.
         let empty = list == 0;
         let (list, bytes) = if empty {
-            (1 << 15, 0x40)
+            (if M::V5TE { 0 } else { 1 << 15 }, 0x40)
         } else {
             (list, list.count_ones() * 4)
         };
@@ -464,6 +484,9 @@ impl Cpu {
         }
 
         self.advance_after_data();
+        // ARMv4 writes the base back after the first access, ARMv5 after
+        // the last.
+        let early_writeback = writeback && !M::V5TE;
         let mut address = start;
         let mut first = true;
         for register in (0..16).filter(|r| list & (1 << r) != 0) {
@@ -473,24 +496,34 @@ impl Cpu {
                 Access::SEQUENTIAL
             };
             if load {
-                let value = bus.read_32(address, access);
-                if first && writeback {
+                let value = self.read_32(bus, address, access);
+                if first && early_writeback {
                     self.r[rn] = final_base;
                 }
                 self.r[register] = value;
             } else {
-                bus.write_32(address, self.r[register], access);
-                if first && writeback {
+                self.write_32(bus, address, self.r[register], access);
+                if first && early_writeback {
                     self.r[rn] = final_base;
                 }
             }
             address = address.wrapping_add(4);
             first = false;
         }
+        let late_writeback = M::V5TE && writeback && {
+            let base_loaded = load && list & (1 << rn) != 0;
+            let base_last_of_several = list >> rn == 1 && list != 1 << rn;
+            !(base_loaded && (self.thumb() || base_last_of_several))
+        };
 
         if switch_bank {
             self.store_bank(Mode::User);
             self.load_bank(mode);
+        }
+        // ARMv5 writes the base back to the current mode's register, even
+        // when the transfer itself used the User bank.
+        if late_writeback {
+            self.r[rn] = final_base;
         }
         if writeback && rn == 15 && !pc_load {
             self.reload_pipeline(bus);
@@ -501,6 +534,8 @@ impl Cpu {
             if pc_load {
                 if user_bank {
                     self.restore_cpsr();
+                } else if self.loads_interwork() {
+                    self.set_state_from_pc();
                 }
                 // Thumb POP {PC} clears bit 0; an empty list loads it raw.
                 if self.thumb() && !empty {
@@ -518,29 +553,31 @@ impl Cpu {
         address: u32,
         access: Access,
     ) -> u32 {
-        bus.read_32(address, access).rotate_right((address & 3) * 8)
+        self.read_32(bus, address, access)
+            .rotate_right((address & 3) * 8)
     }
 
-    /// A halfword load: from an odd address the halfword is rotated.
-    pub(crate) fn read_half_rotated<B: Bus>(
-        &mut self,
-        bus: &mut B,
-        address: u32,
-        access: Access,
-    ) -> u32 {
-        u32::from(bus.read_16(address, access)).rotate_right((address & 1) * 8)
+    /// LDRH: from an odd address the ARM7TDMI rotates the halfword; ARMv5
+    /// ignores bit 0.
+    pub(crate) fn read_half<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u32 {
+        let half = u32::from(self.read_16(bus, address, access));
+        if M::V5TE {
+            half
+        } else {
+            half.rotate_right((address & 1) * 8)
+        }
     }
 
     /// LDRSB.
     pub(crate) fn read_byte_signed<B: Bus>(&mut self, bus: &mut B, address: u32) -> u32 {
-        i32::from(bus.read_8(address, Access::NONSEQUENTIAL) as i8) as u32
+        i32::from(self.read_8(bus, address, Access::NONSEQUENTIAL) as i8) as u32
     }
 
     /// LDRSH: from an odd address the ARM7TDMI sign-extends the high byte
-    /// of the halfword instead.
+    /// of the halfword instead; ARMv5 ignores bit 0.
     pub(crate) fn read_half_signed<B: Bus>(&mut self, bus: &mut B, address: u32) -> u32 {
-        let half = bus.read_16(address, Access::NONSEQUENTIAL);
-        if address & 1 != 0 {
+        let half = self.read_16(bus, address, Access::NONSEQUENTIAL);
+        if address & 1 != 0 && !M::V5TE {
             i32::from((half >> 8) as u8 as i8) as u32
         } else {
             i32::from(half as i16) as u32
