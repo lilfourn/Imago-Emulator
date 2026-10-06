@@ -24,6 +24,7 @@ use crate::bindings::{self, Bindings};
 use crate::cheats;
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
+use crate::cursor::{self, Cursor};
 use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
@@ -54,9 +55,14 @@ pub struct EmulatorView {
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
     controls: Controls,
-    touch: Option<TouchPoint>,
+    /// Where the mouse touches the touchscreen, while its button is down.
+    mouse_touch: Option<TouchPoint>,
+    /// The gamepad's touchscreen cursor, once a gamepad has used it.
+    cursor: Option<Cursor>,
     /// What the emulation thread was last told is held.
     sent: HeldState,
+    /// Where the emulation thread was last told the screen is touched.
+    sent_touch: Option<TouchPoint>,
     /// The player keyboard and gamepads control, in multi-player sessions.
     active_player: usize,
     state_slot: u8,
@@ -131,10 +137,12 @@ impl EmulatorView {
         }
         let gamepad_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = pad_receiver.recv().await {
-                let delivered = this.update_in(cx, |this, window, _| {
-                    // Gamepads are global; only the active window listens.
-                    if window.is_window_active() || !event.pressed {
-                        this.pad_event(&event);
+                let delivered = this.update_in(cx, |this, window, cx| {
+                    // Gamepads are global; only the active window listens,
+                    // but releases always count.
+                    let release = matches!(event, PadEvent::Control { pressed: false, .. });
+                    if window.is_window_active() || release {
+                        this.pad_event(&event, cx);
                     }
                 });
                 if delivered.is_err() {
@@ -154,8 +162,10 @@ impl EmulatorView {
             loading: None,
             placements: Vec::new(),
             controls: Controls::default(),
-            touch: None,
+            mouse_touch: None,
+            cursor: None,
             sent: HeldState::default(),
+            sent_touch: None,
             active_player: 0,
             state_slot: 1,
             notice: None,
@@ -239,7 +249,9 @@ impl EmulatorView {
         });
         // The new emulator starts with nothing held; resend what is.
         self.sent = HeldState::default();
-        self.touch = None;
+        self.sent_touch = None;
+        self.mouse_touch = None;
+        self.cursor = None;
         self.active_player = 0;
         self.sync_held();
         self.watch_memory();
@@ -352,7 +364,7 @@ impl EmulatorView {
             player: self.active_player,
             input: Input {
                 buttons: self.sent.buttons,
-                touch: self.touch,
+                touch: self.sent_touch,
             },
         });
     }
@@ -376,11 +388,18 @@ impl EmulatorView {
         self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
 
-    /// Tells the emulation thread about any change in held inputs.
+    /// Tells the emulation thread about any change in held inputs or in
+    /// where the screen is touched. The mouse and the gamepad cursor touch
+    /// independently; the mouse wins while both do.
     fn sync_held(&mut self) {
         let state = self.controls.state();
-        if state.buttons != self.sent.buttons {
+        let touch = match self.mouse_touch {
+            Some(point) => Some(point),
+            None => self.cursor_touch(state.touch),
+        };
+        if state.buttons != self.sent.buttons || touch != self.sent_touch {
             self.sent.buttons = state.buttons;
+            self.sent_touch = touch;
             self.send_input();
         }
         if state.fast_forward != self.sent.fast_forward {
@@ -392,14 +411,35 @@ impl EmulatorView {
         self.sent = state;
     }
 
+    /// Where the gamepad cursor touches, if its touch input is `held`. The
+    /// cursor appears in the middle of the touchscreen if no gamepad has
+    /// moved it yet.
+    fn cursor_touch(&mut self, held: bool) -> Option<TouchPoint> {
+        if !held {
+            return None;
+        }
+        let (_, size) = self.touchscreen()?;
+        Some(
+            self.cursor
+                .get_or_insert_with(|| Cursor::centre(size))
+                .pixel(),
+        )
+    }
+
+    /// The running game's touchscreen: its index and size.
+    fn touchscreen(&self) -> Option<(usize, ScreenSize)> {
+        let info = &self.session.as_ref()?.info;
+        let screen = info.touch_screen?;
+        Some((screen, *info.screens.get(screen)?))
+    }
+
     fn release_all(&mut self) {
         self.controls.release_all();
-        self.touch = None;
-        self.send_input();
+        self.mouse_touch = None;
         self.sync_held();
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
         // Command and Control chords are menu shortcuts, not game input.
         if !modifiers.platform && !modifiers.control {
@@ -407,19 +447,47 @@ impl EmulatorView {
             let action = self.bindings.key_action(key);
             self.controls.set(format!("key:{key}"), action, true);
             self.sync_held();
+            // Redraw the cursor if a key touches with it, even when paused.
+            cx.notify();
         }
     }
 
-    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke.key;
         self.controls.set(format!("key:{key}"), None, false);
         self.sync_held();
+        cx.notify();
     }
 
-    fn pad_event(&mut self, event: &PadEvent) {
-        let action = self.bindings.pad_action(&event.controller, &event.control);
-        let source = format!("pad:{}:{}", event.controller, event.control);
-        self.controls.set(source, action, event.pressed);
+    fn pad_event(&mut self, event: &PadEvent, cx: &mut Context<Self>) {
+        match event {
+            PadEvent::Control {
+                controller,
+                control,
+                pressed,
+            } => {
+                let action = self.bindings.pad_action(controller, control);
+                let source = format!("pad:{controller}:{control}");
+                self.controls.set(source, action, *pressed);
+                self.sync_held();
+            }
+            PadEvent::Pointer { dx, dy } => self.move_cursor((*dx, *dy)),
+        }
+        // Redraw the cursor, even when paused.
+        cx.notify();
+    }
+
+    /// Moves the gamepad cursor by `motion`, in the units of
+    /// [`PadEvent::Pointer`] as seen on the window, whichever way the
+    /// screens are turned.
+    fn move_cursor(&mut self, motion: (f32, f32)) {
+        let Some((_, size)) = self.touchscreen() else {
+            return;
+        };
+        let (dx, dy) = self.layout.rotation.unturn_vector(motion);
+        self.cursor
+            .get_or_insert_with(|| Cursor::centre(size))
+            .move_by((dx * cursor::SPEED, dy * cursor::SPEED), size);
         self.sync_held();
     }
 
@@ -482,22 +550,17 @@ impl EmulatorView {
         }
     }
 
-    /// Points the stylus at `position`, or lifts it if that is off every
-    /// copy of the touchscreen.
+    /// Points the mouse's stylus at `position`, or lifts it if that is off
+    /// every copy of the touchscreen.
     fn touch_at(&mut self, position: Point<Pixels>) {
-        let touch = self.session.as_ref().and_then(|session| {
-            let screen = session.info.touch_screen?;
-            let size = *session.info.screens.get(screen)?;
-            let point = (f32::from(position.x), f32::from(position.y));
+        let point = (f32::from(position.x), f32::from(position.y));
+        self.mouse_touch = self.touchscreen().and_then(|(screen, size)| {
             self.placements
                 .iter()
                 .filter(|placement| placement.screen == screen)
                 .find_map(|placement| placement.pixel_at(size, point))
         });
-        if touch != self.touch {
-            self.touch = touch;
-            self.send_input();
-        }
+        self.sync_held();
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -510,7 +573,12 @@ impl EmulatorView {
         if let Some(player) = clicked {
             self.switch_player(player, cx);
         }
+        // Back to the mouse: hide the gamepad cursor unless it is touching.
+        if !self.sent.touch {
+            self.cursor = None;
+        }
         self.touch_at(event.position);
+        cx.notify();
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -520,9 +588,8 @@ impl EmulatorView {
     }
 
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        if self.touch.take().is_some() {
-            self.send_input();
-        }
+        self.mouse_touch = None;
+        self.sync_held();
     }
 
     /// Asks for a ROM file, then calls `then` with it.
@@ -759,6 +826,39 @@ impl EmulatorView {
         )
     }
 
+    /// The gamepad cursor, drawn over every copy of the touchscreen and
+    /// filled in while it touches.
+    fn cursor_marks(&self) -> Vec<impl IntoElement + use<>> {
+        const RADIUS: f32 = 6.0;
+        let (Some(cursor), Some((screen, size))) = (self.cursor, self.touchscreen()) else {
+            return Vec::new();
+        };
+        // Centre the mark on the pixel it touches.
+        let pixel = cursor.pixel();
+        let centre = (f32::from(pixel.x) + 0.5, f32::from(pixel.y) + 0.5);
+        let touching = self.sent.touch && self.mouse_touch.is_none();
+        self.placements
+            .iter()
+            .filter(|placement| placement.screen == screen)
+            .map(|placement| {
+                let (x, y) = placement.window_point(size, centre);
+                div()
+                    .absolute()
+                    .left(px(x - RADIUS))
+                    .top(px(y - RADIUS))
+                    .size(px(RADIUS * 2.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(0x00FF_FFFF))
+                    .bg(if touching {
+                        rgba(0xFFFF_FFAA)
+                    } else {
+                        rgba(0x0000_0066)
+                    })
+            })
+            .collect()
+    }
+
     fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
         self.color_correction = !self.color_correction;
         if let Some(session) = &mut self.session {
@@ -924,6 +1024,7 @@ impl Render for EmulatorView {
             self.placements.clear();
             root = root.child(welcome());
         }
+        root = root.children(self.cursor_marks());
 
         // A preview only lives as long as its notice.
         if self.notice.is_none() {

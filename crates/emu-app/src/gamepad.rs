@@ -5,10 +5,14 @@
 //! them through the same bindings as the keyboard. Analog sticks act as
 //! digital directions, with hysteresis so a stick resting near the
 //! threshold does not chatter.
+//!
+//! The right stick also works like a mouse: while it is held over, the
+//! thread sends [`PadEvent::Pointer`] motion, faster the further it is
+//! pushed. The view uses it to move the touch cursor.
 
 use std::collections::{HashMap, HashSet};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gilrs::{Axis, EventType, GamepadId, Gilrs};
 
@@ -17,16 +21,35 @@ const PRESS_THRESHOLD: f32 = 0.5;
 /// Deflection below which a pressed direction releases.
 const RELEASE_THRESHOLD: f32 = 0.3;
 
-/// A control on a controller changed state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PadEvent {
-    /// The controller's UUID as 32 hex digits, for per-controller profiles.
-    pub controller: String,
-    /// gilrs's name for the control, or a stick direction such as
-    /// `"LeftStickUp"`.
-    pub control: String,
-    /// Pressed or released.
-    pub pressed: bool,
+/// Right-stick deflection ignored as drift.
+const POINTER_DEAD_ZONE: f32 = 0.15;
+/// How often pointer motion is sent while the right stick is held over.
+const POINTER_INTERVAL: Duration = Duration::from_millis(8);
+/// How long to wait for controller events while nothing is moving.
+const IDLE_WAIT: Duration = Duration::from_millis(250);
+
+/// Something a controller did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PadEvent {
+    /// A control changed state.
+    Control {
+        /// The controller's UUID as 32 hex digits, for per-controller
+        /// profiles.
+        controller: String,
+        /// gilrs's name for the control, or a stick direction such as
+        /// `"LeftStickUp"`.
+        control: String,
+        /// Pressed or released.
+        pressed: bool,
+    },
+    /// The right stick moved the pointer: 1.0 along an axis for each second
+    /// it is held fully over that way.
+    Pointer {
+        /// Distance right; negative is left.
+        dx: f32,
+        /// Distance down; negative is up.
+        dy: f32,
+    },
 }
 
 /// Starts the gamepad thread, which sends events to `events` until the
@@ -53,9 +76,27 @@ fn run(events: &async_channel::Sender<PadEvent>) {
     };
     let mut sticks = Sticks::default();
     let mut held: HashMap<GamepadId, HashSet<String>> = HashMap::new();
+    // Each controller's right stick, x right and y up as gilrs reports.
+    let mut right_sticks: HashMap<GamepadId, (f32, f32)> = HashMap::new();
+    let mut motion = Motion::default();
+    let mut last_poll = Instant::now();
 
     while !events.is_closed() {
-        let Some(event) = gilrs.next_event_blocking(Some(Duration::from_millis(250))) else {
+        let velocity = pointer_velocity(right_sticks.values().copied());
+        let wait = if velocity == (0.0, 0.0) {
+            IDLE_WAIT
+        } else {
+            POINTER_INTERVAL
+        };
+        let next = gilrs.next_event_blocking(Some(wait));
+        // The sticks held their position since the last poll; an event
+        // below may move them.
+        let now = Instant::now();
+        if let Some((dx, dy)) = motion.advance(velocity, now - last_poll) {
+            events.try_send(PadEvent::Pointer { dx, dy }).ok();
+        }
+        last_poll = now;
+        let Some(event) = next else {
             continue;
         };
         let controller = hex(&gilrs.gamepad(event.id).uuid());
@@ -67,7 +108,7 @@ fn run(events: &async_channel::Sender<PadEvent>) {
                 pad.remove(&control);
             }
             events
-                .try_send(PadEvent {
+                .try_send(PadEvent::Control {
                     controller: controller.clone(),
                     control,
                     pressed,
@@ -78,14 +119,21 @@ fn run(events: &async_channel::Sender<PadEvent>) {
             EventType::ButtonPressed(button, _) => send(format!("{button:?}"), true),
             EventType::ButtonReleased(button, _) => send(format!("{button:?}"), false),
             EventType::AxisChanged(axis, value, _) => {
+                let stick = right_sticks.entry(event.id).or_default();
+                match axis {
+                    Axis::RightStickX => stick.0 = value,
+                    Axis::RightStickY => stick.1 = value,
+                    _ => {}
+                }
                 for (control, pressed) in sticks.update(event.id, axis, value) {
                     send(control.to_owned(), pressed);
                 }
             }
             EventType::Disconnected => {
+                right_sticks.remove(&event.id);
                 for control in held.remove(&event.id).unwrap_or_default() {
                     events
-                        .try_send(PadEvent {
+                        .try_send(PadEvent::Control {
                             controller: controller.clone(),
                             control,
                             pressed: false,
@@ -95,6 +143,52 @@ fn run(events: &async_channel::Sender<PadEvent>) {
             }
             _ => {}
         }
+    }
+}
+
+/// Pointer velocity from right sticks at `(x, y)` with y up, in the units
+/// of [`PadEvent::Pointer`] per second with y down. Small deflections are
+/// ignored, and speed grows with the square of the deflection beyond that
+/// for fine control.
+fn pointer_velocity(sticks: impl IntoIterator<Item = (f32, f32)>) -> (f32, f32) {
+    sticks
+        .into_iter()
+        .map(|(x, y)| {
+            let deflection = x.hypot(y);
+            if deflection <= POINTER_DEAD_ZONE {
+                return (0.0, 0.0);
+            }
+            let strength = ((deflection - POINTER_DEAD_ZONE) / (1.0 - POINTER_DEAD_ZONE)).min(1.0);
+            let speed = strength * strength / deflection;
+            (x * speed, -y * speed)
+        })
+        .fold((0.0, 0.0), |total, (x, y)| (total.0 + x, total.1 + y))
+}
+
+/// Pointer motion gathered between sends, so a stream of axis events does
+/// not become a stream of tiny moves.
+#[derive(Debug, Default)]
+struct Motion {
+    pending: (f32, f32),
+    pending_time: Duration,
+}
+
+impl Motion {
+    /// Moves at `velocity` for `elapsed`. Returns the motion gathered once
+    /// it is due to be sent: every [`POINTER_INTERVAL`], and when the
+    /// pointer stops.
+    fn advance(&mut self, velocity: (f32, f32), elapsed: Duration) -> Option<(f32, f32)> {
+        let seconds = elapsed.as_secs_f32();
+        self.pending.0 += velocity.0 * seconds;
+        self.pending.1 += velocity.1 * seconds;
+        self.pending_time += elapsed;
+        let stopped = velocity == (0.0, 0.0);
+        if !stopped && self.pending_time < POINTER_INTERVAL {
+            return None;
+        }
+        self.pending_time = Duration::ZERO;
+        let motion = std::mem::take(&mut self.pending);
+        (motion != (0.0, 0.0)).then_some(motion)
     }
 }
 
@@ -171,6 +265,29 @@ mod tests {
         assert_eq!(next_direction(0, 0.4), 0);
         assert_eq!(next_direction(1, 0.1), 0);
         assert_eq!(next_direction(1, -0.7), -1);
+    }
+
+    #[test]
+    fn pointer_ignores_drift_and_points_down_the_screen() {
+        assert_eq!(pointer_velocity([(0.1, -0.1)]), (0.0, 0.0));
+        assert_eq!(pointer_velocity([(1.0, 0.0)]), (1.0, 0.0));
+        assert_eq!(pointer_velocity([(0.0, 1.0)]), (0.0, -1.0));
+        let (x, _) = pointer_velocity([(0.5, 0.0)]);
+        assert!(0.0 < x && x < 0.25, "half over moves slowly: {x}");
+    }
+
+    #[test]
+    fn motion_is_gathered_until_due() {
+        let mut motion = Motion::default();
+        let step = Duration::from_millis(5);
+        assert_eq!(motion.advance((1.0, 0.0), step), None);
+        let (dx, dy) = motion.advance((1.0, 0.0), step).expect("due after 10 ms");
+        assert!((dx - 0.01).abs() < 1e-6 && dy == 0.0);
+        // Whatever is left goes out when the stick stops.
+        assert_eq!(motion.advance((0.0, 2.0), step), None);
+        let (_, dy) = motion.advance((0.0, 0.0), step).expect("sent on stop");
+        assert!((dy - 0.01).abs() < 1e-6);
+        assert_eq!(motion.advance((0.0, 0.0), step), None);
     }
 
     #[test]

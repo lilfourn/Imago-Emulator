@@ -113,6 +113,28 @@ impl Rotation {
         }
     }
 
+    /// A movement `(dx, dy)` seen on the turned screen, as a movement on
+    /// the upright one.
+    pub fn unturn_vector(self, (dx, dy): (f32, f32)) -> (f32, f32) {
+        match self {
+            Self::Upright => (dx, dy),
+            Self::Clockwise => (dy, -dx),
+            Self::UpsideDown => (-dx, -dy),
+            Self::Anticlockwise => (-dy, dx),
+        }
+    }
+
+    /// The point a fraction `(s, t)` across and down an upright screen, as a
+    /// fraction across and down the turned screen.
+    fn turn_fraction(self, (s, t): (f32, f32)) -> (f32, f32) {
+        match self {
+            Self::Upright => (s, t),
+            Self::Clockwise => (1.0 - t, s),
+            Self::UpsideDown => (1.0 - s, 1.0 - t),
+            Self::Anticlockwise => (t, 1.0 - s),
+        }
+    }
+
     /// `rect`, inside an upright group of size `extent` with its top-left
     /// corner at the origin, once the group is turned in place.
     fn turn_rect(self, rect: Rect, extent: (f32, f32)) -> Rect {
@@ -204,6 +226,20 @@ impl Placement {
         let row = ((v * f32::from(shown.height)) as u16).min(shown.height - 1);
         let (x, y) = self.rotation.source_pixel(size, column, row);
         Some(TouchPoint { x, y })
+    }
+
+    /// Where `point`, in pixels from the top-left corner of an upright
+    /// `size` screen, is drawn in the window.
+    pub fn window_point(&self, size: ScreenSize, point: (f32, f32)) -> (f32, f32) {
+        let fraction = (
+            point.0 / f32::from(size.width),
+            point.1 / f32::from(size.height),
+        );
+        let (u, v) = self.rotation.turn_fraction(fraction);
+        (
+            self.rect.x + u * self.rect.width,
+            self.rect.y + v * self.rect.height,
+        )
     }
 }
 
@@ -662,8 +698,32 @@ mod tests {
                             Some(TouchPoint { x, y }),
                             "{layout:?} {placement:?}"
                         );
+                        // The gamepad cursor is drawn there too.
+                        let centre = (f32::from(x) + 0.5, f32::from(y) + 0.5);
+                        let mark = placement.window_point(size, centre);
+                        let error = (mark.0 - point.0).abs() + (mark.1 - point.1).abs();
+                        assert!(error < 1e-3, "{layout:?} {placement:?} {mark:?}");
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn unturned_vectors_move_the_same_way_on_screen() {
+        let size = DS[1];
+        let start = (100.0, 80.0);
+        for rotation in Rotation::ALL {
+            let shown = rotation.turn_size(size);
+            let rect = rect(0.0, 0.0, f32::from(shown.width), f32::from(shown.height));
+            let placed = placement(rect, rotation);
+            for direction in [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)] {
+                let (dx, dy) = rotation.unturn_vector(direction);
+                let before = placed.window_point(size, start);
+                let after = placed.window_point(size, (start.0 + dx, start.1 + dy));
+                let moved = (after.0 - before.0, after.1 - before.1);
+                let error = (moved.0 - direction.0).abs() + (moved.1 - direction.1).abs();
+                assert!(error < 1e-3, "{rotation:?} {direction:?} moved {moved:?}");
             }
         }
     }

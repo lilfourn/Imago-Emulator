@@ -10,6 +10,7 @@ mod bindings;
 mod cheats;
 mod color;
 mod controls;
+mod cursor;
 mod emulator;
 mod gamepad;
 mod layout;

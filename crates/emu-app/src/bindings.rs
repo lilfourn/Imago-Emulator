@@ -1,5 +1,6 @@
-//! Bindings for held inputs: emulated buttons, fast-forward and rewind,
-//! from the keyboard or gamepads.
+//! Bindings for held inputs: emulated buttons, fast-forward, rewind and
+//! touching the screen at the gamepad cursor, from the keyboard or
+//! gamepads.
 //!
 //! One-shot commands (Open, Pause, Save State, ...) are GPUI actions bound
 //! to menu shortcuts in `app.rs`. This module covers only inputs that are
@@ -17,6 +18,7 @@
 //! [gamepad]
 //! a = ["East"]
 //! rewind = ["LeftTrigger2"]
+//! touch = ["RightThumb"]
 //!
 //! [gamepads.030000005e0400008e02000000007200]
 //! a = ["South"]
@@ -41,6 +43,8 @@ pub enum Held {
     FastForward,
     /// Steps backwards through recent history while held.
     Rewind,
+    /// Touches the touchscreen at the gamepad cursor while held.
+    Touch,
 }
 
 impl fmt::Display for Held {
@@ -49,6 +53,7 @@ impl fmt::Display for Held {
             Self::Button(button) => button.fmt(f),
             Self::FastForward => f.write_str("fast_forward"),
             Self::Rewind => f.write_str("rewind"),
+            Self::Touch => f.write_str("touch"),
         }
     }
 }
@@ -60,6 +65,7 @@ impl FromStr for Held {
         match s {
             "fast_forward" => Ok(Self::FastForward),
             "rewind" => Ok(Self::Rewind),
+            "touch" => Ok(Self::Touch),
             _ => s
                 .parse()
                 .map(Self::Button)
@@ -98,7 +104,9 @@ const KEY_DEFAULTS: [(Held, &str); 14] = [
 ];
 
 /// Nintendo layout by position: A is the right face button, B the bottom.
-const GAMEPAD_DEFAULTS: [(Held, &str); 18] = [
+/// The right stick moves the touch cursor (see `gamepad.rs`); clicking
+/// either stick touches.
+const GAMEPAD_DEFAULTS: [(Held, &str); 20] = [
     (Held::Button(Button::A), "East"),
     (Held::Button(Button::B), "South"),
     (Held::Button(Button::X), "North"),
@@ -117,6 +125,8 @@ const GAMEPAD_DEFAULTS: [(Held, &str); 18] = [
     (Held::Button(Button::Right), "LeftStickRight"),
     (Held::FastForward, "RightTrigger2"),
     (Held::Rewind, "LeftTrigger2"),
+    (Held::Touch, "RightThumb"),
+    (Held::Touch, "LeftThumb"),
 ];
 
 fn map_of(defaults: &[(Held, &str)]) -> Map {
@@ -252,7 +262,7 @@ pub enum BindingsError {
     /// The file is not valid TOML of the expected shape.
     #[error("invalid bindings file: {0}")]
     Syntax(String),
-    /// An action name is not a button, `fast_forward` or `rewind`.
+    /// An action name is not a button, `fast_forward`, `rewind` or `touch`.
     #[error("unknown action {0:?} in bindings")]
     UnknownAction(String),
     /// One input is bound to two different actions.
@@ -281,6 +291,7 @@ mod tests {
             assert!(map.values().any(|held| *held == Held::FastForward));
             assert!(map.values().any(|held| *held == Held::Rewind));
         }
+        assert_eq!(bindings.pad_action("any", "RightThumb"), Some(Held::Touch));
     }
 
     #[test]
@@ -309,6 +320,13 @@ mod tests {
             Some(Held::Button(Button::B))
         );
         assert_eq!(bindings.pad_action("abcd", "West"), None);
+    }
+
+    #[test]
+    fn touch_can_be_rebound() {
+        let bindings = Bindings::from_toml("[gamepad]\ntouch = [\"West\"]\n").expect("valid file");
+        assert_eq!(bindings.pad_action("any", "West"), Some(Held::Touch));
+        assert_eq!(bindings.pad_action("any", "RightThumb"), None);
     }
 
     #[test]
