@@ -14,8 +14,9 @@ use gpui::{
 };
 
 use crate::app::{
-    ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState,
-    NextStateSlot, OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer,
+    ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical,
+    LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
+    RotateAnticlockwise, RotateClockwise, SaveState, SwapScreens, SwitchPlayer,
     ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause,
 };
 use crate::audio::{self, AudioOutput};
@@ -25,7 +26,7 @@ use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
 use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
 use crate::gamepad::{self, PadEvent};
-use crate::layout::{self, Arrangement, Layout, Placement};
+use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
 use crate::persist;
 use crate::slots::{self, SlotPreview};
@@ -78,11 +79,19 @@ struct Session {
     cheat_texts: Vec<Option<String>>,
     /// The system's colour correction, if it has one.
     correction: Option<Correction>,
-    /// Per screen: the pre-scale factor and the image built with it.
-    images: Vec<Option<(usize, Arc<RenderImage>)>>,
+    /// Per placement: the image drawn there and what it shows.
+    images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     _events: Task<()>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
+}
+
+/// What an image shows: a screen, enlarged by a whole factor and turned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageKey {
+    screen: usize,
+    factor: usize,
+    rotation: Rotation,
 }
 
 impl EmulatorView {
@@ -461,15 +470,17 @@ impl EmulatorView {
         }
     }
 
-    /// Points the stylus at `position`, or lifts it if that is off the
-    /// touchscreen.
+    /// Points the stylus at `position`, or lifts it if that is off every
+    /// copy of the touchscreen.
     fn touch_at(&mut self, position: Point<Pixels>) {
         let touch = self.session.as_ref().and_then(|session| {
             let screen = session.info.touch_screen?;
             let size = *session.info.screens.get(screen)?;
-            let placement = self.placements.iter().find(|p| p.screen == screen)?;
             let point = (f32::from(position.x), f32::from(position.y));
-            layout::pixel_at(placement.rect, size, point)
+            self.placements
+                .iter()
+                .filter(|placement| placement.screen == screen)
+                .find_map(|placement| placement.pixel_at(size, point))
         });
         if touch != self.touch {
             self.touch = touch;
@@ -566,7 +577,58 @@ impl EmulatorView {
     }
 
     fn arrange(&mut self, arrangement: Arrangement, cx: &mut Context<Self>) {
-        self.layout.arrangement = arrangement;
+        self.set_layout(
+            Layout {
+                arrangement,
+                ..self.layout
+            },
+            cx,
+        );
+    }
+
+    fn swap_screens(&mut self, cx: &mut Context<Self>) {
+        self.set_layout(
+            Layout {
+                swapped: !self.layout.swapped,
+                ..self.layout
+            },
+            cx,
+        );
+    }
+
+    fn rotate(&mut self, rotation: Rotation, cx: &mut Context<Self>) {
+        self.show_notice(
+            match rotation {
+                Rotation::Upright => "Screens upright".to_owned(),
+                _ => format!("Screens turned {}° clockwise", rotation.degrees()),
+            },
+            cx,
+        );
+        self.set_layout(
+            Layout {
+                rotation,
+                ..self.layout
+            },
+            cx,
+        );
+    }
+
+    fn change_gap(&mut self, cx: &mut Context<Self>) {
+        let gap = layout::next_gap(self.layout.gap);
+        let message = if gap <= 0.0 {
+            "No gap between screens".to_owned()
+        } else if gap == layout::HINGE_GAP {
+            format!("Screen gap {gap} px, as across the DS hinge")
+        } else {
+            format!("Screen gap {gap} px")
+        };
+        self.show_notice(message, cx);
+        self.set_layout(Layout { gap, ..self.layout }, cx);
+    }
+
+    /// Switches to `layout`.
+    fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        self.layout = layout;
         cx.notify();
     }
 
@@ -696,8 +758,8 @@ impl EmulatorView {
 }
 
 impl Session {
-    /// Brings the images up to date with the latest frame and the size each
-    /// screen is drawn at.
+    /// Brings the images up to date with the latest frame and with how
+    /// each placement draws its screen.
     fn refresh_images(
         &mut self,
         placements: &[Placement],
@@ -707,29 +769,40 @@ impl Session {
     ) {
         if let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) {
             self.sequence = sequence;
-            self.images.resize(self.frames.len(), None);
             for (_, image) in self.images.iter_mut().filter_map(Option::take) {
                 window.drop_image(image).ok();
             }
         }
-        for placement in placements {
+        // One image per placement, so the layout decides how many.
+        if self.images.len() > placements.len() {
+            for (_, image) in self.images.drain(placements.len()..).flatten() {
+                window.drop_image(image).ok();
+            }
+        }
+        self.images.resize(placements.len(), None);
+        let correction = self.correction.as_ref().filter(|_| color_correction);
+        for (slot, placement) in self.images.iter_mut().zip(placements) {
             let Some(frame) = self.frames.get(placement.screen) else {
                 continue;
             };
-            let factor =
-                video::prescale_factor(frame.size().width, placement.rect.width, scale_factor);
-            let slot = &mut self.images[placement.screen];
-            if slot.as_ref().is_some_and(|(built, _)| *built == factor) {
+            let shown = placement.rotation.turn_size(frame.size());
+            let key = ImageKey {
+                screen: placement.screen,
+                factor: video::prescale_factor(shown.width, placement.rect.width, scale_factor),
+                rotation: placement.rotation,
+            };
+            if slot.as_ref().is_some_and(|(built, _)| *built == key) {
                 continue;
             }
             if let Some((_, stale)) = slot.take() {
                 window.drop_image(stale).ok();
             }
-            let image = match self.correction.as_ref().filter(|_| color_correction) {
-                Some(correction) => video::render_image(&correction.frame(frame), factor),
-                None => video::render_image(frame, factor),
-            };
-            *slot = Some((factor, image));
+            let corrected = correction.map(|correction| correction.frame(frame));
+            let frame = corrected.as_ref().unwrap_or(frame);
+            let turned =
+                (key.rotation != Rotation::Upright).then(|| video::turn(frame, key.rotation));
+            let frame = turned.as_ref().unwrap_or(frame);
+            *slot = Some((key, video::render_image(frame, key.factor)));
         }
     }
 }
@@ -780,10 +853,17 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &LayoutSingle, _, cx| {
                 this.arrange(Arrangement::Single, cx);
             }))
-            .on_action(cx.listener(|this, _: &SwapScreens, _, cx| {
-                this.layout.swapped = !this.layout.swapped;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &LayoutHybrid, _, cx| {
+                this.arrange(Arrangement::Hybrid, cx);
             }))
+            .on_action(cx.listener(|this, _: &SwapScreens, _, cx| this.swap_screens(cx)))
+            .on_action(cx.listener(|this, _: &RotateClockwise, _, cx| {
+                this.rotate(this.layout.rotation.clockwise(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &RotateAnticlockwise, _, cx| {
+                this.rotate(this.layout.rotation.anticlockwise(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextScreenGap, _, cx| this.change_gap(cx)))
             .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
                 this.toggle_color_correction(cx);
             }))
@@ -805,8 +885,8 @@ impl Render for EmulatorView {
                 self.color_correction,
                 window,
             );
-            for placement in &self.placements {
-                let Some(Some((_, image))) = session.images.get(placement.screen) else {
+            for (placement, image) in self.placements.iter().zip(&session.images) {
+                let Some((_, image)) = image else {
                     continue;
                 };
                 let rect = placement.rect;

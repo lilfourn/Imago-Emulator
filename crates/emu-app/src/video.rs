@@ -11,6 +11,8 @@ use std::sync::Arc;
 use emu_core::Frame;
 use gpui::RenderImage;
 
+use crate::layout::Rotation;
+
 /// Largest integer pre-scale. Beyond this the remaining linear blur is
 /// invisible and the upload cost keeps growing.
 const MAX_FACTOR: usize = 6;
@@ -22,6 +24,21 @@ pub fn prescale_factor(source_width: u16, drawn_width: f32, scale_factor: f32) -
     let device_per_source = drawn_width * scale_factor / f32::from(source_width.max(1));
     // Saturating float-to-int conversion; the result is clamped anyway.
     (device_per_source.floor() as usize).clamp(1, MAX_FACTOR)
+}
+
+/// `frame` turned by `rotation`, for screens drawn on their side.
+pub fn turn(frame: &Frame, rotation: Rotation) -> Frame {
+    let size = frame.size();
+    let width = usize::from(size.width);
+    let source = frame.pixels();
+    let mut turned = Frame::new(rotation.turn_size(size));
+    for (row, line) in (0u16..).zip(turned.rows_mut()) {
+        for (column, pixel) in (0u16..).zip(line) {
+            let (x, y) = rotation.source_pixel(size, column, row);
+            *pixel = source[usize::from(y) * width + usize::from(x)];
+        }
+    }
+    turned
 }
 
 /// `frame` as BGRA bytes, enlarged `factor` times with nearest-neighbour
@@ -74,6 +91,33 @@ mod tests {
         let bytes = upscale_bgra(&frame, 2);
         let row = [3, 2, 1, 255, 3, 2, 1, 255, 6, 5, 4, 255, 6, 5, 4, 255];
         assert_eq!(bytes, [row, row].concat());
+    }
+
+    #[test]
+    fn turning_moves_pixels_round_the_frame() {
+        // a b c
+        // d e f
+        let mut frame = Frame::new(ScreenSize::new(3, 2));
+        let [a, b, c, d, e, f] = [1, 2, 3, 4, 5, 6].map(|value| rgb(value, 0, 0));
+        frame.pixels_mut().copy_from_slice(&[a, b, c, d, e, f]);
+        let pixels = |rotation| {
+            let turned = turn(&frame, rotation);
+            let size = turned.size();
+            ((size.width, size.height), turned.pixels().to_vec())
+        };
+        assert_eq!(pixels(Rotation::Upright), ((3, 2), vec![a, b, c, d, e, f]));
+        assert_eq!(
+            pixels(Rotation::Clockwise),
+            ((2, 3), vec![d, a, e, b, f, c])
+        );
+        assert_eq!(
+            pixels(Rotation::UpsideDown),
+            ((3, 2), vec![f, e, d, c, b, a])
+        );
+        assert_eq!(
+            pixels(Rotation::Anticlockwise),
+            ((2, 3), vec![c, f, b, e, a, d])
+        );
     }
 
     #[test]
