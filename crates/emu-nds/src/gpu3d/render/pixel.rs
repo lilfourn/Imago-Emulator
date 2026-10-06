@@ -1,15 +1,29 @@
 //! Writing polygon pixels into the frame: depth test, alpha test, opaque
-//! and translucent pixels, polygon IDs, fog flags and shadow polygons
-//! (GBATEK, "DS 3D Polygon Attributes", "DS 3D Shadow Polygons" and "DS 3D
-//! Toon, Edge, Fog, Alpha-Blending, Anti-Aliasing").
+//! and translucent pixels, polygon IDs, fog flags, shadow polygons and
+//! anti-aliased edges (GBATEK, "DS 3D Polygon Attributes", "DS 3D Shadow
+//! Polygons" and "DS 3D Toon, Edge, Fog, Alpha-Blending, Anti-Aliasing").
+//!
+//! With anti-aliasing, the frame keeps a second layer, as the hardware
+//! does: an opaque edge pixel pushes the pixel it covers down into it, to
+//! be blended with by the edge's coverage once the frame is drawn. A pixel
+//! that fails the depth test against an edge is tested against the pixel
+//! beneath it instead, so where two polygons share an edge, each shows
+//! through the other rather than the rear plane. Translucent pixels on an
+//! edge blend into both layers. Shadow polygons only darken the top layer.
 
-use super::raster::{HEIGHT, Target, WIDTH};
+use super::raster::{Coverage, HEIGHT, Target, WIDTH};
 use super::shade::Shader;
 use super::texture::TextureMemory;
 use crate::gpu3d::color;
 
 /// No translucent pixel has been drawn here.
 pub(crate) const NO_ID: u8 = 0xFF;
+
+/// The pixel is not on an opaque polygon's edge.
+pub(crate) const NO_EDGE: u8 = 0xFF;
+
+/// Pixels in a frame.
+pub(crate) const PIXELS: usize = WIDTH * HEIGHT;
 
 /// The attribute buffer: what a pixel holds besides colour and depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,11 +32,37 @@ pub(crate) struct PixelAttr {
     /// Polygon ID of the last translucent pixel drawn here, or [`NO_ID`].
     pub(crate) translucent_id: u8,
     pub(crate) fog: bool,
-    /// An opaque polygon drew here, so edge marking may apply.
-    pub(crate) opaque: bool,
+    /// On an opaque polygon's edge, where edge marking and anti-aliasing
+    /// apply: how much of the pixel the polygon covers, in 32nds less one.
+    /// [`NO_EDGE`] elsewhere.
+    pub(crate) edge: u8,
 }
 
-/// The frame being drawn, indexed by `y * 256 + x`.
+impl PixelAttr {
+    /// The rear plane's attributes, with its polygon ID and fog flag.
+    pub(crate) fn rear_plane(opaque_id: u8, fog: bool) -> Self {
+        Self {
+            opaque_id,
+            translucent_id: NO_ID,
+            fog,
+            edge: NO_EDGE,
+        }
+    }
+
+    pub(crate) fn on_edge(self) -> bool {
+        self.edge != NO_EDGE
+    }
+
+    /// How much of the pixel its opaque polygon covers, in 32nds less one:
+    /// 31 but on anti-aliased edges, which blend with the pixel beneath.
+    pub(crate) fn coverage(self) -> u8 {
+        self.edge.min(31)
+    }
+}
+
+/// The frame being drawn. Colour, depth and attributes hold two layers:
+/// the visible pixels, indexed by `y * 256 + x`, then at `index + PIXELS`
+/// the pixels beneath anti-aliased edges.
 #[derive(Debug, Clone)]
 pub(crate) struct Buffers {
     /// Output pixels: 6-bit colour and 5-bit alpha.
@@ -30,23 +70,18 @@ pub(crate) struct Buffers {
     /// 24-bit depth.
     pub(crate) depth: Box<[u32]>,
     pub(crate) attrs: Box<[PixelAttr]>,
+    /// Shadow volume marks, for the top layer only.
     pub(crate) stencil: Box<[bool]>,
 }
 
 impl Default for Buffers {
     fn default() -> Self {
-        let pixels = WIDTH * HEIGHT;
-        let attr = PixelAttr {
-            opaque_id: 0,
-            translucent_id: NO_ID,
-            fog: false,
-            opaque: false,
-        };
+        let attr = PixelAttr::rear_plane(0, false);
         Self {
-            color: vec![0; pixels].into_boxed_slice(),
-            depth: vec![0; pixels].into_boxed_slice(),
-            attrs: vec![attr; pixels].into_boxed_slice(),
-            stencil: vec![false; pixels].into_boxed_slice(),
+            color: vec![0; 2 * PIXELS].into_boxed_slice(),
+            depth: vec![0; 2 * PIXELS].into_boxed_slice(),
+            attrs: vec![attr; 2 * PIXELS].into_boxed_slice(),
+            stencil: vec![false; PIXELS].into_boxed_slice(),
         }
     }
 }
@@ -74,6 +109,7 @@ pub(crate) struct PolygonTarget<'a> {
     /// Pixels need an alpha above this: ALPHA_TEST_REF, or 0.
     pub(crate) alpha_min: u8,
     pub(crate) blending: bool,
+    pub(crate) antialiasing: bool,
 }
 
 impl PolygonTarget<'_> {
@@ -97,52 +133,91 @@ impl PolygonTarget<'_> {
         });
         color::pack(mixed, alpha.max(old_alpha))
     }
-}
 
-impl Target for PolygonTarget<'_> {
-    fn test(&mut self, index: usize, depth: u32) -> bool {
-        let passes = self.depth_passes(depth, self.buffers.depth[index]);
-        match self.kind {
-            Kind::Normal => passes,
-            Kind::ShadowMask => {
-                if !passes {
-                    self.buffers.stencil[index] = true;
-                }
-                false
-            }
-            Kind::Shadow => {
-                let marked = std::mem::take(&mut self.buffers.stencil[index]);
-                marked && passes && self.buffers.attrs[index].opaque_id != self.id
-            }
-        }
-    }
-
-    fn shade(&mut self, index: usize, depth: u32, vertex: [u8; 3], texcoord: [i32; 2]) {
-        let (rgb, alpha) = self.shader.shade(self.memory, vertex, texcoord);
-        if alpha <= self.alpha_min {
-            return;
-        }
-        let attr = &mut self.buffers.attrs[index];
-        if alpha == 31 && self.kind == Kind::Normal {
-            self.buffers.color[index] = color::pack(rgb, 31);
-            self.buffers.depth[index] = depth;
-            *attr = PixelAttr {
-                opaque_id: self.id,
-                translucent_id: NO_ID,
-                fog: self.fog,
-                opaque: true,
-            };
-            return;
-        }
+    /// Blends a translucent pixel into `slot`.
+    fn blend_into(&mut self, slot: usize, rgb: [u8; 3], alpha: u8, depth: u32) {
+        let attr = &mut self.buffers.attrs[slot];
         // Translucent polygons with the same ID never cover each other.
         if attr.translucent_id == self.id {
             return;
         }
         attr.translucent_id = self.id;
         attr.fog &= self.fog;
-        self.buffers.color[index] = self.blend(rgb, alpha, self.buffers.color[index]);
+        self.buffers.color[slot] = self.blend(rgb, alpha, self.buffers.color[slot]);
         if self.depth_update {
-            self.buffers.depth[index] = depth;
+            self.buffers.depth[slot] = depth;
+        }
+    }
+}
+
+impl Target for PolygonTarget<'_> {
+    fn test(&mut self, index: usize, depth: u32) -> Option<usize> {
+        let passes = self.depth_passes(depth, self.buffers.depth[index]);
+        match self.kind {
+            Kind::Normal if passes => Some(index),
+            // A pixel behind an anti-aliased edge may still show through.
+            Kind::Normal if self.antialiasing && self.buffers.attrs[index].on_edge() => {
+                let beneath = index + PIXELS;
+                self.depth_passes(depth, self.buffers.depth[beneath])
+                    .then_some(beneath)
+            }
+            Kind::Normal => None,
+            Kind::ShadowMask => {
+                if !passes {
+                    self.buffers.stencil[index] = true;
+                }
+                None
+            }
+            Kind::Shadow => {
+                let marked = std::mem::take(&mut self.buffers.stencil[index]);
+                (marked && passes && self.buffers.attrs[index].opaque_id != self.id)
+                    .then_some(index)
+            }
+        }
+    }
+
+    fn shade(
+        &mut self,
+        slot: usize,
+        depth: u32,
+        vertex: [u8; 3],
+        texcoord: [i32; 2],
+        coverage: Coverage,
+    ) {
+        let (rgb, alpha) = self.shader.shade(self.memory, vertex, texcoord);
+        if alpha <= self.alpha_min {
+            return;
+        }
+        if alpha == 31 && self.kind == Kind::Normal {
+            if self.antialiasing && coverage.edge && slot < PIXELS {
+                // Keep what the edge covers, to blend with later.
+                let beneath = slot + PIXELS;
+                self.buffers.color[beneath] = self.buffers.color[slot];
+                self.buffers.depth[beneath] = self.buffers.depth[slot];
+                self.buffers.attrs[beneath] = self.buffers.attrs[slot];
+            }
+            self.buffers.color[slot] = color::pack(rgb, 31);
+            self.buffers.depth[slot] = depth;
+            self.buffers.attrs[slot] = PixelAttr {
+                opaque_id: self.id,
+                translucent_id: NO_ID,
+                fog: self.fog,
+                edge: if coverage.edge {
+                    coverage.amount
+                } else {
+                    NO_EDGE
+                },
+            };
+            return;
+        }
+        self.blend_into(slot, rgb, alpha, depth);
+        // An anti-aliased edge shows the pixel beneath it too.
+        if self.antialiasing
+            && self.kind == Kind::Normal
+            && slot < PIXELS
+            && self.buffers.attrs[slot].on_edge()
+        {
+            self.blend_into(slot + PIXELS, rgb, alpha, depth);
         }
     }
 }

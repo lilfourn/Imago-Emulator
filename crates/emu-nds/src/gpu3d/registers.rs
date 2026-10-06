@@ -38,6 +38,7 @@ pub(crate) struct RenderConfig {
     pub(crate) highlight: bool,
     pub(crate) alpha_test: bool,
     pub(crate) blending: bool,
+    pub(crate) antialiasing: bool,
     pub(crate) edge_marking: bool,
     /// Fog changes alpha only.
     pub(crate) fog_alpha_only: bool,
@@ -106,6 +107,7 @@ impl RenderRegisters {
             highlight: bit(1),
             alpha_test: bit(2),
             blending: bit(3),
+            antialiasing: bit(4),
             edge_marking: bit(5),
             fog_alpha_only: bit(6),
             fog: bit(7),
@@ -143,7 +145,7 @@ mod tests {
         assert_eq!(config.clear_offset, (3, 4));
         assert_eq!(config.toon[1], 0x1F);
         assert_eq!(registers.control(), 0x4FFF, "status bits are not writable");
-        assert!(config.rear_bitmap && config.fog);
+        assert!(config.rear_bitmap && config.fog && config.antialiasing);
     }
 
     #[test]

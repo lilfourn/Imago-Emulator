@@ -108,7 +108,10 @@ pub trait Core: Send {
 - A gamepad thread polls `gilrs` and sends plain `PadEvent`s ("South
   pressed") to the view, which maps them through the same bindings as the
   keyboard. `controls.rs` combines every held key and control, so releasing
-  one never cancels another that holds the same button.
+  one never cancels another that holds the same button. The right stick
+  also sends pointer motion, which moves a touch cursor kept in
+  touchscreen pixels (`cursor.rs`); the mouse and the cursor touch
+  independently, and the mouse wins while both do.
 - Cheats come from `game.cht`, which the view re-reads whenever the
   window regains focus and sends as a `Command`. The memory viewer asks
   the thread to copy a span of RAM (through `Core::peek`) into the shared
@@ -130,6 +133,10 @@ Filters are CPU passes over frames before they become images
 only one is GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup
 table from each 15-bit console colour to its corrected pixel.
 
+GPUI cannot rotate images either, so rotated layouts turn each screen on
+the CPU too (`video::turn`). The touch mapping in `layout.rs` uses the same
+pixel mapping, so a touch lands on the pixel drawn under it.
+
 Each new frame becomes a fresh `RenderImage`, and the previous one is
 removed from GPUI's atlas with `window.drop_image`. GPUI 0.2.2 only reclaims
 atlas space when every image in a texture is dropped, so the app keeps no
@@ -143,6 +150,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Save state | next to the ROM, `game.ss1` | `emu-state` container |
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
+| Screen layout | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
 
 Writes go to `name.tmp` first and are renamed over the target.
 

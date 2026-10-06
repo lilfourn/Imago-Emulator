@@ -20,6 +20,8 @@ pub struct HeldState {
     pub fast_forward: bool,
     /// Step backwards through history.
     pub rewind: bool,
+    /// Touch the screen at the gamepad cursor.
+    pub touch: bool,
 }
 
 /// Held inputs by source.
@@ -66,6 +68,7 @@ impl Controls {
                 Held::Button(button) => state.buttons.set(*button, true),
                 Held::FastForward => state.fast_forward = true,
                 Held::Rewind => state.rewind = true,
+                Held::Touch => state.touch = true,
             }
         }
         state
@@ -97,6 +100,18 @@ mod tests {
         controls.set("key:tab".to_owned(), Some(Held::FastForward), true);
         controls.set("key:tab".to_owned(), None, false);
         assert!(!controls.state().fast_forward);
+    }
+
+    #[test]
+    fn touch_is_held_like_a_button() {
+        let mut controls = Controls::default();
+        controls.set("pad:1:RightThumb".to_owned(), Some(Held::Touch), true);
+        controls.set("key:x".to_owned(), Some(Held::Button(Button::A)), true);
+        let state = controls.state();
+        assert!(state.touch && state.buttons.contains(Button::A));
+        controls.set("pad:1:RightThumb".to_owned(), None, false);
+        let state = controls.state();
+        assert!(!state.touch && state.buttons.contains(Button::A));
     }
 
     #[test]

@@ -5,8 +5,17 @@
 //! The hardware renders each line shortly before it is shown; this draws
 //! the whole frame at once. The rear plane comes first, then the opaque
 //! polygons sorted by their Y range, then the translucent polygons, sorted
-//! the same way unless SWAP_BUFFERS asked for manual order. Edge marking
-//! and fog follow. Anti-aliasing is not emulated: edges stay hard.
+//! the same way unless SWAP_BUFFERS asked for manual order. Edge marking,
+//! fog and anti-aliasing follow, in that order.
+//!
+//! Anti-aliasing applies to the edges of opaque polygons: each edge pixel
+//! is drawn with the share of it the polygon covers, over the pixel it
+//! hides, and at the end the two are blended by that share. Edge marking
+//! replaces an edge's share with half. Simplifications: translucent
+//! polygons keep the small-polygon rule rather than growing to full size;
+//! line segments, dots and wire-frames stay solid, where the hardware
+//! breaks them up (GBATEK suggests drawing them translucent); and
+//! overlapping marked edges blend once, not twice.
 
 mod pixel;
 mod post;
@@ -14,7 +23,7 @@ mod raster;
 mod shade;
 mod texture;
 
-use self::pixel::{Buffers, Kind, NO_ID, PixelAttr, PolygonTarget};
+use self::pixel::{Buffers, Kind, PIXELS, PixelAttr, PolygonTarget};
 use self::raster::WIDTH;
 use self::shade::Shader;
 use self::texture::TextureMemory;
@@ -70,44 +79,45 @@ impl Renderer {
         if config.fog {
             post::apply_fog(&mut self.buffers, config);
         }
+        if config.antialiasing {
+            post::antialias(&mut self.buffers);
+        }
     }
 
     /// Row `y` of the last frame drawn.
     pub(crate) fn line(&self, y: usize) -> &[u32; WIDTH] {
         static BLANK: [u32; WIDTH] = [0; WIDTH];
-        self.buffers
-            .color
+        self.buffers.color[..PIXELS]
             .get(y * WIDTH..(y + 1) * WIDTH)
             .and_then(|row| row.try_into().ok())
             .unwrap_or(&BLANK)
     }
 
-    /// Fills the buffers with the rear plane.
+    /// Fills the top layer of the buffers with the rear plane. The layer
+    /// beneath is only read under anti-aliased edges, which fill it.
     fn clear(&mut self, config: &RenderConfig, vram: &Vram) {
         let clear_id = ((config.clear_color >> 24) & 0x3F) as u8;
         let buffers = &mut self.buffers;
+        let pixels = &mut buffers.color[..PIXELS];
+        let depths = &mut buffers.depth[..PIXELS];
+        let attrs = &mut buffers.attrs[..PIXELS];
         buffers.stencil.fill(false);
         if !config.rear_bitmap {
             let alpha = ((config.clear_color >> 16) & 0x1F) as u8;
-            buffers
-                .color
-                .fill(color::pack(color::rgb6(config.clear_color), alpha));
-            buffers.depth.fill(config.clear_depth);
-            buffers.attrs.fill(PixelAttr {
-                opaque_id: clear_id,
-                translucent_id: NO_ID,
-                fog: config.clear_color & 0x8000 != 0,
-                opaque: false,
-            });
+            pixels.fill(color::pack(color::rgb6(config.clear_color), alpha));
+            depths.fill(config.clear_depth);
+            attrs.fill(PixelAttr::rear_plane(
+                clear_id,
+                config.clear_color & 0x8000 != 0,
+            ));
             return;
         }
         self.memory.load_texture(vram, REAR_COLOR, 0x4_0000);
         let (offset_x, offset_y) = config.clear_offset;
-        for (index, ((pixel, depth), attr)) in buffers
-            .color
+        for (index, ((pixel, depth), attr)) in pixels
             .iter_mut()
-            .zip(buffers.depth.iter_mut())
-            .zip(buffers.attrs.iter_mut())
+            .zip(depths.iter_mut())
+            .zip(attrs.iter_mut())
             .enumerate()
         {
             let x = (index as u32 % 256 + offset_x) & 0xFF;
@@ -118,12 +128,7 @@ impl Renderer {
             let alpha = if rear_color & 0x8000 != 0 { 31 } else { 0 };
             *pixel = color::pack(color::rgb6(u32::from(rear_color)), alpha);
             *depth = expand_depth(u32::from(rear_depth));
-            *attr = PixelAttr {
-                opaque_id: clear_id,
-                translucent_id: NO_ID,
-                fog: rear_depth & 0x8000 != 0,
-                opaque: false,
-            };
+            *attr = PixelAttr::rear_plane(clear_id, rear_depth & 0x8000 != 0);
         }
     }
 
@@ -181,10 +186,13 @@ impl Renderer {
                 0
             },
             blending: config.blending,
+            antialiasing: config.antialiasing,
         };
         let vertices = list.vertices_of(polygon);
         if polygon.line || attr.alpha() == 0 {
             raster::outline(vertices, list.w_buffer, &mut target);
+        } else if config.antialiasing && kind == Kind::Normal && !polygon.translucent {
+            raster::fill_antialiased(vertices, list.w_buffer, &mut target);
         } else {
             raster::fill(vertices, list.w_buffer, &mut target);
         }

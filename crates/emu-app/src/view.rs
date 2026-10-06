@@ -14,8 +14,9 @@ use gpui::{
 };
 
 use crate::app::{
-    ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutSingle, LayoutVertical, LoadState,
-    NextStateSlot, OpenRom, PreviousStateSlot, Reset, SaveState, SwapScreens, SwitchPlayer,
+    ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical,
+    LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
+    RotateAnticlockwise, RotateClockwise, SaveState, SwapScreens, SwitchPlayer,
     ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause,
 };
 use crate::audio::{self, AudioOutput};
@@ -23,11 +24,13 @@ use crate::bindings::{self, Bindings};
 use crate::cheats;
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
+use crate::cursor::{self, Cursor};
 use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
 use crate::gamepad::{self, PadEvent};
-use crate::layout::{self, Arrangement, Layout, Placement};
+use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
 use crate::persist;
+use crate::settings::{self, Settings};
 use crate::slots::{self, SlotPreview};
 use crate::video;
 
@@ -41,6 +44,9 @@ pub struct EmulatorView {
     focus: FocusHandle,
     bindings: Bindings,
     layout: Layout,
+    /// Where the layout is saved for next launch, if there is a config
+    /// folder.
+    settings_path: Option<PathBuf>,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
     /// Where the memory viewer is looking, while it is open.
@@ -49,9 +55,14 @@ pub struct EmulatorView {
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
     controls: Controls,
-    touch: Option<TouchPoint>,
+    /// Where the mouse touches the touchscreen, while its button is down.
+    mouse_touch: Option<TouchPoint>,
+    /// The gamepad's touchscreen cursor, once a gamepad has used it.
+    cursor: Option<Cursor>,
     /// What the emulation thread was last told is held.
     sent: HeldState,
+    /// Where the emulation thread was last told the screen is touched.
+    sent_touch: Option<TouchPoint>,
     /// The player keyboard and gamepads control, in multi-player sessions.
     active_player: usize,
     state_slot: u8,
@@ -78,11 +89,19 @@ struct Session {
     cheat_texts: Vec<Option<String>>,
     /// The system's colour correction, if it has one.
     correction: Option<Correction>,
-    /// Per screen: the pre-scale factor and the image built with it.
-    images: Vec<Option<(usize, Arc<RenderImage>)>>,
+    /// Per placement: the image drawn there and what it shows.
+    images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     _events: Task<()>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
+}
+
+/// What an image shows: a screen, enlarged by a whole factor and turned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageKey {
+    screen: usize,
+    factor: usize,
+    rotation: Rotation,
 }
 
 impl EmulatorView {
@@ -92,6 +111,8 @@ impl EmulatorView {
         focus.focus(window);
 
         let loaded_bindings = bindings::default_path().map(|path| Bindings::load(&path));
+        let settings_path = settings::default_path();
+        let loaded_settings = settings_path.as_deref().map(Settings::load);
         let subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
@@ -116,10 +137,12 @@ impl EmulatorView {
         }
         let gamepad_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = pad_receiver.recv().await {
-                let delivered = this.update_in(cx, |this, window, _| {
-                    // Gamepads are global; only the active window listens.
-                    if window.is_window_active() || !event.pressed {
-                        this.pad_event(&event);
+                let delivered = this.update_in(cx, |this, window, cx| {
+                    // Gamepads are global; only the active window listens,
+                    // but releases always count.
+                    let release = matches!(event, PadEvent::Control { pressed: false, .. });
+                    if window.is_window_active() || release {
+                        this.pad_event(&event, cx);
                     }
                 });
                 if delivered.is_err() {
@@ -132,14 +155,17 @@ impl EmulatorView {
             focus,
             bindings: Bindings::default(),
             layout: Layout::default(),
+            settings_path,
             color_correction: true,
             memory_viewer: None,
             session: None,
             loading: None,
             placements: Vec::new(),
             controls: Controls::default(),
-            touch: None,
+            mouse_touch: None,
+            cursor: None,
             sent: HeldState::default(),
+            sent_touch: None,
             active_player: 0,
             state_slot: 1,
             notice: None,
@@ -153,6 +179,11 @@ impl EmulatorView {
         match loaded_bindings {
             Some(Ok(bindings)) => view.bindings = bindings,
             Some(Err(error)) => view.show_notice(format!("{error}; using default bindings"), cx),
+            None => {}
+        }
+        match loaded_settings {
+            Some(Ok(settings)) => view.layout = settings.layout,
+            Some(Err(error)) => view.show_notice(format!("{error}; using default layout"), cx),
             None => {}
         }
         if !roms.is_empty() {
@@ -218,7 +249,9 @@ impl EmulatorView {
         });
         // The new emulator starts with nothing held; resend what is.
         self.sent = HeldState::default();
-        self.touch = None;
+        self.sent_touch = None;
+        self.mouse_touch = None;
+        self.cursor = None;
         self.active_player = 0;
         self.sync_held();
         self.watch_memory();
@@ -331,7 +364,7 @@ impl EmulatorView {
             player: self.active_player,
             input: Input {
                 buttons: self.sent.buttons,
-                touch: self.touch,
+                touch: self.sent_touch,
             },
         });
     }
@@ -355,11 +388,18 @@ impl EmulatorView {
         self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
 
-    /// Tells the emulation thread about any change in held inputs.
+    /// Tells the emulation thread about any change in held inputs or in
+    /// where the screen is touched. The mouse and the gamepad cursor touch
+    /// independently; the mouse wins while both do.
     fn sync_held(&mut self) {
         let state = self.controls.state();
-        if state.buttons != self.sent.buttons {
+        let touch = match self.mouse_touch {
+            Some(point) => Some(point),
+            None => self.cursor_touch(state.touch),
+        };
+        if state.buttons != self.sent.buttons || touch != self.sent_touch {
             self.sent.buttons = state.buttons;
+            self.sent_touch = touch;
             self.send_input();
         }
         if state.fast_forward != self.sent.fast_forward {
@@ -371,14 +411,35 @@ impl EmulatorView {
         self.sent = state;
     }
 
+    /// Where the gamepad cursor touches, if its touch input is `held`. The
+    /// cursor appears in the middle of the touchscreen if no gamepad has
+    /// moved it yet.
+    fn cursor_touch(&mut self, held: bool) -> Option<TouchPoint> {
+        if !held {
+            return None;
+        }
+        let (_, size) = self.touchscreen()?;
+        Some(
+            self.cursor
+                .get_or_insert_with(|| Cursor::centre(size))
+                .pixel(),
+        )
+    }
+
+    /// The running game's touchscreen: its index and size.
+    fn touchscreen(&self) -> Option<(usize, ScreenSize)> {
+        let info = &self.session.as_ref()?.info;
+        let screen = info.touch_screen?;
+        Some((screen, *info.screens.get(screen)?))
+    }
+
     fn release_all(&mut self) {
         self.controls.release_all();
-        self.touch = None;
-        self.send_input();
+        self.mouse_touch = None;
         self.sync_held();
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
         // Command and Control chords are menu shortcuts, not game input.
         if !modifiers.platform && !modifiers.control {
@@ -386,19 +447,47 @@ impl EmulatorView {
             let action = self.bindings.key_action(key);
             self.controls.set(format!("key:{key}"), action, true);
             self.sync_held();
+            // Redraw the cursor if a key touches with it, even when paused.
+            cx.notify();
         }
     }
 
-    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke.key;
         self.controls.set(format!("key:{key}"), None, false);
         self.sync_held();
+        cx.notify();
     }
 
-    fn pad_event(&mut self, event: &PadEvent) {
-        let action = self.bindings.pad_action(&event.controller, &event.control);
-        let source = format!("pad:{}:{}", event.controller, event.control);
-        self.controls.set(source, action, event.pressed);
+    fn pad_event(&mut self, event: &PadEvent, cx: &mut Context<Self>) {
+        match event {
+            PadEvent::Control {
+                controller,
+                control,
+                pressed,
+            } => {
+                let action = self.bindings.pad_action(controller, control);
+                let source = format!("pad:{controller}:{control}");
+                self.controls.set(source, action, *pressed);
+                self.sync_held();
+            }
+            PadEvent::Pointer { dx, dy } => self.move_cursor((*dx, *dy)),
+        }
+        // Redraw the cursor, even when paused.
+        cx.notify();
+    }
+
+    /// Moves the gamepad cursor by `motion`, in the units of
+    /// [`PadEvent::Pointer`] as seen on the window, whichever way the
+    /// screens are turned.
+    fn move_cursor(&mut self, motion: (f32, f32)) {
+        let Some((_, size)) = self.touchscreen() else {
+            return;
+        };
+        let (dx, dy) = self.layout.rotation.unturn_vector(motion);
+        self.cursor
+            .get_or_insert_with(|| Cursor::centre(size))
+            .move_by((dx * cursor::SPEED, dy * cursor::SPEED), size);
         self.sync_held();
     }
 
@@ -461,20 +550,17 @@ impl EmulatorView {
         }
     }
 
-    /// Points the stylus at `position`, or lifts it if that is off the
-    /// touchscreen.
+    /// Points the mouse's stylus at `position`, or lifts it if that is off
+    /// every copy of the touchscreen.
     fn touch_at(&mut self, position: Point<Pixels>) {
-        let touch = self.session.as_ref().and_then(|session| {
-            let screen = session.info.touch_screen?;
-            let size = *session.info.screens.get(screen)?;
-            let placement = self.placements.iter().find(|p| p.screen == screen)?;
-            let point = (f32::from(position.x), f32::from(position.y));
-            layout::pixel_at(placement.rect, size, point)
+        let point = (f32::from(position.x), f32::from(position.y));
+        self.mouse_touch = self.touchscreen().and_then(|(screen, size)| {
+            self.placements
+                .iter()
+                .filter(|placement| placement.screen == screen)
+                .find_map(|placement| placement.pixel_at(size, point))
         });
-        if touch != self.touch {
-            self.touch = touch;
-            self.send_input();
-        }
+        self.sync_held();
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -487,7 +573,12 @@ impl EmulatorView {
         if let Some(player) = clicked {
             self.switch_player(player, cx);
         }
+        // Back to the mouse: hide the gamepad cursor unless it is touching.
+        if !self.sent.touch {
+            self.cursor = None;
+        }
         self.touch_at(event.position);
+        cx.notify();
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -497,9 +588,8 @@ impl EmulatorView {
     }
 
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        if self.touch.take().is_some() {
-            self.send_input();
-        }
+        self.mouse_touch = None;
+        self.sync_held();
     }
 
     /// Asks for a ROM file, then calls `then` with it.
@@ -566,8 +656,67 @@ impl EmulatorView {
     }
 
     fn arrange(&mut self, arrangement: Arrangement, cx: &mut Context<Self>) {
-        self.layout.arrangement = arrangement;
+        self.set_layout(
+            Layout {
+                arrangement,
+                ..self.layout
+            },
+            cx,
+        );
+    }
+
+    fn swap_screens(&mut self, cx: &mut Context<Self>) {
+        self.set_layout(
+            Layout {
+                swapped: !self.layout.swapped,
+                ..self.layout
+            },
+            cx,
+        );
+    }
+
+    fn rotate(&mut self, rotation: Rotation, cx: &mut Context<Self>) {
+        self.show_notice(
+            match rotation {
+                Rotation::Upright => "Screens upright".to_owned(),
+                _ => format!("Screens turned {}° clockwise", rotation.degrees()),
+            },
+            cx,
+        );
+        self.set_layout(
+            Layout {
+                rotation,
+                ..self.layout
+            },
+            cx,
+        );
+    }
+
+    fn change_gap(&mut self, cx: &mut Context<Self>) {
+        let gap = layout::next_gap(self.layout.gap);
+        let message = if gap <= 0.0 {
+            "No gap between screens".to_owned()
+        } else if gap == layout::HINGE_GAP {
+            format!("Screen gap {gap} px, as across the DS hinge")
+        } else {
+            format!("Screen gap {gap} px")
+        };
+        self.show_notice(message, cx);
+        self.set_layout(Layout { gap, ..self.layout }, cx);
+    }
+
+    /// Switches to `layout` and saves it for next launch, noting any
+    /// failure to save.
+    fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        self.layout = layout;
         cx.notify();
+        let Some(path) = &self.settings_path else {
+            return;
+        };
+        if let Err(error) = (Settings { layout }).save(path) {
+            let message = format!("Cannot save settings to {}: {error}", path.display());
+            self.show_notice(message, cx);
+        }
     }
 
     fn toggle_memory_viewer(&mut self, cx: &mut Context<Self>) {
@@ -677,6 +826,39 @@ impl EmulatorView {
         )
     }
 
+    /// The gamepad cursor, drawn over every copy of the touchscreen and
+    /// filled in while it touches.
+    fn cursor_marks(&self) -> Vec<impl IntoElement + use<>> {
+        const RADIUS: f32 = 6.0;
+        let (Some(cursor), Some((screen, size))) = (self.cursor, self.touchscreen()) else {
+            return Vec::new();
+        };
+        // Centre the mark on the pixel it touches.
+        let pixel = cursor.pixel();
+        let centre = (f32::from(pixel.x) + 0.5, f32::from(pixel.y) + 0.5);
+        let touching = self.sent.touch && self.mouse_touch.is_none();
+        self.placements
+            .iter()
+            .filter(|placement| placement.screen == screen)
+            .map(|placement| {
+                let (x, y) = placement.window_point(size, centre);
+                div()
+                    .absolute()
+                    .left(px(x - RADIUS))
+                    .top(px(y - RADIUS))
+                    .size(px(RADIUS * 2.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(0x00FF_FFFF))
+                    .bg(if touching {
+                        rgba(0xFFFF_FFAA)
+                    } else {
+                        rgba(0x0000_0066)
+                    })
+            })
+            .collect()
+    }
+
     fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
         self.color_correction = !self.color_correction;
         if let Some(session) = &mut self.session {
@@ -696,8 +878,8 @@ impl EmulatorView {
 }
 
 impl Session {
-    /// Brings the images up to date with the latest frame and the size each
-    /// screen is drawn at.
+    /// Brings the images up to date with the latest frame and with how
+    /// each placement draws its screen.
     fn refresh_images(
         &mut self,
         placements: &[Placement],
@@ -707,29 +889,40 @@ impl Session {
     ) {
         if let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) {
             self.sequence = sequence;
-            self.images.resize(self.frames.len(), None);
             for (_, image) in self.images.iter_mut().filter_map(Option::take) {
                 window.drop_image(image).ok();
             }
         }
-        for placement in placements {
+        // One image per placement, so the layout decides how many.
+        if self.images.len() > placements.len() {
+            for (_, image) in self.images.drain(placements.len()..).flatten() {
+                window.drop_image(image).ok();
+            }
+        }
+        self.images.resize(placements.len(), None);
+        let correction = self.correction.as_ref().filter(|_| color_correction);
+        for (slot, placement) in self.images.iter_mut().zip(placements) {
             let Some(frame) = self.frames.get(placement.screen) else {
                 continue;
             };
-            let factor =
-                video::prescale_factor(frame.size().width, placement.rect.width, scale_factor);
-            let slot = &mut self.images[placement.screen];
-            if slot.as_ref().is_some_and(|(built, _)| *built == factor) {
+            let shown = placement.rotation.turn_size(frame.size());
+            let key = ImageKey {
+                screen: placement.screen,
+                factor: video::prescale_factor(shown.width, placement.rect.width, scale_factor),
+                rotation: placement.rotation,
+            };
+            if slot.as_ref().is_some_and(|(built, _)| *built == key) {
                 continue;
             }
             if let Some((_, stale)) = slot.take() {
                 window.drop_image(stale).ok();
             }
-            let image = match self.correction.as_ref().filter(|_| color_correction) {
-                Some(correction) => video::render_image(&correction.frame(frame), factor),
-                None => video::render_image(frame, factor),
-            };
-            *slot = Some((factor, image));
+            let corrected = correction.map(|correction| correction.frame(frame));
+            let frame = corrected.as_ref().unwrap_or(frame);
+            let turned =
+                (key.rotation != Rotation::Upright).then(|| video::turn(frame, key.rotation));
+            let frame = turned.as_ref().unwrap_or(frame);
+            *slot = Some((key, video::render_image(frame, key.factor)));
         }
     }
 }
@@ -780,10 +973,17 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &LayoutSingle, _, cx| {
                 this.arrange(Arrangement::Single, cx);
             }))
-            .on_action(cx.listener(|this, _: &SwapScreens, _, cx| {
-                this.layout.swapped = !this.layout.swapped;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &LayoutHybrid, _, cx| {
+                this.arrange(Arrangement::Hybrid, cx);
             }))
+            .on_action(cx.listener(|this, _: &SwapScreens, _, cx| this.swap_screens(cx)))
+            .on_action(cx.listener(|this, _: &RotateClockwise, _, cx| {
+                this.rotate(this.layout.rotation.clockwise(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &RotateAnticlockwise, _, cx| {
+                this.rotate(this.layout.rotation.anticlockwise(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextScreenGap, _, cx| this.change_gap(cx)))
             .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
                 this.toggle_color_correction(cx);
             }))
@@ -805,8 +1005,8 @@ impl Render for EmulatorView {
                 self.color_correction,
                 window,
             );
-            for placement in &self.placements {
-                let Some(Some((_, image))) = session.images.get(placement.screen) else {
+            for (placement, image) in self.placements.iter().zip(&session.images) {
+                let Some((_, image)) = image else {
                     continue;
                 };
                 let rect = placement.rect;
@@ -824,6 +1024,7 @@ impl Render for EmulatorView {
             self.placements.clear();
             root = root.child(welcome());
         }
+        root = root.children(self.cursor_marks());
 
         // A preview only lives as long as its notice.
         if self.notice.is_none() {

@@ -7,11 +7,11 @@ macOS, written in Rust with a [GPUI](https://gpui.rs) frontend. The goal is to
 play the Pokémon games of generations 1–5 from your own cartridge dumps.
 
 **Status: Phase 4 (Nintendo DS).** The DS core direct-boots retail games
-with an HLE BIOS. Pokémon White plays its opening movie, reaches the main
-menu and starts a new game, at well above full speed. It has:
+with an HLE BIOS. Pokémon White plays from power-on through a new game to
+Route 1, and its in-game save survives a restart. It has:
 - an ARM946E-S and an ARM7TDMI in lockstep, with IPC;
-- both 2D engines and a software 3D engine;
-- 16-channel sound;
+- both 2D engines and a software 3D engine with anti-aliasing;
+- 16-channel sound with capture;
 - the game card with flash saves;
 - the touchscreen, firmware and RTC.
 It passes every test in RockPolish's rockwrestler test ROM.
@@ -70,12 +70,20 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 | X / Y (DS) | S / A | North / West | | Reset | ⌘R |
 | L / R | Q / W | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
 | Start / Select | Return / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
-| Touchscreen | Click and drag | | | Fast-forward on/off | ⌘F |
-| Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen | ⌘1 / ⌘2 / ⌘3 |
+| Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward on/off | ⌘F |
+| Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
 | Rewind | Hold ` | Left trigger | | Swap screens / Quit | ⌘E / ⌘Q |
+| | | | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
+| | | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Colour correction on/off | ⌘⇧C |
 | | | | | Memory viewer | ⌘⇧M |
+
+Hybrid shows one screen large beside both screens small, as in melonDS;
+Swap Screens chooses the large one. Rotation turns the whole arrangement
+for games played with the DS held like a book, and touch follows it. A
+90 px gap matches the DS hinge. The layout, swap, rotation and gap are
+remembered in `~/Library/Application Support/ds-emulator/settings.toml`.
 
 Gamepad buttons are named by position, so A is the right face button as on a
 Nintendo controller. Rebind keys and gamepad controls in
@@ -89,6 +97,7 @@ fast_forward = ["tab"]
 [gamepad]
 a = ["South"]           # Xbox-style: A on the bottom button
 b = ["East"]
+touch = ["RightThumb"]  # touch at the cursor (default: either stick click)
 
 [gamepads.030000005e0400008e02000000007200]   # one controller, by UUID
 rewind = ["LeftTrigger"]

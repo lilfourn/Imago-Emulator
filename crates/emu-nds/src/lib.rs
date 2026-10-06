@@ -54,7 +54,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(33_513_982, 560_190),
     audio_sample_rate: 32_768,
     // Bump whenever any serialized struct changes shape.
-    state_version: 2,
+    state_version: 4,
 };
 
 /// A Nintendo DS with a cartridge inserted.
@@ -391,8 +391,8 @@ mod tests {
         assert_eq!(word(0x0200_0004), 7);
     }
 
-    #[test]
-    fn the_arm9_program_can_paint_the_top_screen() {
+    /// [`rom`] with an ARM9 program that turns the top screen white.
+    fn white_screen_rom() -> Vec<u8> {
         let mut rom = rom();
         // MOV R0, #0x04000000; MOV R1, #0x10000; STR R1, [R0] (DISPCNT:
         // display on); MOV R0, #0x05000000; MVN R1, #0; STRH R1, [R0]
@@ -410,6 +410,12 @@ mod tests {
         for (index, word) in program.into_iter().enumerate() {
             rom[0x200 + index * 4..0x204 + index * 4].copy_from_slice(&word.to_le_bytes());
         }
+        rom
+    }
+
+    #[test]
+    fn the_arm9_program_can_paint_the_top_screen() {
+        let rom = white_screen_rom();
         let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
         nds.run_frame(&[], &mut Vec::new());
         nds.run_frame(&[], &mut Vec::new());
@@ -428,14 +434,18 @@ mod tests {
 
     #[test]
     fn save_states_round_trip() {
-        let rom = rom();
+        let rom = white_screen_rom();
         let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        nds.run_frame(&[], &mut Vec::new());
         nds.run_frame(&[], &mut Vec::new());
         let mut state = Vec::new();
         nds.save_state(&mut state);
         let mut other = Nds::new(&Media::new(&rom)).expect("valid header");
         other.load_state(&state).expect("loads");
         assert_eq!(other.cycles(), nds.cycles());
-        assert_eq!(other.peek(0, 0x0200_0000), Some(42));
+        assert_eq!(other.peek(0, 0x0200_0004), Some(7));
+        // A paused frontend shows the loaded frame before any frame runs.
+        assert_eq!(other.screens()[0].pixels()[0], 0xFFFF_FFFF);
+        assert!(other.screens() == nds.screens());
     }
 }
