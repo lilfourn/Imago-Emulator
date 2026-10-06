@@ -411,6 +411,80 @@ mod tests {
         assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
     }
 
+    /// The lower-left half of the screen in red over a blue rear plane,
+    /// drawn with DISP3DCNT `control`.
+    fn red_half_over_blue(control: u32) -> Gpu3d {
+        let mut gpu = Gpu3d::new();
+        configure(&mut gpu, control, 0x7C00 | 31 << 16);
+        send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        send(&mut gpu, BEGIN_VTXS, &[0]);
+        vertex(&mut gpu, -ONE, ONE, 0);
+        vertex(&mut gpu, -ONE, -ONE, 0);
+        vertex(&mut gpu, ONE, -ONE, 0);
+        finish(&mut gpu, &Vram::default());
+        gpu
+    }
+
+    #[test]
+    fn anti_aliasing_softens_edges_against_the_rear_plane() {
+        let sharp = red_half_over_blue(0);
+        let smooth = red_half_over_blue(1 << 4);
+        for y in 0..192 {
+            // The diagonal crosses the middle of row y at (y + 0.5) * 4 / 3.
+            let crossing = (f64::from(y) + 0.5) * 4.0 / 3.0;
+            let mut blended = 0;
+            for x in 0..256 {
+                let (before, after) = (pixel(&sharp, x, y), pixel(&smooth, x, y));
+                assert!(before == opaque([63, 0, 0]) || before == opaque([0, 0, 63]));
+                let [red, _, blue] = color::unpack(after);
+                if red > 0 && blue > 0 {
+                    blended += 1;
+                }
+                if (x as f64 + 0.5 - crossing).abs() > 1.0 {
+                    assert_eq!(after, before, "({x}, {y}) is off the edge");
+                }
+            }
+            assert!(blended > 0, "row {y} blends its edge");
+        }
+    }
+
+    #[test]
+    fn anti_aliased_neighbours_leave_no_seam() {
+        let mut gpu = Gpu3d::new();
+        configure(&mut gpu, 1 << 4, 0x7C00 | 31 << 16);
+        send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        // x 64..192, y 48..144, as two triangles split along a diagonal.
+        let [x0, y0, x1, y1] = [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2];
+        send(&mut gpu, BEGIN_VTXS, &[0]);
+        for (x, y) in [(x0, y1), (x0, y0), (x1, y0), (x0, y1), (x1, y0), (x1, y1)] {
+            vertex(&mut gpu, x, y, 0);
+        }
+        finish(&mut gpu, &Vram::default());
+        for y in 48..144 {
+            for x in 64..192 {
+                assert_eq!(pixel(&gpu, x, y), opaque([63, 0, 0]), "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn edge_marking_halves_anti_aliased_edges() {
+        let mut gpu = Gpu3d::new();
+        let vram = Vram::default();
+        configure(&mut gpu, 1 << 5 | 1 << 4, 0x7C00 | 31 << 16);
+        gpu.write_register(0x330, 0x7FFF << 16); // Edge colour 1: white.
+        send(&mut gpu, POLYGON_ATTR, &[SOLID | 8 << 24]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
+        finish(&mut gpu, &vram);
+        // White at 17/32 over the blue rear plane.
+        assert_eq!(pixel(&gpu, 64, 96), opaque([33, 33, 63]), "left edge");
+        assert_eq!(pixel(&gpu, 100, 48), opaque([33, 33, 63]), "top edge");
+        assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
+    }
+
     #[test]
     fn swap_buffers_halts_the_fifo_until_vblank() {
         let mut gpu = Gpu3d::new();
