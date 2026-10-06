@@ -70,12 +70,20 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 | X / Y (DS) | S / A | North / West | | Reset | ⌘R |
 | L / R | Q / W | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
 | Start / Select | Return / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
-| Touchscreen | Click and drag | | | Fast-forward on/off | ⌘F |
-| Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen | ⌘1 / ⌘2 / ⌘3 |
+| Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward on/off | ⌘F |
+| Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
 | Rewind | Hold ` | Left trigger | | Swap screens / Quit | ⌘E / ⌘Q |
+| | | | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
+| | | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Colour correction on/off | ⌘⇧C |
 | | | | | Memory viewer | ⌘⇧M |
+
+Hybrid shows one screen large beside both screens small, as in melonDS;
+Swap Screens chooses the large one. Rotation turns the whole arrangement
+for games played with the DS held like a book, and touch follows it. A
+90 px gap matches the DS hinge. The layout, swap, rotation and gap are
+remembered in `~/Library/Application Support/ds-emulator/settings.toml`.
 
 Gamepad buttons are named by position, so A is the right face button as on a
 Nintendo controller. Rebind keys and gamepad controls in
@@ -89,6 +97,7 @@ fast_forward = ["tab"]
 [gamepad]
 a = ["South"]           # Xbox-style: A on the bottom button
 b = ["East"]
+touch = ["RightThumb"]  # touch at the cursor (default: either stick click)
 
 [gamepads.030000005e0400008e02000000007200]   # one controller, by UUID
 rewind = ["LeftTrigger"]
