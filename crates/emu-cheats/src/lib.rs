@@ -19,15 +19,19 @@
 //! come `on` or `off` and a device tag naming the code format, in either
 //! order. Without a tag the format is detected from the codes. Spaces and
 //! line breaks inside codes don't matter: the hex digits are cut into
-//! codes of the device's length. [`parse`] reads the text into [`Cheat`]s
-//! and [`apply`] runs the enabled ones against a [`Memory`], once per
-//! frame, the way cheat devices did.
+//! codes of the device's length. Game Genie codes, 6 or 9 digits long, are
+//! the exception: spaces, line breaks or `+` separate them, and a dash in
+//! a Game Boy cheat marks it as one. [`parse`] reads the text into
+//! [`Cheat`]s and [`apply`] runs the enabled ones against a [`Memory`],
+//! once per frame, the way cheat devices did. Codes that patch the ROM
+//! instead don't run: [`rom_patches`] collects them for the core, which
+//! applies them to every ROM read.
 //!
 //! | Tag | Device | System | Code |
 //! |---|---|---|---|
 //! | `raw` | memory patch | all | `ADDRESS:VALUE`, 1, 2 or 4 bytes by the value's digits |
 //! | `gs` | GameShark | Game Boy | `TTVVAAAA`: `01`, and `8x`/`9x` bank writes |
-//! | `gg` | Game Genie | Game Boy | `XXX-YYY-ZZZ`: not supported yet (ROM patches) |
+//! | `gg` | Game Genie | Game Boy | `ABC-DEF` or `ABC-DEF-GHI`, ROM patches |
 //! | `cb` | CodeBreaker, Xploder | GBA | `XXXXXXXX YYYY`, encrypted after a `9` code |
 //! | `gsa` | GameShark Advance, Action Replay v1/v2 | GBA | `XXXXXXXX YYYYYYYY`, encrypted |
 //! | `par3` | Pro Action Replay v3, Action Replay MAX | GBA | `XXXXXXXX YYYYYYYY`, encrypted |
@@ -39,8 +43,9 @@
 //! the devices: a CodeBreaker `9` code or a `DEADFACE` seed change applies
 //! to every code after it in the file. Game IDs, hooks and master codes
 //! are ignored, since the emulator applies cheats once per frame itself.
-//! What each format leaves out is in its module: ROM patches, the devices'
-//! own buttons, GBA I/O writes, and Action Replay DS types `C4`–`C6`.
+//! What each format leaves out is in its module: GBA ROM patches, the
+//! devices' own buttons, GBA I/O writes, and Action Replay DS types
+//! `C4`–`C6`.
 
 mod ards;
 mod cht;
@@ -49,6 +54,7 @@ mod codes;
 mod decode;
 mod detect;
 mod device;
+mod game_genie;
 mod gameshark;
 mod gsa;
 mod ops;
@@ -59,7 +65,7 @@ mod tea;
 
 use std::fmt;
 
-use emu_core::System;
+use emu_core::{RomPatch, System};
 
 use crate::codes::Item;
 use crate::decode::decode;
@@ -192,6 +198,29 @@ pub fn apply(cheats: &[Cheat], memory: &mut impl Memory) {
     }
 }
 
+/// The ROM patches of every enabled cheat, in list order, for
+/// `emu_core::Core::set_rom_patches`. Hand the core a fresh set whenever
+/// the list changes: switching a cheat off or removing it drops its
+/// patches.
+#[must_use]
+pub fn rom_patches(cheats: &[Cheat]) -> Vec<RomPatch> {
+    cheats
+        .iter()
+        .filter(|cheat| cheat.enabled)
+        .filter_map(|cheat| match &cheat.program {
+            Program::Ops(list) => Some(list),
+            Program::ActionReplayDs(_) => None,
+        })
+        .flatten()
+        .filter_map(|op| match op {
+            Op::PatchRom(patches) => Some(patches),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect()
+}
+
 /// Reads one cheat's lines as its tag's device, or the detected one.
 fn compile(
     system: System,
@@ -232,12 +261,7 @@ fn compile(
                 .collect::<Result<_, _>>()?;
             Program::Ops(ops)
         }
-        Device::GameGenie => {
-            return Err(in_device((
-                first,
-                "Game Genie codes patch the ROM and are not supported yet".to_owned(),
-            )));
-        }
+        Device::GameGenie => Program::Ops(game_genie::read(lines).map_err(in_device)?),
         Device::ActionReplayDs => {
             Program::ActionReplayDs(ards::Program::new(&items(lines, device)?).map_err(in_device)?)
         }

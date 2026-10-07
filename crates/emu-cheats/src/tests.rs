@@ -1,10 +1,10 @@
 //! Whole cheat lists, read and applied.
 
-use emu_core::System;
+use emu_core::{RomPatch, System};
 
 use crate::tea::Cipher;
 use crate::test_memory::TestMemory;
-use crate::{Device, Memory, apply, parse};
+use crate::{Device, Memory, apply, parse, rom_patches};
 
 /// Reads `text` for `system` and applies it once to `memory`.
 fn run(system: System, text: &str, memory: &mut TestMemory) {
@@ -58,8 +58,8 @@ fn errors_name_the_line_and_the_device() {
     );
     let error = parse(System::Gba, "[A] ards\n02000000 00000001\n").expect_err("wrong system");
     assert!(error.to_string().contains("Nintendo DS"), "{error}");
-    let error = parse(System::Gb, "[A]\n00A-17B-C49\n").expect_err("Game Genie");
-    assert_eq!(error.device, Some(Device::GameGenie));
+    let error = parse(System::Gb, "[A]\n00A-17B-C49\n00A-177\n").expect_err("not ROM");
+    assert_eq!((error.line, error.device), (3, Some(Device::GameGenie)));
 }
 
 #[test]
@@ -185,6 +185,53 @@ fn ambiguous_lengths_ask_for_a_tag() {
     assert_eq!(
         devices(System::Gba, &text.replace("[Both]", "[Both] cb")),
         [Device::CodeBreaker]
+    );
+}
+
+#[test]
+fn game_genie_codes_patch_rom_reads_while_on() {
+    let text = "[Lives]\n00A-17B-C49\n[Jump] off\n3E1-23F\n[Both] gg\n01A-17B-C49\n02000000:05\n";
+    let cheats = parse(System::Gb, text).expect("valid");
+    assert_eq!(
+        devices(System::Gb, text),
+        [Device::GameGenie, Device::GameGenie, Device::GameGenie]
+    );
+    let patches = rom_patches(&cheats);
+    assert_eq!(
+        patches,
+        [
+            RomPatch {
+                address: 0x4A17,
+                value: 0x00,
+                compare: Some(0xC8)
+            },
+            RomPatch {
+                address: 0x4A17,
+                value: 0x01,
+                compare: Some(0xC8)
+            },
+        ]
+    );
+    // A read of 0x4A17 in the bank that holds C8 there gets the first
+    // matching patch; another bank's byte passes through.
+    assert_eq!(RomPatch::apply(&patches, 0x4A17, 0xC8), 0x00);
+    assert_eq!(RomPatch::apply(&patches, 0x4A17, 0x3D), 0x3D);
+    // ROM patches don't run as memory writes; raw patches beside them do.
+    let mut memory = TestMemory::default();
+    apply(&cheats, &mut memory);
+    assert_eq!(memory.peek(0x0200_0000), Some(5));
+
+    // Switching cheats off or replacing the list drops their patches.
+    let off = parse(System::Gb, &text.replace("[Lives]", "[Lives] off")).expect("valid");
+    assert_eq!(rom_patches(&off).len(), 1);
+    let replaced = parse(System::Gb, "[Jump]\n3E1-23F\n").expect("valid");
+    assert_eq!(
+        rom_patches(&replaced),
+        [RomPatch {
+            address: 0x0123,
+            value: 0x3E,
+            compare: None
+        }]
     );
 }
 

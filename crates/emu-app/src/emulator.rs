@@ -225,7 +225,8 @@ pub enum Command {
     LoadState(u8),
     /// Copies this span of memory for the UI after every frame, or stops.
     WatchMemory(Option<MemorySpan>),
-    /// Replaces a player's cheats, applied after every frame.
+    /// Replaces a player's cheats: their ROM patches go to the core at
+    /// once, and the rest run after every frame.
     SetCheats {
         /// Index into the core's players.
         player: usize,
@@ -503,6 +504,10 @@ impl Runner {
             }
             Command::SetCheats { player, cheats } => {
                 if let Some(slot) = self.cheats.get_mut(player) {
+                    // ROM patches live in the core, which applies them to
+                    // every read; the rest run after each frame.
+                    let patches = emu_cheats::rom_patches(&cheats);
+                    self.loaded.core.set_rom_patches(player, &patches);
                     *slot = cheats;
                 }
             }
@@ -663,8 +668,8 @@ mod tests {
     use std::time::Duration;
 
     use emu_core::{
-        Button, Buttons, CoreInfo, FrameRate, ScreenSize, StateError, StereoSample, System,
-        TouchPoint,
+        Button, Buttons, CoreInfo, FrameRate, RomPatch, ScreenSize, StateError, StereoSample,
+        System, TouchPoint,
     };
 
     use super::*;
@@ -1000,6 +1005,78 @@ mod tests {
         // The frame cleared the byte; the cheat, seeing A, set it again.
         let (_, bytes) = emulator.memory().expect("watching");
         assert_eq!(bytes, [Some(1)]);
+    }
+
+    /// Every `set_rom_patches` call a core received.
+    type PatchLog = Arc<Mutex<Vec<(usize, Vec<RomPatch>)>>>;
+
+    /// A Game Boy-like core that records the ROM patches it is given.
+    struct Patchable {
+        log: PatchLog,
+        frames: [Frame; 1],
+    }
+
+    impl Core for Patchable {
+        fn info(&self) -> CoreInfo {
+            CoreInfo {
+                system: System::Gb,
+                screens: &SCREENS,
+                touch_screen: None,
+                players: 1,
+                frame_rate: FrameRate::new(1000, 1),
+                audio_sample_rate: 48_000,
+                state_version: 1,
+            }
+        }
+
+        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {}
+
+        fn screens(&self) -> &[Frame] {
+            &self.frames
+        }
+
+        fn reset(&mut self) {}
+
+        fn save_state(&self, _: &mut Vec<u8>) {}
+
+        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
+            Ok(())
+        }
+
+        fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+            let mut log = self.log.lock().expect("unpoisoned");
+            log.push((player, patches.to_vec()));
+        }
+    }
+
+    #[test]
+    fn cheat_lists_hand_their_rom_patches_to_the_core() {
+        let log = PatchLog::default();
+        let loaded = Loaded {
+            core: Box::new(Patchable {
+                log: Arc::clone(&log),
+                frames: [Frame::new(SCREENS[0])],
+            }),
+            rom_paths: vec![PathBuf::from("/nonexistent/patchable.gb")],
+            rom_crc32: 0,
+        };
+        let (events, _events) = async_channel::unbounded();
+        let emulator = Emulator::start(loaded, events, None);
+        for text in ["[Jump]\n3E1-23F\n", "[Jump] off\n3E1-23F\n"] {
+            let cheats = emu_cheats::parse(System::Gb, text).expect("valid");
+            emulator.send(Command::SetCheats { player: 0, cheats });
+        }
+        // Dropping the handle applies the queued commands, then stops.
+        drop(emulator);
+        let jump = RomPatch {
+            address: 0x0123,
+            value: 0x3E,
+            compare: None,
+        };
+        assert_eq!(
+            *log.lock().expect("unpoisoned"),
+            [(0, vec![jump]), (0, Vec::new())]
+        );
     }
 
     #[test]

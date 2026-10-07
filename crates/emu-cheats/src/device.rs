@@ -11,8 +11,8 @@ pub enum Device {
     Raw,
     /// Game Boy GameShark, `TTVVAAAA`. Tag `gs`.
     GameShark,
-    /// Game Boy Game Genie, `XXX-YYY-ZZZ`. Tag `gg`. Not supported yet: it
-    /// patches the ROM.
+    /// Game Boy Game Genie, `ABC-DEF` or `ABC-DEF-GHI`: ROM patches. Tag
+    /// `gg`.
     GameGenie,
     /// GBA CodeBreaker (Xploder), `XXXXXXXX YYYY`. Tag `cb`.
     CodeBreaker,
@@ -101,12 +101,12 @@ impl Device {
         }
     }
 
-    /// Hex digits in one code, or `None` for raw patches.
+    /// Hex digits in one code, or `None` where codes are not cut by
+    /// length: raw patches, and Game Genie codes of 6 or 9 digits.
     pub(crate) const fn digits(self) -> Option<usize> {
         match self {
-            Self::Raw => None,
+            Self::Raw | Self::GameGenie => None,
             Self::GameShark => Some(8),
-            Self::GameGenie => Some(9),
             Self::CodeBreaker => Some(12),
             Self::GameSharkAdvance
             | Self::GameSharkAdvanceRaw

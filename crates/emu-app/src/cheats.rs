@@ -15,8 +15,9 @@ const TEMPLATE: &str = "\
 #
 # The device is detected from the codes; to choose it, add a tag after the
 # name: raw (ADDRESS:VALUE in hex, every system), gs (Game Boy GameShark),
-# cb (CodeBreaker), gsa or gsa-raw (GameShark Advance / Action Replay
-# v1/v2), par3 or par3-raw (Pro Action Replay v3), ards (Action Replay DS).
+# gg (Game Boy Game Genie), cb (CodeBreaker), gsa or gsa-raw (GameShark
+# Advance / Action Replay v1/v2), par3 or par3-raw (Pro Action Replay v3),
+# ards (Action Replay DS).
 # Note how to activate a cheat in a comment under its name.
 #
 # [Infinite money] ards

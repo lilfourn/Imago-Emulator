@@ -1,7 +1,9 @@
 //! Memory operations for the formats that are flat lists of codes: raw
-//! patches, GameShark, CodeBreaker, GameShark Advance and Pro Action
-//! Replay. Each code becomes one operation, so "skip the next n codes"
-//! skips n operations.
+//! patches, GameShark, Game Genie, CodeBreaker, GameShark Advance and Pro
+//! Action Replay. Each code becomes one operation, so "skip the next n
+//! codes" skips n operations.
+
+use emu_core::RomPatch;
 
 use crate::Memory;
 
@@ -93,6 +95,10 @@ pub(crate) enum Op {
     },
     /// Skips the next operations; `usize::MAX` ends the cheat.
     Skip(usize),
+    /// Changes what the game reads from ROM while the cheat is on. The
+    /// frontend hands these to the core (see [`crate::rom_patches`]), so
+    /// running the operation does nothing and conditions don't gate it.
+    PatchRom(Vec<RomPatch>),
 }
 
 /// How [`Op::Modify`] combines values.
@@ -222,6 +228,7 @@ pub(crate) fn run(ops: &[Op], memory: &mut (impl Memory + ?Sized)) {
                 }
             }
             &Op::Skip(skip) => next = next.saturating_add(skip),
+            Op::PatchRom(_) => {}
         }
     }
 }
