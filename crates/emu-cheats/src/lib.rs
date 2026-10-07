@@ -4,106 +4,88 @@
 //!
 //! ```text
 //! # Comments start with "#".
-//! [Infinite money]
-//! 82025E30 270F
+//! [Infinite money] ards
+//! # Hold L+R.
+//! 94000130 FCFF0000
+//! 62111938 00000000
+//! B2111938 00000000
+//! 20001DE4 000000FF
+//! D2000000 00000000
 //! [Walk through walls] off
 //! 02000F04:01
 //! ```
 //!
-//! Each cheat is a `[name]` line, optionally followed by `off`, then its
-//! codes, one per line. [`parse`] turns the text into [`Cheat`]s whose codes
-//! are plain memory operations ([`Op`]), and [`apply`] runs the enabled ones
-//! against a [`Memory`], once per frame, the way cheat devices did.
+//! Each cheat is a `[name]` line followed by its codes. After the name may
+//! come `on` or `off` and a device tag naming the code format, in either
+//! order. Without a tag the format is detected from the codes. Spaces and
+//! line breaks inside codes don't matter: the hex digits are cut into
+//! codes of the device's length. [`parse`] reads the text into [`Cheat`]s
+//! and [`apply`] runs the enabled ones against a [`Memory`], once per
+//! frame, the way cheat devices did.
 //!
-//! Formats, by system:
+//! | Tag | Device | System | Code |
+//! |---|---|---|---|
+//! | `raw` | memory patch | all | `ADDRESS:VALUE`, 1, 2 or 4 bytes by the value's digits |
+//! | `gs` | GameShark | Game Boy | `TTVVAAAA`: `01`, and `8x`/`9x` bank writes |
+//! | `gg` | Game Genie | Game Boy | `XXX-YYY-ZZZ`: not supported yet (ROM patches) |
+//! | `cb` | CodeBreaker, Xploder | GBA | `XXXXXXXX YYYY`, encrypted after a `9` code |
+//! | `gsa` | GameShark Advance, Action Replay v1/v2 | GBA | `XXXXXXXX YYYYYYYY`, encrypted |
+//! | `par3` | Pro Action Replay v3, Action Replay MAX | GBA | `XXXXXXXX YYYYYYYY`, encrypted |
+//! | `gsa-raw`, `par3-raw` | the same, unencrypted | GBA | `XXXXXXXX YYYYYYYY` |
+//! | `ards` | Action Replay DS | DS | `XXXXXXXX YYYYYYYY` |
 //!
-//! - every system: raw `ADDRESS:VALUE` in hex, writing 1, 2 or 4 bytes
-//!   (little-endian) by the value's digit count;
-//! - Game Boy: GameShark `01VVAAAA`;
-//! - Game Boy Advance: CodeBreaker `XAAAAAAA YYYY`, unencrypted.
-//!
-//! Encrypted Action Replay and GameShark Advance codes, Game Genie ROM
-//! patches and Action Replay DS codes are not supported yet; parsing them
-//! returns an error naming the format.
+//! Raw patches may sit among the codes of any device but the Action
+//! Replay DS. Encryption state carries from one cheat to the next, as on
+//! the devices: a CodeBreaker `9` code or a `DEADFACE` seed change applies
+//! to every code after it in the file. Game IDs, hooks and master codes
+//! are ignored, since the emulator applies cheats once per frame itself.
+//! What each format leaves out is in its module: ROM patches, the devices'
+//! own buttons, GBA I/O writes, and Action Replay DS types `C4`–`C6`.
 
-mod code;
+mod ards;
+mod cht;
+mod codebreaker;
+mod codes;
+mod decode;
+mod detect;
+mod device;
+mod gameshark;
+mod gsa;
+mod ops;
+mod par3;
+mod raw;
+mod seed_tables;
+mod tea;
+
+use std::fmt;
 
 use emu_core::System;
 
+use crate::codes::Item;
+use crate::decode::decode;
+use crate::detect::Guess;
+use crate::ops::Op;
+use crate::tea::Cipher;
+
+pub use device::Device;
+
 /// Memory a cheat reads and writes: one player's CPU address space.
 pub trait Memory {
-    /// The byte at `address`, or `None` if it is not plain memory.
+    /// The byte at `address`, or `None` if it cannot be read without side
+    /// effects.
     fn peek(&self, address: u32) -> Option<u8>;
 
     /// Writes the byte at `address`. Returns whether it was plain memory.
     fn poke(&mut self, address: u32, value: u8) -> bool;
-}
 
-/// How many bytes an operation reads or writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Width {
-    /// One byte.
-    Byte = 1,
-    /// Two bytes.
-    Half = 2,
-    /// Four bytes.
-    Word = 4,
-}
-
-/// One memory operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Op {
-    /// Stores `value`.
-    Write {
-        /// Where.
-        address: u32,
-        /// What.
-        value: u32,
-        /// How many bytes.
-        width: Width,
-    },
-    /// Combines the value in memory with `value` and stores the result.
-    Modify {
-        /// Where.
-        address: u32,
-        /// The other operand.
-        value: u32,
-        /// How many bytes.
-        width: Width,
-        /// How to combine them.
-        with: Modify,
-    },
-    /// Runs the next operation only if the value in memory passes `test`.
-    If {
-        /// Where.
-        address: u32,
-        /// The value to compare with.
-        value: u32,
-        /// How many bytes.
-        width: Width,
-        /// The comparison.
-        test: Test,
-    },
-}
-
-/// How [`Op::Modify`] combines values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Modify {
-    /// Bitwise OR.
-    Or,
-    /// Bitwise AND.
-    And,
-    /// Wrapping addition.
-    Add,
-}
-
-/// How [`Op::If`] compares values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Test {
-    /// Memory equals the value.
-    Equal,
-    /// Memory differs from the value.
-    NotEqual,
+    /// Writes the byte at `address` in RAM bank `bank` of the switchable
+    /// region holding it, whichever bank is mapped. Returns whether it was
+    /// plain memory. Only the Game Boy has such banks; by default nothing
+    /// is written.
+    fn poke_bank(&mut self, bank: u8, address: u32, value: u8) -> bool {
+        let _ = (bank, address, value);
+        false
+    }
 }
 
 /// A named group of codes, switched on and off together.
@@ -113,18 +95,68 @@ pub struct Cheat {
     pub name: String,
     /// Whether [`apply`] runs it.
     pub enabled: bool,
-    /// Its codes, in order.
-    pub ops: Vec<Op>,
+    /// The code format, from the tag or detected.
+    pub device: Device,
+    program: Program,
+}
+
+/// What a cheat runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Program {
+    /// One operation per code.
+    Ops(Vec<Op>),
+    /// An Action Replay DS program.
+    ActionReplayDs(ards::Program),
 }
 
 /// A line of a cheat list that could not be read.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("line {line}: {message}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     /// The line number, from 1.
     pub line: usize,
+    /// The device the line was read as, if one was chosen.
+    pub device: Option<Device>,
     /// What is wrong with it.
     pub message: String,
+}
+
+impl ParseError {
+    fn new(line: usize, message: impl Into<String>) -> Self {
+        Self {
+            line,
+            device: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.device {
+            Some(device) => write!(f, "line {} ({device}): {}", self.line, self.message),
+            None => write!(f, "line {}: {}", self.line, self.message),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Encryption state, carried from cheat to cheat through a list.
+#[derive(Debug, Clone)]
+struct Keys {
+    game_shark_advance: Cipher,
+    pro_action_replay: Cipher,
+    code_breaker: Option<codebreaker::Key>,
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self {
+            game_shark_advance: Cipher::GAMESHARK_ADVANCE,
+            pro_action_replay: Cipher::PRO_ACTION_REPLAY,
+            code_breaker: None,
+        }
+    }
 }
 
 /// Reads a cheat list for `system`. Codes before the first `[name]` line
@@ -132,187 +164,160 @@ pub struct ParseError {
 ///
 /// # Errors
 ///
-/// Returns the first line that is neither a comment, a name nor a code in a
-/// supported format.
+/// Returns the first line that is neither a comment, a name nor a code
+/// that a device for `system` can run, naming the device it was read as.
 pub fn parse(system: System, text: &str) -> Result<Vec<Cheat>, ParseError> {
-    let mut cheats: Vec<Cheat> = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let error = |message: String| ParseError {
-            line: index + 1,
-            message,
-        };
-        if let Some(rest) = line.strip_prefix('[') {
-            let (name, flags) = rest
-                .split_once(']')
-                .ok_or_else(|| error("a cheat name needs a closing \"]\"".to_owned()))?;
-            let enabled = match flags.trim() {
-                "" | "on" => true,
-                "off" => false,
-                other => {
-                    return Err(error(format!(
-                        "expected \"on\" or \"off\", found {other:?}"
-                    )));
-                }
-            };
-            cheats.push(Cheat {
-                name: name.trim().to_owned(),
-                enabled,
-                ops: Vec::new(),
-            });
-            continue;
-        }
-        let op = code::parse(system, line).map_err(error)?;
-        if cheats.is_empty() {
-            cheats.push(Cheat {
-                name: "Unnamed".to_owned(),
-                enabled: true,
-                ops: Vec::new(),
-            });
-        }
-        if let (Some(op), Some(cheat)) = (op, cheats.last_mut()) {
-            cheat.ops.push(op);
-        }
-    }
-    Ok(cheats)
+    let mut keys = Keys::default();
+    cht::sections(text)?
+        .into_iter()
+        .map(|section| {
+            let (device, program) = compile(system, &section, &mut keys)?;
+            Ok(Cheat {
+                name: section.name,
+                enabled: section.enabled,
+                device,
+                program,
+            })
+        })
+        .collect()
 }
 
-/// Runs every enabled cheat's operations against `memory`.
+/// Runs every enabled cheat against `memory`, each from a fresh start.
 pub fn apply(cheats: &[Cheat], memory: &mut impl Memory) {
     for cheat in cheats.iter().filter(|cheat| cheat.enabled) {
-        let mut skip = false;
-        for op in &cheat.ops {
-            if std::mem::take(&mut skip) {
-                continue;
-            }
-            match *op {
-                Op::Write {
-                    address,
-                    value,
-                    width,
-                } => write(memory, address, value, width),
-                Op::Modify {
-                    address,
-                    value,
-                    width,
-                    with,
-                } => {
-                    if let Some(old) = read(memory, address, width) {
-                        let new = match with {
-                            Modify::Or => old | value,
-                            Modify::And => old & value,
-                            Modify::Add => old.wrapping_add(value),
-                        };
-                        write(memory, address, new, width);
-                    }
-                }
-                Op::If {
-                    address,
-                    value,
-                    width,
-                    test,
-                } => {
-                    let passed = read(memory, address, width).is_some_and(|old| match test {
-                        Test::Equal => old == value,
-                        Test::NotEqual => old != value,
-                    });
-                    skip = !passed;
-                }
-            }
+        match &cheat.program {
+            Program::Ops(list) => ops::run(list, memory),
+            Program::ActionReplayDs(program) => program.run(memory),
         }
     }
 }
 
-fn read(memory: &impl Memory, address: u32, width: Width) -> Option<u32> {
-    (0..width as u32).try_fold(0, |value, byte| {
-        let next = memory.peek(address.wrapping_add(byte))?;
-        Some(value | u32::from(next) << (byte * 8))
+/// Reads one cheat's lines as its tag's device, or the detected one.
+fn compile(
+    system: System,
+    section: &cht::Section<'_>,
+    keys: &mut Keys,
+) -> Result<(Device, Program), ParseError> {
+    let lines = &section.lines;
+    let first = lines.first().map_or(section.line, |&(line, _)| line);
+    let device = match section.device {
+        Some(device) => {
+            if device.system().is_some_and(|only| only != system) {
+                let only = device.system().map_or("", System::name);
+                return Err(ParseError {
+                    device: Some(device),
+                    ..ParseError::new(section.line, format!("this device is for the {only}"))
+                });
+            }
+            device
+        }
+        None => match detect::guess(system, lines).map_err(|(l, m)| ParseError::new(l, m))? {
+            Guess::Device(device) => device,
+            Guess::Gba16 => {
+                let items = items(lines, Device::GameSharkAdvance)?;
+                detect_gba16(&items, keys).map_err(|message| ParseError::new(first, message))?
+            }
+        },
+    };
+    let in_device = |(line, message): (usize, String)| ParseError {
+        line,
+        device: Some(device),
+        message,
+    };
+    let program = match device {
+        Device::Raw => {
+            let ops = lines
+                .iter()
+                .map(|&(line, text)| raw::patch(text).map_err(|e| in_device((line, e))))
+                .collect::<Result<_, _>>()?;
+            Program::Ops(ops)
+        }
+        Device::GameGenie => {
+            return Err(in_device((
+                first,
+                "Game Genie codes patch the ROM and are not supported yet".to_owned(),
+            )));
+        }
+        Device::ActionReplayDs => {
+            Program::ActionReplayDs(ards::Program::new(&items(lines, device)?).map_err(in_device)?)
+        }
+        Device::GameShark => Program::Ops(
+            decode(&items(lines, device)?, &mut gameshark::GameShark).map_err(in_device)?,
+        ),
+        Device::CodeBreaker => {
+            let mut decoder = codebreaker::CodeBreaker::new(&mut keys.code_breaker);
+            Program::Ops(decode(&items(lines, device)?, &mut decoder).map_err(in_device)?)
+        }
+        Device::GameSharkAdvance
+        | Device::GameSharkAdvanceRaw
+        | Device::ProActionReplay
+        | Device::ProActionReplayRaw => {
+            Program::Ops(compile_gba16(device, &items(lines, device)?, keys).map_err(in_device)?)
+        }
+    };
+    Ok((device, program))
+}
+
+/// `lines` cut into `device`'s codes.
+fn items(lines: &[(usize, &str)], device: Device) -> Result<Vec<(usize, Item)>, ParseError> {
+    let digits = device.digits().unwrap_or(16);
+    codes::items(lines, digits).map_err(|(line, message)| ParseError {
+        line,
+        device: Some(device),
+        message,
     })
 }
 
-fn write(memory: &mut impl Memory, address: u32, value: u32, width: Width) {
-    for byte in 0..width as u32 {
-        memory.poke(address.wrapping_add(byte), (value >> (byte * 8)) as u8);
+/// `items` decrypted as `device`'s, updating its seeds in `keys`.
+fn decrypted(device: Device, items: &[(usize, Item)], keys: &mut Keys) -> Vec<(usize, Item)> {
+    let mut items = items.to_vec();
+    match device {
+        Device::GameSharkAdvance => keys.game_shark_advance.decrypt_items(&mut items),
+        Device::ProActionReplay => keys.pro_action_replay.decrypt_items(&mut items),
+        _ => {}
     }
+    items
+}
+
+/// Reads 16-digit GBA codes as `device`'s.
+fn compile_gba16(
+    device: Device,
+    items: &[(usize, Item)],
+    keys: &mut Keys,
+) -> Result<Vec<Op>, (usize, String)> {
+    let plain = decrypted(device, items, keys);
+    match device {
+        Device::GameSharkAdvance | Device::GameSharkAdvanceRaw => {
+            decode(&plain, &mut gsa::GameSharkAdvance::default())
+        }
+        _ => decode(&plain, &mut par3::ProActionReplay::default()),
+    }
+}
+
+/// Which 16-digit GBA device reads `items` most plausibly.
+fn detect_gba16(items: &[(usize, Item)], keys: &Keys) -> Result<Device, String> {
+    let scores = detect::GBA16.map(|device| {
+        let plain = decrypted(device, items, &mut keys.clone());
+        let codes: Vec<u64> = plain
+            .iter()
+            .filter_map(|(_, item)| match item {
+                Item::Code(code) => Some(*code),
+                Item::Patch(_) => None,
+            })
+            .collect();
+        let score = match device {
+            Device::GameSharkAdvance | Device::GameSharkAdvanceRaw => gsa::plausibility(&codes),
+            _ => par3::plausibility(&codes),
+        };
+        (device, score)
+    });
+    detect::choose_gba16(&scores, |first, second| {
+        let read = |device| compile_gba16(device, items, &mut keys.clone());
+        matches!((read(first), read(second)), (Ok(a), Ok(b)) if a == b)
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-
-    /// Sparse RAM at 0x02000000-0x0203FFFF; the rest is not memory.
-    #[derive(Default)]
-    struct Ram(HashMap<u32, u8>);
-
-    impl Memory for Ram {
-        fn peek(&self, address: u32) -> Option<u8> {
-            (0x0200_0000..0x0204_0000)
-                .contains(&address)
-                .then(|| self.0.get(&address).copied().unwrap_or(0))
-        }
-
-        fn poke(&mut self, address: u32, value: u8) -> bool {
-            let ram = self.peek(address).is_some();
-            if ram {
-                self.0.insert(address, value);
-            }
-            ram
-        }
-    }
-
-    #[test]
-    fn reads_names_flags_and_codes() {
-        let text = "# money\n[Money]\n82025E30 270F\n\n[Moon jump] off\n02000F04:01\n";
-        let cheats = parse(System::Gba, text).expect("valid list");
-        assert_eq!(cheats.len(), 2);
-        assert_eq!(
-            (cheats[0].name.as_str(), cheats[0].enabled),
-            ("Money", true)
-        );
-        assert_eq!(
-            cheats[0].ops,
-            [Op::Write {
-                address: 0x0202_5E30,
-                value: 0x270F,
-                width: Width::Half
-            }]
-        );
-        assert!(!cheats[1].enabled);
-    }
-
-    #[test]
-    fn errors_name_the_line() {
-        let error = parse(System::Gba, "[Money]\nnot a code\n").expect_err("bad code");
-        assert_eq!(error.line, 2);
-    }
-
-    #[test]
-    fn applies_enabled_cheats_and_conditions() {
-        let text = "[On]\n02000000:1234\n[Off] off\n02000010:FF\n\
-                    [Guarded]\n72000000 0000\n32000020 0055\n72000000 1234\n32000021 0066\n";
-        let cheats = parse(System::Gba, text).expect("valid list");
-        let mut ram = Ram::default();
-        apply(&cheats, &mut ram);
-        assert_eq!(read(&ram, 0x0200_0000, Width::Half), Some(0x1234));
-        assert_eq!(ram.peek(0x0200_0010), Some(0));
-        // The first condition fails, so its write is skipped; the second passes.
-        assert_eq!(ram.peek(0x0200_0020), Some(0));
-        assert_eq!(ram.peek(0x0200_0021), Some(0x66));
-    }
-
-    #[test]
-    fn modifies_in_place() {
-        let cheats = parse(System::Gba, "22000000 00F0\nE2000002 0002\n").expect("valid");
-        let mut ram = Ram::default();
-        write(&mut ram, 0x0200_0000, 0x000F, Width::Half);
-        write(&mut ram, 0x0200_0002, 0xFFFF, Width::Half);
-        apply(&cheats, &mut ram);
-        assert_eq!(read(&ram, 0x0200_0000, Width::Half), Some(0x00FF));
-        assert_eq!(read(&ram, 0x0200_0002, Width::Half), Some(0x0001));
-    }
-}
+mod test_memory;
+#[cfg(test)]
+mod tests;
