@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{Frame, Input, RomPatch, ScreenSize, StereoSample, System};
+use crate::{Debugger, Frame, Input, RomPatch, ScreenSize, StereoSample, System};
 
 /// One emulated system with a game loaded.
 ///
@@ -151,6 +151,12 @@ pub trait Core: Send {
     /// game tools.
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         let _ = region;
+        None
+    }
+
+    /// The core's debugger, for stepping, breakpoints and looking inside
+    /// the machine, or `None` if it has none. See [`crate::debug`].
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
         None
     }
 }

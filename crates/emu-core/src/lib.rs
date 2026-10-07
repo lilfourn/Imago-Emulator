@@ -10,6 +10,7 @@
 
 mod audio;
 mod core;
+pub mod debug;
 mod input;
 mod media;
 mod rom_patch;
@@ -19,6 +20,7 @@ mod video;
 
 pub use audio::StereoSample;
 pub use core::{Core, CoreInfo, FrameRate, MemoryRegion, StateError};
+pub use debug::Debugger;
 pub use input::{Button, Buttons, Input, ParseButtonError, TouchPoint};
 pub use media::{Cartridge, LoadError, Media, SystemFile, SystemFileKind};
 pub use rom_patch::RomPatch;
