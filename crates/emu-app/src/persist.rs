@@ -3,7 +3,8 @@
 //! Battery saves, save states and cheats sit next to the ROM, as in mGBA
 //! and melonDS: `game.nds` gets `game.sav`, `game.ss1` and `game.cht`. A
 //! linked pair saves its states next to the first player's ROM as
-//! `game.ls1`.
+//! `game.ls1`. A GBA game in a DS's GBA slot keeps its own `.sav`; the
+//! session's states and cheats are the DS game's.
 
 use std::fs;
 use std::io;
@@ -14,12 +15,29 @@ pub fn backup_path(rom: &Path) -> PathBuf {
     rom.with_extension("sav")
 }
 
+/// A key equal for any two ROMs whose battery saves land in one file: the
+/// save path with its folder resolved (so `./a.nds` and `/games/a.gba`
+/// match), compared without case, as macOS file systems usually do.
+pub fn backup_key(rom: &Path) -> String {
+    let save = backup_path(rom);
+    let folder = match save.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => folder,
+        _ => Path::new("."),
+    };
+    let resolved = match (fs::canonicalize(folder), save.file_name()) {
+        (Ok(folder), Some(name)) => folder.join(name),
+        _ => save,
+    };
+    resolved.to_string_lossy().to_lowercase()
+}
+
 /// The cheat list for `rom`.
 pub fn cheats_path(rom: &Path) -> PathBuf {
     rom.with_extension("cht")
 }
 
-/// The save state file in `slot` for a session of `roms`, one per player.
+/// The save state file in `slot` for a session of `roms`, one per player
+/// (a cartridge in a second slot is not a player).
 ///
 /// # Panics
 ///
@@ -57,6 +75,16 @@ mod tests {
             PathBuf::from("/games/blue.gb"),
         ];
         assert_eq!(state_path(&linked, 2), Path::new("/games/red.ls2"));
+    }
+
+    #[test]
+    fn backup_keys_see_through_folder_spellings_and_case() {
+        let dir = std::env::temp_dir().join(format!("emu-app-keys-{}", std::process::id()));
+        fs::create_dir_all(dir.join("sub")).expect("create temp dir");
+        let key = backup_key(&dir.join("Pokemon.nds"));
+        assert_eq!(key, backup_key(&dir.join("sub/../pokemon.gba")));
+        assert_ne!(key, backup_key(&dir.join("sub/pokemon.gba")));
+        fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]

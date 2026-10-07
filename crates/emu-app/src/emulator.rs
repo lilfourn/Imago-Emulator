@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, ensure};
+use anyhow::{Context as _, bail, ensure};
 use emu_cheats::Cheat;
-use emu_core::{Core, CoreInfo, Frame, Input, Media, System};
+use emu_core::{Cartridge, Core, CoreInfo, Frame, Input, Media, System};
 
 use crate::audio::AudioSink;
 use crate::persist;
@@ -35,7 +35,8 @@ const REWIND_BUDGET_BYTES: usize = 64 << 20;
 /// A game ready to run: the core plus what is needed to save it.
 pub struct Loaded {
     core: Box<dyn Core>,
-    /// Each player's ROM file; battery saves sit next to them.
+    /// Each cartridge's ROM file, in the core's cartridge order: one per
+    /// player, then any in a second slot. Battery saves sit next to them.
     rom_paths: Vec<PathBuf>,
     /// Identifies the ROMs in save states.
     rom_crc32: u32,
@@ -47,9 +48,17 @@ impl Loaded {
         self.core.info()
     }
 
-    /// Each player's ROM file.
+    /// Each cartridge's ROM file: one per player, then any in a second
+    /// slot.
     pub fn rom_paths(&self) -> &[PathBuf] {
         &self.rom_paths
+    }
+
+    /// Each player's ROM file, which names the session's states and
+    /// cheats.
+    pub fn player_rom_paths(&self) -> &[PathBuf] {
+        let players = self.core.info().players;
+        &self.rom_paths[..players.min(self.rom_paths.len())]
     }
 }
 
@@ -58,6 +67,17 @@ struct RomFile {
     system: System,
     rom: Vec<u8>,
     backup: Option<Vec<u8>>,
+}
+
+impl RomFile {
+    /// The file as a core's media, its clock starting at `start_time`.
+    fn media(&self, start_time: i64) -> Media<'_> {
+        Media {
+            backup: self.backup.as_deref(),
+            start_time,
+            ..Media::new(&self.rom)
+        }
+    }
 }
 
 /// The local date and time now, in the form [`Media::start_time`] wants:
@@ -90,38 +110,47 @@ fn read_rom(rom_path: &Path) -> anyhow::Result<RomFile> {
     })
 }
 
-/// Reads each player's ROM and battery save and powers on the right core:
-/// one game, or with two ROMs a pair joined by a link cable.
+/// Reads each ROM and battery save and powers on the right core: one
+/// game; a DS game with a GBA game, which goes in the DS's GBA slot; or two
+/// games for the same system joined by a link cable.
 ///
 /// Blocking file I/O; call it off the UI thread.
 ///
 /// # Errors
 ///
 /// Fails if a file cannot be read, its system cannot be identified, linked
-/// ROMs are for different systems, or the core rejects them.
+/// ROMs are for different systems, two games would share a battery save
+/// file, or the core rejects them.
 pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
     let files = rom_paths
         .iter()
         .map(|path| read_rom(path))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let system = files.first().context("no ROM given")?.system;
-    ensure!(
-        files.iter().all(|file| file.system == system),
-        "linked games must be for the same system"
-    );
     let start_time = local_clock_seconds();
-    let media: Vec<Media<'_>> = files
-        .iter()
-        .map(|file| Media {
-            backup: file.backup.as_deref(),
-            start_time,
-            ..Media::new(&file.rom)
-        })
-        .collect();
-    let core = match media.as_slice() {
-        [one] => emu_cores::create(system, one)?,
-        players => emu_cores::create_linked(system, players)?,
+    let core = match files.as_slice() {
+        [] => bail!("no ROM given"),
+        [one] => emu_cores::create(one.system, &one.media(start_time))?,
+        [first, second] if emu_cores::second_slot(first.system) == Some(second.system) => {
+            let slotted = Media {
+                second_slot: Some(Cartridge {
+                    rom: &second.rom,
+                    backup: second.backup.as_deref(),
+                }),
+                ..first.media(start_time)
+            };
+            emu_cores::create(first.system, &slotted)?
+        }
+        [first, ..] => {
+            let system = first.system;
+            ensure!(
+                files.iter().all(|file| file.system == system),
+                "linked games must be for the same system"
+            );
+            let players: Vec<Media<'_>> = files.iter().map(|file| file.media(start_time)).collect();
+            emu_cores::create_linked(system, &players)?
+        }
     };
+    ensure_separate_saves(&*core, rom_paths)?;
     // One ROM keeps the plain CRC so older save states still match.
     let rom_crc32 = match files.as_slice() {
         [one] => crc32fast::hash(&one.rom),
@@ -138,6 +167,36 @@ pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
         rom_paths: rom_paths.to_vec(),
         rom_crc32,
     })
+}
+
+/// Fails if two cartridges with battery saves would use one `.sav` file,
+/// as `game.nds` and `game.gba` in one folder would: each would overwrite
+/// the other's save.
+fn ensure_separate_saves(core: &dyn Core, rom_paths: &[PathBuf]) -> anyhow::Result<()> {
+    let saving: Vec<&PathBuf> = (0..)
+        .zip(rom_paths)
+        .filter(|(cartridge, _)| core.backup_generation(*cartridge).is_some())
+        .map(|(_, rom)| rom)
+        .collect();
+    let keys: Vec<String> = saving.iter().map(|rom| persist::backup_key(rom)).collect();
+    for (index, rom) in saving.iter().enumerate() {
+        if let Some(other) = (0..index).find(|other| keys[*other] == keys[index]) {
+            bail!(
+                "{} and {} would both save to {}; rename one of them",
+                file_name(saving[other]),
+                file_name(rom),
+                file_name(&persist::backup_path(rom)),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// A request from the UI to the emulation thread.
@@ -238,8 +297,8 @@ impl Emulator {
         let latest = Arc::new(Latest::default());
         let players = loaded.core.info().players.max(1);
         let runner = Runner {
-            flushed_generations: (0..players)
-                .map(|player| loaded.core.backup_generation(player).unwrap_or(0))
+            flushed_generations: (0..loaded.rom_paths.len())
+                .map(|cartridge| loaded.core.backup_generation(cartridge).unwrap_or(0))
                 .collect(),
             loaded,
             inputs: vec![Input::default(); players],
@@ -324,7 +383,7 @@ struct Runner {
     speed: Speed,
     rewinding: bool,
     rewind: Rewind,
-    /// Per player: the backup generation last written to disk.
+    /// Per cartridge: the backup generation last written to disk.
     flushed_generations: Vec<u64>,
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
@@ -513,7 +572,7 @@ impl Runner {
             height: size.height,
             rgb: &rgb,
         };
-        let path = persist::state_path(&self.loaded.rom_paths, slot);
+        let path = persist::state_path(self.loaded.player_rom_paths(), slot);
         persist::write_atomic(
             &path,
             &emu_state::encode(&header, &payload, Some(thumbnail)),
@@ -522,7 +581,7 @@ impl Runner {
     }
 
     fn load_state(&mut self, slot: u8) -> anyhow::Result<()> {
-        let path = persist::state_path(&self.loaded.rom_paths, slot);
+        let path = persist::state_path(self.loaded.player_rom_paths(), slot);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let emu_state::Decoded {
             header, payload, ..
@@ -546,20 +605,21 @@ impl Runner {
         Ok(self.loaded.core.load_state(payload)?)
     }
 
-    /// Writes each player's battery save that changed since the last flush.
+    /// Writes each cartridge's battery save that changed since the last
+    /// flush.
     fn flush_backup(&mut self) {
-        for player in 0..self.flushed_generations.len() {
-            let Some(generation) = self.loaded.core.backup_generation(player) else {
+        for cartridge in 0..self.flushed_generations.len() {
+            let Some(generation) = self.loaded.core.backup_generation(cartridge) else {
                 continue;
             };
-            if generation == self.flushed_generations[player] {
+            if generation == self.flushed_generations[cartridge] {
                 continue;
             }
             let mut backup = Vec::new();
-            self.loaded.core.save_backup(player, &mut backup);
-            let path = persist::backup_path(&self.loaded.rom_paths[player]);
+            self.loaded.core.save_backup(cartridge, &mut backup);
+            let path = persist::backup_path(&self.loaded.rom_paths[cartridge]);
             match persist::write_atomic(&path, &backup) {
-                Ok(()) => self.flushed_generations[player] = generation,
+                Ok(()) => self.flushed_generations[cartridge] = generation,
                 Err(error) => self.notice(format!("Could not write {}: {error}", path.display())),
             }
         }
@@ -714,6 +774,101 @@ mod tests {
         assert!(notices.contains(&Event::Notice("Saved state 2".to_owned())));
         assert!(notices.contains(&Event::Notice("Loaded state 2".to_owned())));
         drop(emulator);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A DS ROM whose two programs loop forever.
+    fn nds_rom() -> Vec<u8> {
+        let mut rom = vec![0; 0x400];
+        let mut put = |offset: usize, value: u32| {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        for (header, program, address) in [(0x20, 0x200, 0x0200_4000), (0x30, 0x300, 0x0238_0000)] {
+            put(header, program);
+            put(header + 4, address);
+            put(header + 8, address);
+            put(header + 12, 4);
+            put(program as usize, 0xEAFF_FFFE); // B .
+        }
+        rom
+    }
+
+    /// A GBA ROM with 128 KiB of Flash.
+    fn gba_rom() -> Vec<u8> {
+        let mut rom = vec![0; 0x400];
+        rom[0xB2] = 0x96;
+        rom[0x200..0x209].copy_from_slice(b"FLASH1M_V");
+        rom
+    }
+
+    /// Writes `files` into a fresh directory named after `test`.
+    fn rom_dir(test: &str, files: &[(&str, &[u8])]) -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!("emu-app-{test}-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let paths = files
+            .iter()
+            .map(|(name, bytes)| {
+                let path = dir.join(name);
+                fs::write(&path, bytes).expect("write rom");
+                path
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    #[test]
+    fn a_gba_game_after_a_ds_game_goes_in_the_gba_slot() {
+        let (dir, paths) = rom_dir(
+            "slot",
+            &[("platinum.nds", &nds_rom()), ("emerald.gba", &gba_rom())],
+        );
+        let loaded = load(&paths).expect("loads");
+        assert_eq!(
+            (loaded.info().system, loaded.info().players),
+            (System::Nds, 1)
+        );
+        assert_eq!(loaded.rom_paths().len(), 2);
+        assert_eq!(loaded.player_rom_paths(), &paths[..1]);
+        assert!(loaded.core.backup_generation(1).is_some(), "the GBA save");
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn games_for_one_system_still_link() {
+        let (dir, paths) = rom_dir(
+            "link",
+            &[("ruby.gba", &gba_rom()), ("sapphire.gba", &gba_rom())],
+        );
+        let loaded = load(&paths).expect("loads");
+        assert_eq!(
+            (loaded.info().system, loaded.info().players),
+            (System::Gba, 2)
+        );
+        assert_eq!(loaded.player_rom_paths(), &paths[..]);
+        let (dir_mixed, mixed) = rom_dir(
+            "mixed",
+            &[("ruby.gba", &gba_rom()), ("platinum.nds", &nds_rom())],
+        );
+        let error = load(&mixed)
+            .err()
+            .expect("a GBA game cannot take a DS game");
+        assert!(format!("{error:#}").contains("same system"), "{error:#}");
+        fs::remove_dir_all(&dir).expect("clean up");
+        fs::remove_dir_all(&dir_mixed).expect("clean up");
+    }
+
+    #[test]
+    fn games_that_would_share_a_save_file_are_refused() {
+        let (dir, paths) = rom_dir(
+            "shared-save",
+            &[("pokemon.nds", &nds_rom()), ("pokemon.gba", &gba_rom())],
+        );
+        let error = load(&paths).err().expect("refused");
+        assert_eq!(
+            format!("{error:#}"),
+            "pokemon.nds and pokemon.gba would both save to pokemon.sav; rename one of them"
+        );
+        assert!(!dir.join("pokemon.sav").exists());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 }

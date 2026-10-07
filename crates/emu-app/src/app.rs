@@ -15,6 +15,7 @@ actions!(
     [
         OpenRom,
         ConnectLinkCable,
+        InsertGbaCartridge,
         EditCheats,
         SwitchPlayer,
         TogglePause,
@@ -56,7 +57,8 @@ const SYSTEM_BARS: f32 = 100.0;
 const TITLE_BAR: f32 = 33.0;
 
 /// Runs the app until the user quits, opening `roms` at launch: one game,
-/// or two linked Game Boy or Game Boy Advance games.
+/// a DS game with a GBA game in its GBA slot, or two linked Game Boy or
+/// Game Boy Advance games.
 pub fn run(roms: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -142,6 +144,7 @@ fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Open ROM…", OpenRom),
                 MenuItem::action("Connect Link Cable…", ConnectLinkCable),
+                MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),
                 MenuItem::separator(),
                 MenuItem::action("Edit Cheats…", EditCheats),
             ],
