@@ -28,6 +28,7 @@ mod arm;
 mod arm9;
 mod armv5;
 pub mod cp15;
+mod disasm;
 mod model;
 mod protection;
 mod tcm;
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 pub use arm9::{Arm9, Arm946es};
 pub use cp15::Cp15;
+pub use disasm::{Architecture, Disassembly, disassemble_arm, disassemble_thumb};
 pub use model::{Arm7tdmi, Model};
 
 /// How a memory access relates to the previous one, as a bit set.
