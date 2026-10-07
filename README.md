@@ -10,11 +10,12 @@ play the Pokémon games of generations 1–5 from your own cartridge dumps.
 with an HLE BIOS. Pokémon White plays from power-on through a new game to
 Route 1, and its in-game save survives a restart. It has:
 - an ARM946E-S and an ARM7TDMI in lockstep, with IPC;
-- both 2D engines and a software 3D engine with anti-aliasing;
+- both 2D engines and a software 3D engine with anti-aliasing, which can
+  draw at up to 8× its resolution;
 - 16-channel sound with capture;
 - the game card with flash saves;
 - the GBA slot, which reads a GBA game and its save for Pal Park;
-- the touchscreen, firmware and RTC.
+- the touchscreen, microphone, firmware and RTC.
 It passes every test in RockPolish's rockwrestler and every page of
 armwrestler for the DS.
 
@@ -34,7 +35,7 @@ dumps. The app has:
 - sound and gamepads;
 - save-state slots with thumbnails, rewind and fast-forward;
 - link play;
-- GBC/GBA colour correction;
+- GBC/GBA colour correction, and DS 3D at 2×, 3× or 4× resolution;
 - cheats and a memory viewer.
 
 See the [roadmap](docs/ROADMAP.md).
@@ -79,11 +80,13 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 | Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
 | Slow motion | Hold 1 | | | Swap screens / Quit | ⌘E / ⌘Q |
 | Rewind | Hold R | Left trigger | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
-| | | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
+| Blow into the microphone (DS) | Hold B | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
 | | | | | Full screen | ⌃⌘F |
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Colour correction on/off | ⌘⇧C |
 | | | | | Memory viewer | ⌘⇧M |
+| | | | | 3D resolution (DS) | View > 3D Resolution |
+| | | | | Computer's microphone on/off (DS) | Emulation > Use Microphone |
 
 The keys are laid out for playing on a keyboard: the left hand on W A S D
 with the shoulders on Q and E, the right hand on a square of four keys
@@ -94,9 +97,22 @@ as fits the display; full screen shows them at the display's full height,
 on black. Hybrid shows one screen large beside both screens small, as in
 melonDS; Swap Screens chooses the large one. Rotation turns the whole
 arrangement for games played with the DS held like a book, and touch
-follows it. A 90 px gap matches the DS hinge. The layout, swap, rotation
-and gap are remembered in
+follows it. A 90 px gap matches the DS hinge. The layout, swap, rotation,
+gap and 3D resolution are remembered in
 `~/Library/Application Support/ds-emulator/settings.toml`.
+
+View > 3D Resolution draws DS 3D at 2×, 3× or 4× its own resolution
+(`resolution_3d` under `[video]` in settings.toml goes up to 8): polygon
+edges, textures and shading come out smooth, and the 2D layers around
+them stay pixel for pixel. The game still sees native 3D wherever it reads
+it back, so emulation and save states are the same at every resolution.
+States hold only native frames, so the first frame after loading one, and
+the frames rewind steps back through, show 3D at the native resolution.
+
+Hold B to blow into the DS microphone, for games that ask you to blow or
+shout. Emulation > Use Microphone listens to the computer's microphone
+instead. It is off at every launch, and only how loud it is reaches the
+game, as noise.
 
 Gamepad buttons are named by position, so A is the right face button as on a
 Nintendo controller. Rebind keys and gamepad controls in

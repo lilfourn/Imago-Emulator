@@ -43,3 +43,5 @@ a shader hook.
 - Upscaled DS frames cost more CPU, both in the rasterizer and in the
   image upload. Plan the M14 renderer with that in mind, for example by
   rasterizing on a worker thread.
+- Done in M16 that way: `Core::set_render_scale` draws DS 3D at up to 8×,
+  in bands on threads, and the app needed no change to its drawing.

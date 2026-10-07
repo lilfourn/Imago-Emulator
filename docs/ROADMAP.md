@@ -234,6 +234,10 @@ are done.
   dump, at about 3× full speed headless.
 - 3D has edge anti-aliasing, edge marking, fog, toon shading and shadows.
   Sound has all 16 channels and both capture units.
+- M16 so far: 3D draws at up to 8× its resolution (View > 3D Resolution),
+  with the 2D layers enlarged around it; in White's bedroom, headless on an
+  M5 Max, that runs at about 3.2× full speed at 2× and 2.7× at 4×. The
+  microphone hears a blow key (B) or the computer's microphone.
 - RockPolish's rockwrestler passes all 23 of its tests, and armwrestler
   for the DS all eight of its pages, both checked by `cargo test`.
 - VBlankIntrWait, which libnds calls as swiWaitForVBlank, used to wait
@@ -250,7 +254,7 @@ are done.
 | M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS (the test-ROM runner reads text off the screen, not CRCs) |
 | M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
 | M15 | Pokémon White shows no anti-piracy symptoms; GBA slot with SRAM and Flash saves ([decision 0006](decisions/0006-gba-slot.md)) | Timing against melonDS traces; HG/SS and B2/W2; Pal Park with real GBA dumps |
-| M16 | — | 3D upscaling, microphone, local wireless |
+| M16 | 3D upscaling to 8× (NDS-9); microphone from a blow key or the computer's (NDS-10) | Local wireless |
 
 ### M12. Two CPUs
 
@@ -287,6 +291,9 @@ are done.
 
 - 3D upscaling, microphone or "blow" button, local wireless between two
   instances.
+- Done: 3D upscaling (`Core::set_render_scale`, View > 3D Resolution); the
+  microphone as a loudness in `Input` (hold B, or Emulation > Use
+  Microphone).
 - **Exit:** trade between two instances of Platinum or HeartGold/SoulSilver
   over emulated local wireless.
 
@@ -326,5 +333,6 @@ are done.
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gap, gamepad touch | UI-2, UI-7 | M13 ✅ |
 | Keyboard-first defaults, large window, full screen | UI-2, UI-5 | Phase 4 ✅ |
-| 3D upscaling | NDS-9 | M16 |
+| 3D upscaling (View > 3D Resolution) | NDS-9 | M16 ✅ |
+| Blow key, computer microphone | NDS-10 | M16 ✅ |
 | Shader chain, recording, achievements, scripting | UI-4, UI-14 | Later |

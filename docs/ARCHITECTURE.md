@@ -55,6 +55,7 @@ pub trait Core: Send {
     fn info(&self) -> CoreInfo;                       // system, screens, timing, audio rate
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>); // one per player
     fn screens(&self) -> &[Frame];                     // DS: [top, bottom]
+    fn set_render_scale(&mut self, scale: u32);        // DS: 3D at N× resolution, display only
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
@@ -80,7 +81,7 @@ pub trait Core: Send {
   `i`, and a DS's GBA slot cartridge is 1. Each keeps its own `.sav`.
 - **Input is per frame and per player**: a 12-bit button mask (bit order follows the GBA
   `KEYINPUT` register, then DS X/Y) plus an optional touch point in
-  bottom-screen pixels.
+  bottom-screen pixels and a microphone loudness, 0 to 255 (DS).
 - **Pixels** are `u32` `0xFFRRGGBB`. On little-endian hosts that is BGRA in
   memory, which GPUI and Metal upload without conversion.
 - **Audio** is interleaved `i16` stereo at the core's own rate; the frontend
@@ -91,6 +92,10 @@ pub trait Core: Send {
 - **ROM patches** are configuration, like the ROM itself: a core keeps the
   set it was last given, applies it to every ROM read, leaves it out of
   save states and keeps it through `load_state` and `reset`.
+- **The render scale** is configuration too: after `set_render_scale(n)`
+  a DS core's frames are n times wider and taller, 3D drawn at that
+  resolution. Touch points and layouts stay in `CoreInfo::screens` pixels,
+  and emulation, audio and state bytes are the same at every scale.
 
 ## Threads in the app
 
@@ -153,6 +158,15 @@ Filters are CPU passes over frames before they become images
 only one is GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup
 table from each 15-bit console colour to its corrected pixel.
 
+DS 3D upscaling is the core's job, as that decision planned. At a render
+scale above 1, the DS draws each 3D frame twice: at the native
+resolution, which display capture can put in VRAM for the game, and
+larger, in 16 horizontal bands on scoped threads. Engine A copies each
+line that shows 3D, with the registers that composed it, and at VBlank
+composes those lines again around the larger 3D frame, a few lines to a
+thread; everything else is enlarged. The app draws the larger frames like
+any others and pre-scales them less.
+
 GPUI cannot rotate images either, so rotated layouts turn each screen on
 the CPU too (`video::turn`). The touch mapping in `layout.rs` uses the same
 pixel mapping, so a touch lands on the pixel drawn under it.
@@ -170,7 +184,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Save state | next to the ROM, `game.ss1` | `emu-state` container |
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
-| Screen layout | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
+| Layout, speeds, 3D resolution | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
 
 Writes go to `name.tmp` first and are renamed over the target.
 
