@@ -28,18 +28,22 @@ mod arm;
 mod arm9;
 mod armv5;
 pub mod cp15;
+mod describe;
 mod disasm;
 mod model;
 mod protection;
 mod tcm;
 mod thumb;
+mod watch;
 
 use serde::{Deserialize, Serialize};
 
 pub use arm9::{Arm9, Arm946es};
 pub use cp15::Cp15;
+pub use describe::describe_psr;
 pub use disasm::{Architecture, Disassembly, disassemble_arm, disassemble_thumb};
 pub use model::{Arm7tdmi, Model};
+pub use watch::Watched;
 
 /// How a memory access relates to the previous one, as a bit set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -106,6 +110,13 @@ pub trait Bus {
     fn write_8(&mut self, address: u32, value: u8, access: Access);
     /// Spends one internal cycle without a memory access.
     fn idle(&mut self);
+    /// Notes a data access an ARM9 served from its tightly coupled memory,
+    /// which never reaches the bus: `bytes` (1, 2 or 4) at `address`,
+    /// whether it was a store, and the value. Only debuggers' watchpoints
+    /// care (see [`Watched`]); by default it does nothing.
+    fn tcm_data(&mut self, address: u32, bytes: u32, write: bool, value: u32) {
+        let _ = (address, bytes, write, value);
+    }
 }
 
 /// A processor mode, as encoded in CPSR bits 0–4.
