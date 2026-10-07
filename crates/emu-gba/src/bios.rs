@@ -102,6 +102,7 @@ pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
 }
 
 fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
+    bus.abandon_intr_wait();
     let to_ram = bus.read_8(0x0300_7FFA, Access::NONSEQUENTIAL) != 0;
     for address in (0x0300_7E00..0x0300_8000).step_by(4) {
         bus.write_32(address, 0, Access::NONSEQUENTIAL);
@@ -143,12 +144,16 @@ fn register_ram_reset(bus: &mut Bus, flags: u32) {
 /// at 0x03007FF8 (which the game's IRQ handler sets), then clears it.
 ///
 /// While waiting, the CPU halts and returns to the SWI instruction itself,
-/// so the call runs again after each interrupt; R0 is zeroed so the repeat
-/// does not discard flags the handler just set.
+/// so the call runs again after each interrupt. The repeat must not discard
+/// flags the handler just set: R0 is zeroed for IntrWait's sake, and as
+/// VBlankIntrWait ignores R0, the bus also remembers which call halted.
 fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) {
     const BIOS_FLAGS: u32 = 0x0300_7FF8;
+    let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
+    let swi = cpu.reg(14).wrapping_sub(if thumb { 2 } else { 4 });
+    let repeat = bus.repeats_intr_wait(swi);
     let mut current = bus.read_16(BIOS_FLAGS, Access::NONSEQUENTIAL);
-    if discard {
+    if discard && !repeat {
         current &= !flags;
         bus.write_16(BIOS_FLAGS, current, Access::NONSEQUENTIAL);
     }
@@ -156,11 +161,9 @@ fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) {
     if current & flags != 0 {
         bus.write_16(BIOS_FLAGS, current & !flags, Access::NONSEQUENTIAL);
     } else {
-        let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
-        let swi_length = if thumb { 2 } else { 4 };
         cpu.set_reg(0, 0);
-        cpu.set_reg(14, cpu.reg(14).wrapping_sub(swi_length));
-        bus.halt();
+        cpu.set_reg(14, swi);
+        bus.halt_in_intr_wait(swi);
     }
     bus.set_bios_open_bus(OPEN_BUS_AFTER_SWI);
     cpu.return_from_exception(bus);
@@ -588,5 +591,63 @@ mod tests {
         assert_eq!(arc_tan2(0, -1), 0xC000);
         let diagonal = arc_tan2(100, 100);
         assert!((0x1FF0..=0x2010).contains(&diagonal), "{diagonal:x}");
+    }
+
+    #[test]
+    fn vblank_intr_wait_returns_once_per_frame() {
+        use emu_core::{Core, Media};
+        let mut rom = vec![0u8; 0x200];
+        let mut put = |address: usize, program: &[u32]| {
+            for (index, word) in program.iter().enumerate() {
+                let at = address + index * 4;
+                rom[at..at + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        };
+        put(
+            0x000,
+            &[
+                0xE3A0_0301, // MOV R0, #0x04000000
+                0xE3A0_1008, // MOV R1, #8
+                0xE1C0_10B4, // STRH R1, [R0, #4]  (DISPSTAT: VBlank IRQ)
+                0xE280_2C02, // ADD R2, R0, #0x200
+                0xE3A0_1001, // MOV R1, #1
+                0xE1C2_10B0, // STRH R1, [R2]  (IE: VBlank)
+                0xE1C2_10B8, // STRH R1, [R2, #8]  (IME)
+                0xE3A0_3403, // MOV R3, #0x03000000
+                0xE283_3C7F, // ADD R3, R3, #0x7F00
+                0xE283_30FC, // ADD R3, R3, #0xFC
+                0xE3A0_4408, // MOV R4, #0x08000000
+                0xE284_4C01, // ADD R4, R4, #0x100
+                0xE583_4000, // STR R4, [R3]  (the IRQ handler)
+                0xEF05_0000, // loop: SWI 0x05  (VBlankIntrWait)
+                0xE285_5001, // ADD R5, R5, #1
+                0xEAFF_FFFC, // B loop
+            ],
+        );
+        // The handler acknowledges the IRQ and sets the BIOS flag, as every
+        // game's does.
+        put(
+            0x100,
+            &[
+                0xE3A0_0301, // MOV R0, #0x04000000
+                0xE280_0C02, // ADD R0, R0, #0x200
+                0xE3A0_1001, // MOV R1, #1
+                0xE1C0_10B2, // STRH R1, [R0, #2]  (IF)
+                0xE3A0_2403, // MOV R2, #0x03000000
+                0xE282_2C7F, // ADD R2, R2, #0x7F00
+                0xE282_20F8, // ADD R2, R2, #0xF8
+                0xE1D2_30B0, // LDRH R3, [R2]
+                0xE383_3001, // ORR R3, R3, #1
+                0xE1C2_30B0, // STRH R3, [R2]
+                0xE12F_FF1E, // BX LR
+            ],
+        );
+        rom[0xB2] = 0x96;
+        let mut gba = crate::Gba::new(&Media::new(&rom)).expect("valid rom");
+        for _ in 0..10 {
+            gba.run_frame(&[], &mut Vec::new());
+        }
+        let frames_waited = gba.cpu().reg(5);
+        assert!((9..=10).contains(&frames_waited), "{frames_waited}");
     }
 }
