@@ -12,6 +12,10 @@ jobs:
       - uses: actions/checkout@v5
       - name: No Nintendo files
         run: scripts/check-no-nintendo-files.sh
+      # Bundles pinned to a release or commit: the Game Boy suites, jsmolka,
+      # armwrestler (GBA and DS) and rockwrestler. The mGBA suite is left
+      # out: its only download is a "latest" build that moves
+      # (scripts/fetch-mgba-suite.sh), so its test skips here.
       - name: Fetch test ROMs
         run: scripts/fetch-test-roms.sh
       - uses: Swatinem/rust-cache@v2

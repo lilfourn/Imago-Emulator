@@ -149,11 +149,16 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 
 ## Phase 3 — Game Boy Advance
 
-**Status (2026-10-05):** M7–M11 met on test ROMs and unit tests:
+**Status (2026-10-07):** M7–M11 met on test ROMs and unit tests, except
+M8's mGBA timer tests:
 - the ARM7TDMI passes all 45 SingleStepTests files (2.25 million cases);
-- jsmolka's arm, thumb, memory, bios, nes and save tests all pass.
+- jsmolka's arm, thumb, memory, bios, nes and save tests all pass;
+- armwrestler passes all eight of its pages;
+- the mGBA test suite passes 4,547 of the 6,998 checks in its 13
+  self-checking groups (`crates/emu-gba/tests/mgba-suite-passing.txt`).
 What's missing:
-- armwrestler and the mGBA test suite are not wired into the harness yet;
+- most of the mGBA suite's timer, I/O read, BIOS math and SIO checks (see
+  M8);
 - the debugger has only the memory viewer (no disassembly or registers);
 - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) settles Q3
   but awaits review.
@@ -169,12 +174,18 @@ FireRed–Emerald trade) need your own dumps.
   memory.
 - **Exit:** jsmolka `arm.gba` and `thumb.gba` pass, plus armwrestler.
 
-### M8. Memory, DMA, timers, BIOS ✅ (jsmolka)
+### M8. Memory, DMA, timers, BIOS ✅ (jsmolka; not the mGBA timer tests)
 
 - Memory map with wait states, DMA, timers, IRQs, HLE BIOS for SWI calls,
   and the GBA's events moved onto `emu-sched`.
 - **Exit:** jsmolka memory and BIOS tests pass, along with most of the mGBA
   suite's timer and DMA tests.
+- mGBA suite, per group: memory 1,385/1,552, I/O read 23/130, timing
+  1,100/2,020, timer count-up 365/936, timer IRQ 0/90, shifter 140/140,
+  carry 93/93, multiply long 52/72, BIOS math 322/615, DMA 1,056/1,244, SIO
+  registers 7/90, SIO timing 0/4, misc. edge cases 4/12. DMA meets the bar;
+  the timers do not. Running the suite found that VBlankIntrWait never
+  returned under the HLE BIOS; that is fixed.
 
 ### M9. Video and sound ✅ (implemented; needs a dump to check)
 
@@ -212,7 +223,7 @@ FireRed–Emerald trade) need your own dumps.
 
 ## Phase 4 — Nintendo DS
 
-**Status (2026-10-06):** M12–M14 are implemented and M13's frontend items
+**Status (2026-10-07):** M12–M14 are implemented and M13's frontend items
 are done.
 - The DS core direct-boots retail games with an HLE BIOS, including the
   callback decompressors and SoftReset.
@@ -223,7 +234,11 @@ are done.
   dump, at about 3× full speed headless.
 - 3D has edge anti-aliasing, edge marking, fog, toon shading and shadows.
   Sound has all 16 channels and both capture units.
-- RockPolish's rockwrestler test ROM passes every test.
+- RockPolish's rockwrestler passes all 23 of its tests, and armwrestler
+  for the DS all eight of its pages, both checked by `cargo test`.
+- VBlankIntrWait, which libnds calls as swiWaitForVBlank, used to wait
+  forever under the HLE BIOS; the mGBA suite found the same bug on the GBA.
+  Both are fixed.
 - Action Replay DS cheats (`ards` in `game.cht`) run after each frame on
   main RAM, and button codes read KEYINPUT and EXTKEYIN. A button-activated
   pointer code changes only its target bytes in a White run (probe
@@ -231,8 +246,8 @@ are done.
 
 | M | Done | Left |
 |---|---|---|
-| M12 | ARMv5TE, CP15 with TCMs and MPU enforcement, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro) |
-| M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS |
+| M12 | ARMv5TE, CP15 with TCMs and MPU enforcement, lockstep CPUs, IPC; armwrestler-DS and rockwrestler pass | A libnds hello world: devkitPro publishes no built one, so it needs devkitARM to build |
+| M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS (the test-ROM runner reads text off the screen, not CRCs) |
 | M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
 | M15 | Pokémon White shows no anti-piracy symptoms; GBA slot with SRAM and Flash saves ([decision 0006](decisions/0006-gba-slot.md)) | Timing against melonDS traces; HG/SS and B2/W2; Pal Park with real GBA dumps |
 | M16 | — | 3D upscaling, microphone, local wireless |

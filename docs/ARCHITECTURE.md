@@ -209,7 +209,7 @@ order). A core's main loop:
 |---|---|---|
 | Unit tests | `#[cfg(test)]` in each module | `cargo test --workspace` |
 | Determinism | headless runner, run twice and diff | M1 test-ROM script |
-| Test ROMs | headless runner + manifest (TOOL-2) | M1 onward, in CI |
+| Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |
 | Trace diffing | trace logger vs. mGBA/SameBoy/melonDS (TOOL-3) | by hand while debugging |
 | Pokémon checkpoints | your own dumps, by hand | at each milestone |
 

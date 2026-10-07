@@ -160,9 +160,9 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | ID | Requirement | Priority |
 |---|---|---|
 | TOOL-1 | Headless runner: runs N frames and prints one `key=value` line per screen with a CRC-32, and optionally dumps PPM images. ✅ | P0 · S |
-| TOOL-2 | Test-ROM suite: a manifest of test ROMs and their pass criteria (serial output, Mooneye's Fibonacci registers, framebuffer CRC), a script that runs them all and prints a pass table, run in CI. Test ROMs are downloaded by script, never committed. ✅ | P0 · M1 |
+| TOOL-2 | Test-ROM suite: a manifest of test ROMs and their pass criteria (serial output, Mooneye's Fibonacci registers, framebuffer CRC), a script that runs them all and prints a pass table, run in CI. Test ROMs are downloaded by script, never committed. ✅ GB/GBC (c-sp bundle), GBA (jsmolka, armwrestler, mGBA suite) and DS (rockwrestler, armwrestler); menu-driven ROMs are driven by scripted presses and read off the screen or VRAM. CI runs all but the mGBA suite, which has no pinned download. | P0 · M1 |
 | TOOL-3 | Trace logger whose format can be diffed against mGBA, SameBoy and melonDS logs. ✅ | P1 · M1 |
-| TOOL-4 | CI on macOS: rustfmt, clippy with warnings denied, tests, and a check that no Nintendo files are tracked. ✅ written, not yet run on a remote | P0 · S |
+| TOOL-4 | CI on macOS: rustfmt, clippy with warnings denied, tests, and a check that no Nintendo files are tracked. ✅ runs on GitHub Actions for every push to main and every pull request | P0 · S |
 
 ## 7. Non-functional requirements
 

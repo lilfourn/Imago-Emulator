@@ -15,7 +15,8 @@ Route 1, and its in-game save survives a restart. It has:
 - the game card with flash saves;
 - the GBA slot, which reads a GBA game and its save for Pal Park;
 - the touchscreen, firmware and RTC.
-It passes every test in RockPolish's rockwrestler test ROM.
+It passes every test in RockPolish's rockwrestler and every page of
+armwrestler for the DS.
 
 The Game Boy and Game Boy Color core passes 135 of 158 open-source test
 ROMs, including all of Blargg's CPU tests, dmg-acid2 and cgb-acid2. The Game
@@ -25,7 +26,9 @@ Boy Advance core has:
 - SRAM, Flash and EEPROM saves;
 - the Pokémon real-time clock;
 - a link cable.
-It passes every jsmolka test ROM it runs, including the save tests. Neither
+It passes every jsmolka test ROM it runs, including the save tests, and
+every page of armwrestler. It passes 4,547 of the mGBA test suite's 6,998
+checks: all of the shifter and carry tests, few of the timer ones. Neither
 core has been checked against commercial games yet; that needs your own
 dumps. The app has:
 - sound and gamepads;
@@ -190,13 +193,24 @@ cargo run --release -p emu-gb --example trace -- rom.gb 1000 # CPU trace
 
 `crates/emu-gb/tests/test-roms-passing.txt` lists every ROM known to pass;
 the test fails if one regresses. Record new passes with `UPDATE_PASSING=1`.
-The GBA works the same way:
+The GBA and DS work the same way, with a passing list per suite next to
+each `test_roms.rs`:
 
 ```sh
-cargo test -p emu-gba --release --test test_roms -- --nocapture  # jsmolka
-scripts/fetch-arm-tests.sh                                       # ~900 MB, once
-cargo test -p emu-arm --release --test single_step               # ARM7TDMI
+scripts/fetch-mgba-suite.sh                            # the mGBA suite, once
+cargo test -p emu-gba --test test_roms -- --nocapture  # jsmolka, armwrestler, mGBA
+cargo test -p emu-nds --test test_roms -- --nocapture  # rockwrestler, armwrestler
+scripts/fetch-arm-tests.sh                             # ~900 MB, once
+cargo test -p emu-arm --release --test single_step     # ARM7TDMI
 ```
+
+armwrestler and rockwrestler are menus: the harness presses its way to
+each page or test and reads the result off the screen with the ROM's own
+font. The mGBA suite's passing list holds a pass count per test group, and
+a group fails if its count drops. A suite whose ROMs are missing is
+skipped. CI fetches everything but the mGBA suite, whose only download is
+a moving "latest" build; `fetch-mgba-suite.sh` checks it against a pinned
+commit's build.
 
 ## Workspace
 
