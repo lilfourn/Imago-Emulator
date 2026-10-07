@@ -6,14 +6,11 @@
 //! far.
 
 mod apu;
-mod backup;
 mod bios;
 mod bus;
-mod cartridge;
 mod dma;
 mod link;
 mod ppu;
-mod rtc;
 mod sio;
 mod timer;
 mod timing;
@@ -23,10 +20,10 @@ use emu_core::{
     Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
     StateError, StereoSample, System, SystemFileKind,
 };
+use emu_gba_cart::Cartridge;
 use serde::{Deserialize, Serialize};
 
 use bus::Bus;
-use cartridge::Cartridge;
 
 pub use link::Linked;
 

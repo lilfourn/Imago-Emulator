@@ -1673,10 +1673,18 @@ version = "0.1.0"
 dependencies = [
  "emu-arm",
  "emu-core",
+ "emu-gba-cart",
  "emu-psg",
  "emu-sched",
  "png 0.18.1",
  "postcard",
+ "serde",
+]
+
+[[package]]
+name = "emu-gba-cart"
+version = "0.1.0"
+dependencies = [
  "serde",
 ]
 

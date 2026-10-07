@@ -15,6 +15,7 @@ emu-state = { path = "crates/emu-state" }
 emu-arm = { path = "crates/emu-arm" }
 emu-gb = { path = "crates/emu-gb" }
 emu-gba = { path = "crates/emu-gba" }
+emu-gba-cart = { path = "crates/emu-gba-cart" }
 emu-nds = { path = "crates/emu-nds" }
 emu-psg = { path = "crates/emu-psg" }
 emu-cores = { path = "crates/emu-cores" }
@@ -58,6 +59,8 @@ opt-level = 3
 [profile.dev.package.emu-gb]
 opt-level = 2
 [profile.dev.package.emu-gba]
+opt-level = 2
+[profile.dev.package.emu-gba-cart]
 opt-level = 2
 [profile.dev.package.emu-nds]
 opt-level = 2

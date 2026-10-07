@@ -6,12 +6,12 @@
 //! and DMA events) at the exact cycle they are due.
 
 use emu_arm::{Access, Bus as CpuBus};
+use emu_gba_cart::Cartridge;
 use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
 
 use crate::apu::{self, Apu};
 use crate::bios;
-use crate::cartridge::Cartridge;
 use crate::dma::{Dma, Timing};
 use crate::ppu::{self, Ppu};
 use crate::sio::{self, Sio};
