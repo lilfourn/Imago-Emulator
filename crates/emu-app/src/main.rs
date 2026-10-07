@@ -20,6 +20,7 @@ mod resample;
 mod rewind;
 mod settings;
 mod slots;
+mod speed;
 mod video;
 mod view;
 

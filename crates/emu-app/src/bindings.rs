@@ -1,6 +1,6 @@
-//! Bindings for held inputs: emulated buttons, fast-forward, rewind and
-//! touching the screen at the gamepad cursor, from the keyboard or
-//! gamepads.
+//! Bindings for held inputs: emulated buttons, fast-forward, slow motion,
+//! rewind and touching the screen at the gamepad cursor, from the keyboard
+//! or gamepads.
 //!
 //! One-shot commands (Open, Pause, Save State, ...) are GPUI actions bound
 //! to menu shortcuts in `app.rs`. This module covers only inputs that are
@@ -39,8 +39,10 @@ use serde::Deserialize;
 pub enum Held {
     /// Holds an emulated button.
     Button(Button),
-    /// Runs emulation unthrottled while held.
+    /// Runs emulation at the fast-forward speed while held.
     FastForward,
+    /// Runs emulation at the slow-motion speed while held.
+    SlowMotion,
     /// Steps backwards through recent history while held.
     Rewind,
     /// Touches the touchscreen at the gamepad cursor while held.
@@ -52,6 +54,7 @@ impl fmt::Display for Held {
         match self {
             Self::Button(button) => button.fmt(f),
             Self::FastForward => f.write_str("fast_forward"),
+            Self::SlowMotion => f.write_str("slow_motion"),
             Self::Rewind => f.write_str("rewind"),
             Self::Touch => f.write_str("touch"),
         }
@@ -64,6 +67,7 @@ impl FromStr for Held {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "fast_forward" => Ok(Self::FastForward),
+            "slow_motion" => Ok(Self::SlowMotion),
             "rewind" => Ok(Self::Rewind),
             "touch" => Ok(Self::Touch),
             _ => s
@@ -86,7 +90,7 @@ pub struct Bindings {
     gamepads: HashMap<String, Map>,
 }
 
-const KEY_DEFAULTS: [(Held, &str); 14] = [
+const KEY_DEFAULTS: [(Held, &str); 15] = [
     (Held::Button(Button::A), "x"),
     (Held::Button(Button::B), "z"),
     (Held::Button(Button::X), "s"),
@@ -100,6 +104,7 @@ const KEY_DEFAULTS: [(Held, &str); 14] = [
     (Held::Button(Button::Left), "left"),
     (Held::Button(Button::Right), "right"),
     (Held::FastForward, "tab"),
+    (Held::SlowMotion, "1"),
     (Held::Rewind, "`"),
 ];
 
@@ -262,7 +267,8 @@ pub enum BindingsError {
     /// The file is not valid TOML of the expected shape.
     #[error("invalid bindings file: {0}")]
     Syntax(String),
-    /// An action name is not a button, `fast_forward`, `rewind` or `touch`.
+    /// An action name is not a button, `fast_forward`, `slow_motion`,
+    /// `rewind` or `touch`.
     #[error("unknown action {0:?} in bindings")]
     UnknownAction(String),
     /// One input is bound to two different actions.
@@ -292,6 +298,14 @@ mod tests {
             assert!(map.values().any(|held| *held == Held::Rewind));
         }
         assert_eq!(bindings.pad_action("any", "RightThumb"), Some(Held::Touch));
+        assert_eq!(bindings.key_action("1"), Some(Held::SlowMotion));
+    }
+
+    #[test]
+    fn slow_motion_can_be_bound_to_a_gamepad() {
+        let bindings =
+            Bindings::from_toml("[gamepad]\nslow_motion = [\"Mode\"]\n").expect("valid file");
+        assert_eq!(bindings.pad_action("any", "Mode"), Some(Held::SlowMotion));
     }
 
     #[test]

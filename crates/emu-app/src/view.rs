@@ -17,7 +17,7 @@ use crate::app::{
     ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical,
     LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
     RotateAnticlockwise, RotateClockwise, SaveState, SwapScreens, SwitchPlayer,
-    ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause,
+    ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause, ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
@@ -32,6 +32,7 @@ use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
 use crate::persist;
 use crate::settings::{self, Settings};
 use crate::slots::{self, SlotPreview};
+use crate::speed::Speeds;
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -47,6 +48,8 @@ pub struct EmulatorView {
     /// Where the layout is saved for next launch, if there is a config
     /// folder.
     settings_path: Option<PathBuf>,
+    /// How fast fast-forward and slow motion run, from the settings file.
+    speeds: Speeds,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
     /// Where the memory viewer is looking, while it is open.
@@ -156,6 +159,7 @@ impl EmulatorView {
             bindings: Bindings::default(),
             layout: Layout::default(),
             settings_path,
+            speeds: Speeds::default(),
             color_correction: true,
             memory_viewer: None,
             session: None,
@@ -182,8 +186,11 @@ impl EmulatorView {
             None => {}
         }
         match loaded_settings {
-            Some(Ok(settings)) => view.layout = settings.layout,
-            Some(Err(error)) => view.show_notice(format!("{error}; using default layout"), cx),
+            Some(Ok(settings)) => {
+                view.layout = settings.layout;
+                view.speeds = settings.speed;
+            }
+            Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
         }
         if !roms.is_empty() {
@@ -402,8 +409,8 @@ impl EmulatorView {
             self.sent_touch = touch;
             self.send_input();
         }
-        if state.fast_forward != self.sent.fast_forward {
-            self.send(Command::SetFastForward(state.fast_forward));
+        if state.pace != self.sent.pace {
+            self.send(Command::SetSpeed(self.speeds.speed(state.pace)));
         }
         if state.rewind != self.sent.rewind {
             self.send(Command::SetRewind(state.rewind));
@@ -499,6 +506,19 @@ impl EmulatorView {
                 "Fast-forward on"
             } else {
                 "Fast-forward off"
+            },
+            cx,
+        );
+    }
+
+    fn toggle_slow_motion(&mut self, cx: &mut Context<Self>) {
+        let on = self.controls.toggle_slow_motion();
+        self.sync_held();
+        self.show_notice(
+            if on {
+                "Slow motion on"
+            } else {
+                "Slow motion off"
             },
             cx,
         );
@@ -713,7 +733,11 @@ impl EmulatorView {
         let Some(path) = &self.settings_path else {
             return;
         };
-        if let Err(error) = (Settings { layout }).save(path) {
+        let settings = Settings {
+            layout,
+            speed: self.speeds,
+        };
+        if let Err(error) = settings.save(path) {
             let message = format!("Cannot save settings to {}: {error}", path.display());
             self.show_notice(message, cx);
         }
@@ -964,6 +988,7 @@ impl Render for EmulatorView {
             .on_action(
                 cx.listener(|this, _: &ToggleFastForward, _, cx| this.toggle_fast_forward(cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleSlowMotion, _, cx| this.toggle_slow_motion(cx)))
             .on_action(cx.listener(|this, _: &LayoutVertical, _, cx| {
                 this.arrange(Arrangement::Vertical, cx);
             }))

@@ -4,9 +4,10 @@
 //! finished frame into a shared slot and sends an [`Event`] to wake the UI.
 //! Wake-ups are coalesced, so a slow UI never queues stale frames.
 //!
-//! Pacing is a sleep to the next frame deadline. Sound stays in sync
-//! because the audio sink adjusts its resampling ratio to the buffer level
-//! (see `resample.rs`).
+//! Pacing is a sleep to the next frame deadline, which fast-forward and
+//! slow motion move closer or further apart (see `speed.rs`). Sound stays
+//! in sync because the audio sink adjusts its resampling ratio to the
+//! buffer level (see `resample.rs`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ use emu_core::{Core, CoreInfo, Frame, Input, Media, System};
 use crate::audio::AudioSink;
 use crate::persist;
 use crate::rewind::Rewind;
+use crate::speed::{self, Speed};
 
 /// How often dirty battery saves are written to disk.
 const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -148,8 +150,8 @@ pub enum Command {
         /// What that player holds.
         input: Input,
     },
-    /// Runs unthrottled while true.
-    SetFastForward(bool),
+    /// Runs at this speed from the next frame on.
+    SetSpeed(Speed),
     /// Steps backwards through recent frames while true.
     SetRewind(bool),
     /// Pauses or resumes.
@@ -244,7 +246,7 @@ impl Emulator {
             cheats: vec![Vec::new(); players],
             watch: None,
             paused: false,
-            fast_forward: false,
+            speed: Speed::NORMAL,
             rewinding: false,
             rewind: Rewind::new(REWIND_BUDGET_BYTES),
             events,
@@ -318,7 +320,8 @@ struct Runner {
     /// Memory the UI is watching.
     watch: Option<MemorySpan>,
     paused: bool,
-    fast_forward: bool,
+    /// How fast frames run; rewinding always steps at normal speed.
+    speed: Speed,
     rewinding: bool,
     rewind: Rewind,
     /// Per player: the backup generation last written to disk.
@@ -349,7 +352,7 @@ impl Runner {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break 'running,
                 }
-                if !self.paused {
+                if !self.paused || self.rewinding {
                     // Don't race to catch up on time spent paused.
                     deadline = deadline.max(Instant::now());
                 }
@@ -364,8 +367,9 @@ impl Runner {
             } else {
                 self.apply_cheats();
                 self.loaded.core.run_frame(&self.inputs, &mut audio);
-                // Fast-forward plays silence rather than sped-up sound.
-                if !self.fast_forward
+                // Only normal speed plays sound: rate control absorbs
+                // ±0.5%, not a change of speed.
+                if self.speed == Speed::NORMAL
                     && let Some(sink) = &mut self.audio
                 {
                     sink.push(&audio);
@@ -382,17 +386,15 @@ impl Runner {
                 last_flush = Instant::now();
             }
 
+            let speed = if self.rewinding {
+                Speed::NORMAL
+            } else {
+                self.speed
+            };
             let now = Instant::now();
-            if self.fast_forward && !self.rewinding {
-                deadline = now;
-                continue;
-            }
-            deadline += frame_duration;
+            deadline = speed::next_deadline(deadline, now, speed.frame_step(frame_duration));
             if deadline > now {
                 thread::sleep(deadline - now);
-            } else if now - deadline > frame_duration * 4 {
-                // Too far behind to catch up smoothly; drop the debt.
-                deadline = now;
             }
         }
         self.flush_backup();
@@ -405,7 +407,7 @@ impl Runner {
                     *slot = input;
                 }
             }
-            Command::SetFastForward(on) => self.fast_forward = on,
+            Command::SetSpeed(speed) => self.speed = speed,
             Command::SetRewind(on) => self.rewinding = on,
             Command::TogglePause => {
                 self.paused = !self.paused;
