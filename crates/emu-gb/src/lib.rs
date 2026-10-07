@@ -12,6 +12,7 @@ mod apu;
 mod bus;
 mod cartridge;
 mod cpu;
+mod disasm;
 mod hdma;
 mod interrupts;
 mod joypad;
@@ -28,6 +29,7 @@ use emu_core::{
 use serde::{Deserialize, Serialize};
 
 pub use cpu::Registers;
+pub use disasm::{Disassembly, disassemble};
 pub use link::Linked;
 pub use model::Model;
 
