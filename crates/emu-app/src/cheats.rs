@@ -9,16 +9,23 @@ use std::process::Command;
 
 /// What a new cheat file starts with.
 const TEMPLATE: &str = "\
-# Cheats for this game. Each cheat is a [name] line followed by its codes,
-# one per line. Add \"off\" after the name to switch a cheat off. Save this
-# file and switch back to ds-emulator to apply it.
+# Cheats for this game. Each cheat is a [name] line followed by its codes.
+# Add \"off\" after the name to switch a cheat off. Save this file and
+# switch back to ds-emulator to apply it.
 #
-# Formats: raw ADDRESS:VALUE in hex on every system, GameShark (01VVAAAA)
-# on Game Boy, and unencrypted CodeBreaker (XAAAAAAA YYYY) on Game Boy
-# Advance.
+# The device is detected from the codes; to choose it, add a tag after the
+# name: raw (ADDRESS:VALUE in hex, every system), gs (Game Boy GameShark),
+# cb (CodeBreaker), gsa or gsa-raw (GameShark Advance / Action Replay
+# v1/v2), par3 or par3-raw (Pro Action Replay v3), ards (Action Replay DS).
+# Note how to activate a cheat in a comment under its name.
 #
-# [Example]
-# 02000000:FF
+# [Infinite money] ards
+# # Hold L+R.
+# 94000130 FCFF0000
+# 62111938 00000000
+# B2111938 00000000
+# 20001DE4 000000FF
+# D2000000 00000000
 ";
 
 /// Creates `path` with an explanatory template unless it exists.
@@ -52,6 +59,18 @@ mod tests {
     fn the_template_parses_to_no_cheats() {
         let cheats = emu_cheats::parse(emu_core::System::Gba, TEMPLATE).expect("valid");
         assert!(cheats.is_empty());
+    }
+
+    #[test]
+    fn the_template_example_is_a_valid_ds_cheat() {
+        let example: String = TEMPLATE
+            .lines()
+            .skip_while(|line| !line.starts_with("# [Infinite money]"))
+            .map(|line| format!("{}\n", line.strip_prefix("# ").unwrap_or(line)))
+            .collect();
+        let cheats = emu_cheats::parse(emu_core::System::Nds, &example).expect("valid");
+        assert_eq!(cheats.len(), 1);
+        assert_eq!(cheats[0].device, emu_cheats::Device::ActionReplayDs);
     }
 
     #[test]

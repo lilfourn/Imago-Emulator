@@ -143,18 +143,37 @@ Choose File > Edit Cheats… to open the game's `game.cht` in your text
 editor. Save the file and switch back to apply it:
 
 ```text
-[Infinite money]
-82025E30 270F
+[Infinite money] ards
+# Hold L+R.
+94000130 FCFF0000
+62111938 00000000
+B2111938 00000000
+20001DE4 000000FF
+D2000000 00000000
 [Walk through walls] off
 02000F04:01
 ```
 
-Each cheat is a `[name]` line, with `off` to disable it, followed by its
-codes. Supported formats:
-- raw `ADDRESS:VALUE` (hex) everywhere;
-- GameShark `01VVAAAA` on Game Boy;
-- unencrypted CodeBreaker on GBA.
-Encrypted Action Replay and GameShark Advance codes are not supported yet.
+Each cheat is a `[name]` line followed by its codes. After the name, `off`
+disables it and a tag names the cheat device; without a tag the device is
+detected from the codes. Spaces and line breaks inside codes don't
+matter. Errors name the line and the device.
+
+| Tag | Device | System |
+|---|---|---|
+| `raw` | `ADDRESS:VALUE` patches (hex) | all |
+| `gs` | GameShark `TTVVAAAA`, including `8x`/`9x` bank codes | Game Boy |
+| `cb` | CodeBreaker / Xploder, encrypted or not | GBA |
+| `gsa`, `gsa-raw` | GameShark Advance / Action Replay v1/v2, encrypted or not | GBA |
+| `par3`, `par3-raw` | Pro Action Replay v3 / Action Replay MAX, encrypted or not | GBA |
+| `ards` | Action Replay DS | DS |
+
+Add a tag when detection guesses wrong or asks for one: 16-digit GBA codes
+can be read four ways, and the list says when two fit equally well. Cheats
+run once a frame, at VBlank, so button-activated codes respond at once.
+Not supported: Game Genie and other ROM patches, codes that need the
+cheat device's own button, GBA I/O writes, and Action Replay DS types
+`C4`–`C6`.
 
 ## Testing against test ROMs
 

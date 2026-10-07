@@ -33,7 +33,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs. |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
-| `emu-cheats` | Parses cheat lists into memory operations and applies them through a two-method `Memory` trait. Knows code formats, not cores. |
+| `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, and `poke_bank` for Game Boy banks. Knows code formats, not cores. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
@@ -92,8 +92,8 @@ pub trait Core: Send {
  main thread (GPUI)                         emulation thread
  ──────────────────                         ────────────────
  key/mouse events ──► Command (mpsc) ─────► apply between frames
-                                            apply cheats (Core::poke)
                                             run_frame()
+                                            apply cheats (Core::peek/poke)
  render(): copy latest frames ◄── Mutex ─── publish screens
            pre-scale to BGRA                 │
            img() per screen                  │
@@ -120,9 +120,14 @@ pub trait Core: Send {
   touchscreen pixels (`cursor.rs`); the mouse and the cursor touch
   independently, and the mouse wins while both do.
 - Cheats come from `game.cht`, which the view re-reads whenever the
-  window regains focus and sends as a `Command`. The memory viewer asks
-  the thread to copy a span of RAM (through `Core::peek`) into the shared
-  latest-frame slot after every frame.
+  window regains focus and sends as a `Command`. They run after each
+  frame: frames end at VBlank, where cheat devices hooked in, so button
+  codes see the frame's own input. DS cheats work on main RAM directly
+  and read KEYINPUT, EXTKEYIN and the ARM7's timers. melonDS instead
+  runs them on the ARM7's bus at its VBlank interrupt, as the real
+  Action Replay does; that reaches the same main RAM and registers.
+- The memory viewer asks the thread to copy a span of RAM (through
+  `Core::peek`) into the shared latest-frame slot after every frame.
 - The emulation thread records a save state after every frame into the
   rewind history (`rewind.rs`): newest state whole, older ones as
   LZ4-compressed XOR deltas, within 64 MiB.
