@@ -37,6 +37,10 @@ actions!(
         ToggleColorCorrection,
         ToggleMemoryViewer,
         ToggleFullScreen,
+        Resolution3d1x,
+        Resolution3d2x,
+        Resolution3d3x,
+        Resolution3d4x,
         Quit,
     ]
 );
@@ -177,6 +181,15 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Rotate Anticlockwise", RotateAnticlockwise),
                 MenuItem::action("Change Screen Gap", NextScreenGap),
                 MenuItem::separator(),
+                MenuItem::submenu(Menu {
+                    name: "3D Resolution".into(),
+                    items: vec![
+                        MenuItem::action("Native (1×)", Resolution3d1x),
+                        MenuItem::action("2×", Resolution3d2x),
+                        MenuItem::action("3×", Resolution3d3x),
+                        MenuItem::action("4×", Resolution3d4x),
+                    ],
+                }),
                 MenuItem::action("Colour Correction", ToggleColorCorrection),
                 MenuItem::action("Memory Viewer", ToggleMemoryViewer),
             ],

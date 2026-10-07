@@ -16,9 +16,9 @@ use gpui::{
 use crate::app::{
     ConnectLinkCable, EditCheats, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
     LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
-    RotateAnticlockwise, RotateClockwise, SaveState, SwapScreens, SwitchPlayer,
-    ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, TogglePause,
-    ToggleSlowMotion,
+    Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise,
+    RotateClockwise, SaveState, SwapScreens, SwitchPlayer, ToggleColorCorrection,
+    ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, TogglePause, ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
@@ -51,6 +51,8 @@ pub struct EmulatorView {
     settings_path: Option<PathBuf>,
     /// How fast fast-forward and slow motion run, from the settings file.
     speeds: Speeds,
+    /// How many times its own resolution DS 3D is drawn at.
+    resolution_3d: u32,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
     /// Where the memory viewer is looking, while it is open.
@@ -163,6 +165,7 @@ impl EmulatorView {
             layout: Layout::default(),
             settings_path,
             speeds: Speeds::default(),
+            resolution_3d: Settings::default().resolution_3d,
             color_correction: true,
             memory_viewer: None,
             session: None,
@@ -192,6 +195,7 @@ impl EmulatorView {
             Some(Ok(settings)) => {
                 view.layout = settings.layout;
                 view.speeds = settings.speed;
+                view.resolution_3d = settings.resolution_3d;
             }
             Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
@@ -251,6 +255,7 @@ impl EmulatorView {
         let rom_paths = loaded.rom_paths().to_vec();
         let player_rom_paths = loaded.player_rom_paths().to_vec();
         let emulator = Emulator::start(loaded, events, audio_sink);
+        emulator.send(Command::SetRenderScale(self.resolution_3d));
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
@@ -769,17 +774,36 @@ impl EmulatorView {
         self.set_layout(Layout { gap, ..self.layout }, cx);
     }
 
-    /// Switches to `layout` and saves it for next launch, noting any
-    /// failure to save.
+    /// Switches to `layout` and saves it for next launch.
     fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
         self.layout = layout;
         cx.notify();
+        self.save_settings(cx);
+    }
+
+    /// Draws DS 3D at `scale` times its own resolution and saves that for
+    /// next launch.
+    fn set_resolution_3d(&mut self, scale: u32, cx: &mut Context<Self>) {
+        self.resolution_3d = scale;
+        self.send(Command::SetRenderScale(scale));
+        let message = match (scale, self.session.as_ref().map(|s| s.info.system)) {
+            (1, _) => "3D at the native resolution".to_owned(),
+            (_, Some(System::Nds) | None) => format!("3D at {scale}× resolution"),
+            (_, Some(_)) => format!("3D at {scale}× resolution, for DS games"),
+        };
+        self.show_notice(message, cx);
+        self.save_settings(cx);
+    }
+
+    /// Writes the settings for next launch, noting any failure.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.settings_path else {
             return;
         };
         let settings = Settings {
-            layout,
+            layout: self.layout,
             speed: self.speeds,
+            resolution_3d: self.resolution_3d,
         };
         if let Err(error) = settings.save(path) {
             let message = format!("Cannot save settings to {}: {error}", path.display());
@@ -1063,6 +1087,18 @@ impl Render for EmulatorView {
             }))
             .on_action(cx.listener(|this, _: &ToggleMemoryViewer, _, cx| {
                 this.toggle_memory_viewer(cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
+                this.set_resolution_3d(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d2x, _, cx| {
+                this.set_resolution_3d(2, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d3x, _, cx| {
+                this.set_resolution_3d(3, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d4x, _, cx| {
+                this.set_resolution_3d(4, cx);
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();

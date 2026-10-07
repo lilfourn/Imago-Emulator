@@ -26,6 +26,7 @@ use crate::latch::Latch;
 use crate::persist;
 use crate::rewind::Rewind;
 use crate::speed::{self, Speed};
+use crate::video;
 
 /// How often dirty battery saves are written to disk.
 const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -225,6 +226,9 @@ pub enum Command {
     LoadState(u8),
     /// Copies this span of memory for the UI after every frame, or stops.
     WatchMemory(Option<MemorySpan>),
+    /// Draws 3D at this many times the native resolution (DS), showing
+    /// the change at once, even while paused.
+    SetRenderScale(u32),
     /// Replaces a player's cheats: their ROM patches go to the core at
     /// once, and the rest run after every frame.
     SetCheats {
@@ -506,6 +510,10 @@ impl Runner {
                 // Show it now, even while paused.
                 self.publish();
             }
+            Command::SetRenderScale(scale) => {
+                self.loaded.core.set_render_scale(scale);
+                self.publish();
+            }
             Command::SetCheats { player, cheats } => {
                 if let Some(slot) = self.cheats.get_mut(player) {
                     // ROM patches live in the core, which applies them to
@@ -593,7 +601,8 @@ impl Runner {
             state_version: info.state_version,
             rom_crc32: self.loaded.rom_crc32,
         };
-        let screen = &self.loaded.core.screens()[0];
+        // At the screen's own size, whatever the 3D resolution.
+        let screen = video::shrink(&self.loaded.core.screens()[0], info.screens[0]);
         let size = screen.size();
         let rgb: Vec<u8> = screen
             .pixels()

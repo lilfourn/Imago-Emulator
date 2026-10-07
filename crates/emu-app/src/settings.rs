@@ -1,8 +1,8 @@
-//! Settings kept between launches: the screen layout, and the speeds of
-//! fast-forward and slow motion.
+//! Settings kept between launches: the screen layout, the speeds of
+//! fast-forward and slow motion, and the resolution of DS 3D.
 //!
-//! The app writes them whenever the layout changes, as TOML next to the
-//! bindings file:
+//! The app writes them whenever one changes, as TOML next to the bindings
+//! file:
 //!
 //! ```toml
 //! [layout]
@@ -14,6 +14,9 @@
 //! [speed]
 //! fast_forward = 4.0      # times normal speed; leave out for no limit
 //! slow_motion = 0.5       # times normal speed
+//!
+//! [video]
+//! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
 //! ```
 //!
 //! Settings missing from the file keep their defaults.
@@ -34,13 +37,30 @@ const ARRANGEMENTS: [(Arrangement, &str); 4] = [
     (Arrangement::Hybrid, "hybrid"),
 ];
 
+/// The highest DS 3D resolution, as a multiple of the native one: what the
+/// core draws at most.
+pub const MAX_RESOLUTION_3D: u32 = 8;
+
 /// Everything remembered between launches.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     /// How the screens are laid out.
     pub layout: Layout,
     /// How fast fast-forward and slow motion run.
     pub speed: Speeds,
+    /// How many times its own resolution DS 3D is drawn at, 1 to
+    /// [`MAX_RESOLUTION_3D`] (see `Core::set_render_scale`).
+    pub resolution_3d: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            layout: Layout::default(),
+            speed: Speeds::default(),
+            resolution_3d: 1,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -48,6 +68,21 @@ pub struct Settings {
 struct SettingsFile {
     layout: LayoutSection,
     speed: SpeedSection,
+    video: VideoSection,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct VideoSection {
+    resolution_3d: u32,
+}
+
+impl Default for VideoSection {
+    fn default() -> Self {
+        Self {
+            resolution_3d: Settings::default().resolution_3d,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -150,9 +185,14 @@ impl Settings {
     pub fn from_toml(text: &str) -> Result<Self, SettingsError> {
         let file: SettingsFile =
             toml::from_str(text).map_err(|error| SettingsError::Syntax(error.to_string()))?;
+        let resolution_3d = file.video.resolution_3d;
+        if !(1..=MAX_RESOLUTION_3D).contains(&resolution_3d) {
+            return Err(SettingsError::UnsupportedResolution(resolution_3d));
+        }
         Ok(Self {
             layout: file.layout.to_layout()?,
             speed: file.speed.to_speeds()?,
+            resolution_3d,
         })
     }
 
@@ -161,6 +201,9 @@ impl Settings {
         let file = SettingsFile {
             layout: LayoutSection::from(&self.layout),
             speed: SpeedSection::from(&self.speed),
+            video: VideoSection {
+                resolution_3d: self.resolution_3d,
+            },
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
         format!("# Saved by ds-emulator whenever a setting changes.\n\n{body}")
@@ -218,6 +261,9 @@ pub enum SettingsError {
     /// The rotation is not 0, 90, 180 or 270 degrees.
     #[error("unsupported rotation {0}° in settings")]
     UnsupportedRotation(u16),
+    /// The 3D resolution is not 1 to [`MAX_RESOLUTION_3D`] times.
+    #[error("unsupported 3D resolution {0}x in settings; use 1 to {max}", max = MAX_RESOLUTION_3D)]
+    UnsupportedResolution(u32),
     /// A speed is not a finite number of at least [`MIN_RATE`].
     #[error("unsupported speed {key} = {value} in settings; use {min} or more", min = MIN_RATE)]
     UnsupportedSpeed {
@@ -245,9 +291,11 @@ mod tests {
                 fast_forward: Speed::Times(Rate::new(3.0).expect("valid rate")),
                 slow_motion: Rate::new(0.25).expect("valid rate"),
             },
+            resolution_3d: 4,
         };
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
+        assert!(text.contains("resolution_3d = 4"), "{text}");
         assert!(text.contains("rotation = 270"), "{text}");
         assert!(text.contains("fast_forward = 3.0"), "{text}");
         assert_eq!(Settings::from_toml(&text), Ok(settings));
@@ -302,6 +350,19 @@ mod tests {
             Settings::from_toml("[speed]\nturbo = 2\n"),
             Err(SettingsError::Syntax(_))
         ));
+    }
+
+    #[test]
+    fn the_3d_resolution_is_1_to_8_times() {
+        let settings = Settings::from_toml("[video]\nresolution_3d = 3\n").expect("valid file");
+        assert_eq!(settings.resolution_3d, 3);
+        assert_eq!(Settings::from_toml("").map(|s| s.resolution_3d), Ok(1));
+        for wrong in [0, 9] {
+            assert_eq!(
+                Settings::from_toml(&format!("[video]\nresolution_3d = {wrong}\n")),
+                Err(SettingsError::UnsupportedResolution(wrong))
+            );
+        }
     }
 
     #[test]
