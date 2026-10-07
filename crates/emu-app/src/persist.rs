@@ -1,10 +1,11 @@
 //! Where per-game files live on disk, and how they are written.
 //!
-//! Battery saves, save states and cheats sit next to the ROM, as in mGBA
-//! and melonDS: `game.nds` gets `game.sav`, `game.ss1` and `game.cht`. A
-//! linked pair saves its states next to the first player's ROM as
-//! `game.ls1`. A GBA game in a DS's GBA slot keeps its own `.sav`; the
-//! session's states and cheats are the DS game's.
+//! Battery saves, save states, cheats and the game's own bindings sit next
+//! to the ROM, as in mGBA and melonDS: `game.nds` gets `game.sav`,
+//! `game.ss1`, `game.cht` and `game.bindings.toml`. A linked pair saves its
+//! states next to the first player's ROM as `game.ls1`. A GBA game in a
+//! DS's GBA slot keeps its own `.sav`; the session's states, cheats and
+//! bindings are the DS game's.
 
 use std::fs;
 use std::io;
@@ -34,6 +35,11 @@ pub fn backup_key(rom: &Path) -> String {
 /// The cheat list for `rom`.
 pub fn cheats_path(rom: &Path) -> PathBuf {
     rom.with_extension("cht")
+}
+
+/// The game's own bindings for `rom`, laid over the user's.
+pub fn bindings_path(rom: &Path) -> PathBuf {
+    rom.with_extension("bindings.toml")
 }
 
 /// The save state file in `slot` for a session of `roms`, one per player
@@ -66,6 +72,10 @@ mod tests {
     fn save_files_sit_next_to_the_rom() {
         let rom = Path::new("/games/platinum.nds");
         assert_eq!(backup_path(rom), Path::new("/games/platinum.sav"));
+        assert_eq!(
+            bindings_path(rom),
+            Path::new("/games/platinum.bindings.toml")
+        );
         assert_eq!(
             state_path(&[rom.to_owned()], 1),
             Path::new("/games/platinum.ss1")

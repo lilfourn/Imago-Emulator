@@ -24,9 +24,15 @@
 //! a = ["South"]
 //! ```
 //!
-//! Actions missing from a section keep their defaults.
+//! Actions missing from a section keep their defaults; an action listed
+//! with no inputs is unbound.
+//!
+//! A game can have its own bindings file, `game.bindings.toml` next to the
+//! ROM, in the same format. It is laid over the user's file when the game
+//! starts, so a game's bindings win over a controller's profile, which
+//! wins over the `[gamepad]` section.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -89,6 +95,7 @@ type Map = HashMap<String, Held>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bindings {
     keys: Map,
+    /// For controllers without a profile.
     gamepad: Map,
     /// Per-controller gamepad maps, by UUID.
     gamepads: HashMap<String, Map>,
@@ -193,25 +200,40 @@ impl Bindings {
             .copied()
     }
 
-    /// The defaults with the actions listed in `text` rebound.
+    /// These bindings with `text`, a bindings file, laid over them: each
+    /// action it lists is bound to exactly the inputs listed, and the
+    /// rest keep theirs. A controller's bindings come from, lowest first,
+    /// these bindings for it, the file's `[gamepad]` section and the
+    /// file's section for that controller.
     ///
     /// # Errors
     ///
     /// Returns [`BindingsError`] if the TOML is malformed, names an unknown
     /// action, or binds one input to two actions.
-    pub fn from_toml(text: &str) -> Result<Self, BindingsError> {
+    pub fn overlay(&self, text: &str) -> Result<Self, BindingsError> {
         let file: BindingsFile =
             toml::from_str(text).map_err(|error| BindingsError::Syntax(error.to_string()))?;
-        let defaults = Self::default();
-        let gamepad = rebind(&defaults.gamepad, file.gamepad)?;
-        let gamepads = file
+        let profiles: BTreeMap<String, Section> = file
             .gamepads
             .into_iter()
-            .map(|(uuid, section)| Ok((uuid.to_ascii_lowercase(), rebind(&gamepad, section)?)))
+            .map(|(uuid, section)| (uuid.to_ascii_lowercase(), section))
+            .collect();
+        let controllers: BTreeSet<&String> = self.gamepads.keys().chain(profiles.keys()).collect();
+        let gamepads = controllers
+            .into_iter()
+            .map(|uuid| {
+                let base = self.gamepads.get(uuid).unwrap_or(&self.gamepad);
+                let general = rebind(base, &file.gamepad)?;
+                let map = match profiles.get(uuid) {
+                    Some(profile) => rebind(&general, profile)?,
+                    None => general,
+                };
+                Ok((uuid.clone(), map))
+            })
             .collect::<Result<_, BindingsError>>()?;
         Ok(Self {
-            keys: rebind(&defaults.keys, file.keys)?,
-            gamepad,
+            keys: rebind(&self.keys, &file.keys)?,
+            gamepad: rebind(&self.gamepad, &file.gamepad)?,
             gamepads,
         })
     }
@@ -223,27 +245,40 @@ impl Bindings {
     /// Returns [`BindingsError`] if the file exists but cannot be read or
     /// parsed.
     pub fn load(path: &Path) -> Result<Self, BindingsError> {
+        Self::default().overlay_file(path)
+    }
+
+    /// These bindings with the file at `path` laid over them (see
+    /// [`Bindings::overlay`]), or unchanged if there is no such file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BindingsError`] if the file exists but cannot be read or
+    /// parsed.
+    pub fn overlay_file(&self, path: &Path) -> Result<Self, BindingsError> {
         match std::fs::read_to_string(path) {
-            Ok(text) => Self::from_toml(&text),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Ok(text) => self.overlay(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(self.clone()),
             Err(error) => Err(BindingsError::Io(error.to_string())),
         }
     }
 }
 
 /// `base` with every action named in `section` bound to exactly the inputs
-/// listed there. An input the section claims is taken from whatever action
-/// had it in `base`.
-fn rebind(base: &Map, section: Section) -> Result<Map, BindingsError> {
+/// listed there, none if the list is empty. An input the section claims
+/// is taken from whatever action had it in `base`.
+fn rebind(base: &Map, section: &Section) -> Result<Map, BindingsError> {
+    let mut named = HashSet::new();
     let mut claimed = Map::new();
     for (action, inputs) in section {
         let held: Held = action.parse()?;
+        named.insert(held);
         for input in inputs {
             if let Some(other) = claimed.insert(input.clone(), held)
                 && other != held
             {
                 return Err(BindingsError::Conflict {
-                    input,
+                    input: input.clone(),
                     first: other,
                     second: held,
                 });
@@ -252,9 +287,7 @@ fn rebind(base: &Map, section: Section) -> Result<Map, BindingsError> {
     }
     let mut map: Map = base
         .iter()
-        .filter(|(input, held)| {
-            !claimed.contains_key(*input) && !claimed.values().any(|c| c == *held)
-        })
+        .filter(|(input, held)| !claimed.contains_key(*input) && !named.contains(*held))
         .map(|(input, held)| (input.clone(), *held))
         .collect();
     map.extend(claimed);
@@ -299,6 +332,13 @@ pub enum BindingsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Bindings {
+        /// The defaults with the actions listed in `text` rebound.
+        fn from_toml(text: &str) -> Result<Self, BindingsError> {
+            Self::default().overlay(text)
+        }
+    }
 
     #[test]
     fn defaults_cover_every_button_fast_forward_and_rewind() {
@@ -373,6 +413,13 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_list_unbinds_an_action() {
+        let bindings = Bindings::from_toml("[keys]\nrewind = []\n").expect("valid file");
+        assert_eq!(bindings.key_action("r"), None);
+        assert_eq!(bindings.key_action("tab"), Some(Held::FastForward));
+    }
+
+    #[test]
     fn controller_profiles_override_the_gamepad_section() {
         let text = "[gamepad]\nb = [\"West\"]\ny = [\"South\"]\n\n[gamepads.ABCD]\na = [\"South\"]\nb = [\"East\"]\n";
         let bindings = Bindings::from_toml(text).expect("valid file");
@@ -426,5 +473,100 @@ mod tests {
     fn missing_file_means_defaults() {
         let path = Path::new("/nonexistent/ds-emulator/bindings.toml");
         assert_eq!(Bindings::load(path), Ok(Bindings::default()));
+    }
+
+    /// The user's file, with a profile for one controller.
+    const USER: &str = "\
+[keys]
+x = [\"o\"]
+
+[gamepad]
+a = [\"South\"]
+b = [\"East\"]
+
+[gamepads.pro]
+fast_forward = [\"Mode\"]
+x = [\"West\"]
+";
+
+    #[test]
+    fn a_game_file_wins_over_profiles_and_the_user_file() {
+        let user = Bindings::from_toml(USER).expect("valid file");
+        let game = "\
+[keys]
+a = [\"l\"]
+
+[gamepad]
+x = [\"North\"]
+rewind = [\"RightTrigger2\"]
+";
+        let bindings = user.overlay(game).expect("valid file");
+        let key = |name| bindings.key_action(name);
+        assert_eq!(key("l"), Some(Held::Button(Button::A)));
+        assert_eq!(key("k"), None);
+        assert_eq!(key("o"), Some(Held::Button(Button::X)), "the user's keys");
+        for controller in ["pro", "other"] {
+            let pad = |control| bindings.pad_action(controller, control);
+            // The game's [gamepad] beats the controller's own profile...
+            assert_eq!(pad("North"), Some(Held::Button(Button::X)), "{controller}");
+            assert_eq!(pad("RightTrigger2"), Some(Held::Rewind));
+            // ...and the user's choices it doesn't touch stay.
+            assert_eq!(pad("South"), Some(Held::Button(Button::A)));
+            assert_eq!(pad("East"), Some(Held::Button(Button::B)));
+        }
+        assert_eq!(bindings.pad_action("pro", "Mode"), Some(Held::FastForward));
+        assert_eq!(bindings.pad_action("pro", "West"), None, "x moved");
+        assert_eq!(bindings.pad_action("other", "Mode"), None);
+    }
+
+    #[test]
+    fn a_game_file_can_have_controller_profiles() {
+        let user = Bindings::from_toml(USER).expect("valid file");
+        let game = "\
+[gamepads.PRO]
+a = [\"North\"]
+
+[gamepads.new]
+start = [\"Mode\"]
+";
+        let bindings = user.overlay(game).expect("valid file");
+        assert_eq!(
+            bindings.pad_action("pro", "North"),
+            Some(Held::Button(Button::A))
+        );
+        assert_eq!(
+            bindings.pad_action("pro", "Mode"),
+            Some(Held::FastForward),
+            "the user's profile underneath"
+        );
+        assert_eq!(
+            bindings.pad_action("new", "Mode"),
+            Some(Held::Button(Button::Start))
+        );
+        assert_eq!(
+            bindings.pad_action("new", "South"),
+            Some(Held::Button(Button::A)),
+            "the user's [gamepad] underneath"
+        );
+    }
+
+    #[test]
+    fn game_files_reject_what_user_files_reject() {
+        let user = Bindings::default();
+        assert!(matches!(
+            user.overlay("[keyz]\na = [\"k\"]\n"),
+            Err(BindingsError::Syntax(_))
+        ));
+        assert_eq!(
+            user.overlay("[gamepad]\njump = [\"South\"]\n"),
+            Err(BindingsError::UnknownAction("jump".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_missing_game_file_changes_nothing() {
+        let user = Bindings::from_toml(USER).expect("valid file");
+        let path = Path::new("/nonexistent/game.bindings.toml");
+        assert_eq!(user.overlay_file(path), Ok(user));
     }
 }

@@ -46,6 +46,8 @@ const STATE_SLOTS: u8 = 4;
 /// The root view of the main window.
 pub struct EmulatorView {
     focus: FocusHandle,
+    /// The bindings in force: the user's, with the active player's game's
+    /// own laid over them.
     bindings: Bindings,
     layout: Layout,
     /// Where the layout is saved for next launch, if there is a config
@@ -103,6 +105,8 @@ struct Session {
     sequence: u64,
     /// Per player: the cheat file's text when last sent to the emulator.
     cheat_texts: Vec<Option<String>>,
+    /// Per player: the user's bindings with the game's own laid over them.
+    bindings: Vec<Bindings>,
     /// The system's colour correction, if it has one.
     correction: Option<Correction>,
     /// Per placement: the image drawn there and what it shows.
@@ -281,6 +285,7 @@ impl EmulatorView {
             frames: Vec::new(),
             sequence: 0,
             cheat_texts: vec![None; info.players.max(1)],
+            bindings: Vec::new(),
             correction: Correction::for_system(info.system),
             images: Vec::new(),
             _events: task,
@@ -292,6 +297,7 @@ impl EmulatorView {
         self.mouse_touch = None;
         self.cursor = None;
         self.active_player = 0;
+        let bindings = self.reload_bindings();
         self.sync_held();
         self.watch_memory();
         if info.players > 1 {
@@ -301,10 +307,42 @@ impl EmulatorView {
             window.set_window_title(&format!("{name} — {}", info.system.name()));
         }
         let running = format!("Running {name}");
-        match self.reload_cheats() {
-            Some(cheats) => self.show_notice(format!("{running} · {cheats}"), cx),
-            None => self.show_notice(running, cx),
-        }
+        let notes = [Some(running), bindings, self.reload_cheats()];
+        let notice: Vec<String> = notes.into_iter().flatten().collect();
+        self.show_notice(notice.join(" · "), cx);
+    }
+
+    /// Re-reads the user's bindings file and lays each player's game
+    /// bindings file over it, putting the active player's in force.
+    /// Returns what went wrong, if anything.
+    fn reload_bindings(&mut self) -> Option<String> {
+        let mut problems = Vec::new();
+        let user = match bindings::default_path().map(|path| Bindings::load(&path)) {
+            Some(Ok(bindings)) => bindings,
+            Some(Err(error)) => {
+                problems.push(format!("{error}; using default bindings"));
+                Bindings::default()
+            }
+            None => Bindings::default(),
+        };
+        let session = self.session.as_mut()?;
+        session.bindings = session
+            .player_rom_paths
+            .iter()
+            .map(|rom| {
+                let path = persist::bindings_path(rom);
+                user.overlay_file(&path).unwrap_or_else(|error| {
+                    problems.push(format!("{} not applied: {error}", file_name(&path)));
+                    user.clone()
+                })
+            })
+            .collect();
+        self.bindings = session
+            .bindings
+            .get(self.active_player)
+            .cloned()
+            .unwrap_or(user);
+        (!problems.is_empty()).then(|| problems.join(" · "))
     }
 
     /// Re-reads each player's cheat file and sends the ones that changed to
@@ -430,6 +468,14 @@ impl EmulatorView {
             input: Input::default(),
         });
         self.active_player = player;
+        // Keyboard and gamepads now play the other player's game.
+        if let Some(bindings) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.bindings.get(player))
+        {
+            self.bindings = bindings.clone();
+        }
         self.send_input();
         self.watch_memory();
         self.show_notice(format!("Controlling player {}", player + 1), cx);
