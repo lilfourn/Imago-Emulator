@@ -133,12 +133,13 @@ impl Core for Linked {
         Ok(())
     }
 
-    fn backup_generation(&self, player: usize) -> Option<u64> {
-        self.players.get(player)?.backup_generation(0)
+    /// Each player has one cartridge: cartridge `i` is player `i`'s.
+    fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+        self.players.get(cartridge)?.backup_generation(0)
     }
 
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
-        if let Some(gb) = self.players.get(player) {
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+        if let Some(gb) = self.players.get(cartridge) {
             gb.save_backup(0, out);
         }
     }

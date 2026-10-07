@@ -14,6 +14,7 @@ mod capture;
 mod cart;
 mod display;
 mod dma;
+mod gba_slot;
 mod gpu2d;
 mod gpu3d;
 mod hardware;
@@ -33,9 +34,11 @@ use emu_core::{
     Button, Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
     StateError, StereoSample, System, SystemFileKind,
 };
+use emu_gba_cart::Cartridge as GbaCartridge;
 
 use cart::Cart;
 use display::FRAME_CYCLES;
+use gba_slot::GbaSlot;
 use hardware::Hardware;
 use machine::Machine;
 use rtc::Rtc;
@@ -54,10 +57,10 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(33_513_982, 560_190),
     audio_sample_rate: 32_768,
     // Bump whenever any serialized struct changes shape.
-    state_version: 4,
+    state_version: 5,
 };
 
-/// A Nintendo DS with a cartridge inserted.
+/// A Nintendo DS with a game card inserted, and maybe a GBA cartridge.
 #[derive(Debug)]
 pub struct Nds {
     machine: Machine,
@@ -66,6 +69,8 @@ pub struct Nds {
 
 impl Nds {
     /// Powers on a DS with `media`'s cartridge and direct-boots it.
+    /// `media.second_slot` goes in the GBA slot, where DS games can read a
+    /// GBA game and its save.
     ///
     /// The BIOS is emulated unless `media` holds both the ARM9 (4 KiB) and
     /// ARM7 (16 KiB) BIOS dumps.
@@ -101,12 +106,19 @@ impl Nds {
                     .filter(|bios| bios.len() == 0x4000),
             );
         let hle_bios = dumps.is_none();
-        let (arm9_bios, arm7_bios) = dumps.map_or_else(
+        let (mut arm9_bios, arm7_bios) = dumps.map_or_else(
             || (bios::arm9_image(), bios::arm7_image()),
             |(arm9, arm7)| (arm9.into(), arm7.into()),
         );
+        let mut gba_slot = GbaSlot::new(media.second_slot.map(|cartridge| {
+            GbaCartridge::new(cartridge.rom.into(), cartridge.backup, media.start_time)
+        }));
+        if hle_bios && let Some(logo) = gba_slot.bios_logo() {
+            arm9_bios[gba_slot::BIOS_LOGO].copy_from_slice(&logo);
+        }
         let mut hw = Hardware::new(arm9_bios, arm7_bios);
         hw.cart = Cart::new(media.rom.into(), media.backup);
+        hw.gba_slot = gba_slot;
         hw.spi = Spi::new(media.system_file(SystemFileKind::NdsFirmware));
         hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
@@ -270,7 +282,7 @@ impl Core for Nds {
     }
 
     fn reset(&mut self) {
-        // The cartridge (with its save), firmware and clock carry over.
+        // The cartridges (with their saves), firmware and clock carry over.
         let old = &mut self.machine.hw;
         let mut hw = Hardware::new(
             std::mem::take(&mut old.arm9_bios),
@@ -280,7 +292,9 @@ impl Core for Nds {
         std::mem::swap(&mut hw.cart, &mut old.cart);
         std::mem::swap(&mut hw.spi, &mut old.spi);
         std::mem::swap(&mut hw.rtc, &mut old.rtc);
+        std::mem::swap(&mut hw.gba_slot, &mut old.gba_slot);
         hw.rtc.restart_cycles(now);
+        hw.gba_slot.restart_cycles(now);
         self.machine = Machine::boot(hw, self.machine.hle_bios);
     }
 
@@ -292,6 +306,11 @@ impl Core for Nds {
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
         let mut machine: Machine = postcard::from_bytes(state)
             .map_err(|_| StateError::Malformed("not a Nintendo DS state"))?;
+        if machine.hw.gba_slot.is_occupied() != self.machine.hw.gba_slot.is_occupied() {
+            return Err(StateError::Malformed(
+                "the state's GBA slot does not match this session's",
+            ));
+        }
         machine.hw.take_media_from(&mut self.machine.hw);
         self.machine = machine;
         // The rendered 3D image is not saved.
@@ -301,15 +320,22 @@ impl Core for Nds {
         Ok(())
     }
 
-    fn backup_generation(&self, player: usize) -> Option<u64> {
-        (player == 0)
-            .then(|| self.machine.hw.cart.backup_generation())
-            .flatten()
+    /// Cartridge 0 is the game card, 1 the GBA slot's cartridge.
+    fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+        let hw = &self.machine.hw;
+        match cartridge {
+            0 => hw.cart.backup_generation(),
+            1 => hw.gba_slot.backup_generation(),
+            _ => None,
+        }
     }
 
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
-        if player == 0 {
-            self.machine.hw.cart.save_backup(out);
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+        let hw = &self.machine.hw;
+        match cartridge {
+            0 => hw.cart.save_backup(out),
+            1 => hw.gba_slot.save_backup(out),
+            _ => {}
         }
     }
 
@@ -447,5 +473,116 @@ mod tests {
         // A paused frontend shows the loaded frame before any frame runs.
         assert_eq!(other.screens()[0].pixels()[0], 0xFFFF_FFFF);
         assert!(other.screens() == nds.screens());
+    }
+
+    /// A GBA ROM with 128 KiB of Flash, a made-up logo and game code.
+    fn gba_rom() -> Vec<u8> {
+        let mut rom: Vec<u8> = (0..0x400u32).map(|index| (index * 7) as u8).collect();
+        rom[0x9C] = 0x21;
+        rom[0x9E] = 0xF8;
+        rom[0xAC..0xB2].copy_from_slice(b"TEST01");
+        rom[0xB2] = 0x96;
+        rom[0xBE..0xC0].fill(0);
+        rom[0x200..0x209].copy_from_slice(b"FLASH1M_V");
+        rom
+    }
+
+    /// A DS with `gba`, and its save if given, in the GBA slot.
+    fn nds_with_slot(rom: &[u8], gba: &[u8], save: Option<&[u8]>) -> Nds {
+        let media = Media {
+            second_slot: Some(emu_core::Cartridge {
+                rom: gba,
+                backup: save,
+            }),
+            ..Media::new(rom)
+        };
+        Nds::new(&media).expect("valid header")
+    }
+
+    /// Programs `value` at `offset` of the GBA slot's Flash bank 0 through
+    /// the ARM9's bus.
+    fn program_flash(nds: &mut Nds, offset: u32, value: u8) {
+        let hw = &mut nds.machine.hw;
+        hw.arm9_write_8(0x0A00_5555, 0xAA);
+        hw.arm9_write_8(0x0A00_2AAA, 0x55);
+        hw.arm9_write_8(0x0A00_5555, 0xA0);
+        hw.arm9_write_8(0x0A00_0000 + offset, value);
+    }
+
+    #[test]
+    fn boot_leaves_the_gba_header_and_logo_where_the_library_looks() {
+        let rom = rom();
+        let gba = gba_rom();
+        let nds = nds_with_slot(&rom, &gba, None);
+        let ram = |address: u32| nds.peek(0, address).unwrap_or(0);
+        assert_eq!([ram(0x027F_FC30), ram(0x027F_FC31)], [0, 0], "module ID");
+        let codes: Vec<u8> = (0x027F_FC36..0x027F_FC3C).map(ram).collect();
+        assert_eq!(codes, b"01TEST");
+        assert_eq!(
+            &nds.machine.hw.arm9_bios[gba_slot::BIOS_LOGO],
+            &gba[0x04..0xA0]
+        );
+
+        let empty = Nds::new(&Media::new(&rom)).expect("valid header");
+        let ram = |address: u32| empty.peek(0, address).unwrap_or(0);
+        assert_eq!([ram(0x027F_FC30), ram(0x027F_FC31)], [0xFF, 0xFF]);
+        assert!(
+            empty.machine.hw.arm9_bios[gba_slot::BIOS_LOGO]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+    }
+
+    #[test]
+    fn the_gba_save_is_cartridge_1() {
+        let rom = rom();
+        let gba = gba_rom();
+        let mut nds = nds_with_slot(&rom, &gba, None);
+        assert_eq!(nds.backup_generation(1), Some(0));
+        assert_eq!(nds.backup_generation(2), None);
+        program_flash(&mut nds, 0x10, 0x5A);
+        assert_eq!(nds.backup_generation(1), Some(1));
+        let mut save = Vec::new();
+        nds.save_backup(1, &mut save);
+        assert_eq!((save.len(), save[0x10]), (0x2_0000, 0x5A));
+        let mut card = Vec::new();
+        nds.save_backup(0, &mut card);
+        assert_ne!(card, save, "the game card keeps its own save");
+
+        let mut again = nds_with_slot(&rom, &gba, Some(&save));
+        assert_eq!(again.machine.hw.arm9_read_8(0x0A00_0010), 0x5A);
+        let empty = Nds::new(&Media::new(&rom)).expect("valid header");
+        assert_eq!(empty.backup_generation(1), None);
+    }
+
+    #[test]
+    fn states_and_resets_keep_the_gba_cartridge() {
+        let rom = rom();
+        let gba = gba_rom();
+        let mut nds = nds_with_slot(&rom, &gba, None);
+        nds.run_frame(&[], &mut Vec::new());
+        program_flash(&mut nds, 0x20, 0x77);
+        let mut state = Vec::new();
+        nds.save_state(&mut state);
+
+        let mut other = nds_with_slot(&rom, &gba, None);
+        let before = other.backup_generation(1);
+        other.load_state(&state).expect("loads");
+        let hw = &mut other.machine.hw;
+        assert_eq!(hw.arm9_read_8(0x0A00_0020), 0x77);
+        assert_eq!(hw.arm9_read_32(0x0800_00AC), u32::from_le_bytes(*b"TEST"));
+        assert_ne!(
+            other.backup_generation(1),
+            before,
+            "the frontend saves again"
+        );
+
+        let mut empty = Nds::new(&Media::new(&rom)).expect("valid header");
+        assert!(empty.load_state(&state).is_err(), "no GBA slot to restore");
+
+        other.reset();
+        let hw = &mut other.machine.hw;
+        assert_eq!(hw.arm9_read_8(0x0A00_0020), 0x77);
+        assert_eq!(hw.arm9_read_8(0x0800_00B2), 0x96);
     }
 }

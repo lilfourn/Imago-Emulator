@@ -1704,6 +1704,7 @@ version = "0.1.0"
 dependencies = [
  "emu-arm",
  "emu-core",
+ "emu-gba-cart",
  "emu-sched",
  "png 0.18.1",
  "postcard",

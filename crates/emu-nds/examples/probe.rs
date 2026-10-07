@@ -16,6 +16,8 @@
 //!   as `dir/f000120.png` and so on.
 //! - `SAVE_IN=game.sav` powers on with that battery save; `SAVE_OUT=path`
 //!   writes the battery save there at the end.
+//! - `GBA_ROM=game.gba` puts that GBA game in the GBA slot, with
+//!   `GBA_SAVE_IN` and `GBA_SAVE_OUT` for its save as above.
 //! - `STATE_IN=path` loads a save state before the first frame;
 //!   `STATE_OUT=path` writes one at the end.
 //! - `START_TIME=seconds` sets the real-time clock (Unix time) at power-on.
@@ -25,7 +27,7 @@
 
 use std::{env, fs, io::BufWriter, path::Path, process};
 
-use emu_core::{Button, Core, Input, Media, TouchPoint};
+use emu_core::{Button, Cartridge, Core, Input, Media, TouchPoint};
 use emu_nds::Nds;
 
 fn main() {
@@ -38,12 +40,18 @@ fn main() {
     let png_path = args.next();
     let rom = read_or_exit(&path);
     let save = env::var("SAVE_IN").ok().map(|path| read_or_exit(&path));
+    let gba_rom = env::var("GBA_ROM").ok().map(|path| read_or_exit(&path));
+    let gba_save = env::var("GBA_SAVE_IN").ok().map(|path| read_or_exit(&path));
     let media = Media {
         backup: save.as_deref(),
         start_time: env::var("START_TIME")
             .ok()
             .and_then(|text| text.parse().ok())
             .unwrap_or(0),
+        second_slot: gba_rom.as_deref().map(|rom| Cartridge {
+            rom,
+            backup: gba_save.as_deref(),
+        }),
         ..Media::new(&rom)
     };
     let mut nds = Nds::new(&media).unwrap_or_else(|error| {
@@ -83,10 +91,12 @@ fn main() {
     if let Some(path) = png_path {
         save_screens(&nds, &path);
     }
-    if let Ok(path) = env::var("SAVE_OUT") {
-        let mut bytes = Vec::new();
-        nds.save_backup(0, &mut bytes);
-        write_or_exit(&path, &bytes);
+    for (cartridge, variable) in [(0, "SAVE_OUT"), (1, "GBA_SAVE_OUT")] {
+        if let Ok(path) = env::var(variable) {
+            let mut bytes = Vec::new();
+            nds.save_backup(cartridge, &mut bytes);
+            write_or_exit(&path, &bytes);
+        }
     }
     if let Ok(path) = env::var("STATE_OUT") {
         let mut bytes = Vec::new();

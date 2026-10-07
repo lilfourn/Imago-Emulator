@@ -7,7 +7,9 @@
 
 use emu_arm::Access;
 
+use crate::gba_slot;
 use crate::hardware::Hardware;
+use crate::ipc::Side;
 use crate::vram::{Region, Vram};
 
 /// Access width, for wait states.
@@ -39,6 +41,11 @@ fn put_word(memory: &mut [u8], index: usize, value: u32) {
     memory[index..index + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+/// The CPU an access comes from.
+fn side(arm9: bool) -> Side {
+    if arm9 { Side::Arm9 } else { Side::Arm7 }
+}
+
 /// Where a memory address lands, for the plain-memory regions both CPUs
 /// share. Everything else is decoded per CPU.
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +61,14 @@ enum Place {
     Arm9Bios(usize),
     Arm7Bios(usize),
     Io,
-    /// The GBA slot with no cartridge, or nothing at all.
+    /// The GBA slot's ROM, 0x08000000-0x09FFFFFF, on a 16-bit bus.
+    GbaRom,
+    /// The GBA slot's SRAM or Flash, 0x0A000000-0x0AFFFFFF, on an 8-bit
+    /// bus that sees unaligned addresses as they are.
+    GbaRam,
+    /// The GBA slot while EXMEMCNT gives it to the other CPU: zeros.
+    GbaDeselected,
+    /// Nothing at all.
     Open,
 }
 
@@ -91,6 +105,15 @@ impl Hardware {
         }
     }
 
+    /// `place` in the GBA slot if `side` owns it.
+    fn gba_slot_place(&self, side: Side, place: Place) -> Place {
+        if self.gba_slot_owner() == side {
+            place
+        } else {
+            Place::GbaDeselected
+        }
+    }
+
     fn arm9_place(&self, address: u32) -> Place {
         match address >> 24 {
             0x02 => Place::MainRam(address as usize & 0x3F_FFFF),
@@ -107,6 +130,8 @@ impl Hardware {
                 None => Place::Open,
             },
             0x07 => Place::Oam(address & 0x7FF),
+            0x08 | 0x09 => self.gba_slot_place(Side::Arm9, Place::GbaRom),
+            0x0A => self.gba_slot_place(Side::Arm9, Place::GbaRam),
             0xFF if address >= 0xFFFF_0000 => Place::Arm9Bios(address as usize & 0xFFF),
             _ => Place::Open,
         }
@@ -126,6 +151,8 @@ impl Hardware {
             0x03 => Place::Arm7Wram(address as usize & 0xFFFF),
             0x04 => Place::Io,
             0x06 => Place::Vram(Region::Arm7, address & 0x3_FFFF),
+            0x08 | 0x09 => self.gba_slot_place(Side::Arm7, Place::GbaRom),
+            0x0A => self.gba_slot_place(Side::Arm7, Place::GbaRam),
             _ => Place::Open,
         }
     }
@@ -139,6 +166,7 @@ impl Hardware {
     }
 
     fn read_place_32(&mut self, arm9: bool, address: u32) -> u32 {
+        let unaligned = address;
         let address = address & !3;
         match self.place(arm9, address) {
             Place::MainRam(index) => word(&self.main_ram, index),
@@ -164,11 +192,19 @@ impl Hardware {
                     self.io7_read_32(address)
                 }
             }
+            Place::GbaRom => {
+                u32::from(self.gba_slot.read_rom(address))
+                    | u32::from(self.gba_slot.read_rom(address | 2)) << 16
+            }
+            // An 8-bit bus: the byte repeats across the word.
+            Place::GbaRam => u32::from(self.gba_slot.read_ram(unaligned)) * 0x0101_0101,
+            Place::GbaDeselected => 0,
             Place::Open => 0xFFFF_FFFF,
         }
     }
 
     fn read_place_16(&mut self, arm9: bool, address: u32) -> u16 {
+        let unaligned = address;
         let address = address & !1;
         match self.place(arm9, address) {
             Place::MainRam(index) => half(&self.main_ram, index),
@@ -186,6 +222,9 @@ impl Hardware {
                     self.io7_read_16(address)
                 }
             }
+            Place::GbaRom => self.gba_slot.read_rom(address),
+            Place::GbaRam => u16::from(self.gba_slot.read_ram(unaligned)) * 0x0101,
+            Place::GbaDeselected => 0,
             Place::Open => 0xFFFF,
         }
     }
@@ -207,11 +246,15 @@ impl Hardware {
                     self.io7_read_8(address)
                 }
             }
+            Place::GbaRom => (self.gba_slot.read_rom(address & !1) >> ((address & 1) * 8)) as u8,
+            Place::GbaRam => self.gba_slot.read_ram(address),
+            Place::GbaDeselected => 0,
             Place::Open => 0xFF,
         }
     }
 
     fn write_place_32(&mut self, arm9: bool, address: u32, value: u32) {
+        let unaligned = address;
         let address = address & !3;
         match self.place(arm9, address) {
             Place::MainRam(index) => put_word(&mut self.main_ram, index, value),
@@ -236,11 +279,24 @@ impl Hardware {
                     self.io7_write_32(address, value);
                 }
             }
-            Place::Arm9Bios(_) | Place::Arm7Bios(_) | Place::Open => {}
+            Place::GbaRom => {
+                let now = self.now(side(arm9));
+                self.gba_slot.write_rom(address, value as u16, now);
+                self.gba_slot
+                    .write_rom(address | 2, (value >> 16) as u16, now);
+            }
+            // Only the byte lane at the (unaligned) address reaches the
+            // 8-bit bus.
+            Place::GbaRam => {
+                let byte = value.rotate_right((unaligned & 3) * 8) as u8;
+                self.gba_slot.write_ram(unaligned, byte);
+            }
+            Place::Arm9Bios(_) | Place::Arm7Bios(_) | Place::GbaDeselected | Place::Open => {}
         }
     }
 
     fn write_place_16(&mut self, arm9: bool, address: u32, value: u16) {
+        let unaligned = address;
         let address = address & !1;
         match self.place(arm9, address) {
             Place::MainRam(index) => put_half(&mut self.main_ram, index, value),
@@ -256,7 +312,15 @@ impl Hardware {
                     self.io7_write_16(address, value);
                 }
             }
-            Place::Arm9Bios(_) | Place::Arm7Bios(_) | Place::Open => {}
+            Place::GbaRom => {
+                let now = self.now(side(arm9));
+                self.gba_slot.write_rom(address, value, now);
+            }
+            Place::GbaRam => {
+                let byte = (value >> ((unaligned & 1) * 8)) as u8;
+                self.gba_slot.write_ram(unaligned, byte);
+            }
+            Place::Arm9Bios(_) | Place::Arm7Bios(_) | Place::GbaDeselected | Place::Open => {}
         }
     }
 
@@ -273,11 +337,14 @@ impl Hardware {
                     self.io7_write_8(address, value);
                 }
             }
-            // Palette and OAM ignore byte writes.
+            Place::GbaRam => self.gba_slot.write_ram(address, value),
+            // Palette, OAM and the GBA slot's ROM ignore byte writes.
             Place::Palette(_)
             | Place::Oam(_)
             | Place::Arm9Bios(_)
             | Place::Arm7Bios(_)
+            | Place::GbaRom
+            | Place::GbaDeselected
             | Place::Open => {}
         }
     }
@@ -348,6 +415,10 @@ impl Hardware {
                 (_, true) => 2,
             },
             Place::Vram(..) | Place::Palette(_) | Place::Oam(_) if width == Width::Word => 4,
+            Place::GbaRom => {
+                2 * gba_slot::rom_cycles(self.gba_slot_timing(Side::Arm9), width, sequential)
+            }
+            Place::GbaRam => 2 * gba_slot::ram_cycles(self.gba_slot_timing(Side::Arm9)),
             _ => 2,
         }
     }
@@ -364,6 +435,10 @@ impl Hardware {
                 (_, true) => 1,
             },
             Place::Vram(..) if width == Width::Word => 2,
+            Place::GbaRom => {
+                gba_slot::rom_cycles(self.gba_slot_timing(Side::Arm7), width, sequential)
+            }
+            Place::GbaRam => gba_slot::ram_cycles(self.gba_slot_timing(Side::Arm7)),
             _ => 1,
         }
     }
@@ -428,5 +503,145 @@ mod tests {
             0x55AA,
             "mirrors every 256 KiB"
         );
+    }
+
+    /// A GBA ROM with `library` (a save library ID string) at 0x200 and a
+    /// recognisable header.
+    fn gba_rom(library: &[u8]) -> Vec<u8> {
+        let mut rom: Vec<u8> = (0..0x400u32).map(|index| index as u8).collect();
+        rom[0xAC..0xB0].copy_from_slice(b"TEST");
+        rom[0xB2] = 0x96;
+        rom[0x200..0x200 + library.len()].copy_from_slice(library);
+        rom
+    }
+
+    fn with_cartridge(rom: Vec<u8>) -> Hardware {
+        let mut hw = hardware();
+        let cartridge = emu_gba_cart::Cartridge::new(rom.into(), None, 0);
+        hw.gba_slot = crate::gba_slot::GbaSlot::new(Some(cartridge));
+        hw
+    }
+
+    #[test]
+    fn the_arm9_reads_gba_rom_at_every_width() {
+        let mut hw = with_cartridge(gba_rom(b""));
+        assert_eq!(hw.arm9_read_8(0x0800_00AC), b'T');
+        assert_eq!(hw.arm9_read_8(0x0800_00B2), 0x96);
+        assert_eq!(hw.arm9_read_16(0x0800_0010), 0x1110);
+        assert_eq!(hw.arm9_read_32(0x0800_00AC), u32::from_le_bytes(*b"TEST"));
+        // Past the end of the ROM the bus returns the halfword address.
+        assert_eq!(hw.arm9_read_16(0x0900_0010), 0x0008);
+        assert_eq!(hw.arm9_read_32(0x0800_1000), 0x0801_0800);
+        // ROM ignores writes.
+        hw.arm9_write_16(0x0800_0010, 0);
+        assert_eq!(hw.arm9_read_16(0x0800_0010), 0x1110);
+    }
+
+    #[test]
+    fn exmemcnt_bit_7_hands_the_slot_to_the_arm7() {
+        let mut hw = with_cartridge(gba_rom(b"SRAM_V"));
+        hw.arm9_write_8(0x0A00_0000, 0x5A);
+        assert_eq!(hw.arm7_read_32(0x0800_00AC), 0, "the ARM7 is deselected");
+        assert_eq!(hw.arm7_read_8(0x0A00_0000), 0);
+        hw.arm9_write_16(0x0400_0204, 0x0080);
+        assert_eq!(hw.arm9_read_32(0x0800_00AC), 0);
+        assert_eq!(hw.arm9_read_8(0x0A00_0000), 0);
+        hw.arm9_write_8(0x0A00_0000, 0x11);
+        assert_eq!(hw.arm7_read_32(0x0800_00AC), u32::from_le_bytes(*b"TEST"));
+        assert_eq!(
+            hw.arm7_read_8(0x0A00_0000),
+            0x5A,
+            "the ARM9's write was dropped"
+        );
+        assert_eq!(
+            hw.arm7_read_16(0x0400_0204) & 0x80,
+            0x80,
+            "EXMEMSTAT shows it"
+        );
+    }
+
+    #[test]
+    fn sram_sits_on_an_8_bit_bus() {
+        let mut hw = with_cartridge(gba_rom(b"SRAM_V"));
+        hw.arm9_write_32(0x0A00_0002, 0xAABB_CCDD);
+        assert_eq!(hw.arm9_read_8(0x0A00_0002), 0xBB);
+        assert_eq!(hw.arm9_read_8(0x0A00_0003), 0xFF);
+        assert_eq!(hw.arm9_read_32(0x0A00_0002), 0xBBBB_BBBB);
+        hw.arm9_write_16(0x0A00_0005, 0x1234);
+        assert_eq!(hw.arm9_read_16(0x0A00_0005), 0x1212);
+        // 32 KiB of SRAM, repeating.
+        assert_eq!(hw.arm9_read_8(0x0A00_8002), 0xBB);
+        assert_eq!(hw.gba_slot.backup_generation(), Some(2));
+    }
+
+    /// Sends a Flash command through the DS bus.
+    fn flash_command(hw: &mut Hardware, command: u8) {
+        hw.arm9_write_8(0x0A00_5555, 0xAA);
+        hw.arm9_write_8(0x0A00_2AAA, 0x55);
+        hw.arm9_write_8(0x0A00_5555, command);
+    }
+
+    #[test]
+    fn flash_128k_answers_through_the_slot() {
+        let mut hw = with_cartridge(gba_rom(b"FLASH1M_V"));
+        flash_command(&mut hw, 0x90);
+        let id = (hw.arm9_read_8(0x0A00_0000), hw.arm9_read_8(0x0A00_0001));
+        assert_eq!(id, (0xC2, 0x09), "Macronix 128 KiB");
+        flash_command(&mut hw, 0xF0);
+        // Program a byte in each bank.
+        flash_command(&mut hw, 0xA0);
+        hw.arm9_write_8(0x0A00_1234, 0x42);
+        flash_command(&mut hw, 0xB0);
+        hw.arm9_write_8(0x0A00_0000, 1);
+        assert_eq!(hw.arm9_read_8(0x0A00_1234), 0xFF, "bank 1 is blank");
+        flash_command(&mut hw, 0xA0);
+        hw.arm9_write_8(0x0A00_1234, 0x24);
+        flash_command(&mut hw, 0xB0);
+        hw.arm9_write_8(0x0A00_0000, 0);
+        assert_eq!(hw.arm9_read_8(0x0A00_1234), 0x42);
+        let mut save = Vec::new();
+        hw.gba_slot.save_backup(&mut save);
+        assert_eq!(
+            (save.len(), save[0x1234], save[0x1_1234]),
+            (0x2_0000, 0x42, 0x24)
+        );
+        // Erase bank 0's 4 KiB sector holding it.
+        flash_command(&mut hw, 0x80);
+        hw.arm9_write_8(0x0A00_5555, 0xAA);
+        hw.arm9_write_8(0x0A00_2AAA, 0x55);
+        hw.arm9_write_8(0x0A00_1000, 0x30);
+        assert_eq!(hw.arm9_read_8(0x0A00_1234), 0xFF);
+    }
+
+    #[test]
+    fn an_empty_slot_reads_all_ones() {
+        let mut hw = hardware();
+        assert_eq!(hw.arm9_read_32(0x0800_0000), 0xFFFF_FFFF);
+        assert_eq!(hw.arm9_read_16(0x09FF_FFFE), 0xFFFF);
+        assert_eq!(hw.arm9_read_8(0x0A00_0000), 0xFF);
+        assert_eq!(hw.arm9_read_32(0x0A00_0000), 0xFFFF_FFFF);
+        hw.arm9_write_8(0x0A00_0000, 0);
+        assert_eq!(hw.arm9_read_8(0x0A00_0000), 0xFF);
+        assert_eq!(hw.gba_slot.backup_generation(), None);
+    }
+
+    #[test]
+    fn gba_slot_wait_states_follow_each_cpus_exmem_bits() {
+        let mut hw = with_cartridge(gba_rom(b""));
+        let n = Access::NONSEQUENTIAL;
+        let s = Access::SEQUENTIAL;
+        // Power-on: 10-cycle first access, 6-cycle second, 10-cycle SRAM.
+        assert_eq!(hw.arm9_wait(0x0800_0000, Width::Half, n), 20);
+        assert_eq!(hw.arm9_wait(0x0800_0000, Width::Word, n), 32);
+        assert_eq!(hw.arm9_wait(0x0A00_0000, Width::Word, n), 20);
+        // 6/4 ROM and 18-cycle SRAM for the ARM9 only.
+        hw.arm9_write_16(0x0400_0204, 0x0018 | 3);
+        assert_eq!(hw.arm9_wait(0x0800_0000, Width::Word, s), 16);
+        assert_eq!(hw.arm9_wait(0x0A00_0000, Width::Byte, n), 36);
+        // Handed to the ARM7, which times it by its own bits.
+        hw.arm9_write_16(0x0400_0204, 0x0080);
+        hw.arm7_write_16(0x0400_0204, 0x000C);
+        assert_eq!(hw.arm7_wait(0x0800_0000, Width::Half, n), 18);
+        assert_eq!(hw.arm7_wait(0x0A00_0000, Width::Half, n), 10);
     }
 }

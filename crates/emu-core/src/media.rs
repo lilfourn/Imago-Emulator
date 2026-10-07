@@ -18,10 +18,14 @@ pub struct Media<'a> {
     /// or console real-time clock, which has no time zone and shows this
     /// date and time as is. Tests pass a fixed value for determinism.
     pub start_time: i64,
+    /// A cartridge in a second slot (the DS GBA slot), if one is inserted.
+    /// Systems without a second slot reject media that carry one.
+    pub second_slot: Option<Cartridge<'a>>,
 }
 
 impl<'a> Media<'a> {
-    /// Media with only a ROM: no save, no system files, clock at the epoch.
+    /// Media with only a ROM: no save, no system files, clock at the epoch,
+    /// nothing in a second slot.
     #[must_use]
     pub const fn new(rom: &'a [u8]) -> Self {
         Self {
@@ -29,6 +33,7 @@ impl<'a> Media<'a> {
             backup: None,
             system_files: &[],
             start_time: 0,
+            second_slot: None,
         }
     }
 
@@ -40,6 +45,16 @@ impl<'a> Media<'a> {
             .find(|file| file.kind == kind)
             .map(|file| file.data)
     }
+}
+
+/// A cartridge's contents: its image and its battery save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cartridge<'a> {
+    /// The cartridge image.
+    pub rom: &'a [u8],
+    /// The battery save previously written by [`crate::Core::save_backup`]
+    /// for this cartridge, if one exists.
+    pub backup: Option<&'a [u8]>,
 }
 
 /// A BIOS or firmware image dumped from the user's own hardware.

@@ -73,8 +73,13 @@ impl Gba {
     /// # Errors
     ///
     /// Returns [`LoadError::InvalidRom`] if the cartridge header lacks its
-    /// fixed value (GBATEK, "GBA Cartridge Header", 0xB2).
+    /// fixed value (GBATEK, "GBA Cartridge Header", 0xB2), or
+    /// [`LoadError::Unsupported`] if `media` has a second-slot cartridge,
+    /// which a GBA has no slot for.
     pub fn new(media: &Media<'_>) -> Result<Self, LoadError> {
+        if media.second_slot.is_some() {
+            return Err(LoadError::Unsupported("a second cartridge slot"));
+        }
         let invalid = |reason| LoadError::InvalidRom {
             system: System::Gba,
             reason,
@@ -218,14 +223,14 @@ impl Core for Gba {
         Ok(())
     }
 
-    fn backup_generation(&self, player: usize) -> Option<u64> {
-        (player == 0)
+    fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+        (cartridge == 0)
             .then(|| self.machine.bus.cartridge.backup_generation())
             .flatten()
     }
 
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
-        if player == 0 {
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+        if cartridge == 0 {
             self.machine.bus.cartridge.save_backup(out);
         }
     }

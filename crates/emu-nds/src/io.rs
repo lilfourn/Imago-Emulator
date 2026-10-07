@@ -39,6 +39,15 @@ impl Hardware {
         self.raw_mut(side)[index..index + 2].copy_from_slice(&value.to_le_bytes());
     }
 
+    /// The GBA-slot timing bits (EXMEMCNT bits 0-6) as `side` last wrote
+    /// them: each CPU keeps its own.
+    pub(crate) fn gba_slot_timing(&self, side: Side) -> u16 {
+        match side {
+            Side::Arm9 => self.exmemcnt & 0x7F,
+            Side::Arm7 => self.raw_16(Side::Arm7, 0x204) & 0x7F,
+        }
+    }
+
     /// DISPSTAT as `side` reads it.
     fn dispstat(&self, side: Side) -> u16 {
         let stored = self.cpu(side).dispstat;

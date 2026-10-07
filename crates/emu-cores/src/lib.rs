@@ -36,11 +36,23 @@ pub const fn info(system: System) -> CoreInfo {
     }
 }
 
-/// Powers on `system` with `media`.
+/// The system whose games fit in `system`'s second cartridge slot, if it
+/// has one: a DS takes Game Boy Advance games in its GBA slot.
+#[must_use]
+pub const fn second_slot(system: System) -> Option<System> {
+    match system {
+        System::Nds => Some(System::Gba),
+        System::Gb | System::Gba => None,
+    }
+}
+
+/// Powers on `system` with `media`, including any cartridge in
+/// [`Media::second_slot`].
 ///
 /// # Errors
 ///
-/// Returns the core's [`LoadError`] if it rejects the ROM.
+/// Returns the core's [`LoadError`] if it rejects the ROM, or a second-slot
+/// cartridge on a system without one.
 pub fn create(system: System, media: &Media<'_>) -> Result<Box<dyn Core>, LoadError> {
     Ok(match system {
         System::Gb => Box::new(emu_gb::Gb::new(media)?),
@@ -79,6 +91,25 @@ mod tests {
         );
         assert_eq!(system_for_path(Path::new("notes.txt")), None);
         assert_eq!(system_for_path(Path::new("no_extension")), None);
+    }
+
+    #[test]
+    fn only_the_ds_has_a_second_slot() {
+        assert_eq!(second_slot(System::Nds), Some(System::Gba));
+        assert_eq!(second_slot(System::Gba), None);
+        let mut rom = vec![0; 0xC0];
+        rom[0xB2] = 0x96;
+        let media = Media {
+            second_slot: Some(emu_core::Cartridge {
+                rom: &rom,
+                backup: None,
+            }),
+            ..Media::new(&rom)
+        };
+        assert!(matches!(
+            create(System::Gba, &media),
+            Err(LoadError::Unsupported(_))
+        ));
     }
 
     #[test]
