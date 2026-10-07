@@ -1,0 +1,13 @@
+Memory tests: 1385/1552
+I/O read tests: 23/130
+Timing tests: 1100/2020
+Timer count-up tests: 365/936
+Timer IRQ tests: 0/90
+Shifter tests: 140/140
+Carry tests: 93/93
+Multiply long tests: 52/72
+BIOS math tests: 322/615
+DMA tests: 1056/1244
+SIO register R/W tests: 7/90
+SIO timing tests: 0/4
+Misc. edge case tests: 4/12
