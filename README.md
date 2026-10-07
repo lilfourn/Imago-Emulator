@@ -65,25 +65,33 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 
 | Game | Key | Gamepad | | App | Shortcut |
 |---|---|---|---|---|---|
-| D-pad | Arrow keys | D-pad, left stick | | Open ROM | ⌘O |
-| A / B | X / Z | East / South | | Pause / resume | ⌘P |
-| X / Y (DS) | S / A | North / West | | Reset | ⌘R |
-| L / R | Q / W | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
+| D-pad | W A S D or arrow keys | D-pad, left stick | | Open ROM | ⌘O |
+| A / B | K / J | East / South | | Pause / resume | ⌘P |
+| X / Y (DS) | I / U | North / West | | Reset | ⌘R |
+| L / R | Q / E | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
 | Start / Select | Return / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
-| Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward on/off | ⌘F |
+| Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward / slow motion on/off | ⌘F / ⌘⇧F |
 | Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
-| Rewind | Hold ` | Left trigger | | Swap screens / Quit | ⌘E / ⌘Q |
-| | | | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
+| Slow motion | Hold 1 | | | Swap screens / Quit | ⌘E / ⌘Q |
+| Rewind | Hold R | Left trigger | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
 | | | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
+| | | | | Full screen | ⌃⌘F |
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Colour correction on/off | ⌘⇧C |
 | | | | | Memory viewer | ⌘⇧M |
 
-Hybrid shows one screen large beside both screens small, as in melonDS;
-Swap Screens chooses the large one. Rotation turns the whole arrangement
-for games played with the DS held like a book, and touch follows it. A
-90 px gap matches the DS hinge. The layout, swap, rotation and gap are
-remembered in `~/Library/Application Support/ds-emulator/settings.toml`.
+The keys are laid out for playing on a keyboard: the left hand on W A S D
+with the shoulders on Q and E, the right hand on a square of four keys
+shaped like the DS face buttons, U and I (Y and X) above J and K (B and A).
+
+The DS screens start stacked with no gap, in a window that opens as large
+as fits the display; full screen shows them at the display's full height,
+on black. Hybrid shows one screen large beside both screens small, as in
+melonDS; Swap Screens chooses the large one. Rotation turns the whole
+arrangement for games played with the DS held like a book, and touch
+follows it. A 90 px gap matches the DS hinge. The layout, swap, rotation
+and gap are remembered in
+`~/Library/Application Support/ds-emulator/settings.toml`.
 
 Gamepad buttons are named by position, so A is the right face button as on a
 Nintendo controller. Rebind keys and gamepad controls in
@@ -91,8 +99,8 @@ Nintendo controller. Rebind keys and gamepad controls in
 
 ```toml
 [keys]
-a = ["x", "k"]          # several keys per action
-fast_forward = ["tab"]
+a = ["k", "space"]      # several keys per action
+rewind = ["`"]
 
 [gamepad]
 a = ["South"]           # Xbox-style: A on the bottom button

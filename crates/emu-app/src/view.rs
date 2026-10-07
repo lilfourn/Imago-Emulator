@@ -17,7 +17,8 @@ use crate::app::{
     ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical,
     LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
     RotateAnticlockwise, RotateClockwise, SaveState, SwapScreens, SwitchPlayer,
-    ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause, ToggleSlowMotion,
+    ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, TogglePause,
+    ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
@@ -962,7 +963,12 @@ impl Render for EmulatorView {
             .key_context("Emulator")
             .size_full()
             .relative()
-            .bg(rgb(0x0011_1111))
+            // Nothing but the screens on black in full screen.
+            .bg(rgb(if window.is_fullscreen() {
+                0x0000_0000
+            } else {
+                0x0011_1111
+            }))
             .text_color(rgb(0x00DD_DDDD))
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::connect_link_cable))
@@ -1014,6 +1020,9 @@ impl Render for EmulatorView {
             }))
             .on_action(cx.listener(|this, _: &ToggleMemoryViewer, _, cx| {
                 this.toggle_memory_viewer(cx);
+            }))
+            .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
+                window.toggle_fullscreen();
             }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))

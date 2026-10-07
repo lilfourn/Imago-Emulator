@@ -301,5 +301,6 @@ are done.
 | Debugger panels | UI-12 | M7 → M11 |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gap, gamepad touch | UI-2, UI-7 | M13 ✅ |
+| Keyboard-first defaults, large window, full screen | UI-2, UI-5 | Phase 4 ✅ |
 | 3D upscaling | NDS-9 | M16 |
 | Shader chain, recording, achievements, scripting | UI-4, UI-14 | Later |

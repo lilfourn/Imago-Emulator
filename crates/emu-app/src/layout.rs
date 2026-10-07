@@ -243,6 +243,12 @@ impl Placement {
     }
 }
 
+/// The largest size with the proportions of `size` that fits in `area`.
+pub fn fit(size: (f32, f32), area: (f32, f32)) -> (f32, f32) {
+    let scale = (area.0 / size.0).min(area.1 / size.1).max(0.0);
+    (size.0 * scale, size.1 * scale)
+}
+
 impl Layout {
     /// Places `screens` in a `viewport` of logical pixels, turned, scaled
     /// uniformly to fit and centred.
@@ -595,6 +601,19 @@ mod tests {
         let placed = rects(layout, &DS, (384.0, 768.0));
         let (width, height) = extent(&placed);
         assert_eq!((width, height), (384.0, 768.0));
+    }
+
+    #[test]
+    fn default_stacks_the_screens_without_a_gap() {
+        let layout = Layout::default();
+        assert_eq!(layout.arrangement, Arrangement::Vertical);
+        assert_eq!(layout.gap, 0.0);
+    }
+
+    #[test]
+    fn fit_keeps_proportions() {
+        assert_eq!(fit((256.0, 384.0), (1000.0, 900.0)), (600.0, 900.0));
+        assert_eq!(fit((256.0, 384.0), (128.0, 900.0)), (128.0, 192.0));
     }
 
     #[test]

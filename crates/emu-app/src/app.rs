@@ -7,6 +7,7 @@ use gpui::{
     WindowOptions, actions, prelude::*, px, size,
 };
 
+use crate::layout;
 use crate::view::EmulatorView;
 
 actions!(
@@ -34,9 +35,25 @@ actions!(
         NextScreenGap,
         ToggleColorCorrection,
         ToggleMemoryViewer,
+        ToggleFullScreen,
         Quit,
     ]
 );
+
+/// Two DS screens stacked, in emulated pixels: the shape the window opens
+/// in.
+const STACKED_DS: (f32, f32) = (256.0, 384.0);
+
+/// How much of the display's free area the window opens to fill.
+const DISPLAY_SHARE: f32 = 0.9;
+
+/// Room on the display for the menu bar and the Dock, in logical pixels.
+/// GPUI reports only the whole display, not the part they leave free, so
+/// this is a generous guess.
+const SYSTEM_BARS: f32 = 100.0;
+
+/// Room for the window's title bar, in logical pixels.
+const TITLE_BAR: f32 = 33.0;
 
 /// Runs the app until the user quits, opening `roms` at launch: one game,
 /// or two linked Game Boy or Game Boy Advance games.
@@ -64,6 +81,9 @@ pub fn run(roms: Vec<PathBuf>) {
             KeyBinding::new("cmd-g", NextScreenGap, None),
             KeyBinding::new("cmd-shift-c", ToggleColorCorrection, None),
             KeyBinding::new("cmd-shift-m", ToggleMemoryViewer, None),
+            // AppKit puts View > Enter Full Screen in the menu itself, on
+            // Globe-F; this adds the classic shortcut.
+            KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.set_menus(menus());
@@ -74,8 +94,12 @@ pub fn run(roms: Vec<PathBuf>) {
         })
         .detach();
 
-        // Two DS screens stacked at 2x.
-        let bounds = Bounds::centered(None, size(px(512.0), px(768.0)), cx);
+        let display = cx.primary_display().map(|display| {
+            let size = display.bounds().size;
+            (f32::from(size.width), f32::from(size.height))
+        });
+        let (width, height) = initial_size(display);
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
@@ -92,6 +116,19 @@ pub fn run(roms: Vec<PathBuf>) {
         .expect("opening the main window");
         cx.activate(true);
     });
+}
+
+/// The window's content size at launch, in logical pixels: stacked DS
+/// screens as large as fit most of a `display` of that size, or at 2x if
+/// there is none.
+fn initial_size(display: Option<(f32, f32)>) -> (f32, f32) {
+    let Some((width, height)) = display else {
+        return (STACKED_DS.0 * 2.0, STACKED_DS.1 * 2.0);
+    };
+    let free = (width, height - SYSTEM_BARS);
+    let area = (free.0 * DISPLAY_SHARE, free.1 * DISPLAY_SHARE - TITLE_BAR);
+    let (width, height) = layout::fit(STACKED_DS, area);
+    (width.floor(), height.floor())
 }
 
 fn menus() -> Vec<Menu> {
@@ -142,4 +179,22 @@ fn menus() -> Vec<Menu> {
             ],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_opens_large_on_a_laptop_display() {
+        // A 14-inch MacBook Pro: 760 px is 1.98x, leaving room for the
+        // menu bar, Dock and title bar.
+        assert_eq!(initial_size(Some((1512.0, 982.0))), (507.0, 760.0));
+        assert_eq!(initial_size(Some((2560.0, 1440.0))), (782.0, 1173.0));
+    }
+
+    #[test]
+    fn window_opens_at_2x_without_a_display() {
+        assert_eq!(initial_size(None), (512.0, 768.0));
+    }
 }
