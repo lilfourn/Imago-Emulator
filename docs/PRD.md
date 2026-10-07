@@ -94,7 +94,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | CORE-4 | Battery saves are exposed with a write counter. The frontend flushes them at most 1 s after a write, on quit, and atomically (write a temporary file, then rename). ✅ | P0 · M3 |
 | CORE-5 | The real-time clock starts at `Media::start_time` and advances with emulated cycles. Per-game RTC offsets are supported. | P0 · M5, M10 |
 | CORE-6 | No BIOS or firmware is required. Use an HLE GBA BIOS ✅ and DS direct boot by default; use the user's own dumps when provided ✅ GBA. | P0 · M8, M13 |
-| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ `memory`, `peek`/`poke` for plain RAM and the keypad and timer registers cheats test, `poke_bank` for Game Boy RAM banks | P1 · M11 |
+| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ `memory`, `peek`/`poke` for plain RAM and the keypad and timer registers cheats test, `poke_bank` for Game Boy RAM banks, `poke_io_16` for GBA registers, `set_rom_patches` for ROM patches | P1 · M11 |
 
 ### 6.2 Systems
 
@@ -152,7 +152,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap ✅ and slow motion (hold 1, or ⌘⇧F) ✅. | P0 · S / P1 · M4 |
 | UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
 | UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor (✅ viewer), tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |
-| UI-13 | Cheats: GameShark (✅ GB, with 8x/9x bank codes), Action Replay (✅ DS; ✅ GBA GameShark Advance / Action Replay v1/v2 and Pro Action Replay v3, encrypted or not), CodeBreaker (✅ GBA, with encryption) and raw patches ✅. Not yet: Game Genie and other ROM patches. | P2 · M11 |
+| UI-13 | Cheats: GameShark (✅ GB, with 8x/9x bank codes), Game Genie (✅ GB), Action Replay (✅ DS; ✅ GBA GameShark Advance / Action Replay v1/v2 and Pro Action Replay v3, encrypted or not, with ROM patches and I/O writes), CodeBreaker (✅ GBA, with encryption) and raw patches ✅ | P2 · M11 |
 | UI-14 | Screenshots and video recording, RetroAchievements (rcheevos), Lua scripting hooks. | P2 |
 
 ### 6.4 Tooling

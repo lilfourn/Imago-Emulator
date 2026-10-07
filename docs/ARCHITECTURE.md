@@ -33,7 +33,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs. |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
-| `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, and `poke_bank` for Game Boy banks. Knows code formats, not cores. |
+| `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
@@ -62,6 +62,9 @@ pub trait Core: Send {
     fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>);   // .sav bytes
     fn peek(&self, player: usize, address: u32) -> Option<u8>;  // plain RAM only
     fn poke(&mut self, player: usize, address: u32, value: u8) -> bool;
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool; // GB banks
+    fn poke_io_16(&mut self, player: usize, address: u32, value: u16) -> bool; // GBA registers
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]); // cheats' ROM patches
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
 }
 ```
@@ -85,6 +88,9 @@ pub trait Core: Send {
 - **Determinism**: cores never read the clock, randomness or files. Same
   media and inputs give the same frames and state bytes. Rewind, netplay and
   frame-CRC tests depend on it.
+- **ROM patches** are configuration, like the ROM itself: a core keeps the
+  set it was last given, applies it to every ROM read, leaves it out of
+  save states and keeps it through `load_state` and `reset`.
 
 ## Threads in the app
 
@@ -122,10 +128,12 @@ pub trait Core: Send {
 - Cheats come from `game.cht`, which the view re-reads whenever the
   window regains focus and sends as a `Command`. They run after each
   frame: frames end at VBlank, where cheat devices hooked in, so button
-  codes see the frame's own input. DS cheats work on main RAM directly
-  and read KEYINPUT, EXTKEYIN and the ARM7's timers. melonDS instead
-  runs them on the ARM7's bus at its VBlank interrupt, as the real
-  Action Replay does; that reaches the same main RAM and registers.
+  codes see the frame's own input. ROM patches instead go to the core
+  when the list arrives (`Core::set_rom_patches`), so a cheat switched
+  off or deleted takes its patches with it. DS cheats work on main RAM
+  directly and read KEYINPUT, EXTKEYIN and the ARM7's timers. melonDS
+  instead runs them on the ARM7's bus at its VBlank interrupt, as the
+  real Action Replay does; that reaches the same main RAM and registers.
 - The memory viewer asks the thread to copy a span of RAM (through
   `Core::peek`) into the shared latest-frame slot after every frame.
 - The emulation thread records a save state after every frame into the

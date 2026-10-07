@@ -155,8 +155,6 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 What's missing:
 - armwrestler and the mGBA test suite are not wired into the harness yet;
 - the debugger has only the memory viewer (no disassembly or registers);
-- cheats lack ROM patches (GameShark Advance `6`, Pro Action Replay
-  ROM codes) and GBA I/O writes;
 - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) settles Q3
   but awaits review.
 The Pokémon checkpoints (FireRed music, Emerald saves and clock, the
@@ -202,7 +200,9 @@ FireRed–Emerald trade) need your own dumps.
   - `emu-cheats` with `game.cht` files (File > Edit Cheats…): device
     tags or detection; GameShark Advance / Action Replay v1/v2 and Pro
     Action Replay v3, encrypted (both seed sets, `DEADFACE`) or not;
-    CodeBreaker with its encryption; Game Boy GameShark bank codes; and
+    CodeBreaker with its encryption; Game Boy GameShark bank codes and
+    Game Genie; ROM patches (Game Genie, GameShark Advance `6`, Pro Action
+    Replay `18`–`1E`) and Pro Action Replay I/O writes (`C6`, `C7`); and
     Action Replay DS for Phase 4. Cheats run after each frame, at VBlank;
   - a memory viewer (View > Memory Viewer);
   - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3.

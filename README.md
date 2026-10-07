@@ -157,23 +157,28 @@ D2000000 00000000
 Each cheat is a `[name]` line followed by its codes. After the name, `off`
 disables it and a tag names the cheat device; without a tag the device is
 detected from the codes. Spaces and line breaks inside codes don't
-matter. Errors name the line and the device.
+matter, except that Game Genie codes are separated by spaces, line breaks
+or `+`. Errors name the line and the device.
 
 | Tag | Device | System |
 |---|---|---|
 | `raw` | `ADDRESS:VALUE` patches (hex) | all |
 | `gs` | GameShark `TTVVAAAA`, including `8x`/`9x` bank codes | Game Boy |
+| `gg` | Game Genie `ABC-DEF` or `ABC-DEF-GHI` (ROM patches) | Game Boy |
 | `cb` | CodeBreaker / Xploder, encrypted or not | GBA |
 | `gsa`, `gsa-raw` | GameShark Advance / Action Replay v1/v2, encrypted or not | GBA |
 | `par3`, `par3-raw` | Pro Action Replay v3 / Action Replay MAX, encrypted or not | GBA |
 | `ards` | Action Replay DS | DS |
 
 Add a tag when detection guesses wrong or asks for one: 16-digit GBA codes
-can be read four ways, and the list says when two fit equally well. Cheats
-run once a frame, at VBlank, so button-activated codes respond at once.
-Not supported: Game Genie and other ROM patches, codes that need the
-cheat device's own button, GBA I/O writes, and Action Replay DS types
-`C4`–`C6`.
+can be read four ways, and the list says when two fit equally well. A dash
+marks Game Boy codes as Game Genie ones. Cheats run once a frame, at
+VBlank, so button-activated codes respond at once. ROM patches (Game
+Genie, GameShark Advance type `6`, Pro Action Replay `18`–`1E`) apply to
+every ROM read, through save states and resets, until the cheat is
+switched off or removed. Pro Action Replay `C6`/`C7` codes write GBA I/O
+registers, except HALTCNT. Not supported: codes that need the cheat
+device's own button, and Action Replay DS types `C4`–`C6`.
 
 ## Testing against test ROMs
 
