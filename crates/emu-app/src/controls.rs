@@ -17,6 +17,8 @@ use crate::speed::Pace;
 pub struct HeldState {
     /// Emulated buttons held.
     pub buttons: Buttons,
+    /// Emulated buttons pressed and released over and over.
+    pub turbo: Buttons,
     /// Run faster or slower; fast-forward wins over slow motion.
     pub pace: Pace,
     /// Step backwards through history.
@@ -76,6 +78,7 @@ impl Controls {
         for held in self.pressed.values() {
             match held {
                 Held::Button(button) => state.buttons.set(*button, true),
+                Held::Turbo(button) => state.turbo.set(*button, true),
                 Held::FastForward => fast_forward = true,
                 Held::SlowMotion => slow_motion = true,
                 Held::Rewind => state.rewind = true,
@@ -131,6 +134,19 @@ mod tests {
         controls.set("pad:1:RightThumb".to_owned(), None, false);
         let state = controls.state();
         assert!(!state.touch && state.buttons.contains(Button::A));
+    }
+
+    #[test]
+    fn turbo_is_held_apart_from_the_button() {
+        let mut controls = Controls::default();
+        controls.set("key:l".to_owned(), Some(Held::Turbo(Button::A)), true);
+        let state = controls.state();
+        assert!(state.turbo.contains(Button::A));
+        assert!(state.buttons.is_empty());
+        controls.set("key:k".to_owned(), Some(Held::Button(Button::A)), true);
+        controls.set("key:l".to_owned(), None, false);
+        let state = controls.state();
+        assert!(state.turbo.is_empty() && state.buttons.contains(Button::A));
     }
 
     #[test]

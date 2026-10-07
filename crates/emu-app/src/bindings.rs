@@ -1,6 +1,7 @@
-//! Bindings for held inputs: emulated buttons, fast-forward, slow motion,
-//! rewind, touching the screen at the gamepad cursor and blowing into the
-//! DS microphone, from the keyboard or gamepads.
+//! Bindings for held inputs: emulated buttons and their turbo versions,
+//! fast-forward, slow motion, rewind, touching the screen at the gamepad
+//! cursor and blowing into the DS microphone, from the keyboard or
+//! gamepads.
 //!
 //! One-shot commands (Open, Pause, Save State, ...) are GPUI actions bound
 //! to menu shortcuts in `app.rs`. This module covers only inputs that are
@@ -13,6 +14,7 @@
 //! ```toml
 //! [keys]
 //! a = ["k", "space"]
+//! turbo_a = ["l"]         # A pressed and released over and over
 //! rewind = ["`"]
 //!
 //! [gamepad]
@@ -22,6 +24,9 @@
 //!
 //! [gamepads.030000005e0400008e02000000007200]
 //! a = ["South"]
+//!
+//! [turbo]
+//! frames = 3              # frames per turbo press, and per gap
 //! ```
 //!
 //! Actions missing from a section keep their defaults; an action listed
@@ -40,11 +45,16 @@ use std::str::FromStr;
 use emu_core::Button;
 use serde::Deserialize;
 
+use crate::turbo;
+
 /// Something a held input does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Held {
     /// Holds an emulated button.
     Button(Button),
+    /// Presses and releases an emulated button over and over while held
+    /// (see `turbo.rs`).
+    Turbo(Button),
     /// Runs emulation at the fast-forward speed while held.
     FastForward,
     /// Runs emulation at the slow-motion speed while held.
@@ -57,10 +67,14 @@ pub enum Held {
     Blow,
 }
 
+/// What `turbo_a` and the like start with.
+const TURBO_PREFIX: &str = "turbo_";
+
 impl fmt::Display for Held {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Button(button) => button.fmt(f),
+            Self::Turbo(button) => write!(f, "{TURBO_PREFIX}{button}"),
             Self::FastForward => f.write_str("fast_forward"),
             Self::SlowMotion => f.write_str("slow_motion"),
             Self::Rewind => f.write_str("rewind"),
@@ -74,16 +88,17 @@ impl FromStr for Held {
     type Err = BindingsError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let unknown = || BindingsError::UnknownAction(s.to_owned());
         match s {
             "fast_forward" => Ok(Self::FastForward),
             "slow_motion" => Ok(Self::SlowMotion),
             "rewind" => Ok(Self::Rewind),
             "touch" => Ok(Self::Touch),
             "blow" => Ok(Self::Blow),
-            _ => s
-                .parse()
-                .map(Self::Button)
-                .map_err(|_| BindingsError::UnknownAction(s.to_owned())),
+            _ => match s.strip_prefix(TURBO_PREFIX) {
+                Some(button) => button.parse().map(Self::Turbo).map_err(|_| unknown()),
+                None => s.parse().map(Self::Button).map_err(|_| unknown()),
+            },
         }
     }
 }
@@ -99,6 +114,8 @@ pub struct Bindings {
     gamepad: Map,
     /// Per-controller gamepad maps, by UUID.
     gamepads: HashMap<String, Map>,
+    /// Frames per turbo press, and per gap; at least 1.
+    turbo_frames: u8,
 }
 
 /// Laid out for playing on a keyboard: the left hand on WASD and the
@@ -167,6 +184,7 @@ impl Default for Bindings {
             keys: map_of(&KEY_DEFAULTS),
             gamepad: map_of(&GAMEPAD_DEFAULTS),
             gamepads: HashMap::new(),
+            turbo_frames: turbo::DEFAULT_FRAMES,
         }
     }
 }
@@ -183,6 +201,14 @@ struct BindingsFile {
     gamepad: Section,
     #[serde(default)]
     gamepads: BTreeMap<String, Section>,
+    #[serde(default)]
+    turbo: TurboSection,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TurboSection {
+    frames: Option<u8>,
 }
 
 impl Bindings {
@@ -200,6 +226,11 @@ impl Bindings {
             .copied()
     }
 
+    /// Frames each turbo press lasts, and each gap between presses.
+    pub fn turbo_frames(&self) -> u8 {
+        self.turbo_frames
+    }
+
     /// These bindings with `text`, a bindings file, laid over them: each
     /// action it lists is bound to exactly the inputs listed, and the
     /// rest keep theirs. A controller's bindings come from, lowest first,
@@ -209,7 +240,8 @@ impl Bindings {
     /// # Errors
     ///
     /// Returns [`BindingsError`] if the TOML is malformed, names an unknown
-    /// action, or binds one input to two actions.
+    /// action, binds one input to two actions, or asks for zero turbo
+    /// frames.
     pub fn overlay(&self, text: &str) -> Result<Self, BindingsError> {
         let file: BindingsFile =
             toml::from_str(text).map_err(|error| BindingsError::Syntax(error.to_string()))?;
@@ -231,10 +263,16 @@ impl Bindings {
                 Ok((uuid.clone(), map))
             })
             .collect::<Result<_, BindingsError>>()?;
+        let turbo_frames = match file.turbo.frames {
+            Some(0) => return Err(BindingsError::NoTurboFrames),
+            Some(frames) => frames,
+            None => self.turbo_frames,
+        };
         Ok(Self {
             keys: rebind(&self.keys, &file.keys)?,
             gamepad: rebind(&self.gamepad, &file.gamepad)?,
             gamepads,
+            turbo_frames,
         })
     }
 
@@ -313,8 +351,8 @@ pub enum BindingsError {
     /// The file is not valid TOML of the expected shape.
     #[error("invalid bindings file: {0}")]
     Syntax(String),
-    /// An action name is not a button, `fast_forward`, `slow_motion`,
-    /// `rewind`, `touch` or `blow`.
+    /// An action name is not a button, a turbo button such as `turbo_a`,
+    /// `fast_forward`, `slow_motion`, `rewind`, `touch` or `blow`.
     #[error("unknown action {0:?} in bindings")]
     UnknownAction(String),
     /// One input is bound to two different actions.
@@ -327,6 +365,9 @@ pub enum BindingsError {
         /// The action that tried to take it.
         second: Held,
     },
+    /// `[turbo]` asks for presses zero frames long.
+    #[error("turbo frames must be at least 1")]
+    NoTurboFrames,
 }
 
 #[cfg(test)]
@@ -451,6 +492,10 @@ mod tests {
             Bindings::from_toml("[keys]\nturbo = [\"t\"]\n"),
             Err(BindingsError::UnknownAction("turbo".to_owned()))
         );
+        assert_eq!(
+            Bindings::from_toml("[keys]\nturbo_z = [\"t\"]\n"),
+            Err(BindingsError::UnknownAction("turbo_z".to_owned()))
+        );
         assert!(matches!(
             Bindings::from_toml("[keys]\na = [\"k\"]\nb = [\"k\"]\n"),
             Err(BindingsError::Conflict { .. })
@@ -475,6 +520,46 @@ mod tests {
         assert_eq!(Bindings::load(path), Ok(Bindings::default()));
     }
 
+    #[test]
+    fn turbo_buttons_parse_and_print() {
+        let text = "[keys]\nturbo_a = [\"l\"]\n\n[gamepad]\nturbo_x = [\"Mode\"]\n";
+        let bindings = Bindings::from_toml(text).expect("valid file");
+        assert_eq!(bindings.key_action("l"), Some(Held::Turbo(Button::A)));
+        assert_eq!(bindings.key_action("k"), Some(Held::Button(Button::A)));
+        assert_eq!(
+            bindings.pad_action("any", "Mode"),
+            Some(Held::Turbo(Button::X))
+        );
+        assert_eq!(Held::Turbo(Button::Start).to_string(), "turbo_start");
+        assert_eq!("turbo_start".parse(), Ok(Held::Turbo(Button::Start)));
+    }
+
+    #[test]
+    fn no_turbo_is_bound_by_default() {
+        let bindings = Bindings::default();
+        let maps = [&bindings.keys, &bindings.gamepad];
+        assert!(
+            maps.iter()
+                .flat_map(|map| map.values())
+                .all(|held| !matches!(held, Held::Turbo(_)))
+        );
+        assert_eq!(bindings.turbo_frames(), turbo::DEFAULT_FRAMES);
+    }
+
+    #[test]
+    fn turbo_frames_are_read_and_must_be_positive() {
+        let bindings = Bindings::from_toml("[turbo]\nframes = 2\n").expect("valid file");
+        assert_eq!(bindings.turbo_frames(), 2);
+        assert_eq!(
+            Bindings::from_toml("[turbo]\nframes = 0\n"),
+            Err(BindingsError::NoTurboFrames)
+        );
+        assert!(matches!(
+            Bindings::from_toml("[turbo]\nrate = 2\n"),
+            Err(BindingsError::Syntax(_))
+        ));
+    }
+
     /// The user's file, with a profile for one controller.
     const USER: &str = "\
 [keys]
@@ -494,22 +579,24 @@ x = [\"West\"]
         let user = Bindings::from_toml(USER).expect("valid file");
         let game = "\
 [keys]
-a = [\"l\"]
+turbo_a = [\"l\"]
 
 [gamepad]
 x = [\"North\"]
-rewind = [\"RightTrigger2\"]
+turbo_a = [\"RightTrigger2\"]
+
+[turbo]
+frames = 1
 ";
         let bindings = user.overlay(game).expect("valid file");
         let key = |name| bindings.key_action(name);
-        assert_eq!(key("l"), Some(Held::Button(Button::A)));
-        assert_eq!(key("k"), None);
+        assert_eq!(key("l"), Some(Held::Turbo(Button::A)));
         assert_eq!(key("o"), Some(Held::Button(Button::X)), "the user's keys");
         for controller in ["pro", "other"] {
             let pad = |control| bindings.pad_action(controller, control);
             // The game's [gamepad] beats the controller's own profile...
             assert_eq!(pad("North"), Some(Held::Button(Button::X)), "{controller}");
-            assert_eq!(pad("RightTrigger2"), Some(Held::Rewind));
+            assert_eq!(pad("RightTrigger2"), Some(Held::Turbo(Button::A)));
             // ...and the user's choices it doesn't touch stay.
             assert_eq!(pad("South"), Some(Held::Button(Button::A)));
             assert_eq!(pad("East"), Some(Held::Button(Button::B)));
@@ -517,6 +604,7 @@ rewind = [\"RightTrigger2\"]
         assert_eq!(bindings.pad_action("pro", "Mode"), Some(Held::FastForward));
         assert_eq!(bindings.pad_action("pro", "West"), None, "x moved");
         assert_eq!(bindings.pad_action("other", "Mode"), None);
+        assert_eq!(bindings.turbo_frames(), 1);
     }
 
     #[test]
@@ -548,6 +636,7 @@ start = [\"Mode\"]
             Some(Held::Button(Button::A)),
             "the user's [gamepad] underneath"
         );
+        assert_eq!(bindings.turbo_frames(), turbo::DEFAULT_FRAMES);
     }
 
     #[test]

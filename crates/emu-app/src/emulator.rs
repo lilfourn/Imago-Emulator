@@ -19,13 +19,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail, ensure};
 use emu_cheats::Cheat;
-use emu_core::{Cartridge, Core, CoreInfo, Frame, Input, Media, System};
+use emu_core::{Buttons, Cartridge, Core, CoreInfo, Frame, Input, Media, System};
 
 use crate::audio::AudioSink;
 use crate::latch::Latch;
 use crate::persist;
 use crate::rewind::Rewind;
 use crate::speed::{self, Speed};
+use crate::turbo::Turbo;
 use crate::video;
 
 /// How often dirty battery saves are written to disk.
@@ -212,6 +213,17 @@ pub enum Command {
         /// What that player holds.
         input: Input,
     },
+    /// Replaces a player's turbo buttons from the next frame on: each is
+    /// pressed for `frames` frames, released for as many, and so on, past
+    /// the latch (see `turbo.rs`).
+    SetTurbo {
+        /// Index into the core's players.
+        player: usize,
+        /// The buttons whose turbo inputs that player holds.
+        buttons: Buttons,
+        /// Frames per press, and per gap.
+        frames: u8,
+    },
     /// Runs at this speed from the next frame on.
     SetSpeed(Speed),
     /// Steps backwards through recent frames while true.
@@ -317,6 +329,7 @@ impl Emulator {
                 .collect(),
             loaded,
             latches: vec![Latch::default(); players],
+            turbos: vec![Turbo::default(); players],
             cheats: vec![Vec::new(); players],
             watch: None,
             paused: false,
@@ -390,6 +403,8 @@ struct Runner {
     /// One per player: what they hold, each press kept long enough for
     /// the game to see it.
     latches: Vec<Latch>,
+    /// One per player: the buttons they turbo, counted in frames.
+    turbos: Vec<Turbo>,
     /// One list per player.
     cheats: Vec<Vec<Cheat>>,
     /// Memory the UI is watching.
@@ -443,11 +458,16 @@ impl Runner {
                 }
             } else {
                 inputs.clear();
-                inputs.extend(self.latches.iter().map(Latch::input));
+                for (latch, turbo) in self.latches.iter().zip(&self.turbos) {
+                    inputs.push(turbo.apply(latch.input()));
+                }
                 self.loaded.core.run_frame(&inputs, &mut audio);
                 self.apply_cheats();
                 for latch in &mut self.latches {
                     latch.advance();
+                }
+                for turbo in &mut self.turbos {
+                    turbo.advance();
                 }
                 // Only normal speed plays sound: rate control absorbs
                 // ±0.5%, not a change of speed.
@@ -487,6 +507,15 @@ impl Runner {
             Command::SetInput { player, input } => {
                 if let Some(latch) = self.latches.get_mut(player) {
                     latch.set(input);
+                }
+            }
+            Command::SetTurbo {
+                player,
+                buttons,
+                frames,
+            } => {
+                if let Some(turbo) = self.turbos.get_mut(player) {
+                    turbo.set(buttons, frames);
                 }
             }
             Command::SetSpeed(speed) => self.speed = speed,
@@ -535,12 +564,16 @@ impl Runner {
         }
     }
 
-    /// Drops releases still waiting out a press's minimum hold: after the
-    /// game jumps to another moment, a press from before would land out of
-    /// place.
+    /// Drops releases still waiting out a press's minimum hold, and turbo
+    /// presses being finished, and starts held turbo buttons again with a
+    /// press: after the game jumps to another moment, a press from before
+    /// would land out of place.
     fn clear_latches(&mut self) {
         for latch in &mut self.latches {
             latch.clear();
+        }
+        for turbo in &mut self.turbos {
+            turbo.clear();
         }
     }
 
@@ -877,6 +910,43 @@ mod tests {
         // Each player saw only their own.
         assert_eq!(frames_where(&seen, 0, |input| !input.buttons.is_empty()), 0);
         assert_eq!(frames_where(&seen, 1, |input| input.touch.is_some()), 0);
+    }
+
+    #[test]
+    fn turbo_alternates_frame_by_frame_past_the_latch() {
+        let (emulator, seen) = start_recorder();
+        let a: Buttons = [Button::A].into_iter().collect();
+        emulator.send(Command::SetTurbo {
+            player: 1,
+            buttons: a,
+            frames: 1,
+        });
+        run_frames(&seen, 10);
+        let held_until = seen.lock().expect("unpoisoned").len();
+        emulator.send(Command::SetTurbo {
+            player: 1,
+            buttons: Buttons::NONE,
+            frames: 1,
+        });
+        // A press under way finishes; then nothing.
+        run_frames(&seen, 3);
+        let released_from = seen.lock().expect("unpoisoned").len();
+        run_frames(&seen, 5);
+        let seen_now = seen.lock().expect("unpoisoned").clone();
+        let pressed: Vec<bool> = seen_now[..held_until]
+            .iter()
+            .map(|inputs| inputs[1].buttons.contains(Button::A))
+            .collect();
+        // Frames may run before the command arrives.
+        let start = pressed.iter().position(|a| *a).expect("turbo pressed A");
+        let turbo = &pressed[start..];
+        assert!(
+            turbo.windows(2).all(|pair| pair[0] != pair[1]),
+            "a one-frame press is not held for the latch's minimum: {turbo:?}"
+        );
+        let after = &seen_now[released_from..];
+        assert!(after.iter().all(|inputs| inputs[1].buttons.is_empty()));
+        assert_eq!(frames_where(&seen, 0, |input| !input.buttons.is_empty()), 0);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use emu_core::{CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
+use emu_core::{Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use gpui::{
     Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
@@ -454,6 +454,14 @@ impl EmulatorView {
         });
     }
 
+    fn send_turbo(&self) {
+        self.send(Command::SetTurbo {
+            player: self.active_player,
+            buttons: self.sent.turbo,
+            frames: self.bindings.turbo_frames(),
+        });
+    }
+
     /// Hands keyboard and gamepad control to `player`, releasing everything
     /// the previous player held.
     fn switch_player(&mut self, player: usize, cx: &mut Context<Self>) {
@@ -467,6 +475,11 @@ impl EmulatorView {
             player: self.active_player,
             input: Input::default(),
         });
+        self.send(Command::SetTurbo {
+            player: self.active_player,
+            buttons: Buttons::NONE,
+            frames: self.bindings.turbo_frames(),
+        });
         self.active_player = player;
         // Keyboard and gamepads now play the other player's game.
         if let Some(bindings) = self
@@ -477,6 +490,7 @@ impl EmulatorView {
             self.bindings = bindings.clone();
         }
         self.send_input();
+        self.send_turbo();
         self.watch_memory();
         self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
@@ -498,6 +512,10 @@ impl EmulatorView {
             self.sent.blow = state.blow;
             self.sent_touch = touch;
             self.send_input();
+        }
+        if state.turbo != self.sent.turbo {
+            self.sent.turbo = state.turbo;
+            self.send_turbo();
         }
         if state.pace != self.sent.pace {
             self.send(Command::SetSpeed(self.speeds.speed(state.pace)));

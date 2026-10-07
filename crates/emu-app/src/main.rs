@@ -24,6 +24,7 @@ mod rewind;
 mod settings;
 mod slots;
 mod speed;
+mod turbo;
 mod video;
 mod view;
 
