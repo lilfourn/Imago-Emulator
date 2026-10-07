@@ -42,6 +42,45 @@ pub(crate) struct Machine {
     /// debugging.
     #[serde(skip)]
     pub(crate) system_calls: [[u32; 0x20]; 2],
+    /// The end of a slice a debugger stopped part-way through, so the next
+    /// run finishes the same slice. Not machine state: a loaded state
+    /// starts a fresh slice.
+    #[serde(skip)]
+    slice_target: Option<u64>,
+}
+
+/// How [`Machine::run_slice_with`] runs each CPU instruction, and whether
+/// it stops after one: [`Plain`] for running games, or a debugger's
+/// checks (`debug.rs`).
+pub(crate) trait Stepper {
+    /// Runs one ARM9 instruction on `bus`.
+    fn arm9(&mut self, cpu: &mut Arm9, bus: &mut Arm9Bus<'_>);
+    /// Runs one ARM7 instruction on `bus`.
+    fn arm7(&mut self, cpu: &mut Cpu, bus: &mut Arm7Bus<'_>);
+    /// Whether to stop after a step of `side`'s, whose next instruction is
+    /// at `next`. `ran` says whether the step ran anything (an instruction
+    /// or an emulated BIOS call) rather than DMA or waiting.
+    fn stop(&mut self, side: Side, ran: bool, next: u32) -> bool;
+}
+
+/// Runs instructions straight on the bus and never stops.
+pub(crate) struct Plain;
+
+impl Stepper for Plain {
+    #[inline]
+    fn arm9(&mut self, cpu: &mut Arm9, bus: &mut Arm9Bus<'_>) {
+        cpu.step(bus);
+    }
+
+    #[inline]
+    fn arm7(&mut self, cpu: &mut Cpu, bus: &mut Arm7Bus<'_>) {
+        cpu.step(bus);
+    }
+
+    #[inline]
+    fn stop(&mut self, _: Side, _: bool, _: u32) -> bool {
+        false
+    }
 }
 
 /// What happened while running, for the core to act on.
@@ -49,6 +88,8 @@ pub(crate) struct Machine {
 pub(crate) struct Progress {
     /// VBlank started: a frame is complete.
     pub(crate) frame_done: bool,
+    /// The [`Stepper`] stopped the slice part-way through.
+    pub(crate) stopped: bool,
 }
 
 /// The registers a CPU starts a program with: entry point, stacks for
@@ -105,6 +146,7 @@ impl Machine {
             suspended: [Vec::new(), Vec::new()],
             vblank_wait_swi: [None; 2],
             system_calls: [[0; 0x20]; 2],
+            slice_target: None,
         }
     }
 
@@ -113,19 +155,36 @@ impl Machine {
         self.hw.scheduler.now()
     }
 
-    /// Runs one slice. Returns what the events in it did.
-    pub(crate) fn run_slice(
+    /// Runs one slice, each instruction by `stepper` ([`Plain`] to just
+    /// run them), which can stop it part-way; the next call then finishes
+    /// the same slice. Returns what the events in it did.
+    pub(crate) fn run_slice_with<S: Stepper>(
         &mut self,
+        stepper: &mut S,
         mut on_moment: impl FnMut(&mut Hardware, Moment),
     ) -> Progress {
         let now = self.hw.scheduler.now();
-        let next = self.hw.scheduler.next_time().unwrap_or(u64::MAX);
-        let target = next.clamp(now + 1, now + SLICE_CYCLES);
+        let target = self.slice_target.take().unwrap_or_else(|| {
+            let next = self.hw.scheduler.next_time().unwrap_or(u64::MAX);
+            next.clamp(now + 1, now + SLICE_CYCLES)
+        });
+        let stopped = Progress {
+            frame_done: false,
+            stopped: true,
+        };
         while self.hw.arm9.cycles < target * 2 {
-            self.step_arm9(target * 2);
+            let ran = self.step_arm9(target * 2, stepper);
+            if stepper.stop(Side::Arm9, ran, self.arm9.next_instruction()) {
+                self.slice_target = Some(target);
+                return stopped;
+            }
         }
         while self.hw.arm7.cycles < target {
-            self.step_arm7(target);
+            let ran = self.step_arm7(target, stepper);
+            if stepper.stop(Side::Arm7, ran, self.arm7.next_instruction()) {
+                self.slice_target = Some(target);
+                return stopped;
+            }
         }
         self.hw.scheduler.advance(target - now);
         // The geometry FIFO's interrupt is a level, and its DMA runs while
@@ -179,18 +238,19 @@ impl Machine {
         self.hw.schedule_timer(side, index);
     }
 
-    /// One ARM9 instruction, DMA run or stretch of halt, up to `target` in
-    /// ARM9 cycles.
-    fn step_arm9(&mut self, target: u64) {
+    /// One ARM9 instruction (run by `stepper`), emulated BIOS call, DMA
+    /// run or stretch of halt, up to `target` in ARM9 cycles. Returns
+    /// whether it was an instruction or a BIOS call.
+    fn step_arm9<S: Stepper>(&mut self, target: u64, stepper: &mut S) -> bool {
         let hw = &mut self.hw;
         if hw.run_dma(Side::Arm9) {
-            return;
+            return false;
         }
         // Halted by a BIOS call or by CP15's wait for interrupt.
         if hw.arm9.halted || self.arm9.halted() {
             if !hw.arm9.interrupts.pending() {
                 hw.arm9.cycles = hw.arm9.cycles.max(target);
-                return;
+                return false;
             }
             hw.arm9.halted = false;
             self.arm9.wake();
@@ -228,7 +288,7 @@ impl Machine {
                 effects,
                 &mut self.suspended[0],
             );
-            return;
+            return true;
         }
         if self.hle_bios
             && reached(&self.arm9, bios::ARM9_CALLBACK_RETURN)
@@ -250,23 +310,25 @@ impl Machine {
                 stub,
                 &mut self.suspended[0],
             );
-            return;
+            return true;
         }
         self.arm9.set_irq_line(hw.arm9.interrupts.line());
-        self.arm9.step(&mut Arm9Bus(hw));
+        stepper.arm9(&mut self.arm9, &mut Arm9Bus(hw));
+        true
     }
 
-    /// One ARM7 instruction, DMA run or stretch of halt, up to `target` in
-    /// bus cycles.
-    fn step_arm7(&mut self, target: u64) {
+    /// One ARM7 instruction (run by `stepper`), emulated BIOS call, DMA
+    /// run or stretch of halt, up to `target` in bus cycles. Returns
+    /// whether it was an instruction or a BIOS call.
+    fn step_arm7<S: Stepper>(&mut self, target: u64, stepper: &mut S) -> bool {
         let hw = &mut self.hw;
         if hw.run_dma(Side::Arm7) {
-            return;
+            return false;
         }
         if hw.arm7.halted {
             if !hw.arm7.interrupts.pending() {
                 hw.arm7.cycles = hw.arm7.cycles.max(target);
-                return;
+                return false;
             }
             hw.arm7.halted = false;
         }
@@ -285,7 +347,7 @@ impl Machine {
                 effects,
                 &mut self.suspended[1],
             );
-            return;
+            return true;
         }
         if self.hle_bios
             && reached(&self.arm7, bios::ARM7_CALLBACK_RETURN)
@@ -302,10 +364,11 @@ impl Machine {
                 stub,
                 &mut self.suspended[1],
             );
-            return;
+            return true;
         }
         self.arm7.set_irq_line(hw.arm7.interrupts.line());
-        self.arm7.step(&mut Arm7Bus(hw));
+        stepper.arm7(&mut self.arm7, &mut Arm7Bus(hw));
+        true
     }
 }
 
@@ -597,7 +660,7 @@ mod tests {
             if !nds.machine.suspended[0].is_empty() {
                 break;
             }
-            nds.machine.run_slice(|_, _| {});
+            nds.machine.run_slice_with(&mut Plain, |_, _| {});
         }
         assert!(!nds.machine.suspended[0].is_empty(), "stopped mid-call");
         let mut state = Vec::new();

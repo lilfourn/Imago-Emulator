@@ -12,14 +12,17 @@ mod boot;
 mod bus;
 mod capture;
 mod cart;
+mod debug;
 mod display;
 mod dma;
 mod gba_slot;
 mod gpu2d;
 mod gpu3d;
+mod graphics;
 mod hardware;
 mod interrupt;
 mod io;
+mod io_names;
 mod ipc;
 mod machine;
 mod math;
@@ -31,8 +34,8 @@ mod timer;
 mod vram;
 
 use emu_core::{
-    Button, Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
-    StateError, StereoSample, System, SystemFileKind,
+    Button, Core, CoreInfo, Debugger, Frame, FrameRate, Input, LoadError, Media, MemoryRegion,
+    ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge as GbaCartridge;
 
@@ -40,7 +43,7 @@ use cart::Cart;
 use display::FRAME_CYCLES;
 use gba_slot::GbaSlot;
 use hardware::Hardware;
-use machine::Machine;
+use machine::{Machine, Plain, Stepper};
 use rtc::Rtc;
 use spi::Spi;
 
@@ -257,6 +260,41 @@ impl Nds {
     pub fn cycles(&self) -> u64 {
         self.machine.now()
     }
+
+    /// Runs slices, each instruction by `stepper`, until a frame finishes
+    /// or `stepper` stops one part-way, for [`Core::run_frame`] and
+    /// [`Debugger::run_until`]. Returns whether the frame finished; the
+    /// next call carries on after a stop.
+    fn run<S: Stepper>(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        stepper: &mut S,
+    ) -> bool {
+        self.set_input(&inputs.first().copied().unwrap_or_default());
+        if self.machine.hw.spi.powered_off() {
+            // The game switched the console off: dark screens, no sound.
+            for screen in &mut self.screens {
+                screen.pixels_mut().fill(0xFF00_0000);
+            }
+            return true;
+        }
+        let start = self.machine.now();
+        // A frame ends at VBlank, or after a frame's time if that never
+        // comes.
+        while self.machine.now() - start < FRAME_CYCLES {
+            let progress = self.machine.run_slice_with(stepper, |_, _| {});
+            if progress.stopped {
+                return false;
+            }
+            if progress.frame_done {
+                break;
+            }
+        }
+        self.machine.hw.sound.drain_samples(audio);
+        self.present();
+        true
+    }
 }
 
 impl Core for Nds {
@@ -265,24 +303,7 @@ impl Core for Nds {
     }
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
-        self.set_input(&inputs.first().copied().unwrap_or_default());
-        if self.machine.hw.spi.powered_off() {
-            // The game switched the console off: dark screens, no sound.
-            for screen in &mut self.screens {
-                screen.pixels_mut().fill(0xFF00_0000);
-            }
-            return;
-        }
-        let start = self.machine.now();
-        // A frame ends at VBlank, or after a frame's time if that never
-        // comes.
-        while self.machine.now() - start < FRAME_CYCLES {
-            if self.machine.run_slice(|_, _| {}).frame_done {
-                break;
-            }
-        }
-        self.machine.hw.sound.drain_samples(audio);
-        self.present();
+        self.run(inputs, audio, &mut Plain);
     }
 
     fn screens(&self) -> &[Frame] {
@@ -386,6 +407,10 @@ impl Core for Nds {
             MemoryRegion::MainRam => Some(&self.machine.hw.main_ram),
             MemoryRegion::VideoRam => None,
         }
+    }
+
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        Some(self)
     }
 }
 

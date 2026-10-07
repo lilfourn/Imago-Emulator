@@ -349,6 +349,57 @@ impl Hardware {
         }
     }
 
+    /// The byte at `address` as the ARM9 (if `arm9`) or the ARM7 reads
+    /// it, without side effects or time passing, for debuggers: memory,
+    /// the BIOS, the GBA slot and the I/O registers whose reads change
+    /// nothing. `None` for unmapped space and I/O reads that would. The
+    /// ARM9's TCM is the CPU's to answer.
+    pub(crate) fn peek(&self, arm9: bool, address: u32) -> Option<u8> {
+        let byte = |half: u16| (half >> ((address & 1) * 8)) as u8;
+        Some(match self.place(arm9, address) {
+            Place::MainRam(index) => self.main_ram[index],
+            Place::SharedWram(index) => self.shared_wram[index],
+            Place::Arm7Wram(index) => self.arm7_wram[index],
+            Place::Palette(offset) => byte(self.read_palette(offset)),
+            Place::Oam(offset) => byte(self.read_oam(offset)),
+            Place::Vram(region, offset) => self.vram.read_8(region, offset),
+            Place::Arm9Bios(index) => self.arm9_bios[index],
+            Place::Arm7Bios(index) => self.arm7_bios[index],
+            Place::Io => return self.peek_io(side(arm9), address),
+            Place::GbaRom => byte(self.gba_slot.peek_rom(address)),
+            Place::GbaRam => self.gba_slot.read_ram(address),
+            Place::GbaDeselected => 0,
+            Place::Open => return None,
+        })
+    }
+
+    /// Writes the byte at `address` as the ARM9 (if `arm9`) or the ARM7
+    /// sees it, without side effects, for debuggers: main RAM, WRAM,
+    /// palette RAM, VRAM and OAM, a byte at a time (unlike CPU byte stores
+    /// to palette RAM and OAM). Returns whether `address` is one of those.
+    pub(crate) fn poke(&mut self, arm9: bool, address: u32, value: u8) -> bool {
+        let merge = |half: u16| {
+            let shift = (address & 1) * 8;
+            (half & !(0xFF << shift)) | u16::from(value) << shift
+        };
+        match self.place(arm9, address) {
+            Place::MainRam(index) => self.main_ram[index] = value,
+            Place::SharedWram(index) => self.shared_wram[index] = value,
+            Place::Arm7Wram(index) => self.arm7_wram[index] = value,
+            Place::Palette(offset) => {
+                let half = merge(self.read_palette(offset));
+                self.write_palette(offset, half);
+            }
+            Place::Oam(offset) => {
+                let half = merge(self.read_oam(offset));
+                self.write_oam(offset, half);
+            }
+            Place::Vram(region, offset) => self.vram.write_8(region, offset, value),
+            _ => return false,
+        }
+        true
+    }
+
     // The ARM9's view.
 
     pub(crate) fn arm9_read_32(&mut self, address: u32) -> u32 {

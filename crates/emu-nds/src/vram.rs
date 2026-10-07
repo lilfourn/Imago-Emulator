@@ -187,6 +187,12 @@ impl Vram {
         self.control[bank]
     }
 
+    /// The banks covering the 8 KiB page that holds `offset` in `region`
+    /// (wrapped to its size): bit n for bank n (0 = A … 8 = I).
+    pub(crate) fn banks_at(&self, region: Region, offset: u32) -> u16 {
+        self.pages[region.index()][(wrap(region, offset) / PAGE) as usize]
+    }
+
     /// Writes VRAMCNT for `bank` and remaps.
     pub(crate) fn set_control(&mut self, bank: usize, value: u8) {
         self.control[bank] = value & 0x9F;
