@@ -39,6 +39,32 @@ impl Hardware {
         self.raw_mut(side)[index..index + 2].copy_from_slice(&value.to_le_bytes());
     }
 
+    /// The registers cheat codes test, read without side effects: the
+    /// ARM7's timers (0x04000100–0x0400010F), KEYINPUT (0x04000130) and
+    /// EXTKEYIN (0x04000136). The ARM7's, because the Action Replay runs
+    /// there. `None` for any other address.
+    pub(crate) fn peek_cheat_register(&self, address: u32) -> Option<u8> {
+        let half = match address & !1 {
+            0x0400_0100..=0x0400_010E => {
+                let offset = (address & !1) - 0x0400_0100;
+                self.arm7.timers.read(offset, self.now(Side::Arm7))
+            }
+            0x0400_0130 => self.keys,
+            0x0400_0136 => self.ext_keys,
+            _ => return None,
+        };
+        Some((half >> ((address & 1) * 8)) as u8)
+    }
+
+    /// The GBA-slot timing bits (EXMEMCNT bits 0-6) as `side` last wrote
+    /// them: each CPU keeps its own.
+    pub(crate) fn gba_slot_timing(&self, side: Side) -> u16 {
+        match side {
+            Side::Arm9 => self.exmemcnt & 0x7F,
+            Side::Arm7 => self.raw_16(Side::Arm7, 0x204) & 0x7F,
+        }
+    }
+
     /// DISPSTAT as `side` reads it.
     fn dispstat(&self, side: Side) -> u16 {
         let stored = self.cpu(side).dispstat;

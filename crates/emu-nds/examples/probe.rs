@@ -16,16 +16,20 @@
 //!   as `dir/f000120.png` and so on.
 //! - `SAVE_IN=game.sav` powers on with that battery save; `SAVE_OUT=path`
 //!   writes the battery save there at the end.
+//! - `GBA_ROM=game.gba` puts that GBA game in the GBA slot, with
+//!   `GBA_SAVE_IN` and `GBA_SAVE_OUT` for its save as above.
 //! - `STATE_IN=path` loads a save state before the first frame;
 //!   `STATE_OUT=path` writes one at the end.
 //! - `START_TIME=seconds` sets the real-time clock (Unix time) at power-on.
+//! - `CHEATS=game.cht` applies that cheat list after every frame, as the
+//!   app does.
 //! - `QUIET=1` prints the CPU line every 60 frames instead of every frame.
 //! - `DUMP=hex` prints the ARM9 code there at the end instead of around
 //!   its PC.
 
 use std::{env, fs, io::BufWriter, path::Path, process};
 
-use emu_core::{Button, Core, Input, Media, TouchPoint};
+use emu_core::{Button, Cartridge, Core, Input, Media, TouchPoint};
 use emu_nds::Nds;
 
 fn main() {
@@ -38,12 +42,18 @@ fn main() {
     let png_path = args.next();
     let rom = read_or_exit(&path);
     let save = env::var("SAVE_IN").ok().map(|path| read_or_exit(&path));
+    let gba_rom = env::var("GBA_ROM").ok().map(|path| read_or_exit(&path));
+    let gba_save = env::var("GBA_SAVE_IN").ok().map(|path| read_or_exit(&path));
     let media = Media {
         backup: save.as_deref(),
         start_time: env::var("START_TIME")
             .ok()
             .and_then(|text| text.parse().ok())
             .unwrap_or(0),
+        second_slot: gba_rom.as_deref().map(|rom| Cartridge {
+            rom,
+            backup: gba_save.as_deref(),
+        }),
         ..Media::new(&rom)
     };
     let mut nds = Nds::new(&media).unwrap_or_else(|error| {
@@ -57,6 +67,7 @@ fn main() {
                 process::exit(1);
             });
     }
+    let cheats = cheat_list();
     let script = input_script();
     let snaps = snapshot_plan();
     let quiet = env::var_os("QUIET").is_some();
@@ -67,6 +78,7 @@ fn main() {
             .find(|(start, _)| *start <= frame)
             .map_or_else(Input::default, |(_, input)| *input);
         nds.run_frame(&[input], &mut Vec::new());
+        emu_cheats::apply(&cheats, &mut CheatMemory(&mut nds));
         if !quiet || frame % 60 == 59 {
             println!("frame={frame} {}", nds.debug_state());
         }
@@ -83,10 +95,12 @@ fn main() {
     if let Some(path) = png_path {
         save_screens(&nds, &path);
     }
-    if let Ok(path) = env::var("SAVE_OUT") {
-        let mut bytes = Vec::new();
-        nds.save_backup(0, &mut bytes);
-        write_or_exit(&path, &bytes);
+    for (cartridge, variable) in [(0, "SAVE_OUT"), (1, "GBA_SAVE_OUT")] {
+        if let Ok(path) = env::var(variable) {
+            let mut bytes = Vec::new();
+            nds.save_backup(cartridge, &mut bytes);
+            write_or_exit(&path, &bytes);
+        }
     }
     if let Ok(path) = env::var("STATE_OUT") {
         let mut bytes = Vec::new();
@@ -107,6 +121,31 @@ fn write_or_exit(path: &str, bytes: &[u8]) {
         eprintln!("cannot write {path}: {error}");
         process::exit(1);
     });
+}
+
+/// The DS as cheats see it.
+struct CheatMemory<'a>(&'a mut Nds);
+
+impl emu_cheats::Memory for CheatMemory<'_> {
+    fn peek(&self, address: u32) -> Option<u8> {
+        self.0.peek(0, address)
+    }
+
+    fn poke(&mut self, address: u32, value: u8) -> bool {
+        self.0.poke(0, address, value)
+    }
+}
+
+/// The cheats in `CHEATS`, if set.
+fn cheat_list() -> Vec<emu_cheats::Cheat> {
+    let Ok(path) = env::var("CHEATS") else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&read_or_exit(&path)).into_owned();
+    emu_cheats::parse(emu_core::System::Nds, &text).unwrap_or_else(|error| {
+        eprintln!("{path}: {error}");
+        process::exit(1);
+    })
 }
 
 /// `INPUT` as (first frame, input held) pairs.

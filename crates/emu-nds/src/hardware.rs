@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cart::{Cart, RomEvent};
 use crate::dma::{Dma, Owner, Timing};
+use crate::gba_slot::GbaSlot;
 use crate::gpu2d::Engine2d;
 use crate::gpu3d::Gpu3d;
 use crate::interrupt::{Interrupts, irq};
@@ -105,6 +106,7 @@ pub(crate) struct Hardware {
     pub(crate) math: Math,
     pub(crate) sound: Sound,
     pub(crate) cart: Cart,
+    pub(crate) gba_slot: GbaSlot,
     pub(crate) spi: Spi,
     pub(crate) rtc: Rtc,
     /// KEYINPUT: A, B, Select, Start, Right, Left, Up, Down, R, L; active low.
@@ -164,6 +166,7 @@ impl Hardware {
             math: Math::default(),
             sound: Sound::default(),
             cart: Cart::new(Box::default(), None),
+            gba_slot: GbaSlot::default(),
             spi: Spi::new(None),
             rtc: Rtc::new(0),
             keys: 0x03FF,
@@ -180,12 +183,22 @@ impl Hardware {
         }
     }
 
-    /// Moves the BIOS images and the ROM out of `other`, which is about to
+    /// Moves the BIOS images and the ROMs out of `other`, which is about to
     /// be replaced by a loaded save state.
     pub(crate) fn take_media_from(&mut self, other: &mut Self) {
         self.arm9_bios = std::mem::take(&mut other.arm9_bios);
         self.arm7_bios = std::mem::take(&mut other.arm7_bios);
         self.cart.take_rom_from(&mut other.cart);
+        self.gba_slot.take_rom_from(&mut other.gba_slot);
+    }
+
+    /// The CPU that EXMEMCNT gives the GBA slot.
+    pub(crate) fn gba_slot_owner(&self) -> Side {
+        if self.exmemcnt & (1 << 7) != 0 {
+            Side::Arm7
+        } else {
+            Side::Arm9
+        }
     }
 
     /// The CPU that EXMEMCNT gives the game card slot.

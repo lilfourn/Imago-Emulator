@@ -14,10 +14,11 @@ use gpui::{
 };
 
 use crate::app::{
-    ConnectLinkCable, EditCheats, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical,
-    LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
+    ConnectLinkCable, EditCheats, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
+    LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
     RotateAnticlockwise, RotateClockwise, SaveState, SwapScreens, SwitchPlayer,
-    ToggleColorCorrection, ToggleFastForward, ToggleMemoryViewer, TogglePause,
+    ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, TogglePause,
+    ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
@@ -32,6 +33,7 @@ use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
 use crate::persist;
 use crate::settings::{self, Settings};
 use crate::slots::{self, SlotPreview};
+use crate::speed::Speeds;
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -47,6 +49,8 @@ pub struct EmulatorView {
     /// Where the layout is saved for next launch, if there is a config
     /// folder.
     settings_path: Option<PathBuf>,
+    /// How fast fast-forward and slow motion run, from the settings file.
+    speeds: Speeds,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
     /// Where the memory viewer is looking, while it is open.
@@ -81,8 +85,10 @@ pub struct EmulatorView {
 struct Session {
     emulator: Emulator,
     info: CoreInfo,
-    /// One ROM per player.
+    /// Each cartridge's ROM: one per player, then any in a second slot.
     rom_paths: Vec<PathBuf>,
+    /// Each player's ROM, which names their cheats and the states.
+    player_rom_paths: Vec<PathBuf>,
     frames: Vec<Frame>,
     sequence: u64,
     /// Per player: the cheat file's text when last sent to the emulator.
@@ -156,6 +162,7 @@ impl EmulatorView {
             bindings: Bindings::default(),
             layout: Layout::default(),
             settings_path,
+            speeds: Speeds::default(),
             color_correction: true,
             memory_viewer: None,
             session: None,
@@ -182,8 +189,11 @@ impl EmulatorView {
             None => {}
         }
         match loaded_settings {
-            Some(Ok(settings)) => view.layout = settings.layout,
-            Some(Err(error)) => view.show_notice(format!("{error}; using default layout"), cx),
+            Some(Ok(settings)) => {
+                view.layout = settings.layout;
+                view.speeds = settings.speed;
+            }
+            Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
         }
         if !roms.is_empty() {
@@ -192,9 +202,21 @@ impl EmulatorView {
         view
     }
 
-    /// Loads one ROM per player off the UI thread, then starts them; two
-    /// ROMs are joined by a link cable.
+    /// Loads the ROMs off the UI thread, then starts them: one game, a DS
+    /// game with a GBA game in its slot, or two games joined by a link
+    /// cable.
     fn open(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        // Stopping writes the running game's battery saves. Reopening one
+        // of its games (to link it or insert a cartridge) must read those,
+        // not the copy on disk from up to a second ago.
+        let saves: Vec<String> = paths.iter().map(|path| persist::backup_key(path)).collect();
+        let reopening = self.session.as_ref().is_some_and(|session| {
+            let mut roms = session.rom_paths.iter();
+            roms.any(|rom| saves.contains(&persist::backup_key(rom)))
+        });
+        if reopening {
+            self.stop(window);
+        }
         let name = paths
             .iter()
             .map(|path| file_name(path))
@@ -227,6 +249,7 @@ impl EmulatorView {
         };
         let (events, receiver) = async_channel::unbounded();
         let rom_paths = loaded.rom_paths().to_vec();
+        let player_rom_paths = loaded.player_rom_paths().to_vec();
         let emulator = Emulator::start(loaded, events, audio_sink);
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
@@ -239,6 +262,7 @@ impl EmulatorView {
             emulator,
             info,
             rom_paths,
+            player_rom_paths,
             frames: Vec::new(),
             sequence: 0,
             cheat_texts: vec![None; info.players.max(1)],
@@ -272,9 +296,9 @@ impl EmulatorView {
     /// the emulator. Returns a summary of the changes, if any.
     fn reload_cheats(&mut self) -> Option<String> {
         let session = self.session.as_mut()?;
-        let players = session.rom_paths.len();
+        let players = session.player_rom_paths.len();
         let mut changes = Vec::new();
-        for (player, rom) in session.rom_paths.iter().enumerate() {
+        for (player, rom) in session.player_rom_paths.iter().enumerate() {
             let text = cheats::read(&persist::cheats_path(rom));
             if text == session.cheat_texts[player] {
                 continue;
@@ -304,8 +328,8 @@ impl EmulatorView {
     /// from a template first if needed.
     fn edit_cheats(&mut self, _: &EditCheats, _: &mut Window, cx: &mut Context<Self>) {
         let Some(rom) = self.session.as_ref().and_then(|session| {
-            let player = self.active_player.min(session.rom_paths.len() - 1);
-            session.rom_paths.get(player)
+            let player = self.active_player.min(session.player_rom_paths.len() - 1);
+            session.player_rom_paths.get(player)
         }) else {
             self.show_notice("Open a game first, then edit its cheats", cx);
             return;
@@ -402,8 +426,8 @@ impl EmulatorView {
             self.sent_touch = touch;
             self.send_input();
         }
-        if state.fast_forward != self.sent.fast_forward {
-            self.send(Command::SetFastForward(state.fast_forward));
+        if state.pace != self.sent.pace {
+            self.send(Command::SetSpeed(self.speeds.speed(state.pace)));
         }
         if state.rewind != self.sent.rewind {
             self.send(Command::SetRewind(state.rewind));
@@ -504,6 +528,19 @@ impl EmulatorView {
         );
     }
 
+    fn toggle_slow_motion(&mut self, cx: &mut Context<Self>) {
+        let on = self.controls.toggle_slow_motion();
+        self.sync_held();
+        self.show_notice(
+            if on {
+                "Slow motion on"
+            } else {
+                "Slow motion off"
+            },
+            cx,
+        );
+    }
+
     fn change_state_slot(&mut self, forward: bool, cx: &mut Context<Self>) {
         self.state_slot = if forward {
             self.state_slot % STATE_SLOTS + 1
@@ -512,7 +549,7 @@ impl EmulatorView {
         };
         let slot = self.state_slot;
         self.show_notice(format!("State slot {slot}"), cx);
-        let Some(rom_paths) = self.session.as_ref().map(|s| s.rom_paths.clone()) else {
+        let Some(rom_paths) = self.session.as_ref().map(|s| s.player_rom_paths.clone()) else {
             return;
         };
         let preview = cx
@@ -649,6 +686,28 @@ impl EmulatorView {
         });
     }
 
+    /// Restarts the running DS game with a GBA game in its GBA slot,
+    /// replacing any already there.
+    fn insert_gba_cartridge(
+        &mut self,
+        _: &InsertGbaCartridge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let game = self
+            .session
+            .as_ref()
+            .filter(|session| has_gba_slot(session.info.system))
+            .map(|session| session.rom_paths[0].clone());
+        let Some(game) = game else {
+            self.show_notice("Open a DS game first, then insert a GBA cartridge", cx);
+            return;
+        };
+        self.prompt_for_rom("Insert", window, cx, move |this, cartridge, window, cx| {
+            this.open(vec![game, cartridge], window, cx);
+        });
+    }
+
     fn drop_files(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = paths.paths().first() {
             self.open(vec![path.clone()], window, cx);
@@ -713,7 +772,11 @@ impl EmulatorView {
         let Some(path) = &self.settings_path else {
             return;
         };
-        if let Err(error) = (Settings { layout }).save(path) {
+        let settings = Settings {
+            layout,
+            speed: self.speeds,
+        };
+        if let Err(error) = settings.save(path) {
             let message = format!("Cannot save settings to {}: {error}", path.display());
             self.show_notice(message, cx);
         }
@@ -938,7 +1001,12 @@ impl Render for EmulatorView {
             .key_context("Emulator")
             .size_full()
             .relative()
-            .bg(rgb(0x0011_1111))
+            // Nothing but the screens on black in full screen.
+            .bg(rgb(if window.is_fullscreen() {
+                0x0000_0000
+            } else {
+                0x0011_1111
+            }))
             .text_color(rgb(0x00DD_DDDD))
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::connect_link_cable))
@@ -964,6 +1032,7 @@ impl Render for EmulatorView {
             .on_action(
                 cx.listener(|this, _: &ToggleFastForward, _, cx| this.toggle_fast_forward(cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleSlowMotion, _, cx| this.toggle_slow_motion(cx)))
             .on_action(cx.listener(|this, _: &LayoutVertical, _, cx| {
                 this.arrange(Arrangement::Vertical, cx);
             }))
@@ -990,12 +1059,21 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleMemoryViewer, _, cx| {
                 this.toggle_memory_viewer(cx);
             }))
+            .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
+                window.toggle_fullscreen();
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_drop(cx.listener(Self::drop_files));
+        // Listening only while a DS runs leaves the menu item disabled
+        // otherwise.
+        let system = self.session.as_ref().map(|session| session.info.system);
+        if system.is_some_and(has_gba_slot) {
+            root = root.on_action(cx.listener(Self::insert_gba_cartridge));
+        }
 
         if let Some(session) = self.session.as_mut() {
             self.placements = self.layout.place(session.info.screens, viewport);
@@ -1077,6 +1155,11 @@ fn welcome() -> impl IntoElement {
                 .text_color(rgb(0x0088_8888))
                 .child("Open a ROM with ⌘O, or drop a .gb, .gbc, .gba or .nds file here."),
         )
+}
+
+/// Whether `system` takes GBA games in a second slot.
+fn has_gba_slot(system: System) -> bool {
+    emu_cores::second_slot(system) == Some(System::Gba)
 }
 
 fn file_name(path: &Path) -> String {

@@ -1,0 +1,183 @@
+//! Emulation speed: which speed the player asked for, how fast that is,
+//! and how far apart it puts frame deadlines.
+//!
+//! The emulation thread sleeps to each frame's deadline (see
+//! `docs/decisions/0003-frame-pacing.md`). A speed divides the gap between
+//! deadlines; an unlimited speed drops them and runs flat out.
+
+use std::time::{Duration, Instant};
+
+/// The slowest rate allowed. One frame then waits at most ten frames'
+/// time, so the emulation thread stays quick to pause or quit.
+pub const MIN_RATE: f64 = 0.1;
+
+/// Which speed the player asked for, from held inputs and toggles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pace {
+    /// The system's own frame rate.
+    #[default]
+    Normal,
+    /// The fast-forward speed.
+    FastForward,
+    /// The slow-motion speed.
+    SlowMotion,
+}
+
+/// A multiple of normal speed: finite and at least [`MIN_RATE`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rate(f64);
+
+// Rates are finite, so every rate equals itself.
+impl Eq for Rate {}
+
+impl Rate {
+    /// Normal speed.
+    pub const NORMAL: Self = Self(1.0);
+
+    /// `times` normal speed, if it is finite and at least [`MIN_RATE`].
+    pub fn new(times: f64) -> Option<Self> {
+        (times.is_finite() && times >= MIN_RATE).then_some(Self(times))
+    }
+
+    /// The multiple of normal speed.
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// How fast emulation runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Speed {
+    /// As fast as the host can go.
+    Unlimited,
+    /// A multiple of the system's frame rate.
+    Times(Rate),
+}
+
+impl Speed {
+    /// The system's own frame rate.
+    pub const NORMAL: Self = Self::Times(Rate::NORMAL);
+
+    /// How far apart frame deadlines are at this speed, for frames
+    /// `frame` long at normal speed; `None` if unlimited.
+    pub fn frame_step(self, frame: Duration) -> Option<Duration> {
+        match self {
+            Self::Unlimited => None,
+            Self::Times(rate) => Some(frame.div_f64(rate.get())),
+        }
+    }
+}
+
+/// The speeds fast-forward and slow motion run at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Speeds {
+    /// Unlimited unless capped.
+    pub fast_forward: Speed,
+    /// Half speed unless set.
+    pub slow_motion: Rate,
+}
+
+impl Default for Speeds {
+    fn default() -> Self {
+        Self {
+            fast_forward: Speed::Unlimited,
+            slow_motion: Rate(0.5),
+        }
+    }
+}
+
+impl Speeds {
+    /// The speed `pace` runs at.
+    pub fn speed(self, pace: Pace) -> Speed {
+        match pace {
+            Pace::Normal => Speed::NORMAL,
+            Pace::FastForward => self.fast_forward,
+            Pace::SlowMotion => Speed::Times(self.slow_motion),
+        }
+    }
+}
+
+/// When the next frame is due, given that the last was due at `deadline`
+/// and finished at `now`: `step` later, or now if unlimited (`None`) or
+/// more than four steps behind, too far to catch up smoothly.
+pub fn next_deadline(deadline: Instant, now: Instant, step: Option<Duration>) -> Instant {
+    let Some(step) = step else {
+        return now;
+    };
+    let next = deadline + step;
+    if now.saturating_duration_since(next) > step * 4 {
+        now
+    } else {
+        next
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FRAME: Duration = Duration::from_millis(16);
+
+    fn times(rate: f64) -> Speed {
+        Speed::Times(Rate::new(rate).expect("valid rate"))
+    }
+
+    #[test]
+    fn a_speed_divides_the_frame() {
+        assert_eq!(Speed::NORMAL.frame_step(FRAME), Some(FRAME));
+        assert_eq!(times(4.0).frame_step(FRAME), Some(FRAME / 4));
+        assert_eq!(times(0.5).frame_step(FRAME), Some(FRAME * 2));
+        assert_eq!(Speed::Unlimited.frame_step(FRAME), None);
+    }
+
+    #[test]
+    fn rates_must_be_finite_and_not_too_slow() {
+        for rate in [0.0, -1.0, 0.05, f64::NAN, f64::INFINITY] {
+            assert_eq!(Rate::new(rate), None, "{rate}");
+        }
+        assert_eq!(Rate::new(MIN_RATE).map(Rate::get), Some(MIN_RATE));
+        assert_eq!(Rate::new(1000.0).map(Rate::get), Some(1000.0));
+    }
+
+    #[test]
+    fn each_pace_has_its_speed() {
+        let speeds = Speeds::default();
+        assert_eq!(speeds.speed(Pace::Normal), Speed::NORMAL);
+        assert_eq!(speeds.speed(Pace::FastForward), Speed::Unlimited);
+        assert_eq!(speeds.speed(Pace::SlowMotion), times(0.5));
+        let capped = Speeds {
+            fast_forward: times(4.0),
+            ..speeds
+        };
+        assert_eq!(capped.speed(Pace::FastForward), times(4.0));
+    }
+
+    #[test]
+    fn deadlines_advance_by_the_step() {
+        let start = Instant::now();
+        let early = start + Duration::from_millis(1);
+        assert_eq!(next_deadline(start, early, Some(FRAME)), start + FRAME);
+        let step = times(4.0).frame_step(FRAME);
+        assert_eq!(next_deadline(start, early, step), start + FRAME / 4);
+    }
+
+    #[test]
+    fn a_small_debt_is_caught_up_and_a_large_one_dropped() {
+        let start = Instant::now();
+        let late = start + FRAME * 3;
+        assert_eq!(next_deadline(start, late, Some(FRAME)), start + FRAME);
+        let far_behind = start + FRAME * 6;
+        assert_eq!(next_deadline(start, far_behind, Some(FRAME)), far_behind);
+        // Four quarter-frame steps behind is far behind at 4x.
+        let step = times(4.0).frame_step(FRAME);
+        let behind = start + FRAME * 3 / 2;
+        assert_eq!(next_deadline(start, behind, step), behind);
+    }
+
+    #[test]
+    fn unlimited_is_due_now() {
+        let start = Instant::now();
+        let now = start + Duration::from_millis(5);
+        assert_eq!(next_deadline(start, now, None), now);
+    }
+}

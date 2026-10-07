@@ -1,6 +1,6 @@
-//! Bindings for held inputs: emulated buttons, fast-forward, rewind and
-//! touching the screen at the gamepad cursor, from the keyboard or
-//! gamepads.
+//! Bindings for held inputs: emulated buttons, fast-forward, slow motion,
+//! rewind and touching the screen at the gamepad cursor, from the keyboard
+//! or gamepads.
 //!
 //! One-shot commands (Open, Pause, Save State, ...) are GPUI actions bound
 //! to menu shortcuts in `app.rs`. This module covers only inputs that are
@@ -12,8 +12,8 @@
 //!
 //! ```toml
 //! [keys]
-//! a = ["x", "k"]
-//! fast_forward = ["tab"]
+//! a = ["k", "space"]
+//! rewind = ["`"]
 //!
 //! [gamepad]
 //! a = ["East"]
@@ -39,8 +39,10 @@ use serde::Deserialize;
 pub enum Held {
     /// Holds an emulated button.
     Button(Button),
-    /// Runs emulation unthrottled while held.
+    /// Runs emulation at the fast-forward speed while held.
     FastForward,
+    /// Runs emulation at the slow-motion speed while held.
+    SlowMotion,
     /// Steps backwards through recent history while held.
     Rewind,
     /// Touches the touchscreen at the gamepad cursor while held.
@@ -52,6 +54,7 @@ impl fmt::Display for Held {
         match self {
             Self::Button(button) => button.fmt(f),
             Self::FastForward => f.write_str("fast_forward"),
+            Self::SlowMotion => f.write_str("slow_motion"),
             Self::Rewind => f.write_str("rewind"),
             Self::Touch => f.write_str("touch"),
         }
@@ -64,6 +67,7 @@ impl FromStr for Held {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "fast_forward" => Ok(Self::FastForward),
+            "slow_motion" => Ok(Self::SlowMotion),
             "rewind" => Ok(Self::Rewind),
             "touch" => Ok(Self::Touch),
             _ => s
@@ -86,21 +90,30 @@ pub struct Bindings {
     gamepads: HashMap<String, Map>,
 }
 
-const KEY_DEFAULTS: [(Held, &str); 14] = [
-    (Held::Button(Button::A), "x"),
-    (Held::Button(Button::B), "z"),
-    (Held::Button(Button::X), "s"),
-    (Held::Button(Button::Y), "a"),
+/// Laid out for playing on a keyboard: the left hand on WASD and the
+/// shoulders either side of it, the right hand on a square of four keys in
+/// the DS face-button positions (Y and X on top, B and A below). The arrow
+/// keys steer too.
+const KEY_DEFAULTS: [(Held, &str); 19] = [
+    (Held::Button(Button::Up), "w"),
+    (Held::Button(Button::Left), "a"),
+    (Held::Button(Button::Down), "s"),
+    (Held::Button(Button::Right), "d"),
+    (Held::Button(Button::Up), "up"),
+    (Held::Button(Button::Left), "left"),
+    (Held::Button(Button::Down), "down"),
+    (Held::Button(Button::Right), "right"),
+    (Held::Button(Button::Y), "u"),
+    (Held::Button(Button::X), "i"),
+    (Held::Button(Button::B), "j"),
+    (Held::Button(Button::A), "k"),
     (Held::Button(Button::L), "q"),
-    (Held::Button(Button::R), "w"),
+    (Held::Button(Button::R), "e"),
     (Held::Button(Button::Start), "enter"),
     (Held::Button(Button::Select), "backspace"),
-    (Held::Button(Button::Up), "up"),
-    (Held::Button(Button::Down), "down"),
-    (Held::Button(Button::Left), "left"),
-    (Held::Button(Button::Right), "right"),
     (Held::FastForward, "tab"),
-    (Held::Rewind, "`"),
+    (Held::SlowMotion, "1"),
+    (Held::Rewind, "r"),
 ];
 
 /// Nintendo layout by position: A is the right face button, B the bottom.
@@ -262,7 +275,8 @@ pub enum BindingsError {
     /// The file is not valid TOML of the expected shape.
     #[error("invalid bindings file: {0}")]
     Syntax(String),
-    /// An action name is not a button, `fast_forward`, `rewind` or `touch`.
+    /// An action name is not a button, `fast_forward`, `slow_motion`,
+    /// `rewind` or `touch`.
     #[error("unknown action {0:?} in bindings")]
     UnknownAction(String),
     /// One input is bound to two different actions.
@@ -292,15 +306,53 @@ mod tests {
             assert!(map.values().any(|held| *held == Held::Rewind));
         }
         assert_eq!(bindings.pad_action("any", "RightThumb"), Some(Held::Touch));
+        assert_eq!(bindings.key_action("1"), Some(Held::SlowMotion));
+    }
+
+    #[test]
+    fn default_keys_are_each_bound_once() {
+        assert_eq!(map_of(&KEY_DEFAULTS).len(), KEY_DEFAULTS.len());
+        assert_eq!(map_of(&GAMEPAD_DEFAULTS).len(), GAMEPAD_DEFAULTS.len());
+    }
+
+    #[test]
+    fn default_keys_suit_a_keyboard() {
+        let bindings = Bindings::default();
+        let key = |name| bindings.key_action(name);
+        for (wasd, arrow, button) in [
+            ("w", "up", Button::Up),
+            ("a", "left", Button::Left),
+            ("s", "down", Button::Down),
+            ("d", "right", Button::Right),
+        ] {
+            assert_eq!(key(wasd), Some(Held::Button(button)), "{wasd}");
+            assert_eq!(key(arrow), Some(Held::Button(button)), "{arrow}");
+        }
+        // Face buttons in the DS's diamond, squared off: Y X over B A.
+        assert_eq!(key("u"), Some(Held::Button(Button::Y)));
+        assert_eq!(key("i"), Some(Held::Button(Button::X)));
+        assert_eq!(key("j"), Some(Held::Button(Button::B)));
+        assert_eq!(key("k"), Some(Held::Button(Button::A)));
+        assert_eq!(key("q"), Some(Held::Button(Button::L)));
+        assert_eq!(key("e"), Some(Held::Button(Button::R)));
+        assert_eq!(key("tab"), Some(Held::FastForward));
+        assert_eq!(key("r"), Some(Held::Rewind));
+    }
+
+    #[test]
+    fn slow_motion_can_be_bound_to_a_gamepad() {
+        let bindings =
+            Bindings::from_toml("[gamepad]\nslow_motion = [\"Mode\"]\n").expect("valid file");
+        assert_eq!(bindings.pad_action("any", "Mode"), Some(Held::SlowMotion));
     }
 
     #[test]
     fn overrides_replace_only_the_listed_actions() {
-        let bindings = Bindings::from_toml("[keys]\na = [\"k\", \"j\"]\n").expect("valid file");
-        assert_eq!(bindings.key_action("k"), Some(Held::Button(Button::A)));
-        assert_eq!(bindings.key_action("j"), Some(Held::Button(Button::A)));
-        assert_eq!(bindings.key_action("x"), None);
-        assert_eq!(bindings.key_action("z"), Some(Held::Button(Button::B)));
+        let bindings = Bindings::from_toml("[keys]\na = [\"x\", \"space\"]\n").expect("valid file");
+        assert_eq!(bindings.key_action("x"), Some(Held::Button(Button::A)));
+        assert_eq!(bindings.key_action("space"), Some(Held::Button(Button::A)));
+        assert_eq!(bindings.key_action("k"), None);
+        assert_eq!(bindings.key_action("j"), Some(Held::Button(Button::B)));
     }
 
     #[test]
@@ -343,8 +395,8 @@ mod tests {
 
     #[test]
     fn rebinding_takes_the_input_from_its_old_action() {
-        let bindings = Bindings::from_toml("[keys]\na = [\"z\"]\n").expect("valid file");
-        assert_eq!(bindings.key_action("z"), Some(Held::Button(Button::A)));
+        let bindings = Bindings::from_toml("[keys]\na = [\"j\"]\n").expect("valid file");
+        assert_eq!(bindings.key_action("j"), Some(Held::Button(Button::A)));
         assert!(
             !bindings
                 .keys

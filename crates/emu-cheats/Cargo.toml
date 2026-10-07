@@ -1,6 +1,6 @@
 [package]
 name = "emu-cheats"
-description = "Cheat codes: parses cheat lists into memory operations and applies them each frame."
+description = "Cheat codes: reads cheat lists for each cheat device and applies them each frame."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,6 @@ publish.workspace = true
 
 [dependencies]
 emu-core.workspace = true
-thiserror.workspace = true
 
 [lints]
 workspace = true

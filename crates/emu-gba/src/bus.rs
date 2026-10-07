@@ -6,12 +6,12 @@
 //! and DMA events) at the exact cycle they are due.
 
 use emu_arm::{Access, Bus as CpuBus};
+use emu_gba_cart::Cartridge;
 use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
 
 use crate::apu::{self, Apu};
 use crate::bios;
-use crate::cartridge::Cartridge;
 use crate::dma::{Dma, Timing};
 use crate::ppu::{self, Ppu};
 use crate::sio::{self, Sio};
@@ -478,6 +478,16 @@ impl Bus {
         match address >> 24 {
             0x02 => Some(self.ewram[(address & 0x3_FFFF) as usize]),
             0x03 => Some(self.iwram[(address & 0x7FFF) as usize]),
+            _ => None,
+        }
+    }
+
+    /// KEYINPUT (0x04000130–0x04000131), for cheats that test buttons;
+    /// `None` elsewhere.
+    pub(crate) fn peek_keys(&self, address: u32) -> Option<u8> {
+        match address {
+            0x0400_0130 => Some(self.keys as u8),
+            0x0400_0131 => Some((self.keys >> 8) as u8),
             _ => None,
         }
     }

@@ -13,6 +13,7 @@ Route 1, and its in-game save survives a restart. It has:
 - both 2D engines and a software 3D engine with anti-aliasing;
 - 16-channel sound with capture;
 - the game card with flash saves;
+- the GBA slot, which reads a GBA game and its save for Pal Park;
 - the touchscreen, firmware and RTC.
 It passes every test in RockPolish's rockwrestler test ROM.
 
@@ -40,7 +41,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [PRD](docs/PRD.md): goals, requirements, legal policy, risks, open questions
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot
 
 ## Build and run
 
@@ -51,6 +52,7 @@ The separate Metal Toolchain download is not needed.
 cargo run --release -p emu-app -- path/to/game.nds   # or open one with ⌘O
 cargo run --release -p emu-app -- red.gb blue.gb     # two Game Boys, linked
 cargo run --release -p emu-app -- fr.gba em.gba      # two GBAs, linked
+cargo run --release -p emu-app -- pt.nds em.gba      # a GBA game in the DS's GBA slot
 cargo test --workspace
 ```
 
@@ -65,25 +67,33 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 
 | Game | Key | Gamepad | | App | Shortcut |
 |---|---|---|---|---|---|
-| D-pad | Arrow keys | D-pad, left stick | | Open ROM | ⌘O |
-| A / B | X / Z | East / South | | Pause / resume | ⌘P |
-| X / Y (DS) | S / A | North / West | | Reset | ⌘R |
-| L / R | Q / W | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
+| D-pad | W A S D or arrow keys | D-pad, left stick | | Open ROM | ⌘O |
+| A / B | K / J | East / South | | Pause / resume | ⌘P |
+| X / Y (DS) | I / U | North / West | | Reset | ⌘R |
+| L / R | Q / E | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
 | Start / Select | Return / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
-| Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward on/off | ⌘F |
+| Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward / slow motion on/off | ⌘F / ⌘⇧F |
 | Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
-| Rewind | Hold ` | Left trigger | | Swap screens / Quit | ⌘E / ⌘Q |
-| | | | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
+| Slow motion | Hold 1 | | | Swap screens / Quit | ⌘E / ⌘Q |
+| Rewind | Hold R | Left trigger | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
 | | | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
+| | | | | Full screen | ⌃⌘F |
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Colour correction on/off | ⌘⇧C |
 | | | | | Memory viewer | ⌘⇧M |
 
-Hybrid shows one screen large beside both screens small, as in melonDS;
-Swap Screens chooses the large one. Rotation turns the whole arrangement
-for games played with the DS held like a book, and touch follows it. A
-90 px gap matches the DS hinge. The layout, swap, rotation and gap are
-remembered in `~/Library/Application Support/ds-emulator/settings.toml`.
+The keys are laid out for playing on a keyboard: the left hand on W A S D
+with the shoulders on Q and E, the right hand on a square of four keys
+shaped like the DS face buttons, U and I (Y and X) above J and K (B and A).
+
+The DS screens start stacked with no gap, in a window that opens as large
+as fits the display; full screen shows them at the display's full height,
+on black. Hybrid shows one screen large beside both screens small, as in
+melonDS; Swap Screens chooses the large one. Rotation turns the whole
+arrangement for games played with the DS held like a book, and touch
+follows it. A 90 px gap matches the DS hinge. The layout, swap, rotation
+and gap are remembered in
+`~/Library/Application Support/ds-emulator/settings.toml`.
 
 Gamepad buttons are named by position, so A is the right face button as on a
 Nintendo controller. Rebind keys and gamepad controls in
@@ -91,8 +101,8 @@ Nintendo controller. Rebind keys and gamepad controls in
 
 ```toml
 [keys]
-a = ["x", "k"]          # several keys per action
-fast_forward = ["tab"]
+a = ["k", "space"]      # several keys per action
+rewind = ["`"]
 
 [gamepad]
 a = ["South"]           # Xbox-style: A on the bottom button
@@ -118,24 +128,52 @@ click its screen or press ⌘T to switch. Game Boy `.sav` files use the same
 layout as SameBoy, mGBA and BGB, including the MBC3 clock, so saves move
 between them.
 
+## GBA slot
+
+Open a DS game, choose File > Insert GBA Cartridge…, and pick a GBA game.
+The DS restarts with it in the GBA slot, where Pal Park reads it, or start
+with both: `ds-emulator pt.nds em.gba`. The GBA game keeps its own `.sav`
+next to its ROM, so give the two ROMs different names: `pokemon.nds` and
+`pokemon.gba` in one folder would share `pokemon.sav`, and the app refuses
+to load them. Pal Park has not been tried yet; that needs GBA dumps.
+
 ## Cheats
 
 Choose File > Edit Cheats… to open the game's `game.cht` in your text
 editor. Save the file and switch back to apply it:
 
 ```text
-[Infinite money]
-82025E30 270F
+[Infinite money] ards
+# Hold L+R.
+94000130 FCFF0000
+62111938 00000000
+B2111938 00000000
+20001DE4 000000FF
+D2000000 00000000
 [Walk through walls] off
 02000F04:01
 ```
 
-Each cheat is a `[name]` line, with `off` to disable it, followed by its
-codes. Supported formats:
-- raw `ADDRESS:VALUE` (hex) everywhere;
-- GameShark `01VVAAAA` on Game Boy;
-- unencrypted CodeBreaker on GBA.
-Encrypted Action Replay and GameShark Advance codes are not supported yet.
+Each cheat is a `[name]` line followed by its codes. After the name, `off`
+disables it and a tag names the cheat device; without a tag the device is
+detected from the codes. Spaces and line breaks inside codes don't
+matter. Errors name the line and the device.
+
+| Tag | Device | System |
+|---|---|---|
+| `raw` | `ADDRESS:VALUE` patches (hex) | all |
+| `gs` | GameShark `TTVVAAAA`, including `8x`/`9x` bank codes | Game Boy |
+| `cb` | CodeBreaker / Xploder, encrypted or not | GBA |
+| `gsa`, `gsa-raw` | GameShark Advance / Action Replay v1/v2, encrypted or not | GBA |
+| `par3`, `par3-raw` | Pro Action Replay v3 / Action Replay MAX, encrypted or not | GBA |
+| `ards` | Action Replay DS | DS |
+
+Add a tag when detection guesses wrong or asks for one: 16-digit GBA codes
+can be read four ways, and the list says when two fit equally well. Cheats
+run once a frame, at VBlank, so button-activated codes respond at once.
+Not supported: Game Genie and other ROM patches, codes that need the
+cheat device's own button, GBA I/O writes, and Action Replay DS types
+`C4`–`C6`.
 
 ## Testing against test ROMs
 
@@ -164,6 +202,7 @@ cargo test -p emu-arm --release --test single_step               # ARM7TDMI
 | `emu-state` | Save-state container format |
 | `emu-arm` | ARM7TDMI (GBA, DS ARM7) and ARM946E-S (DS ARM9) interpreters |
 | `emu-psg` | The Game Boy family's sound generator, shared by GB and GBA |
+| `emu-gba-cart` | The GBA cartridge, shared by the GBA core and the DS GBA slot |
 | `emu-gb` | Game Boy and Game Boy Color core |
 | `emu-gba` | Game Boy Advance core |
 | `emu-nds` | Nintendo DS core |

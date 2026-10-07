@@ -844,3 +844,409 @@ fn user_bank_ldm_writes_the_base_back_to_the_current_mode() {
     assert_eq!(cpu.reg(14), 0xC0FF_EEAB, "loaded into the User bank");
     assert_eq!(cpu.reg(13), 0xBAD0, "User R13 untouched");
 }
+
+/// A protection region at `base` covering 1 << `size_log2` bytes, enabled.
+const fn region(base: u32, size_log2: u32) -> u32 {
+    base | (size_log2 - 1) << 1 | 1
+}
+
+/// Main RAM around [`MAIN`], up to 0x02010000.
+const RAM_REGION: u32 = region(0x0200_0000, 16);
+/// The high vectors, where aborts go.
+const VECTOR_REGION: u32 = region(0xFFFF_0000, 16);
+/// Full access for regions 0 and 1 (main RAM and the vectors).
+const FULL: u32 = 0x33;
+/// An address the protection tests give a region of its own.
+const GUARDED: u32 = 0x0400_0000;
+/// An address no protection region covers.
+const UNMAPPED: u32 = 0x0300_0000;
+
+/// Turns the protection unit on with `regions` from region 0 up and their
+/// data and instruction permissions (4 bits per region, region 0 lowest),
+/// then refills the pipeline under it.
+fn protect(cpu: &mut Arm9, ram: &mut Ram, regions: &[u32], data: u32, code: u32) {
+    let cp15 = cpu.cp15_mut();
+    for (index, &value) in (0..).zip(regions) {
+        cp15.write(6, index, 0, value);
+    }
+    cp15.write(5, 0, 2, data);
+    cp15.write(5, 0, 3, code);
+    cp15.set_control(cp15.control() | control::PROTECTION_UNIT);
+    let pc = next_pc(cpu);
+    cpu.jump(ram, pc);
+}
+
+/// Asserts that the CPU just took a data abort for the instruction at
+/// [`MAIN`], from `mode`.
+fn assert_data_abort(cpu: &Arm9, mode: Mode, what: &str) {
+    assert_eq!(cpu.mode(), Mode::Abort, "{what}");
+    assert_eq!(cpu.reg(14), MAIN + 8, "{what}: LR");
+    assert_eq!(next_pc(cpu), 0xFFFF_0010, "{what}: vector");
+    assert_eq!(cpu.saved_psr().map(Mode::from_bits), Some(mode), "{what}");
+    assert_ne!(cpu.cpsr() & psr::I, 0, "{what}: IRQs off");
+}
+
+#[test]
+fn a_disabled_protection_unit_checks_nothing() {
+    let mut ram = Ram::new();
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE591_0000]); // LDR R0, [R1]
+    let cp15 = cpu.cp15_mut();
+    cp15.write(6, 0, 0, region(UNMAPPED, 12));
+    cp15.write(5, 0, 2, 0);
+    cp15.write(5, 0, 3, 0);
+    ram.poke_32(UNMAPPED, 0x1234);
+    cpu.set_reg(1, UNMAPPED);
+    cpu.step(&mut ram);
+    assert_eq!(cpu.mode(), Mode::System);
+    assert_eq!(cpu.reg(0), 0x1234);
+}
+
+#[test]
+fn an_access_no_region_covers_takes_a_data_abort() {
+    let mut ram = Ram::new();
+    // LDR R0, [R1, #4]!
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE5B1_0004]);
+    protect(&mut cpu, &mut ram, &[RAM_REGION, VECTOR_REGION], FULL, FULL);
+    cpu.set_reg(0, 0xAAAA);
+    cpu.set_reg(1, UNMAPPED - 4);
+    let before = cpu.cpsr();
+    ram.forget();
+    cpu.step(&mut ram);
+    assert_data_abort(&cpu, Mode::System, "LDR");
+    assert_eq!(cpu.saved_psr(), Some(before));
+    assert_eq!(cpu.reg(0), 0xAAAA, "Rd unchanged");
+    assert_eq!(cpu.reg(1), UNMAPPED - 4, "no writeback");
+    assert!(ram.data_accesses().is_empty());
+    // The abort costs time, as any access would.
+    assert_ne!(ram.idles, 0);
+}
+
+#[test]
+fn every_data_instruction_aborts_before_writing_registers() {
+    let arm = [
+        0xE591_0000, // LDR R0, [R1]
+        0xE5D1_0000, // LDRB R0, [R1]
+        0xE581_0000, // STR R0, [R1]
+        0xE5C1_0000, // STRB R0, [R1]
+        0xE491_0004, // LDR R0, [R1], #4
+        0xE5A1_0004, // STR R0, [R1, #4]!
+        0xE4B1_0000, // LDRT R0, [R1]
+        0xE4A1_0000, // STRT R0, [R1]
+        0xE1D1_00B0, // LDRH R0, [R1]
+        0xE0C1_00B2, // STRH R0, [R1], #2
+        0xE1D1_00D0, // LDRSB R0, [R1]
+        0xE1F1_00F2, // LDRSH R0, [R1, #2]!
+        0xE1C1_20D0, // LDRD R2, [R1]
+        0xE0C1_20F8, // STRD R2, [R1], #8
+        0xE101_0092, // SWP R0, R2, [R1]
+        0xE141_0092, // SWPB R0, R2, [R1]
+        0xE8B1_000D, // LDMIA R1!, {R0, R2, R3}
+        0xE921_000D, // STMDB R1!, {R0, R2, R3}
+        0xE891_8001, // LDMIA R1, {R0, PC}
+    ];
+    let thumb: [u16; 22] = [
+        0x6808, // LDR R0, [R1]
+        0x6008, // STR R0, [R1]
+        0x7808, // LDRB R0, [R1]
+        0x7008, // STRB R0, [R1]
+        0x8808, // LDRH R0, [R1]
+        0x8008, // STRH R0, [R1]
+        0x5888, // LDR R0, [R1, R2]
+        0x5088, // STR R0, [R1, R2]
+        0x5C88, // LDRB R0, [R1, R2]
+        0x5488, // STRB R0, [R1, R2]
+        0x5A88, // LDRH R0, [R1, R2]
+        0x5288, // STRH R0, [R1, R2]
+        0x5688, // LDRSB R0, [R1, R2]
+        0x5E88, // LDRSH R0, [R1, R2]
+        0x9800, // LDR R0, [SP]
+        0x9000, // STR R0, [SP]
+        0xC90D, // LDMIA R1!, {R0, R2, R3}
+        0xC10D, // STMIA R1!, {R0, R2, R3}
+        0xB40D, // PUSH {R0, R2, R3}
+        0xBC0D, // POP {R0, R2, R3}
+        0xBD01, // POP {R0, PC}
+        0xB50D, // PUSH {R0, R2, R3, LR}
+    ];
+    let cases = arm
+        .iter()
+        .map(|&word| (false, word))
+        .chain(thumb.iter().map(|&half| (true, u32::from(half))));
+    for (thumb, instruction) in cases {
+        let mut ram = Ram::new();
+        if thumb {
+            ram.load_thumb(MAIN, &[instruction as u16]);
+        } else {
+            ram.load_arm(MAIN, &[instruction]);
+        }
+        let mut cpu: Arm9 = start(&mut ram, MAIN, thumb);
+        protect(&mut cpu, &mut ram, &[RAM_REGION, VECTOR_REGION], FULL, FULL);
+        let registers = [0xA0, UNMAPPED, 0, 0xA3];
+        for (index, value) in registers.into_iter().enumerate() {
+            cpu.set_reg(index, value);
+        }
+        cpu.set_reg(13, UNMAPPED + 0x100);
+        ram.forget();
+        cpu.step(&mut ram);
+        let what = format!("{instruction:08x}");
+        assert_data_abort(&cpu, Mode::System, &what);
+        assert_eq!(cpu.registers().r[..4], registers, "{what}");
+        assert_eq!(cpu.registers().usr[5], UNMAPPED + 0x100, "{what}: SP");
+        assert!(ram.data_accesses().is_empty(), "{what}");
+    }
+}
+
+#[test]
+fn data_permissions_depend_on_the_mode() {
+    // (field, privileged read, privileged write, User read, User write)
+    let cases = [
+        (0, false, false, false, false),
+        (1, true, true, false, false),
+        (2, true, true, true, false),
+        (3, true, true, true, true),
+        (4, false, false, false, false),
+        (5, true, false, false, false),
+        (6, true, false, true, false),
+        (7, false, false, false, false),
+        (0xF, false, false, false, false),
+    ];
+    for (field, privileged_read, privileged_write, user_read, user_write) in cases {
+        let modes = [
+            (Mode::System, privileged_read, privileged_write),
+            (Mode::User, user_read, user_write),
+        ];
+        for (mode, read, write) in modes {
+            // LDR R0, [R1] and STR R0, [R1]
+            for (instruction, allowed) in [(0xE591_0000, read), (0xE581_0000, write)] {
+                let mut ram = Ram::new();
+                let mut cpu = arm9_running(&mut ram, MAIN, &[instruction]);
+                cpu.set_cpsr(mode.bits());
+                cpu.set_reg(1, GUARDED);
+                let regions = [RAM_REGION, VECTOR_REGION, region(GUARDED, 12)];
+                protect(&mut cpu, &mut ram, &regions, FULL | field << 8, FULL);
+                cpu.step(&mut ram);
+                let what = format!("field {field}, {mode:?}, {instruction:08x}");
+                assert_eq!(cpu.mode() == mode, allowed, "{what}");
+                assert_eq!(cpu.mode() == Mode::Abort, !allowed, "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn instruction_permissions_depend_on_the_mode() {
+    for field in 0..16 {
+        let privileged = matches!(field, 1 | 2 | 3 | 5 | 6);
+        let user = matches!(field, 2 | 3 | 6);
+        for (mode, allowed) in [(Mode::System, privileged), (Mode::User, user)] {
+            let mut ram = Ram::new();
+            ram.load_arm(GUARDED, &[0xE3A0_0001]); // MOV R0, #1
+            let mut cpu: Arm9 = start(&mut ram, GUARDED, false);
+            cpu.set_cpsr(mode.bits());
+            let regions = [RAM_REGION, VECTOR_REGION, region(GUARDED, 12)];
+            ram.forget();
+            protect(&mut cpu, &mut ram, &regions, 0x333, FULL | field << 8);
+            cpu.step(&mut ram);
+            let what = format!("field {field}, {mode:?}");
+            assert_eq!(cpu.reg(0) == 1, allowed, "{what}");
+            assert_eq!(cpu.mode() == Mode::Abort, !allowed, "{what}");
+            assert_eq!(ram.fetched(GUARDED), allowed, "{what}: no fetch if refused");
+        }
+    }
+}
+
+#[test]
+fn higher_regions_win_where_they_overlap() {
+    let inner = GUARDED + 0x1000;
+    // (regions 2 and 3, data permissions for them, address, allowed)
+    let cases = [
+        // No access over 64 KiB, full access to 4 KiB inside it above.
+        (
+            [region(GUARDED, 16), region(inner, 12)],
+            0x3000,
+            GUARDED,
+            false,
+        ),
+        (
+            [region(GUARDED, 16), region(inner, 12)],
+            0x3000,
+            inner,
+            true,
+        ),
+        // The same pair the other way round: the large region wins.
+        (
+            [region(inner, 12), region(GUARDED, 16)],
+            0x0300,
+            inner,
+            false,
+        ),
+    ];
+    for (guarded, data, address, allowed) in cases {
+        let mut ram = Ram::new();
+        let mut cpu = arm9_running(&mut ram, MAIN, &[0xE591_0000]); // LDR R0, [R1]
+        cpu.set_reg(1, address);
+        let regions = [RAM_REGION, VECTOR_REGION, guarded[0], guarded[1]];
+        protect(&mut cpu, &mut ram, &regions, FULL | data, FULL);
+        cpu.step(&mut ram);
+        assert_eq!(cpu.mode() == Mode::System, allowed, "{address:08x}");
+    }
+}
+
+#[test]
+fn a_refused_fetch_aborts_only_if_it_would_run() {
+    // The RAM region ends here; nothing past it may run.
+    const END: u32 = 0x0201_0000;
+    let mut ram = Ram::new();
+    // A loop in the region's last two words, which prefetches past its end.
+    ram.load_arm(END - 8, &[0xE280_0001, 0xEAFF_FFFD]); // ADD R0, R0, #1; B END - 8
+    let mut cpu: Arm9 = start(&mut ram, END - 8, false);
+    protect(&mut cpu, &mut ram, &[RAM_REGION, VECTOR_REGION], FULL, FULL);
+    ram.forget();
+    for _ in 0..6 {
+        cpu.step(&mut ram);
+    }
+    assert_eq!(cpu.mode(), Mode::System);
+    assert_eq!(cpu.reg(0), 3);
+    assert!(!ram.fetched(END), "refused fetches stay off the bus");
+
+    // Running on past the end takes a prefetch abort at the first
+    // instruction outside, after the last one inside has run.
+    for thumb in [false, true] {
+        let mut ram = Ram::new();
+        let size = if thumb { 2 } else { 4 };
+        if thumb {
+            ram.load_thumb(END - size, &[0x2001]); // MOV R0, #1
+        } else {
+            ram.load_arm(END - size, &[0xE3A0_0001]); // MOV R0, #1
+        }
+        let mut cpu: Arm9 = start(&mut ram, END - size, thumb);
+        protect(&mut cpu, &mut ram, &[RAM_REGION, VECTOR_REGION], FULL, FULL);
+        let before = cpu.cpsr();
+        cpu.step(&mut ram);
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(cpu.mode(), Mode::System);
+        cpu.step(&mut ram);
+        assert_eq!(cpu.mode(), Mode::Abort, "thumb: {thumb}");
+        assert_eq!(cpu.reg(14), END + 4, "thumb: {thumb}");
+        assert_eq!(next_pc(&cpu), 0xFFFF_000C, "thumb: {thumb}");
+        assert_eq!(cpu.saved_psr(), Some(before), "thumb: {thumb}");
+        assert!(!cpu.thumb());
+    }
+}
+
+#[test]
+fn an_aborted_block_transfer_restores_its_base() {
+    // Region 2 is 4 KiB at GUARDED; the next page is unmapped.
+    let edge = GUARDED + 0xFF8;
+    let regions = [RAM_REGION, VECTOR_REGION, region(GUARDED, 12)];
+    let data = FULL | 3 << 8;
+
+    // LDMIA R0!, {R0, R1, R2}: R0 and R1 load, R2's word aborts.
+    let mut ram = Ram::new();
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE8B0_0007]);
+    protect(&mut cpu, &mut ram, &regions, data, FULL);
+    ram.poke_32(edge, 0x1111);
+    ram.poke_32(edge + 4, 0x2222);
+    cpu.set_reg(0, edge);
+    cpu.set_reg(2, 0x3333);
+    cpu.step(&mut ram);
+    assert_data_abort(&cpu, Mode::System, "LDM");
+    assert_eq!(cpu.reg(0), edge, "the loaded base is restored");
+    assert_eq!(cpu.reg(1), 0x2222, "loaded before the abort");
+    assert_eq!(cpu.reg(2), 0x3333, "the aborted load");
+
+    // STMIA R0!, {R1, R2, R3}: two stores land, the third aborts.
+    let mut ram = Ram::new();
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE8A0_000E]);
+    protect(&mut cpu, &mut ram, &regions, data, FULL);
+    cpu.set_reg(0, edge);
+    ram.forget();
+    cpu.step(&mut ram);
+    assert_data_abort(&cpu, Mode::System, "STM");
+    assert_eq!(cpu.reg(0), edge);
+    assert_eq!(
+        ram.data_accesses(),
+        [Seen::Write(edge), Seen::Write(edge + 4)]
+    );
+
+    // LDMIA R0, {R1, PC} with PC's word refused leaves PC alone.
+    let mut ram = Ram::new();
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE890_8002]);
+    protect(&mut cpu, &mut ram, &regions, data, FULL);
+    cpu.set_reg(0, edge + 4);
+    cpu.step(&mut ram);
+    assert_data_abort(&cpu, Mode::System, "LDM to PC");
+}
+
+#[test]
+fn ldrt_and_strt_have_user_permissions() {
+    // (data field for GUARDED, instruction, allowed in System mode)
+    let cases = [
+        (1, 0xE591_0000, true),  // LDR R0, [R1]
+        (1, 0xE4B1_0000, false), // LDRT R0, [R1]
+        (1, 0xE4F1_0000, false), // LDRBT R0, [R1]
+        (1, 0xE581_0000, true),  // STR R0, [R1]
+        (1, 0xE4A1_0000, false), // STRT R0, [R1]
+        (2, 0xE4B1_0000, true),  // LDRT R0, [R1]
+        (2, 0xE4A1_0000, false), // STRT R0, [R1]
+        (2, 0xE4E1_0000, false), // STRBT R0, [R1]
+        (3, 0xE4A1_0000, true),  // STRT R0, [R1]
+    ];
+    for (field, instruction, allowed) in cases {
+        let mut ram = Ram::new();
+        let mut cpu = arm9_running(&mut ram, MAIN, &[instruction]);
+        cpu.set_reg(1, GUARDED);
+        let regions = [RAM_REGION, VECTOR_REGION, region(GUARDED, 12)];
+        protect(&mut cpu, &mut ram, &regions, FULL | field << 8, FULL);
+        cpu.step(&mut ram);
+        let what = format!("field {field}, {instruction:08x}");
+        assert_eq!(cpu.mode() == Mode::System, allowed, "{what}");
+    }
+}
+
+#[test]
+fn tcm_accesses_are_checked_too() {
+    // The data TCM at 0x027C0000, which no region covers.
+    let mut ram = Ram::new();
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE591_0000]); // LDR R0, [R1]
+    enable_tcm(&mut cpu);
+    assert!(cpu.tcm_write_8(0x027C_0000, 0x5A));
+    protect(&mut cpu, &mut ram, &[RAM_REGION, VECTOR_REGION], FULL, FULL);
+    cpu.set_reg(1, 0x027C_0000);
+    cpu.step(&mut ram);
+    assert_data_abort(&cpu, Mode::System, "DTCM");
+    assert_eq!(cpu.reg(0), 0);
+
+    // Code in the instruction TCM, likewise.
+    let mut ram = Ram::new();
+    let mut cpu: Arm9 = start(&mut ram, MAIN, false);
+    enable_tcm(&mut cpu);
+    for (offset, byte) in (0..).zip(0xE3A0_0001u32.to_le_bytes()) {
+        assert!(cpu.tcm_write_8(0x100 + offset, byte));
+    }
+    cpu.jump(&mut ram, 0x100);
+    protect(&mut cpu, &mut ram, &[RAM_REGION, VECTOR_REGION], FULL, FULL);
+    cpu.step(&mut ram);
+    assert_eq!(cpu.mode(), Mode::Abort);
+    assert_eq!(cpu.reg(0), 0);
+    assert_eq!(next_pc(&cpu), 0xFFFF_000C);
+}
+
+#[test]
+fn turning_protection_on_uses_regions_written_while_it_was_off() {
+    let mut ram = Ram::new();
+    let mut cpu = arm9_running(&mut ram, MAIN, &[0xE591_0000, 0xE591_0000]);
+    cpu.set_reg(1, GUARDED);
+    protect(&mut cpu, &mut ram, &[RAM_REGION, VECTOR_REGION], FULL, FULL);
+    let cp15 = cpu.cp15_mut();
+    cp15.set_control(cp15.control() & !control::PROTECTION_UNIT);
+    cp15.write(6, 2, 0, region(GUARDED, 12));
+    cp15.write(5, 0, 2, FULL | 3 << 8);
+    cp15.set_control(cp15.control() | control::PROTECTION_UNIT);
+    cpu.step(&mut ram);
+    assert_eq!(cpu.mode(), Mode::System);
+    // Back to no access for region 2 while on.
+    cpu.cp15_mut().write(5, 0, 2, FULL);
+    cpu.step(&mut ram);
+    assert_eq!(cpu.mode(), Mode::Abort);
+}

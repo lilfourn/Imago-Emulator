@@ -52,29 +52,38 @@ pub trait Core: Send {
     /// error the core is left exactly as it was.
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
 
-    /// How many times `player`'s game has written to battery-backed memory
-    /// (SRAM, EEPROM, flash or a cartridge clock), or `None` if it has
-    /// none. Each player has their own cartridge.
+    /// How many times cartridge `cartridge`'s game has written to
+    /// battery-backed memory (SRAM, EEPROM, flash or a cartridge clock), or
+    /// `None` if it has none or there is no such cartridge.
+    ///
+    /// Cartridges are numbered in the order their media were given: in a
+    /// linked pair cartridge `i` is player `i`'s; on a DS, cartridge 0 is
+    /// the game card and cartridge 1 the one in the GBA slot
+    /// ([`crate::Media::second_slot`]).
     ///
     /// Frontends compare this with the value at their last flush and call
     /// [`Core::save_backup`] only when it changed, on a timer rather than on
     /// every write.
-    fn backup_generation(&self, player: usize) -> Option<u64> {
-        let _ = player;
+    fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+        let _ = cartridge;
         None
     }
 
-    /// Appends `player`'s battery save to `out` in the de facto `.sav`
-    /// layout for the system (for example, Game Boy cartridge RAM followed
-    /// by the 48-byte MBC3 clock trailer). Appends nothing if there is no
-    /// backup.
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
-        let _ = (player, out);
+    /// Appends cartridge `cartridge`'s battery save to `out` in the de
+    /// facto `.sav` layout for its system (for example, Game Boy cartridge
+    /// RAM followed by the 48-byte MBC3 clock trailer). Appends nothing if
+    /// there is no backup. Cartridges are numbered as for
+    /// [`Core::backup_generation`].
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+        let _ = (cartridge, out);
     }
 
     /// The byte at `address` in `player`'s CPU address space, for cheats
-    /// and debuggers, or `None` where that is not plain RAM (I/O registers,
-    /// ROM, unmapped space). Reading never has side effects.
+    /// and debuggers, or `None` where it cannot be read without side
+    /// effects. Plain RAM is readable; so are the few I/O registers that
+    /// cheat codes test, such as the keypad, where a core lists them. ROM,
+    /// other I/O and unmapped space are not. Reading never has side
+    /// effects.
     fn peek(&self, player: usize, address: u32) -> Option<u8> {
         let _ = (player, address);
         None
@@ -84,6 +93,16 @@ pub trait Core: Send {
     /// cheats and debuggers. Returns whether `address` is plain RAM.
     fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
         let _ = (player, address, value);
+        false
+    }
+
+    /// Writes the byte at `address` in RAM bank `bank` of the switchable
+    /// region holding `address`, without switching banks, for cheats that
+    /// name a bank (Game Boy GameShark `8x` and `9x` codes). Elsewhere it
+    /// is [`Core::poke`]. Returns whether `address` is plain RAM. Cores
+    /// without banked RAM write nothing.
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool {
+        let _ = (player, bank, address, value);
         false
     }
 

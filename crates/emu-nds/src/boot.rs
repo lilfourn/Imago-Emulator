@@ -102,8 +102,12 @@ pub(crate) fn load(hw: &mut Hardware, rom: &[u8], user_settings: &[u8], chip_id:
     // The ARM7 BIOS's CRC, which games check to tell a DS from a DSi.
     hw.arm9_write_16(0x027F_F850, 0x5835);
     hw.arm9_write_16(0x027F_FC10, 0x5835);
-    // No GBA cartridge.
-    hw.arm9_write_16(0x027F_FC30, 0xFFFF);
+    // What the firmware read from the GBA slot's cartridge header; a
+    // module ID of 0xFFFF means the slot is empty.
+    let module_info = hw.gba_slot.module_info();
+    for (offset, byte) in (0u32..).zip(module_info) {
+        hw.arm9_write_8(0x027F_FC30 + offset, byte);
+    }
     // Booted from a cartridge.
     hw.arm9_write_16(0x027F_FC40, 1);
     for (offset, byte) in user_settings.iter().take(0x70).enumerate() {

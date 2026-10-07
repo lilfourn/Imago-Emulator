@@ -94,7 +94,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | CORE-4 | Battery saves are exposed with a write counter. The frontend flushes them at most 1 s after a write, on quit, and atomically (write a temporary file, then rename). ✅ | P0 · M3 |
 | CORE-5 | The real-time clock starts at `Media::start_time` and advances with emulated cycles. Per-game RTC offsets are supported. | P0 · M5, M10 |
 | CORE-6 | No BIOS or firmware is required. Use an HLE GBA BIOS ✅ and DS direct boot by default; use the user's own dumps when provided ✅ GBA. | P0 · M8, M13 |
-| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ `memory`, and `peek`/`poke` for plain RAM | P1 · M11 |
+| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ `memory`, `peek`/`poke` for plain RAM and the keypad and timer registers cheats test, `poke_bank` for Game Boy RAM banks | P1 · M11 |
 
 ### 6.2 Systems
 
@@ -124,14 +124,14 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 
 | ID | Requirement | Priority |
 |---|---|---|
-| NDS-1 | ARMv5TE additions (CLZ, QADD/QSUB, DSP multiplies, BLX, LDRD/STRD) and CP15 (protection unit, TCM, cache control). ✅ (protection unit stored, not enforced) | P0 · M12 |
+| NDS-1 | ARMv5TE additions (CLZ, QADD/QSUB, DSP multiplies, BLX, LDRD/STRD) and CP15 (protection unit, TCM, cache control). ✅ (protection unit enforced, TCM included) | P0 · M12 |
 | NDS-2 | ARM9 and ARM7 run in interleaved slices, with IPC sync and FIFO. ✅ | P0 · M12 |
 | NDS-3 | Direct boot, VRAM bank mapping (banks A–I), both 2D engines, SPI touchscreen/firmware/power management, RTC, cartridge reads. ✅ | P0 · M13 |
 | NDS-4 | 3D: geometry engine (GXFIFO, matrix stacks, lighting, clipping) and a software rasterizer as the accuracy reference. ✅ | P0 · M14 |
 | NDS-5 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG) and sound capture. ✅ | P0 · M14 |
 | NDS-6 | 512 KB SPI flash saves for every DS Pokémon game. ✅ (by game code, including the infrared carts) | P0 · M14 |
 | NDS-7 | No anti-piracy symptoms in HG/SS, B/W or B2/W2 without patches. Any trigger is an emulator bug. | P0 · M15 |
-| NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. | P1 · M15 |
+| NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. ✅ (SRAM and Flash, [decision 0006](decisions/0006-gba-slot.md); Pal Park itself untried without GBA dumps) | P1 · M15 |
 | NDS-9 | 3D upscaling (N× internal resolution, or a Metal compute rasterizer). | P1 · M16 |
 | NDS-10 | Local wireless between two instances (trades, battles). Microphone input or a "blow" button. | P2 · M16 |
 | NDS-11 | HG/SS infrared cartridge (Pokéwalker). | P2 |
@@ -141,18 +141,18 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | ID | Requirement | Priority |
 |---|---|---|
 | UI-1 | Open a ROM from the File menu (⌘O), by drag and drop, or from the command line. ✅ | P0 · S |
-| UI-2 | DS screen layouts: stacked, side by side, single screen with swap. ✅ Hybrid (one large and one small screen), rotation and gap setting. ✅ | P0 · S / P1 · M13 |
+| UI-2 | DS screen layouts: stacked, side by side, single screen with swap. ✅ Hybrid (one large and one small screen), rotation and gap setting. ✅ Stacked with no gap by default, a launch window as large as the display allows, and full screen. ✅ | P0 · S / P1 · M13 |
 | UI-3 | Crisp scaling at any window size ("sharp bilinear"). ✅ Integer scaling, and GBA/GBC colour correction ✅. | P0 · S / P1 · M11 |
 | UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. | P2 |
-| UI-5 | Input action layer: physical input → action → core buttons. Keyboard bindings in TOML with several keys per action. ✅ | P0 · S |
+| UI-5 | Input action layer: physical input → action → core buttons. Keyboard bindings in TOML with several keys per action. ✅ Keyboard-first defaults: WASD, face buttons on U I / J K. ✅ | P0 · S |
 | UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides, turbo, hotkey chords. | P1 · M4 |
 | UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. ✅ | P0 · S / P1 · M13 |
 | UI-8 | Audio output at the device rate with dynamic rate control (adjust the resample ratio by up to ±0.5% based on buffer fill). ✅ | P0 · M3 |
 | UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch), thumbnail and age shown when switching. | P0 · S / P1 · M4 |
-| UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap, slow motion. | P0 · S / P1 · M4 |
+| UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap ✅ and slow motion (hold 1, or ⌘⇧F) ✅. | P0 · S / P1 · M4 |
 | UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
 | UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor (✅ viewer), tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |
-| UI-13 | Cheats: GameShark (✅ GB), Action Replay, CodeBreaker (✅ GBA, unencrypted) and raw patches ✅. | P2 · M11 |
+| UI-13 | Cheats: GameShark (✅ GB, with 8x/9x bank codes), Action Replay (✅ DS; ✅ GBA GameShark Advance / Action Replay v1/v2 and Pro Action Replay v3, encrypted or not), CodeBreaker (✅ GBA, with encryption) and raw patches ✅. Not yet: Game Genie and other ROM patches. | P2 · M11 |
 | UI-14 | Screenshots and video recording, RetroAchievements (rcheevos), Lua scripting hooks. | P2 |
 
 ### 6.4 Tooling

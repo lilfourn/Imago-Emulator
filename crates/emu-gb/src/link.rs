@@ -133,12 +133,13 @@ impl Core for Linked {
         Ok(())
     }
 
-    fn backup_generation(&self, player: usize) -> Option<u64> {
-        self.players.get(player)?.backup_generation(0)
+    /// Each player has one cartridge: cartridge `i` is player `i`'s.
+    fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+        self.players.get(cartridge)?.backup_generation(0)
     }
 
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
-        if let Some(gb) = self.players.get(player) {
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+        if let Some(gb) = self.players.get(cartridge) {
             gb.save_backup(0, out);
         }
     }
@@ -152,6 +153,12 @@ impl Core for Linked {
         self.players
             .get_mut(player)
             .is_some_and(|gb| Core::poke(gb, 0, address, value))
+    }
+
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool {
+        self.players
+            .get_mut(player)
+            .is_some_and(|gb| gb.poke_bank(0, bank, address, value))
     }
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {

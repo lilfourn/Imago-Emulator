@@ -195,8 +195,7 @@ impl<M: Model> Processor<M> {
         let address = (self.r[15] & !2).wrapping_add((op & 0xFF) * 4);
         self.advance_after_data();
         let value = self.read_32(bus, address, Access::NONSEQUENTIAL);
-        bus.idle();
-        self.r[Self::low(op, 8)] = value;
+        self.finish_load(bus, Self::low(op, 8), value);
     }
 
     /// Formats 7 and 8: loads and stores with a register offset.
@@ -208,14 +207,17 @@ impl<M: Model> Processor<M> {
         let value = match kind {
             0 => {
                 self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
+                self.abort_if_refused(bus);
                 return;
             }
             1 => {
                 self.write_16(bus, address, self.r[rd] as u16, Access::NONSEQUENTIAL);
+                self.abort_if_refused(bus);
                 return;
             }
             2 => {
                 self.write_8(bus, address, self.r[rd] as u8, Access::NONSEQUENTIAL);
+                self.abort_if_refused(bus);
                 return;
             }
             3 => self.read_byte_signed(bus, address),
@@ -224,6 +226,15 @@ impl<M: Model> Processor<M> {
             6 => u32::from(self.read_8(bus, address, Access::NONSEQUENTIAL)),
             _ => self.read_half_signed(bus, address),
         };
+        self.finish_load(bus, rd, value);
+    }
+
+    /// Ends a single load: the internal cycle, then Rd, unless the load
+    /// aborted.
+    fn finish_load<B: Bus>(&mut self, bus: &mut B, rd: usize, value: u32) {
+        if self.abort_if_refused(bus) {
+            return;
+        }
         bus.idle();
         self.r[rd] = value;
     }
@@ -238,16 +249,21 @@ impl<M: Model> Processor<M> {
         let rd = Self::low(op, 0);
         self.advance_after_data();
         match (load, byte) {
-            (false, false) => self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL),
-            (false, true) => self.write_8(bus, address, self.r[rd] as u8, Access::NONSEQUENTIAL),
+            (false, false) => {
+                self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
+                self.abort_if_refused(bus);
+            }
+            (false, true) => {
+                self.write_8(bus, address, self.r[rd] as u8, Access::NONSEQUENTIAL);
+                self.abort_if_refused(bus);
+            }
             (true, byte) => {
                 let value = if byte {
                     u32::from(self.read_8(bus, address, Access::NONSEQUENTIAL))
                 } else {
                     self.read_word_rotated(bus, address, Access::NONSEQUENTIAL)
                 };
-                bus.idle();
-                self.r[rd] = value;
+                self.finish_load(bus, rd, value);
             }
         }
     }
@@ -259,10 +275,10 @@ impl<M: Model> Processor<M> {
         self.advance_after_data();
         if op & (1 << 11) != 0 {
             let value = self.read_half(bus, address, Access::NONSEQUENTIAL);
-            bus.idle();
-            self.r[rd] = value;
+            self.finish_load(bus, rd, value);
         } else {
             self.write_16(bus, address, self.r[rd] as u16, Access::NONSEQUENTIAL);
+            self.abort_if_refused(bus);
         }
     }
 
@@ -273,10 +289,10 @@ impl<M: Model> Processor<M> {
         self.advance_after_data();
         if op & (1 << 11) != 0 {
             let value = self.read_word_rotated(bus, address, Access::NONSEQUENTIAL);
-            bus.idle();
-            self.r[rd] = value;
+            self.finish_load(bus, rd, value);
         } else {
             self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
+            self.abort_if_refused(bus);
         }
     }
 

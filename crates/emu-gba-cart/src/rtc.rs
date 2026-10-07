@@ -17,7 +17,7 @@ const COMMAND_STATUS: u8 = 4;
 const COMMAND_TIME: u8 = 6;
 
 /// System clock cycles per second.
-const CYCLES_PER_SECOND: u64 = 16_777_216;
+const CYCLES_PER_SECOND: u64 = crate::CLOCK_HZ;
 
 /// Game codes (first three characters) of cartridges with this clock.
 const GAMES: [&[u8; 3]; 5] = [

@@ -6,14 +6,11 @@
 //! far.
 
 mod apu;
-mod backup;
 mod bios;
 mod bus;
-mod cartridge;
 mod dma;
 mod link;
 mod ppu;
-mod rtc;
 mod sio;
 mod timer;
 mod timing;
@@ -23,10 +20,10 @@ use emu_core::{
     Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
     StateError, StereoSample, System, SystemFileKind,
 };
+use emu_gba_cart::Cartridge;
 use serde::{Deserialize, Serialize};
 
 use bus::Bus;
-use cartridge::Cartridge;
 
 pub use link::Linked;
 
@@ -76,8 +73,13 @@ impl Gba {
     /// # Errors
     ///
     /// Returns [`LoadError::InvalidRom`] if the cartridge header lacks its
-    /// fixed value (GBATEK, "GBA Cartridge Header", 0xB2).
+    /// fixed value (GBATEK, "GBA Cartridge Header", 0xB2), or
+    /// [`LoadError::Unsupported`] if `media` has a second-slot cartridge,
+    /// which a GBA has no slot for.
     pub fn new(media: &Media<'_>) -> Result<Self, LoadError> {
+        if media.second_slot.is_some() {
+            return Err(LoadError::Unsupported("a second cartridge slot"));
+        }
         let invalid = |reason| LoadError::InvalidRom {
             system: System::Gba,
             reason,
@@ -221,21 +223,23 @@ impl Core for Gba {
         Ok(())
     }
 
-    fn backup_generation(&self, player: usize) -> Option<u64> {
-        (player == 0)
+    fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+        (cartridge == 0)
             .then(|| self.machine.bus.cartridge.backup_generation())
             .flatten()
     }
 
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
-        if player == 0 {
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+        if cartridge == 0 {
             self.machine.bus.cartridge.save_backup(out);
         }
     }
 
+    /// EWRAM, IWRAM and KEYINPUT.
     fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        let bus = &self.machine.bus;
         (player == 0)
-            .then(|| self.machine.bus.peek_ram(address))
+            .then(|| bus.peek_ram(address).or_else(|| bus.peek_keys(address)))
             .flatten()
     }
 
@@ -295,6 +299,20 @@ mod tests {
             (CYCLES_PER_FRAME - 8..=CYCLES_PER_FRAME + 8).contains(&length),
             "{length}"
         );
+    }
+
+    #[test]
+    fn cheats_can_read_the_keypad() {
+        let rom = rom(&[0xEAFF_FFFE]); // B .
+        let mut gba = Gba::new(&Media::new(&rom)).expect("valid rom");
+        let mut input = Input::default();
+        input.buttons.set(emu_core::Button::L, true);
+        gba.run_frame(&[input], &mut Vec::new());
+        // KEYINPUT is active low: L is bit 9.
+        let keys = [0x0400_0130, 0x0400_0131].map(|address| gba.peek(0, address));
+        assert_eq!(keys, [Some(0xFF), Some(0x01)]);
+        assert_eq!(gba.peek(0, 0x0400_0132), None);
+        assert_eq!(gba.peek(1, 0x0400_0130), None);
     }
 
     #[test]

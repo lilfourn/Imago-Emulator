@@ -15,8 +15,8 @@ pub struct SlotPreview {
     pub saved: SystemTime,
 }
 
-/// Reads slot `slot` of the session of `rom_paths`; `None` if it is empty
-/// or unreadable.
+/// Reads slot `slot` of the session whose players' ROMs are `rom_paths`;
+/// `None` if it is empty or unreadable.
 pub fn preview(rom_paths: &[PathBuf], slot: u8) -> Option<SlotPreview> {
     let path = persist::state_path(rom_paths, slot);
     let saved = fs::metadata(&path).ok()?.modified().ok()?;

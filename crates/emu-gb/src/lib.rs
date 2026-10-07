@@ -91,8 +91,12 @@ impl Gb {
     /// # Errors
     ///
     /// Returns [`LoadError`] if the header checksum is wrong (Pan Docs,
-    /// "0x014D") or the cartridge type is not supported.
+    /// "0x014D"), the cartridge type is not supported, or `media` has a
+    /// second-slot cartridge, which a Game Boy has no slot for.
     pub fn new(media: &Media<'_>) -> Result<Self, LoadError> {
+        if media.second_slot.is_some() {
+            return Err(LoadError::Unsupported("a second cartridge slot"));
+        }
         let header = media.rom.get(0x134..=0x14D).ok_or(LoadError::InvalidRom {
             system: System::Gb,
             reason: "shorter than the 0x150-byte header",
@@ -238,12 +242,12 @@ impl Core for Gb {
         Ok(())
     }
 
-    fn backup_generation(&self, player: usize) -> Option<u64> {
-        (player == 0).then(|| self.machine.bus.cartridge.backup_generation())?
+    fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+        (cartridge == 0).then(|| self.machine.bus.cartridge.backup_generation())?
     }
 
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>) {
-        if player == 0 {
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+        if cartridge == 0 {
             self.machine.bus.cartridge.save_backup(out);
         }
     }
@@ -258,6 +262,15 @@ impl Core for Gb {
             return false;
         };
         self.machine.bus.poke_ram(address, value)
+    }
+
+    /// Banks are cartridge RAM's at 0xA000–0xBFFF and, on a Game Boy
+    /// Color, WRAM's at 0xD000–0xDFFF.
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool {
+        let Some(address) = u16::try_from(address).ok().filter(|_| player == 0) else {
+            return false;
+        };
+        self.machine.bus.poke_ram_bank(bank, address, value)
     }
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
@@ -314,6 +327,23 @@ mod tests {
         let cgb = Gb::new(&Media::new(&rom_for(Model::Cgb, &[]))).expect("valid rom");
         assert_eq!((dmg.model(), cgb.model()), (Model::Dmg, Model::Cgb));
         assert_eq!(cgb.registers().a, 0x11);
+    }
+
+    #[test]
+    fn bank_pokes_reach_unmapped_wram_banks() {
+        // LD A,3; LDH (SVBK),A
+        let program = [0x3E, 0x03, 0xE0, 0x70];
+        let mut gb = Gb::new(&Media::new(&rom_for(Model::Cgb, &program))).expect("valid rom");
+        // WRAM bank 1 is mapped at power-on; write bank 3 behind its back.
+        assert!(gb.poke_bank(0, 3, 0xD010, 0x63));
+        assert_eq!(Core::peek(&gb, 0, 0xD010), Some(0));
+        gb.step();
+        gb.step();
+        assert_eq!(Core::peek(&gb, 0, 0xD010), Some(0x63));
+        // Outside the banked regions it is a plain poke.
+        assert!(gb.poke_bank(0, 5, 0xC000, 0x11));
+        assert_eq!(Core::peek(&gb, 0, 0xC000), Some(0x11));
+        assert!(!gb.poke_bank(0, 1, 0x8000, 0x11));
     }
 
     #[test]

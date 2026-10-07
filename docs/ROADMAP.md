@@ -155,7 +155,8 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 What's missing:
 - armwrestler and the mGBA test suite are not wired into the harness yet;
 - the debugger has only the memory viewer (no disassembly or registers);
-- cheats lack the encrypted Action Replay and GameShark Advance formats;
+- cheats lack ROM patches (GameShark Advance `6`, Pro Action Replay
+  ROM codes) and GBA I/O writes;
 - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) settles Q3
   but awaits review.
 The Pokémon checkpoints (FireRed music, Emerald saves and clock, the
@@ -198,7 +199,11 @@ FireRed–Emerald trade) need your own dumps.
 - Done:
   - `emu_gba::Linked` (normal and multi-player modes);
   - colour correction for GBC and GBA (View > Colour Correction);
-  - `emu-cheats` with `game.cht` files (File > Edit Cheats…);
+  - `emu-cheats` with `game.cht` files (File > Edit Cheats…): device
+    tags or detection; GameShark Advance / Action Replay v1/v2 and Pro
+    Action Replay v3, encrypted (both seed sets, `DEADFACE`) or not;
+    CodeBreaker with its encryption; Game Boy GameShark bank codes; and
+    Action Replay DS for Phase 4. Cheats run after each frame, at VBlank;
   - a memory viewer (View > Memory Viewer);
   - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3.
 - **Exit:** trade between FireRed and Emerald over the emulated link cable.
@@ -219,13 +224,17 @@ are done.
 - 3D has edge anti-aliasing, edge marking, fog, toon shading and shadows.
   Sound has all 16 channels and both capture units.
 - RockPolish's rockwrestler test ROM passes every test.
+- Action Replay DS cheats (`ards` in `game.cht`) run after each frame on
+  main RAM, and button codes read KEYINPUT and EXTKEYIN. A button-activated
+  pointer code changes only its target bytes in a White run (probe
+  `CHEATS=`).
 
 | M | Done | Left |
 |---|---|---|
-| M12 | ARMv5TE, CP15 with TCMs, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro); MPU enforcement |
+| M12 | ARMv5TE, CP15 with TCMs and MPU enforcement, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro) |
 | M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS |
 | M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
-| M15 | Pokémon White shows no anti-piracy symptoms | Timing against melonDS traces; GBA slot (needs a decision on sharing GBA cartridge code across cores); HG/SS and B2/W2 |
+| M15 | Pokémon White shows no anti-piracy symptoms; GBA slot with SRAM and Flash saves ([decision 0006](decisions/0006-gba-slot.md)) | Timing against melonDS traces; HG/SS and B2/W2; Pal Park with real GBA dumps |
 | M16 | — | 3D upscaling, microphone, local wireless |
 
 ### M12. Two CPUs
@@ -254,7 +263,7 @@ are done.
 ### M15. Accuracy
 
 - Timing and cartridge behaviour, measured against melonDS traces. GBA slot
-  using the GBA core's cartridge code.
+  using the GBA cartridge code, shared through `emu-gba-cart`.
 - **Exit:** HeartGold/SoulSilver and Black 2/White 2 play through with no
   anti-piracy symptoms (for example, Pokémon gaining no EXP). Pal Park reads
   a GBA ROM and save from the GBA slot.
@@ -297,9 +306,10 @@ are done.
 | Rewind, four state slots, fast-forward toggle, gamepads | UI-6, UI-9–11 | M4 ✅ |
 | State-slot thumbnails in the slot notice | UI-9 | Phase 2 ✅ |
 | Link cable, per-player input | GB-6 | M6 ✅ |
-| Fast-forward speed cap | UI-10 | Later |
+| Fast-forward speed cap, slow motion | UI-10 | Phase 4 ✅ |
 | Debugger panels | UI-12 | M7 → M11 |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gap, gamepad touch | UI-2, UI-7 | M13 ✅ |
+| Keyboard-first defaults, large window, full screen | UI-2, UI-5 | Phase 4 ✅ |
 | 3D upscaling | NDS-9 | M16 |
 | Shader chain, recording, achievements, scripting | UI-4, UI-14 | Later |

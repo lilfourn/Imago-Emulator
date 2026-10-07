@@ -10,6 +10,11 @@
 //! ARMv5TE's additions are in `armv5.rs`; where it changes an ARMv4
 //! instruction (loads into R15, misaligned halfword loads, LDM/STM edge
 //! cases), the handler here checks `M::V5TE`, a constant per model.
+//!
+//! Data transfers check for a data abort after their accesses and before
+//! they write registers, so an aborted one leaves its base and destination
+//! registers as they were (on the ARM7TDMI, which has no protection unit,
+//! the check is a constant false).
 
 use crate::alu::{self, Shift};
 use crate::{Access, Bus, Mode, Model, Processor, psr};
@@ -295,6 +300,9 @@ impl<M: Model> Processor<M> {
             self.write_32(bus, address, source, Access::LOCK);
             value
         };
+        if self.abort_if_refused(bus) {
+            return;
+        }
         bus.idle();
         self.r[rd] = loaded;
         if rd == 15 {
@@ -331,15 +339,23 @@ impl<M: Model> Processor<M> {
             base.wrapping_sub(offset)
         };
         let address = if pre { offset_address } else { base };
+        // LDRT, STRT and their byte forms (post-indexed with W set) have
+        // User mode's permissions in any mode.
+        let user = self.user_permissions() || (M::PROTECTION_UNIT && !pre && writeback);
+        let access = Access::NONSEQUENTIAL;
 
         // The PC moves on before the data access: STR R15 stores +12.
         self.advance_after_data();
         if load {
             let value = if byte {
-                u32::from(self.read_8(bus, address, Access::NONSEQUENTIAL))
+                u32::from(self.model.read_8(bus, address, access, user))
             } else {
-                self.read_word_rotated(bus, address, Access::NONSEQUENTIAL)
+                let word = self.model.read_32(bus, address, access, user);
+                word.rotate_right((address & 3) * 8)
             };
+            if self.abort_if_refused(bus) {
+                return;
+            }
             bus.idle();
             if (writeback || !pre) && rn != rd {
                 self.write_back(bus, rn, offset_address);
@@ -354,9 +370,12 @@ impl<M: Model> Processor<M> {
         } else {
             let value = self.r[rd];
             if byte {
-                self.write_8(bus, address, value as u8, Access::NONSEQUENTIAL);
+                self.model.write_8(bus, address, value as u8, access, user);
             } else {
-                self.write_32(bus, address, value, Access::NONSEQUENTIAL);
+                self.model.write_32(bus, address, value, access, user);
+            }
+            if self.abort_if_refused(bus) {
+                return;
             }
             if writeback || !pre {
                 self.write_back(bus, rn, offset_address);
@@ -406,6 +425,9 @@ impl<M: Model> Processor<M> {
                 3 => self.read_half_signed(bus, address),
                 _ => self.read_half(bus, address, Access::NONSEQUENTIAL),
             };
+            if self.abort_if_refused(bus) {
+                return;
+            }
             bus.idle();
             if (writeback || !pre) && rn != rd {
                 self.write_back(bus, rn, offset_address);
@@ -418,6 +440,9 @@ impl<M: Model> Processor<M> {
             // ARMv4 has only STRH; the signed forms store a halfword too.
             // (ARMv5TE's LDRD and STRD use them; see `armv5.rs`.)
             self.write_16(bus, address, self.r[rd] as u16, Access::NONSEQUENTIAL);
+            if self.abort_if_refused(bus) {
+                return;
+            }
             if writeback || !pre {
                 self.write_back(bus, rn, offset_address);
             }
@@ -443,7 +468,9 @@ impl<M: Model> Processor<M> {
     /// list writes the new base back unless the base is the last of several
     /// registers, when the loaded value stays (Thumb LDMIA always keeps the
     /// loaded value). A load into R15 takes the state from bit 0 unless it
-    /// is an exception return (S bit).
+    /// is an exception return (S bit). A data abort stops the transfer:
+    /// registers loaded before it keep their values, but R15 is not loaded
+    /// and the base gets its old value back, even if it was loaded.
     #[allow(clippy::too_many_arguments)] // Mirrors the instruction's fields.
     pub(crate) fn transfer_multiple<B: Bus>(
         &mut self,
@@ -489,6 +516,7 @@ impl<M: Model> Processor<M> {
         let early_writeback = writeback && !M::V5TE;
         let mut address = start;
         let mut first = true;
+        let mut refused = false;
         for register in (0..16).filter(|r| list & (1 << r) != 0) {
             let access = if first {
                 Access::NONSEQUENTIAL
@@ -497,12 +525,20 @@ impl<M: Model> Processor<M> {
             };
             if load {
                 let value = self.read_32(bus, address, access);
+                refused = self.model.data_refused();
+                if refused {
+                    break;
+                }
                 if first && early_writeback {
                     self.r[rn] = final_base;
                 }
                 self.r[register] = value;
             } else {
                 self.write_32(bus, address, self.r[register], access);
+                refused = self.model.data_refused();
+                if refused {
+                    break;
+                }
                 if first && early_writeback {
                     self.r[rn] = final_base;
                 }
@@ -519,6 +555,13 @@ impl<M: Model> Processor<M> {
         if switch_bank {
             self.store_bank(Mode::User);
             self.load_bank(mode);
+        }
+        if refused {
+            if rn != 15 {
+                self.r[rn] = base;
+            }
+            self.data_abort(bus);
+            return;
         }
         // ARMv5 writes the base back to the current mode's register, even
         // when the transfer itself used the User bank.

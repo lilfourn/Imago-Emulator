@@ -114,6 +114,11 @@ impl CpuBus for Arm7Bus<'_> {
 
 /// Memory as the ARM9's own code sees it, TCM included, for the BIOS
 /// calls the machine runs outside the CPU. TCM accesses take a cycle.
+///
+/// The protection unit does not check these accesses. The real BIOS runs
+/// privileged and would abort on an address the game's regions forbid,
+/// but games pass the BIOS only memory they can use themselves. Like DMA,
+/// which the protection unit never sees, the emulated calls just go ahead.
 pub(crate) struct Arm9TcmBus<'a, 'b> {
     pub(crate) cpu: &'a mut Arm9,
     pub(crate) bus: Arm9Bus<'b>,

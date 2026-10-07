@@ -5,12 +5,14 @@
 //! Registers are addressed as MRC/MCR do, by CRn, CRm and opcode 2 (opcode
 //! 1 is always 0 on the ARM946E-S). This keeps the ID codes, the control
 //! register, the protection unit, cache lockdown, TCM regions and the trace
-//! process ID. The protection unit's settings are stored but not enforced:
-//! no access ever aborts. Cache commands (c7) and the test registers (c15)
-//! have no state here; caches are not emulated.
+//! process ID. While the protection unit is on, its regions and access
+//! permissions decide which accesses abort (see `protection.rs`); the
+//! cachable and bufferable bits are stored only. Cache commands (c7) and the
+//! test registers (c15) have no state here; caches are not emulated.
 
 use serde::{Deserialize, Serialize};
 
+use crate::protection::Map;
 use crate::tcm::Window;
 
 /// Bits of the control register (c1, c0, 0).
@@ -74,6 +76,7 @@ const ITCM_REGION_MASK: u32 = 0x0000_003E;
 
 /// CP15's registers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Saved")]
 pub struct Cp15 {
     control: u32,
     /// Cachable bits per protection region, for data and for instructions
@@ -98,6 +101,48 @@ pub struct Cp15 {
     /// Where the TCMs answer, derived from the registers above.
     itcm: Window,
     dtcm: Window,
+    /// What each page allows, derived from the protection regions and
+    /// permissions; current while the protection unit is on. Rebuilt
+    /// rather than saved.
+    #[serde(skip)]
+    protection: Map,
+}
+
+/// CP15 as saved: every field but the protection map, in order.
+#[derive(Deserialize)]
+struct Saved {
+    control: u32,
+    cachable: [u32; 2],
+    bufferable: u32,
+    permissions: [u32; 2],
+    regions: [u32; 8],
+    lockdown: [u32; 2],
+    dtcm_region: u32,
+    itcm_region: u32,
+    trace_process_id: u32,
+    itcm: Window,
+    dtcm: Window,
+}
+
+impl From<Saved> for Cp15 {
+    fn from(saved: Saved) -> Self {
+        let mut cp15 = Self {
+            control: saved.control,
+            cachable: saved.cachable,
+            bufferable: saved.bufferable,
+            permissions: saved.permissions,
+            regions: saved.regions,
+            lockdown: saved.lockdown,
+            dtcm_region: saved.dtcm_region,
+            itcm_region: saved.itcm_region,
+            trace_process_id: saved.trace_process_id,
+            itcm: saved.itcm,
+            dtcm: saved.dtcm,
+            protection: Map::default(),
+        };
+        cp15.map_protection();
+        cp15
+    }
 }
 
 impl Default for Cp15 {
@@ -114,6 +159,7 @@ impl Default for Cp15 {
             trace_process_id: 0,
             itcm: Window::new(0, false, false),
             dtcm: Window::new(0, false, false),
+            protection: Map::default(),
         };
         cp15.map_tcm();
         cp15
@@ -152,9 +198,11 @@ impl Cp15 {
             (1, 0, 0) => self.set_control(value),
             (2, 0, side @ 0..=1) => self.cachable[side as usize] = value & 0xFF,
             (3, 0, 0) => self.bufferable = value & 0xFF,
-            (5, 0, side @ 0..=1) => self.permissions[side as usize] = extended_permissions(value),
-            (5, 0, side @ 2..=3) => self.permissions[side as usize - 2] = value,
-            (6, region @ 0..=7, 0..=1) => self.regions[region as usize] = value & REGION_MASK,
+            (5, 0, side @ 0..=1) => {
+                self.set_permissions(side as usize, extended_permissions(value));
+            }
+            (5, 0, side @ 2..=3) => self.set_permissions(side as usize - 2, value),
+            (6, region @ 0..=7, 0..=1) => self.set_region(region as usize, value & REGION_MASK),
             (9, 0, side @ 0..=1) => self.lockdown[side as usize] = value,
             (9, 1, 0) => self.set_dtcm_region(value),
             (9, 1, 1) => self.set_itcm_region(value),
@@ -171,8 +219,12 @@ impl Cp15 {
 
     /// Writes the control register; fixed bits keep their values.
     pub fn set_control(&mut self, value: u32) {
+        let was_protecting = self.protecting();
         self.control = (value & control::WRITABLE) | control::FIXED;
         self.map_tcm();
+        if !was_protecting {
+            self.map_protection();
+        }
     }
 
     /// The data TCM region register (c9, c1, 0).
@@ -223,6 +275,41 @@ impl Cp15 {
     #[must_use]
     pub fn loads_interwork(&self) -> bool {
         self.control & control::PRE_V5 == 0
+    }
+
+    /// Whether the protection unit lets an access of kind `need`
+    /// (`protection::READ`, `WRITE` or `EXECUTE`) through, with User mode's
+    /// permissions if `user` is set. Everything passes while it is off.
+    #[inline]
+    pub(crate) fn permits(&self, address: u32, need: u8, user: bool) -> bool {
+        !self.protecting() || self.protection.allows(address, need, user)
+    }
+
+    fn protecting(&self) -> bool {
+        self.control & control::PROTECTION_UNIT != 0
+    }
+
+    fn set_permissions(&mut self, side: usize, value: u32) {
+        if self.permissions[side] != value {
+            self.permissions[side] = value;
+            self.map_protection();
+        }
+    }
+
+    fn set_region(&mut self, index: usize, value: u32) {
+        if self.regions[index] != value {
+            self.regions[index] = value;
+            self.map_protection();
+        }
+    }
+
+    /// Rebuilds the protection map if the unit is on; turning it on
+    /// rebuilds it too, so changes meanwhile wait until then.
+    fn map_protection(&mut self) {
+        if self.protecting() {
+            let [data, code] = self.permissions;
+            self.protection.rebuild(&self.regions, data, code);
+        }
     }
 
     pub(crate) fn itcm(&self) -> Window {
@@ -306,6 +393,35 @@ mod tests {
         assert_eq!(cp15.read(5, 0, 0), 0b10_01_00_11_10_01_00_10);
         cp15.write(5, 0, 1, 0xFFFF);
         assert_eq!(cp15.read(5, 0, 3), 0x3333_3333);
+    }
+
+    #[test]
+    fn protection_follows_the_registers_and_survives_loading() {
+        use crate::protection::READ;
+        let mut cp15 = Cp15::default();
+        // 4 MiB at 0x02000000, read-write for privileged code only.
+        cp15.write(6, 0, 0, 0x0200_002B);
+        cp15.write(5, 0, 2, 1);
+        assert!(cp15.permits(0x0300_0000, READ, true), "off: no checks");
+        cp15.set_control(control::RESET | control::PROTECTION_UNIT);
+        assert!(cp15.permits(0x023F_FFFC, READ, false));
+        assert!(!cp15.permits(0x023F_FFFC, READ, true));
+        assert!(!cp15.permits(0x0240_0000, READ, false));
+
+        let saved = Saved {
+            control: cp15.control,
+            cachable: cp15.cachable,
+            bufferable: cp15.bufferable,
+            permissions: cp15.permissions,
+            regions: cp15.regions,
+            lockdown: cp15.lockdown,
+            dtcm_region: cp15.dtcm_region,
+            itcm_region: cp15.itcm_region,
+            trace_process_id: cp15.trace_process_id,
+            itcm: cp15.itcm,
+            dtcm: cp15.dtcm,
+        };
+        assert_eq!(Cp15::from(saved), cp15);
     }
 
     #[test]

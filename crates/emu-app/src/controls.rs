@@ -10,14 +10,15 @@ use std::collections::HashMap;
 use emu_core::Buttons;
 
 use crate::bindings::Held;
+use crate::speed::Pace;
 
 /// The combined effect of everything held.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HeldState {
     /// Emulated buttons held.
     pub buttons: Buttons,
-    /// Run unthrottled.
-    pub fast_forward: bool,
+    /// Run faster or slower; fast-forward wins over slow motion.
+    pub pace: Pace,
     /// Step backwards through history.
     pub rewind: bool,
     /// Touch the screen at the gamepad cursor.
@@ -29,6 +30,7 @@ pub struct HeldState {
 pub struct Controls {
     pressed: HashMap<String, Held>,
     fast_forward_latched: bool,
+    slow_motion_latched: bool,
 }
 
 impl Controls {
@@ -46,7 +48,8 @@ impl Controls {
         }
     }
 
-    /// Releases everything held, keeping a latched fast-forward.
+    /// Releases everything held, keeping latched fast-forward and slow
+    /// motion.
     pub fn release_all(&mut self) {
         self.pressed.clear();
     }
@@ -57,20 +60,33 @@ impl Controls {
         self.fast_forward_latched
     }
 
+    /// Turns latched slow motion on or off; returns the new setting.
+    pub fn toggle_slow_motion(&mut self) -> bool {
+        self.slow_motion_latched = !self.slow_motion_latched;
+        self.slow_motion_latched
+    }
+
     /// The combined state.
     pub fn state(&self) -> HeldState {
-        let mut state = HeldState {
-            fast_forward: self.fast_forward_latched,
-            ..HeldState::default()
-        };
+        let mut state = HeldState::default();
+        let mut fast_forward = self.fast_forward_latched;
+        let mut slow_motion = self.slow_motion_latched;
         for held in self.pressed.values() {
             match held {
                 Held::Button(button) => state.buttons.set(*button, true),
-                Held::FastForward => state.fast_forward = true,
+                Held::FastForward => fast_forward = true,
+                Held::SlowMotion => slow_motion = true,
                 Held::Rewind => state.rewind = true,
                 Held::Touch => state.touch = true,
             }
         }
+        state.pace = if fast_forward {
+            Pace::FastForward
+        } else if slow_motion {
+            Pace::SlowMotion
+        } else {
+            Pace::Normal
+        };
         state
     }
 }
@@ -99,7 +115,7 @@ mod tests {
         assert_eq!(controls.state(), HeldState::default());
         controls.set("key:tab".to_owned(), Some(Held::FastForward), true);
         controls.set("key:tab".to_owned(), None, false);
-        assert!(!controls.state().fast_forward);
+        assert_eq!(controls.state().pace, Pace::Normal);
     }
 
     #[test]
@@ -121,7 +137,32 @@ mod tests {
         controls.set("key:`".to_owned(), Some(Held::Rewind), true);
         controls.release_all();
         let state = controls.state();
-        assert!(state.fast_forward);
+        assert_eq!(state.pace, Pace::FastForward);
         assert!(!state.rewind);
+    }
+
+    #[test]
+    fn slow_motion_is_held_or_latched() {
+        let mut controls = Controls::default();
+        controls.set("key:1".to_owned(), Some(Held::SlowMotion), true);
+        assert_eq!(controls.state().pace, Pace::SlowMotion);
+        controls.set("key:1".to_owned(), None, false);
+        assert_eq!(controls.state().pace, Pace::Normal);
+
+        assert!(controls.toggle_slow_motion());
+        controls.release_all();
+        assert_eq!(controls.state().pace, Pace::SlowMotion);
+        assert!(!controls.toggle_slow_motion());
+        assert_eq!(controls.state().pace, Pace::Normal);
+    }
+
+    #[test]
+    fn fast_forward_wins_over_slow_motion() {
+        let mut controls = Controls::default();
+        controls.toggle_slow_motion();
+        controls.set("key:tab".to_owned(), Some(Held::FastForward), true);
+        assert_eq!(controls.state().pace, Pace::FastForward);
+        controls.set("key:tab".to_owned(), None, false);
+        assert_eq!(controls.state().pace, Pace::SlowMotion);
     }
 }

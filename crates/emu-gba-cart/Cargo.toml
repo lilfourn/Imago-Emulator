@@ -1,0 +1,13 @@
+[package]
+name = "emu-gba-cart"
+description = "The Game Boy Advance cartridge (ROM, save memory, GPIO clock), shared by the GBA core and the DS GBA slot."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[lints]
+workspace = true
