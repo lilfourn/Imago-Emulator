@@ -41,6 +41,7 @@ actions!(
         Resolution3d2x,
         Resolution3d3x,
         Resolution3d4x,
+        ToggleMicrophone,
         Quit,
     ]
 );
@@ -161,6 +162,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Fast-Forward", ToggleFastForward),
                 MenuItem::action("Slow Motion", ToggleSlowMotion),
                 MenuItem::action("Switch Player", SwitchPlayer),
+                MenuItem::action("Use Microphone", ToggleMicrophone),
                 MenuItem::separator(),
                 MenuItem::action("Save State", SaveState),
                 MenuItem::action("Load State", LoadState),

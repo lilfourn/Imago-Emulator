@@ -18,7 +18,8 @@ use crate::app::{
     LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
     Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise,
     RotateClockwise, SaveState, SwapScreens, SwitchPlayer, ToggleColorCorrection,
-    ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, TogglePause, ToggleSlowMotion,
+    ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, ToggleMicrophone, TogglePause,
+    ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings};
@@ -30,6 +31,7 @@ use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
+use crate::microphone::{self, Loudness, Microphone};
 use crate::persist;
 use crate::settings::{self, Settings};
 use crate::slots::{self, SlotPreview};
@@ -53,6 +55,12 @@ pub struct EmulatorView {
     speeds: Speeds,
     /// How many times its own resolution DS 3D is drawn at.
     resolution_3d: u32,
+    /// The computer's microphone, while the user has it on: off at every
+    /// launch.
+    microphone: Option<(Microphone, Loudness)>,
+    /// How loud the microphone was when the emulation thread was last
+    /// told.
+    heard: u8,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
     /// Where the memory viewer is looking, while it is open.
@@ -166,6 +174,8 @@ impl EmulatorView {
             settings_path,
             speeds: Speeds::default(),
             resolution_3d: Settings::default().resolution_3d,
+            microphone: None,
+            heard: 0,
             color_correction: true,
             memory_viewer: None,
             session: None,
@@ -363,7 +373,10 @@ impl EmulatorView {
 
     fn handle(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Frame => cx.notify(),
+            Event::Frame => {
+                self.listen();
+                cx.notify();
+            }
             Event::Notice(text) => self.show_notice(text, cx),
         }
     }
@@ -394,7 +407,11 @@ impl EmulatorView {
             input: Input {
                 buttons: self.sent.buttons,
                 touch: self.sent_touch,
-                microphone: if self.sent.blow { Input::LOUDEST } else { 0 },
+                microphone: if self.sent.blow {
+                    Input::LOUDEST
+                } else {
+                    self.heard
+                },
             },
         });
     }
@@ -795,6 +812,36 @@ impl EmulatorView {
         self.save_settings(cx);
     }
 
+    /// Starts or stops listening to the computer's microphone for DS games.
+    fn toggle_microphone(&mut self, cx: &mut Context<Self>) {
+        if self.microphone.take().is_some() {
+            self.heard = 0;
+            self.send_input();
+            self.show_notice("Microphone off", cx);
+            return;
+        }
+        match microphone::open() {
+            Ok(microphone) => {
+                self.microphone = Some(microphone);
+                self.show_notice("Microphone on: DS games hear how loud it is", cx);
+            }
+            Err(error) => self.show_notice(format!("{error:#}"), cx),
+        }
+    }
+
+    /// Passes on how loud the microphone has been since the last frame,
+    /// while it is on, as the active player's microphone input.
+    fn listen(&mut self) {
+        let Some((_, loudness)) = &self.microphone else {
+            return;
+        };
+        let heard = loudness.take();
+        if heard != self.heard {
+            self.heard = heard;
+            self.send_input();
+        }
+    }
+
     /// Writes the settings for next launch, noting any failure.
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.settings_path else {
@@ -1099,6 +1146,9 @@ impl Render for EmulatorView {
             }))
             .on_action(cx.listener(|this, _: &Resolution3d4x, _, cx| {
                 this.set_resolution_3d(4, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMicrophone, _, cx| {
+                this.toggle_microphone(cx);
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();

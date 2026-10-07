@@ -17,6 +17,7 @@ mod gamepad;
 mod latch;
 mod layout;
 mod memory_viewer;
+mod microphone;
 mod persist;
 mod resample;
 mod rewind;
