@@ -22,8 +22,9 @@ use crate::app::{
     ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
-use crate::bindings::{self, Bindings};
+use crate::bindings::{self, Bindings, Shortcut};
 use crate::cheats;
+use crate::chords::{Chords, Effect};
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
 use crate::cursor::{self, Cursor};
@@ -71,6 +72,8 @@ pub struct EmulatorView {
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
     controls: Controls,
+    /// Gamepad hotkey chords in progress.
+    chords: Chords,
     /// Where the mouse touches the touchscreen, while its button is down.
     mouse_touch: Option<TouchPoint>,
     /// The gamepad's touchscreen cursor, once a gamepad has used it.
@@ -162,7 +165,7 @@ impl EmulatorView {
                     // but releases always count.
                     let release = matches!(event, PadEvent::Control { pressed: false, .. });
                     if window.is_window_active() || release {
-                        this.pad_event(&event, cx);
+                        this.pad_event(&event, window, cx);
                     }
                 });
                 if delivered.is_err() {
@@ -186,6 +189,7 @@ impl EmulatorView {
             loading: None,
             placements: Vec::new(),
             controls: Controls::default(),
+            chords: Chords::default(),
             mouse_touch: None,
             cursor: None,
             sent: HeldState::default(),
@@ -550,6 +554,7 @@ impl EmulatorView {
 
     fn release_all(&mut self) {
         self.controls.release_all();
+        self.chords.clear();
         self.mouse_touch = None;
         self.sync_held();
     }
@@ -574,22 +579,56 @@ impl EmulatorView {
         cx.notify();
     }
 
-    fn pad_event(&mut self, event: &PadEvent, cx: &mut Context<Self>) {
+    fn pad_event(&mut self, event: &PadEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PadEvent::Control {
                 controller,
                 control,
                 pressed,
             } => {
-                let action = self.bindings.pad_action(controller, control);
-                let source = format!("pad:{controller}:{control}");
-                self.controls.set(source, action, *pressed);
-                self.sync_held();
+                let hotkey = |control: &str| self.bindings.hotkey(control);
+                let effects = self.chords.event(hotkey, controller, control, *pressed);
+                for effect in effects {
+                    self.pad_effect(controller, effect, window, cx);
+                }
             }
             PadEvent::Pointer { dx, dy } => self.move_cursor((*dx, *dy)),
         }
         // Redraw the cursor, even when paused.
         cx.notify();
+    }
+
+    /// Carries out one effect of a control on `controller` going down or
+    /// up (see `chords.rs`).
+    fn pad_effect(
+        &mut self,
+        controller: &str,
+        effect: Effect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match effect {
+            Effect::Pass { control, pressed } => {
+                let action = self.bindings.pad_action(controller, &control);
+                let source = format!("pad:{controller}:{control}");
+                self.controls.set(source, action, pressed);
+                self.sync_held();
+            }
+            Effect::Hold { control, held } => {
+                let source = format!("pad:{controller}:{control}");
+                self.controls.set(source, Some(held), true);
+                self.sync_held();
+            }
+            Effect::Run(shortcut) => {
+                // Its handler updates this view, which is busy until this
+                // event is done, so it runs just after.
+                let action = shortcut_action(shortcut);
+                let focus = self.focus.clone();
+                window.defer(cx, move |window, cx| {
+                    focus.dispatch_action(action.as_ref(), window, cx);
+                });
+            }
+        }
     }
 
     /// Moves the gamepad cursor by `motion`, in the units of
@@ -1310,6 +1349,23 @@ fn welcome() -> impl IntoElement {
                 .text_color(rgb(0x0088_8888))
                 .child("Open a ROM with ⌘O, or drop a .gb, .gbc, .gba or .nds file here."),
         )
+}
+
+/// The menu action a gamepad hotkey runs.
+fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
+    match shortcut {
+        Shortcut::SaveState => Box::new(SaveState),
+        Shortcut::LoadState => Box::new(LoadState),
+        Shortcut::NextSlot => Box::new(NextStateSlot),
+        Shortcut::PreviousSlot => Box::new(PreviousStateSlot),
+        Shortcut::Pause => Box::new(TogglePause),
+        Shortcut::Reset => Box::new(Reset),
+        Shortcut::ToggleFastForward => Box::new(ToggleFastForward),
+        Shortcut::ToggleSlowMotion => Box::new(ToggleSlowMotion),
+        Shortcut::SwapScreens => Box::new(SwapScreens),
+        Shortcut::SwitchPlayer => Box::new(SwitchPlayer),
+        Shortcut::FullScreen => Box::new(ToggleFullScreen),
+    }
 }
 
 /// Whether `system` takes GBA games in a second slot.

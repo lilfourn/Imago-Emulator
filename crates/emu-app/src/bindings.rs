@@ -1,11 +1,12 @@
 //! Bindings for held inputs: emulated buttons and their turbo versions,
 //! fast-forward, slow motion, rewind, touching the screen at the gamepad
 //! cursor and blowing into the DS microphone, from the keyboard or
-//! gamepads.
+//! gamepads; and gamepad hotkeys.
 //!
 //! One-shot commands (Open, Pause, Save State, ...) are GPUI actions bound
-//! to menu shortcuts in `app.rs`. This module covers only inputs that are
-//! held down, because those need release events.
+//! to menu shortcuts in `app.rs`. This module covers inputs that are held
+//! down, because those need release events, and the gamepad hotkeys that
+//! run those commands from a controller (see `chords.rs`).
 //!
 //! Users override the defaults in a TOML file that maps each action to one
 //! or more GPUI key names or gilrs control names. Gamepad bindings can be
@@ -25,6 +26,11 @@
 //! [gamepads.030000005e0400008e02000000007200]
 //! a = ["South"]
 //!
+//! [hotkeys]               # gamepad chords: the modifier plus a control
+//! modifier = ["Select"]
+//! save_state = ["RightTrigger"]
+//! reset = ["West"]
+//!
 //! [turbo]
 //! frames = 3              # frames per turbo press, and per gap
 //! ```
@@ -39,6 +45,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -103,8 +110,92 @@ impl FromStr for Held {
     }
 }
 
-/// Maps input names to held actions.
-type Map = HashMap<String, Held>;
+/// An app command a gamepad hotkey runs, as its menu item does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Shortcut {
+    /// Saves a state to the current slot.
+    SaveState,
+    /// Loads the state in the current slot.
+    LoadState,
+    /// Selects the next state slot.
+    NextSlot,
+    /// Selects the previous state slot.
+    PreviousSlot,
+    /// Pauses or resumes.
+    Pause,
+    /// Power-cycles the system.
+    Reset,
+    /// Turns latched fast-forward on or off.
+    ToggleFastForward,
+    /// Turns latched slow motion on or off.
+    ToggleSlowMotion,
+    /// Swaps the DS screens.
+    SwapScreens,
+    /// Hands control to the next player in link play.
+    SwitchPlayer,
+    /// Enters or leaves full screen.
+    FullScreen,
+}
+
+/// Each shortcut and its name in the `[hotkeys]` table.
+const SHORTCUTS: [(Shortcut, &str); 11] = [
+    (Shortcut::SaveState, "save_state"),
+    (Shortcut::LoadState, "load_state"),
+    (Shortcut::NextSlot, "next_slot"),
+    (Shortcut::PreviousSlot, "previous_slot"),
+    (Shortcut::Pause, "pause"),
+    (Shortcut::Reset, "reset"),
+    (Shortcut::ToggleFastForward, "toggle_fast_forward"),
+    (Shortcut::ToggleSlowMotion, "toggle_slow_motion"),
+    (Shortcut::SwapScreens, "swap_screens"),
+    (Shortcut::SwitchPlayer, "switch_player"),
+    (Shortcut::FullScreen, "full_screen"),
+];
+
+/// What a gamepad control does in the `[hotkeys]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Hotkey {
+    /// Held down, makes the other hotkey controls run their hotkeys.
+    Modifier,
+    /// Pressed with the modifier, runs an app command.
+    Run(Shortcut),
+    /// Pressed with the modifier, holds an action until released: `rewind`,
+    /// `fast_forward` or any other held action.
+    Hold(Held),
+}
+
+impl fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Modifier => f.write_str("modifier"),
+            Self::Run(shortcut) => {
+                let name = SHORTCUTS
+                    .iter()
+                    .find(|(each, _)| each == shortcut)
+                    .map_or("?", |(_, name)| name);
+                f.write_str(name)
+            }
+            Self::Hold(held) => held.fmt(f),
+        }
+    }
+}
+
+impl FromStr for Hotkey {
+    type Err = BindingsError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "modifier" {
+            return Ok(Self::Modifier);
+        }
+        match SHORTCUTS.iter().find(|(_, name)| *name == s) {
+            Some((shortcut, _)) => Ok(Self::Run(*shortcut)),
+            None => s.parse().map(Self::Hold),
+        }
+    }
+}
+
+/// Maps input names to what they do.
+type Map<A = Held> = HashMap<String, A>;
 
 /// Keyboard and gamepad bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +205,8 @@ pub struct Bindings {
     gamepad: Map,
     /// Per-controller gamepad maps, by UUID.
     gamepads: HashMap<String, Map>,
+    /// Gamepad hotkeys, for every controller.
+    hotkeys: Map<Hotkey>,
     /// Frames per turbo press, and per gap; at least 1.
     turbo_frames: u8,
 }
@@ -171,10 +264,27 @@ const GAMEPAD_DEFAULTS: [(Held, &str); 20] = [
     (Held::Touch, "LeftThumb"),
 ];
 
-fn map_of(defaults: &[(Held, &str)]) -> Map {
+/// Select is the modifier, as in RetroArch. The shoulders save and load,
+/// Start pauses, the D-pad's sides pick the state slot, up swaps the
+/// screens and down hands control to the other player in link play. The
+/// right trigger, which fast-forwards while held, latches it on or off.
+/// Reset, which loses unsaved play, has no default.
+const HOTKEY_DEFAULTS: [(Hotkey, &str); 9] = [
+    (Hotkey::Modifier, "Select"),
+    (Hotkey::Run(Shortcut::SaveState), "RightTrigger"),
+    (Hotkey::Run(Shortcut::LoadState), "LeftTrigger"),
+    (Hotkey::Run(Shortcut::Pause), "Start"),
+    (Hotkey::Run(Shortcut::NextSlot), "DPadRight"),
+    (Hotkey::Run(Shortcut::PreviousSlot), "DPadLeft"),
+    (Hotkey::Run(Shortcut::SwapScreens), "DPadUp"),
+    (Hotkey::Run(Shortcut::SwitchPlayer), "DPadDown"),
+    (Hotkey::Run(Shortcut::ToggleFastForward), "RightTrigger2"),
+];
+
+fn map_of<A: Copy>(defaults: &[(A, &str)]) -> Map<A> {
     defaults
         .iter()
-        .map(|(held, name)| ((*name).to_owned(), *held))
+        .map(|(action, name)| ((*name).to_owned(), *action))
         .collect()
 }
 
@@ -184,6 +294,7 @@ impl Default for Bindings {
             keys: map_of(&KEY_DEFAULTS),
             gamepad: map_of(&GAMEPAD_DEFAULTS),
             gamepads: HashMap::new(),
+            hotkeys: map_of(&HOTKEY_DEFAULTS),
             turbo_frames: turbo::DEFAULT_FRAMES,
         }
     }
@@ -201,6 +312,8 @@ struct BindingsFile {
     gamepad: Section,
     #[serde(default)]
     gamepads: BTreeMap<String, Section>,
+    #[serde(default)]
+    hotkeys: Section,
     #[serde(default)]
     turbo: TurboSection,
 }
@@ -224,6 +337,11 @@ impl Bindings {
             .unwrap_or(&self.gamepad)
             .get(control)
             .copied()
+    }
+
+    /// What gamepad `control` does in the hotkey table, on any controller.
+    pub fn hotkey(&self, control: &str) -> Option<Hotkey> {
+        self.hotkeys.get(control).copied()
     }
 
     /// Frames each turbo press lasts, and each gap between presses.
@@ -272,6 +390,7 @@ impl Bindings {
             keys: rebind(&self.keys, &file.keys)?,
             gamepad: rebind(&self.gamepad, &file.gamepad)?,
             gamepads,
+            hotkeys: rebind(&self.hotkeys, &file.hotkeys)?,
             turbo_frames,
         })
     }
@@ -305,28 +424,31 @@ impl Bindings {
 /// `base` with every action named in `section` bound to exactly the inputs
 /// listed there, none if the list is empty. An input the section claims
 /// is taken from whatever action had it in `base`.
-fn rebind(base: &Map, section: &Section) -> Result<Map, BindingsError> {
+fn rebind<A>(base: &Map<A>, section: &Section) -> Result<Map<A>, BindingsError>
+where
+    A: FromStr<Err = BindingsError> + Copy + Eq + Hash + fmt::Display,
+{
     let mut named = HashSet::new();
-    let mut claimed = Map::new();
+    let mut claimed: Map<A> = Map::new();
     for (action, inputs) in section {
-        let held: Held = action.parse()?;
-        named.insert(held);
+        let action: A = action.parse()?;
+        named.insert(action);
         for input in inputs {
-            if let Some(other) = claimed.insert(input.clone(), held)
-                && other != held
+            if let Some(other) = claimed.insert(input.clone(), action)
+                && other != action
             {
                 return Err(BindingsError::Conflict {
                     input: input.clone(),
-                    first: other,
-                    second: held,
+                    first: other.to_string(),
+                    second: action.to_string(),
                 });
             }
         }
     }
-    let mut map: Map = base
+    let mut map: Map<A> = base
         .iter()
-        .filter(|(input, held)| !claimed.contains_key(*input) && !named.contains(*held))
-        .map(|(input, held)| (input.clone(), *held))
+        .filter(|(input, action)| !claimed.contains_key(*input) && !named.contains(*action))
+        .map(|(input, action)| (input.clone(), *action))
         .collect();
     map.extend(claimed);
     Ok(map)
@@ -352,7 +474,8 @@ pub enum BindingsError {
     #[error("invalid bindings file: {0}")]
     Syntax(String),
     /// An action name is not a button, a turbo button such as `turbo_a`,
-    /// `fast_forward`, `slow_motion`, `rewind`, `touch` or `blow`.
+    /// `fast_forward`, `slow_motion`, `rewind`, `touch` or `blow`, nor in
+    /// `[hotkeys]` one of the shortcuts or `modifier`.
     #[error("unknown action {0:?} in bindings")]
     UnknownAction(String),
     /// One input is bound to two different actions.
@@ -361,9 +484,9 @@ pub enum BindingsError {
         /// The doubly-bound input.
         input: String,
         /// The action it was bound to first.
-        first: Held,
+        first: String,
         /// The action that tried to take it.
-        second: Held,
+        second: String,
     },
     /// `[turbo]` asks for presses zero frames long.
     #[error("turbo frames must be at least 1")]
@@ -399,6 +522,7 @@ mod tests {
     fn default_keys_are_each_bound_once() {
         assert_eq!(map_of(&KEY_DEFAULTS).len(), KEY_DEFAULTS.len());
         assert_eq!(map_of(&GAMEPAD_DEFAULTS).len(), GAMEPAD_DEFAULTS.len());
+        assert_eq!(map_of(&HOTKEY_DEFAULTS).len(), HOTKEY_DEFAULTS.len());
     }
 
     #[test]
@@ -455,9 +579,11 @@ mod tests {
 
     #[test]
     fn an_empty_list_unbinds_an_action() {
-        let bindings = Bindings::from_toml("[keys]\nrewind = []\n").expect("valid file");
+        let text = "[keys]\nrewind = []\n\n[hotkeys]\nsave_state = []\n";
+        let bindings = Bindings::from_toml(text).expect("valid file");
         assert_eq!(bindings.key_action("r"), None);
-        assert_eq!(bindings.key_action("tab"), Some(Held::FastForward));
+        assert_eq!(bindings.hotkey("RightTrigger"), None);
+        assert_eq!(bindings.hotkey("Select"), Some(Hotkey::Modifier));
     }
 
     #[test]
@@ -560,6 +686,75 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn default_hotkeys_hang_off_select() {
+        let bindings = Bindings::default();
+        let hotkey = |control| bindings.hotkey(control);
+        assert_eq!(hotkey("Select"), Some(Hotkey::Modifier));
+        assert_eq!(
+            hotkey("RightTrigger"),
+            Some(Hotkey::Run(Shortcut::SaveState))
+        );
+        assert_eq!(
+            hotkey("LeftTrigger"),
+            Some(Hotkey::Run(Shortcut::LoadState))
+        );
+        assert_eq!(hotkey("Start"), Some(Hotkey::Run(Shortcut::Pause)));
+        assert_eq!(hotkey("DPadRight"), Some(Hotkey::Run(Shortcut::NextSlot)));
+        assert_eq!(hotkey("East"), None);
+        assert!(
+            !bindings
+                .hotkeys
+                .values()
+                .any(|hotkey| *hotkey == Hotkey::Run(Shortcut::Reset)),
+            "reset loses play, so it has no default"
+        );
+    }
+
+    #[test]
+    fn hotkeys_are_rebound_like_actions() {
+        let text = "[hotkeys]\nmodifier = [\"Mode\"]\nreset = [\"West\"]\nrewind = [\"LeftTrigger2\"]\nload_state = [\"Start\"]\n";
+        let bindings = Bindings::from_toml(text).expect("valid file");
+        let hotkey = |control| bindings.hotkey(control);
+        assert_eq!(hotkey("Mode"), Some(Hotkey::Modifier));
+        assert_eq!(hotkey("Select"), None, "the modifier moved");
+        assert_eq!(hotkey("West"), Some(Hotkey::Run(Shortcut::Reset)));
+        assert_eq!(hotkey("LeftTrigger2"), Some(Hotkey::Hold(Held::Rewind)));
+        // Start was pause's; load_state takes it, and leaves the shoulder.
+        assert_eq!(hotkey("Start"), Some(Hotkey::Run(Shortcut::LoadState)));
+        assert_eq!(hotkey("LeftTrigger"), None);
+        assert_eq!(
+            hotkey("RightTrigger"),
+            Some(Hotkey::Run(Shortcut::SaveState))
+        );
+    }
+
+    #[test]
+    fn hotkeys_reject_unknown_names_and_doubly_bound_controls() {
+        assert_eq!(
+            Bindings::from_toml("[hotkeys]\nquit = [\"Mode\"]\n"),
+            Err(BindingsError::UnknownAction("quit".to_owned()))
+        );
+        assert_eq!(
+            Bindings::from_toml("[hotkeys]\nmodifier = [\"Mode\"]\npause = [\"Mode\"]\n"),
+            Err(BindingsError::Conflict {
+                input: "Mode".to_owned(),
+                first: "modifier".to_owned(),
+                second: "pause".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn hotkey_names_round_trip() {
+        for (shortcut, name) in SHORTCUTS {
+            assert_eq!(Hotkey::Run(shortcut).to_string(), name);
+            assert_eq!(name.parse(), Ok(Hotkey::Run(shortcut)));
+        }
+        assert_eq!("modifier".parse(), Ok(Hotkey::Modifier));
+        assert_eq!("turbo_b".parse(), Ok(Hotkey::Hold(Held::Turbo(Button::B))));
+    }
+
     /// The user's file, with a profile for one controller.
     const USER: &str = "\
 [keys]
@@ -608,7 +803,7 @@ frames = 1
     }
 
     #[test]
-    fn a_game_file_can_have_controller_profiles() {
+    fn a_game_file_can_have_controller_profiles_and_hotkeys() {
         let user = Bindings::from_toml(USER).expect("valid file");
         let game = "\
 [gamepads.PRO]
@@ -616,6 +811,9 @@ a = [\"North\"]
 
 [gamepads.new]
 start = [\"Mode\"]
+
+[hotkeys]
+reset = [\"West\"]
 ";
         let bindings = user.overlay(game).expect("valid file");
         assert_eq!(
@@ -636,6 +834,8 @@ start = [\"Mode\"]
             Some(Held::Button(Button::A)),
             "the user's [gamepad] underneath"
         );
+        assert_eq!(bindings.hotkey("West"), Some(Hotkey::Run(Shortcut::Reset)));
+        assert_eq!(bindings.hotkey("Select"), Some(Hotkey::Modifier));
         assert_eq!(bindings.turbo_frames(), turbo::DEFAULT_FRAMES);
     }
 

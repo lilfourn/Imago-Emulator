@@ -9,6 +9,7 @@ mod app;
 mod audio;
 mod bindings;
 mod cheats;
+mod chords;
 mod color;
 mod controls;
 mod cursor;
