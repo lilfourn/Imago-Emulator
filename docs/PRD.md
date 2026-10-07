@@ -131,7 +131,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | NDS-5 | Sound: 16 channels (PCM8, PCM16, IMA-ADPCM, PSG) and sound capture. ✅ | P0 · M14 |
 | NDS-6 | 512 KB SPI flash saves for every DS Pokémon game. ✅ (by game code, including the infrared carts) | P0 · M14 |
 | NDS-7 | No anti-piracy symptoms in HG/SS, B/W or B2/W2 without patches. Any trigger is an emulator bug. | P0 · M15 |
-| NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. | P1 · M15 |
+| NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. ✅ (SRAM and Flash, [decision 0006](decisions/0006-gba-slot.md); Pal Park itself untried without GBA dumps) | P1 · M15 |
 | NDS-9 | 3D upscaling (N× internal resolution, or a Metal compute rasterizer). | P1 · M16 |
 | NDS-10 | Local wireless between two instances (trades, battles). Microphone input or a "blow" button. | P2 · M16 |
 | NDS-11 | HG/SS infrared cartridge (Pokéwalker). | P2 |

@@ -13,6 +13,7 @@ Route 1, and its in-game save survives a restart. It has:
 - both 2D engines and a software 3D engine with anti-aliasing;
 - 16-channel sound with capture;
 - the game card with flash saves;
+- the GBA slot, which reads a GBA game and its save for Pal Park;
 - the touchscreen, firmware and RTC.
 It passes every test in RockPolish's rockwrestler test ROM.
 
@@ -40,7 +41,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [PRD](docs/PRD.md): goals, requirements, legal policy, risks, open questions
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot
 
 ## Build and run
 
@@ -51,6 +52,7 @@ The separate Metal Toolchain download is not needed.
 cargo run --release -p emu-app -- path/to/game.nds   # or open one with ⌘O
 cargo run --release -p emu-app -- red.gb blue.gb     # two Game Boys, linked
 cargo run --release -p emu-app -- fr.gba em.gba      # two GBAs, linked
+cargo run --release -p emu-app -- pt.nds em.gba      # a GBA game in the DS's GBA slot
 cargo test --workspace
 ```
 
@@ -126,6 +128,15 @@ click its screen or press ⌘T to switch. Game Boy `.sav` files use the same
 layout as SameBoy, mGBA and BGB, including the MBC3 clock, so saves move
 between them.
 
+## GBA slot
+
+Open a DS game, choose File > Insert GBA Cartridge…, and pick a GBA game.
+The DS restarts with it in the GBA slot, where Pal Park reads it, or start
+with both: `ds-emulator pt.nds em.gba`. The GBA game keeps its own `.sav`
+next to its ROM, so give the two ROMs different names: `pokemon.nds` and
+`pokemon.gba` in one folder would share `pokemon.sav`, and the app refuses
+to load them. Pal Park has not been tried yet; that needs GBA dumps.
+
 ## Cheats
 
 Choose File > Edit Cheats… to open the game's `game.cht` in your text
@@ -172,6 +183,7 @@ cargo test -p emu-arm --release --test single_step               # ARM7TDMI
 | `emu-state` | Save-state container format |
 | `emu-arm` | ARM7TDMI (GBA, DS ARM7) and ARM946E-S (DS ARM9) interpreters |
 | `emu-psg` | The Game Boy family's sound generator, shared by GB and GBA |
+| `emu-gba-cart` | The GBA cartridge, shared by the GBA core and the DS GBA slot |
 | `emu-gb` | Game Boy and Game Boy Color core |
 | `emu-gba` | Game Boy Advance core |
 | `emu-nds` | Nintendo DS core |

@@ -16,6 +16,7 @@ How the workspace fits together. The *why* behind the big choices lives in
                   emu-gb  emu-gba  emu-nds
                      │       ├────────┤
                      │    emu-arm  emu-sched (as cores adopt it)
+                     │    emu-gba-cart (the GBA cartridge)
                      └───────┴────────┘
                           emu-core
 ```
@@ -27,9 +28,10 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-state` | The save-state container format. |
 | `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. |
 | `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
+| `emu-gba-cart` | The GBA cartridge: ROM, SRAM, Flash and EEPROM saves, and the GPIO clock. Shared by the GBA core and the DS's GBA slot ([decision 0006](decisions/0006-gba-slot.md)); depends only on `serde`. |
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
-| `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS, cartridge saves and RTC, serial port, and the linked pair. Event-driven by `emu-sched`. |
-| `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs. |
+| `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
+| `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs. |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Parses cheat lists into memory operations and applies them through a two-method `Memory` trait. Knows code formats, not cores. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
@@ -39,8 +41,10 @@ Rules that keep this shape:
 
 - Cores depend on `emu-core`, never on each other or on a frontend.
 - Sharing stops at self-contained chips: the CPU (`emu-arm`), the
-  scheduler, and the GB/GBA sound generator (`emu-psg`, the same silicon in
-  both). Shared system code would tangle timing fixes across systems.
+  scheduler, the GB/GBA sound generator (`emu-psg`, the same silicon in
+  both), and the GBA cartridge (`emu-gba-cart`, the same cartridge in a GBA
+  or a DS's GBA slot). Shared system code would tangle timing fixes across
+  systems.
 - GPUI types never leave `emu-app`. If GPUI is replaced, only that crate
   changes.
 
@@ -54,8 +58,8 @@ pub trait Core: Send {
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
-    fn backup_generation(&self, player: usize) -> Option<u64>; // battery-save write counter
-    fn save_backup(&self, player: usize, out: &mut Vec<u8>);   // .sav bytes
+    fn backup_generation(&self, cartridge: usize) -> Option<u64>; // battery-save write counter
+    fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>);   // .sav bytes
     fn peek(&self, player: usize, address: u32) -> Option<u8>;  // plain RAM only
     fn poke(&mut self, player: usize, address: u32, value: u8) -> bool;
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
@@ -64,10 +68,13 @@ pub trait Core: Send {
 
 - **Construction is per system** (`emu_gba::Gba::new(&Media)`), so a core
   always has a game loaded. `Media` carries the ROM, the battery save, any
-  user-dumped BIOS/firmware, and the RTC start time.
+  user-dumped BIOS/firmware, the RTC start time, and any cartridge in a
+  second slot (the DS's GBA slot, [decision 0006](decisions/0006-gba-slot.md)).
 - **Players**: `CoreInfo::players` is 1, or 2 for a linked pair
   ([decision 0004](decisions/0004-linked-cores.md)). Each player has an
   input and a cartridge; screens split evenly between players.
+- **Battery saves are numbered by cartridge**: player `i`'s cartridge is
+  `i`, and a DS's GBA slot cartridge is 1. Each keeps its own `.sav`.
 - **Input is per frame and per player**: a 12-bit button mask (bit order follows the GBA
   `KEYINPUT` register, then DS X/Y) plus an optional touch point in
   bottom-screen pixels.

@@ -225,7 +225,7 @@ are done.
 | M12 | ARMv5TE, CP15 with TCMs and MPU enforcement, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro) |
 | M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS |
 | M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
-| M15 | Pokémon White shows no anti-piracy symptoms | Timing against melonDS traces; GBA slot (needs a decision on sharing GBA cartridge code across cores); HG/SS and B2/W2 |
+| M15 | Pokémon White shows no anti-piracy symptoms; GBA slot with SRAM and Flash saves ([decision 0006](decisions/0006-gba-slot.md)) | Timing against melonDS traces; HG/SS and B2/W2; Pal Park with real GBA dumps |
 | M16 | — | 3D upscaling, microphone, local wireless |
 
 ### M12. Two CPUs
@@ -254,7 +254,7 @@ are done.
 ### M15. Accuracy
 
 - Timing and cartridge behaviour, measured against melonDS traces. GBA slot
-  using the GBA core's cartridge code.
+  using the GBA cartridge code, shared through `emu-gba-cart`.
 - **Exit:** HeartGold/SoulSilver and Black 2/White 2 play through with no
   anti-piracy symptoms (for example, Pokémon gaining no EXP). Pal Park reads
   a GBA ROM and save from the GBA slot.
