@@ -102,6 +102,9 @@ pub(crate) struct Call {
     /// Where the BIOS keeps its interrupt flags for IntrWait: DTCM + 0x3FF8
     /// on the ARM9, 0x0380FFF8 on the ARM7.
     pub(crate) intr_flags: u32,
+    /// Whether this is the VBlankIntrWait call the CPU halted in, run
+    /// again after an interrupt woke it.
+    pub(crate) resumes: bool,
 }
 
 /// What a call does to the CPU, for the machine to apply.
@@ -152,7 +155,8 @@ pub(crate) fn run<B: Bus>(number: u8, call: &Call, bus: &mut B) -> Effects {
             ..Effects::default()
         },
         0x04 => intr_wait(bus, call.intr_flags, r0 != 0, r1),
-        0x05 => intr_wait(bus, call.intr_flags, true, 1),
+        // VBlankIntrWait ignores R0, so the machine tells its repeat apart.
+        0x05 => intr_wait(bus, call.intr_flags, !call.resumes, 1),
         0x06 => Effects {
             halt: true,
             ..Effects::default()
@@ -483,6 +487,7 @@ mod tests {
             side,
             args,
             intr_flags: 0xFFF8,
+            resumes: false,
         }
     }
 
@@ -505,6 +510,28 @@ mod tests {
         assert!(effects.halt && effects.repeat);
         ram.write_32(0xFFF8, 1, Access::NONSEQUENTIAL);
         let effects = run(0x04, &call(Side::Arm7, [0, 1, 0, 0]), &mut ram);
+        assert!(!effects.halt);
+        assert_eq!(
+            ram.read_32(0xFFF8, Access::NONSEQUENTIAL),
+            0,
+            "flag consumed"
+        );
+    }
+
+    #[test]
+    fn vblank_intr_wait_keeps_the_flag_when_it_resumes() {
+        let mut ram = Ram::new();
+        ram.write_32(0xFFF8, 1, Access::NONSEQUENTIAL);
+        // A new call discards the old flag and waits for the next VBlank.
+        let effects = run(0x05, &call(Side::Arm7, [0; 4]), &mut ram);
+        assert!(effects.halt && effects.repeat);
+        // Woken by an interrupt whose handler set the flag again.
+        ram.write_32(0xFFF8, 1, Access::NONSEQUENTIAL);
+        let resumed = Call {
+            resumes: true,
+            ..call(Side::Arm7, [0; 4])
+        };
+        let effects = run(0x05, &resumed, &mut ram);
         assert!(!effects.halt);
         assert_eq!(
             ram.read_32(0xFFF8, Access::NONSEQUENTIAL),
@@ -558,6 +585,7 @@ mod tests {
             side: Side::Arm7,
             args: [0; 4],
             intr_flags: 0x3FF8,
+            resumes: false,
         };
         let effects = run(0x00, &call, &mut ram);
         assert_eq!(effects.restart, Some(0x0238_0001));

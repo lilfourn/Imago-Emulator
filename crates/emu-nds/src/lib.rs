@@ -57,7 +57,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(33_513_982, 560_190),
     audio_sample_rate: 32_768,
     // Bump whenever any serialized struct changes shape.
-    state_version: 5,
+    state_version: 6,
 };
 
 /// A Nintendo DS with a game card inserted, and maybe a GBA cartridge.

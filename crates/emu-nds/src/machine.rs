@@ -35,6 +35,9 @@ pub(crate) struct Machine {
     /// Emulated BIOS calls waiting for a game function they called to
     /// return, per CPU (ARM9, ARM7), the innermost last.
     suspended: [Vec<Suspended>; 2],
+    /// Per CPU (ARM9, ARM7), the address of the SWI whose VBlankIntrWait
+    /// call halted it. The CPU runs that SWI again on waking.
+    vblank_wait_swi: [Option<u32>; 2],
     /// How many times each CPU (ARM9, ARM7) called each BIOS function, for
     /// debugging.
     #[serde(skip)]
@@ -100,6 +103,7 @@ impl Machine {
             hw,
             hle_bios,
             suspended: [Vec::new(), Vec::new()],
+            vblank_wait_swi: [None; 2],
             system_calls: [[0; 0x20]; 2],
         }
     }
@@ -197,7 +201,12 @@ impl Machine {
         if self.hle_bios && entered_swi {
             // The BIOS keeps its interrupt flags at the top of DTCM.
             let dtcm = self.arm9.cp15().dtcm_region() & !0xFFF;
-            let trap = Trap::read(&self.arm9, Side::Arm9, dtcm + 0x3FF8);
+            let trap = Trap::read(
+                &self.arm9,
+                Side::Arm9,
+                dtcm + 0x3FF8,
+                self.vblank_wait_swi[0],
+            );
             let effects = {
                 let mut bus = Arm9TcmBus {
                     cpu: &mut self.arm9,
@@ -206,6 +215,8 @@ impl Machine {
                 trap.run(&mut bus)
             };
             self.system_calls[0][usize::from(effects.0 & 0x1F)] += 1;
+            self.vblank_wait_swi[0] =
+                trap.vblank_wait_after(effects.0, &effects.1, self.vblank_wait_swi[0]);
             let effects = effects.1;
             if effects.restart.is_some() {
                 // The ARM9's SoftReset also resets CP15's control register.
@@ -263,9 +274,11 @@ impl Machine {
             && !self.arm7.thumb()
             && self.arm7.mode() == Mode::Supervisor;
         if self.hle_bios && entered_swi {
-            let trap = Trap::read(&self.arm7, Side::Arm7, 0x0380_FFF8);
+            let trap = Trap::read(&self.arm7, Side::Arm7, 0x0380_FFF8, self.vblank_wait_swi[1]);
             let (number, effects) = trap.run(&mut Arm7Bus(hw));
             self.system_calls[1][usize::from(number & 0x1F)] += 1;
+            self.vblank_wait_swi[1] =
+                trap.vblank_wait_after(number, &effects, self.vblank_wait_swi[1]);
             trap.finish(
                 &mut self.arm7,
                 &mut Arm7Bus(hw),
@@ -313,20 +326,49 @@ struct Trap {
 }
 
 impl Trap {
-    fn read<M: Model>(cpu: &Processor<M>, side: Side, intr_flags: u32) -> Self {
-        Self {
+    /// The call the CPU just trapped into; `vblank_wait_swi` is the SWI
+    /// whose VBlankIntrWait call halted the CPU, if one did.
+    fn read<M: Model>(
+        cpu: &Processor<M>,
+        side: Side,
+        intr_flags: u32,
+        vblank_wait_swi: Option<u32>,
+    ) -> Self {
+        let mut trap = Self {
             call: Call {
                 side,
                 args: [cpu.reg(0), cpu.reg(1), cpu.reg(2), cpu.reg(3)],
                 intr_flags,
+                resumes: false,
             },
             return_address: cpu.reg(14),
             caller_psr: cpu.saved_psr().unwrap_or_default(),
-        }
+        };
+        trap.call.resumes = vblank_wait_swi == Some(trap.swi());
+        trap
     }
 
     fn thumb(&self) -> bool {
         self.caller_psr & psr::T != 0
+    }
+
+    /// The address of the SWI instruction.
+    fn swi(&self) -> u32 {
+        let length = if self.thumb() { 2 } else { 4 };
+        self.return_address.wrapping_sub(length)
+    }
+
+    /// The SWI whose VBlankIntrWait call halts the CPU once system call
+    /// `number` has had `effects`, given `halted`, the one before: this SWI
+    /// if its VBlankIntrWait halts, none once the halted call returns or
+    /// SoftReset abandons it, and otherwise `halted`.
+    fn vblank_wait_after(&self, number: u8, effects: &Effects, halted: Option<u32>) -> Option<u32> {
+        match number {
+            0x00 => None,
+            0x05 if effects.repeat => Some(self.swi()),
+            0x05 if self.call.resumes => None,
+            _ => halted,
+        }
     }
 
     /// Runs the call against memory as the calling CPU sees it. Returns
@@ -602,5 +644,51 @@ mod tests {
         assert_eq!(registers.irq, [ARM9_STACKS.1, 0]);
         assert_eq!(registers.spsr[1], 0, "SPSR_svc");
         assert_eq!(arm9.cp15().control(), bios::ARM9_RESET_CONTROL);
+    }
+
+    #[test]
+    fn vblank_intr_wait_returns_once_per_frame() {
+        let mut program = vec![0; 0x4C];
+        program[..17].copy_from_slice(&[
+            0xEE19_3F11, // MRC P15, 0, R3, C9, C1, 0  (DTCM region)
+            0xE1A0_3623, // MOV R3, R3, LSR #12
+            0xE1A0_3603, // MOV R3, R3, LSL #12
+            0xE283_3901, // ADD R3, R3, #0x4000
+            0xE3A0_4402, // MOV R4, #0x02000000
+            0xE284_4C41, // ADD R4, R4, #0x4100
+            0xE503_4004, // STR R4, [R3, #-4]  (the IRQ handler)
+            0xE3A0_0301, // MOV R0, #0x04000000
+            0xE3A0_1008, // MOV R1, #8
+            0xE1C0_10B4, // STRH R1, [R0, #4]  (DISPSTAT: VBlank IRQ)
+            0xE280_2C02, // ADD R2, R0, #0x200
+            0xE3A0_1001, // MOV R1, #1
+            0xE582_1010, // STR R1, [R2, #0x10]  (IE: VBlank)
+            0xE582_1008, // STR R1, [R2, #8]  (IME)
+            0xEF05_0000, // loop: SWI 05h (VBlankIntrWait)
+            0xE285_5001, // ADD R5, R5, #1
+            0xEAFF_FFFC, // B loop
+        ]);
+        // The handler acknowledges the IRQ and sets the BIOS flag at the
+        // top of DTCM, as libnds's does.
+        program[0x40..0x4C].copy_from_slice(&[
+            0xE3A0_0301, // MOV R0, #0x04000000
+            0xE280_0C02, // ADD R0, R0, #0x200
+            0xE3A0_1001, // MOV R1, #1
+            0xE580_1014, // STR R1, [R0, #0x14]  (IF)
+            0xEE19_2F11, // MRC P15, 0, R2, C9, C1, 0
+            0xE1A0_2622, // MOV R2, R2, LSR #12
+            0xE1A0_2602, // MOV R2, R2, LSL #12
+            0xE282_2901, // ADD R2, R2, #0x4000
+            0xE512_3008, // LDR R3, [R2, #-8]
+            0xE383_3001, // ORR R3, R3, #1
+            0xE502_3008, // STR R3, [R2, #-8]
+            0xE12F_FF1E, // BX LR
+        ]);
+        let mut nds = Nds::new(&Media::new(&rom(&program))).expect("valid header");
+        for _ in 0..10 {
+            nds.run_frame(&[], &mut Vec::new());
+        }
+        let frames_waited = nds.machine.arm9.reg(5);
+        assert!((9..=10).contains(&frames_waited), "{frames_waited}");
     }
 }
