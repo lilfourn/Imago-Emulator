@@ -440,7 +440,7 @@ impl Geometry {
         let viewport = self.viewport;
         let width = viewport.x2 - viewport.x1 + 1;
         let height = viewport.y2 - viewport.y1 + 1;
-        let (screen_x, screen_y, depth) = if w > 0 {
+        let (screen_x, screen_y, depth, fine) = if w > 0 {
             let screen_x = (x + w) * width / (2 * w) + viewport.x1;
             let screen_y = (y + w) * height / (2 * w) + viewport.y1;
             let depth = if self.list.w_buffer {
@@ -448,10 +448,19 @@ impl Geometry {
             } else {
                 (((z << 14) / w) + 0x3FFF) << 9
             };
-            (screen_x, screen_y, depth)
+            // The same, keeping 8 fractional bits.
+            let fine_x = (((x + w) * width) << 8) / (2 * w) + (viewport.x1 << 8);
+            let fine_y = (((y + w) * height) << 8) / (2 * w) + (viewport.y1 << 8);
+            (
+                screen_x,
+                screen_y,
+                depth,
+                Some([fine_x, (192 << 8) - fine_y]),
+            )
         } else {
-            (viewport.x1, viewport.y1, 0)
+            (viewport.x1, viewport.y1, 0, None)
         };
+        let fine_limit = 0x400 << 8;
         ScreenVertex {
             x: screen_x.clamp(-0x400, 0x400) as i32,
             // Hardware Y counts up from the bottom; rows count down.
@@ -460,6 +469,7 @@ impl Geometry {
             w: vertex.position[3],
             color: vertex.color.map(|c| c.clamp(0, 63) as u8),
             texcoord: vertex.texcoord,
+            fine: fine.map(|fine| fine.map(|c| c.clamp(-fine_limit, fine_limit) as i32)),
         }
     }
 

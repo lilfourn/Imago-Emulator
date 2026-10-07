@@ -5,7 +5,8 @@
 //! Vertices are stored in screen space, as the hardware does: integer pixel
 //! positions, a 24-bit depth (Z or W, chosen by SWAP_BUFFERS), the W used
 //! for perspective-correct interpolation, a 6-bit colour and a 12.4 texture
-//! coordinate.
+//! coordinate. Each also keeps its position to a 256th of a pixel, which
+//! the hardware drops, for drawing at a higher resolution (NDS-9).
 
 use serde::{Deserialize, Serialize};
 
@@ -160,6 +161,24 @@ pub(crate) struct ScreenVertex {
     pub(crate) color: [u8; 3],
     /// S and T, 12.4 fixed point.
     pub(crate) texcoord: [i32; 2],
+    /// Column and row with 8 fractional bits, for drawing above the native
+    /// resolution only. Not saved: in a loaded state the vertex sits on
+    /// its whole pixel.
+    #[serde(skip)]
+    pub(crate) fine: Option<[i32; 2]>,
+}
+
+impl ScreenVertex {
+    /// Column and row on a grid `scale` times finer than the screen's
+    /// pixels: [`ScreenVertex::x`] and [`ScreenVertex::y`] at 1, else the
+    /// fine position, scaled and rounded down.
+    pub(crate) fn position(&self, scale: i32) -> (i32, i32) {
+        if scale == 1 {
+            return (self.x, self.y);
+        }
+        let [x, y] = self.fine.unwrap_or([self.x << 8, self.y << 8]);
+        ((x * scale) >> 8, (y * scale) >> 8)
+    }
 }
 
 /// One entry of Polygon RAM.

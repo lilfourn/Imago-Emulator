@@ -2,8 +2,7 @@
 //! anti-aliasing (GBATEK, "DS 3D Toon, Edge, Fog, Alpha-Blending,
 //! Anti-Aliasing").
 
-use super::pixel::{Buffers, PIXELS};
-use super::raster::{HEIGHT, WIDTH};
+use super::pixel::Buffers;
 use crate::gpu3d::color;
 use crate::gpu3d::registers::RenderConfig;
 
@@ -12,44 +11,62 @@ use crate::gpu3d::registers::RenderConfig;
 /// or so"; melonDS uses this).
 const MARKED_COVERAGE: u8 = 16;
 
+/// Left, right, up and down, as steps across and down.
+const NEIGHBOURS: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+
 /// Paints the edges of opaque polygons in the edge colour for their
 /// polygon ID: where a neighbour (up, down, left, right) has another ID
-/// and is further away. Beyond the screen, neighbours are the rear plane's
-/// ID and depth.
+/// and is further away. Beyond the buffers' area, neighbours are the rear
+/// plane's ID and depth.
+///
+/// Above the native resolution, an outline is as thick as a screen pixel:
+/// the paint runs on from each marked pixel away from the neighbour that
+/// marked it, over its own polygon ID, for `scale` pixels in all.
 pub(crate) fn mark_edges(buffers: &mut Buffers, config: &RenderConfig) {
     let clear_id = ((config.clear_color >> 24) & 0x3F) as u8;
     let edge_colors = config.edge_colors.map(|c| color::rgb6(u32::from(c)));
-    let neighbour = |buffers: &Buffers, x: Option<usize>, y: Option<usize>| match (x, y) {
-        (Some(x), Some(y)) if x < WIDTH && y < HEIGHT => {
-            let index = y * WIDTH + x;
-            (buffers.attrs[index].opaque_id, buffers.depth[index])
-        }
-        _ => (clear_id, config.clear_depth),
+    let area = buffers.area;
+    let (width, rows) = (area.width(), area.rows);
+    // The pixel `steps` steps along `(dx, dy)` from (x, y), if inside.
+    let step = |x: usize, y: usize, (dx, dy): (isize, isize), steps: isize| {
+        let x = x.checked_add_signed(dx * steps)?;
+        let y = y.checked_add_signed(dy * steps)?;
+        (x < width && y < rows).then_some(y * width + x)
     };
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let index = y * WIDTH + x;
+    for y in 0..rows {
+        for x in 0..width {
+            let index = y * width + x;
             let attr = buffers.attrs[index];
             if !attr.on_edge() {
                 continue;
             }
             let here = buffers.depth[index];
-            let marked = [
-                neighbour(buffers, x.checked_sub(1), Some(y)),
-                neighbour(buffers, Some(x + 1), Some(y)),
-                neighbour(buffers, Some(x), y.checked_sub(1)),
-                neighbour(buffers, Some(x), Some(y + 1)),
-            ]
-            .into_iter()
-            .any(|(id, there)| id != attr.opaque_id && here < there);
-            if !marked {
+            let marked_by = NEIGHBOURS.map(|direction| {
+                let (id, there) = step(x, y, direction, 1)
+                    .map_or((clear_id, config.clear_depth), |neighbour| {
+                        (buffers.attrs[neighbour].opaque_id, buffers.depth[neighbour])
+                    });
+                id != attr.opaque_id && here < there
+            });
+            if !marked_by.contains(&true) {
                 continue;
             }
             let rgb = edge_colors[usize::from(attr.opaque_id >> 3)];
-            let pixel = &mut buffers.color[index];
-            *pixel = color::pack(rgb, color::alpha(*pixel));
+            let paint = |pixel: &mut u32| *pixel = color::pack(rgb, color::alpha(*pixel));
+            paint(&mut buffers.color[index]);
             if config.antialiasing {
                 buffers.attrs[index].edge = MARKED_COVERAGE;
+            }
+            for (direction, _) in NEIGHBOURS.into_iter().zip(marked_by).filter(|(_, by)| *by) {
+                for steps in 1..area.scale as isize {
+                    let Some(inner) = step(x, y, direction, -steps) else {
+                        break;
+                    };
+                    if buffers.attrs[inner].opaque_id != attr.opaque_id {
+                        break;
+                    }
+                    paint(&mut buffers.color[inner]);
+                }
             }
         }
     }
@@ -97,15 +114,16 @@ pub(crate) fn apply_fog(buffers: &mut Buffers, config: &RenderConfig) {
         color: pixels,
         depth,
         attrs,
+        layer,
         ..
     } = buffers;
-    let (top, beneath) = pixels.split_at_mut(PIXELS);
+    let (top, beneath) = pixels.split_at_mut(*layer);
     for (index, pixel) in top.iter_mut().enumerate() {
         let attr = attrs[index];
         if attr.fog {
             add_fog(pixel, depth[index]);
         }
-        let below = index + PIXELS;
+        let below = index + *layer;
         if attr.coverage() < 31 && attrs[below].fog {
             add_fog(&mut beneath[index], depth[below]);
         }
@@ -116,8 +134,9 @@ pub(crate) fn apply_fog(buffers: &mut Buffers, config: &RenderConfig) {
 /// coverage. Over a transparent pixel, the edge keeps its colour and only
 /// its alpha fades.
 pub(crate) fn antialias(buffers: &mut Buffers) {
-    let (top, beneath) = buffers.color.split_at_mut(PIXELS);
-    for ((pixel, &under), attr) in top.iter_mut().zip(&*beneath).zip(&buffers.attrs[..PIXELS]) {
+    let layer = buffers.layer;
+    let (top, beneath) = buffers.color.split_at_mut(layer);
+    for ((pixel, &under), attr) in top.iter_mut().zip(&*beneath).zip(&buffers.attrs[..layer]) {
         let coverage = attr.coverage();
         if coverage == 31 {
             continue;
@@ -181,7 +200,7 @@ mod tests {
         for (index, coverage, beneath) in [(0, 15, BLUE), (1, 7, 0), (2, 31, BLUE)] {
             buffers.color[index] = RED;
             buffers.attrs[index].edge = coverage;
-            buffers.color[index + PIXELS] = beneath;
+            buffers.color[index + buffers.layer] = beneath;
         }
         antialias(&mut buffers);
         assert_eq!(
@@ -205,12 +224,16 @@ mod tests {
         for (index, coverage) in [(0, 15), (1, 31)] {
             buffers.color[index] = RED;
             buffers.attrs[index].edge = coverage;
-            buffers.color[index + PIXELS] = RED;
-            buffers.attrs[index + PIXELS].fog = true;
+            buffers.color[index + buffers.layer] = RED;
+            buffers.attrs[index + buffers.layer].fog = true;
         }
         apply_fog(&mut buffers, &config);
         assert_eq!(buffers.color[0], RED, "the edge has no fog flag");
-        assert_eq!(buffers.color[PIXELS], 0, "beneath the edge");
-        assert_eq!(buffers.color[1 + PIXELS], RED, "beneath a whole pixel");
+        assert_eq!(buffers.color[buffers.layer], 0, "beneath the edge");
+        assert_eq!(
+            buffers.color[1 + buffers.layer],
+            RED,
+            "beneath a whole pixel"
+        );
     }
 }

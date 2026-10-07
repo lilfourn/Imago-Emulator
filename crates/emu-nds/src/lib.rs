@@ -151,13 +151,20 @@ impl Nds {
         hw.check_keypad_interrupt();
     }
 
+    /// Copies the engines' screens, or their larger versions with
+    /// upscaled 3D, into the frames.
     fn present(&mut self) {
         let hw = &self.machine.hw;
+        let (a, b) = if hw.scaled.scale > 1 {
+            (&hw.scaled.a, &hw.scaled.b)
+        } else {
+            (&hw.screen_a, &hw.screen_b)
+        };
         // POWCNT1 bit 15 puts engine A on the top screen.
         let (top, bottom) = if hw.powcnt1 & 0x8000 != 0 {
-            (&hw.screen_a, &hw.screen_b)
+            (a, b)
         } else {
-            (&hw.screen_b, &hw.screen_a)
+            (b, a)
         };
         let [top_frame, bottom_frame] = &mut self.screens;
         top_frame.pixels_mut().copy_from_slice(top);
@@ -282,6 +289,18 @@ impl Core for Nds {
         &self.screens
     }
 
+    /// Up to 8 times the native resolution. The game's own 3D reads (display
+    /// capture) still see the native frame, which is drawn as well.
+    fn set_render_scale(&mut self, scale: u32) {
+        let scale = usize::try_from(scale).unwrap_or(usize::MAX);
+        let hw = &mut self.machine.hw;
+        hw.set_render_scale(scale);
+        let scale = hw.scaled.scale as u16;
+        let size = ScreenSize::new(SCREEN.width * scale, SCREEN.height * scale);
+        self.screens = [Frame::new(size), Frame::new(size)];
+        self.present();
+    }
+
     fn reset(&mut self) {
         // The cartridges (with their saves), firmware and clock carry over.
         let old = &mut self.machine.hw;
@@ -296,6 +315,7 @@ impl Core for Nds {
         std::mem::swap(&mut hw.gba_slot, &mut old.gba_slot);
         hw.rtc.restart_cycles(now);
         hw.gba_slot.restart_cycles(now);
+        hw.take_display_from(old);
         self.machine = Machine::boot(hw, self.machine.hle_bios);
     }
 
@@ -313,6 +333,7 @@ impl Core for Nds {
             ));
         }
         machine.hw.take_media_from(&mut self.machine.hw);
+        machine.hw.take_display_from(&mut self.machine.hw);
         self.machine = machine;
         // The rendered 3D image is not saved.
         let hw = &mut self.machine.hw;
@@ -468,7 +489,9 @@ mod tests {
             })
             .collect();
         assert!(
-            readings.iter().all(|&value| value != 0x800 && value <= 0xFFF),
+            readings
+                .iter()
+                .all(|&value| value != 0x800 && value <= 0xFFF),
             "{readings:X?}"
         );
     }
@@ -514,6 +537,36 @@ mod tests {
         nds.run_frame(&[], &mut Vec::new());
         nds.run_frame(&[], &mut Vec::new());
         assert_eq!(nds.screens()[0].pixels()[0], 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn render_scale_enlarges_the_screens_but_not_the_state() {
+        let rom = white_screen_rom();
+        let mut native = Nds::new(&Media::new(&rom)).expect("valid header");
+        let mut larger = Nds::new(&Media::new(&rom)).expect("valid header");
+        larger.set_render_scale(3);
+        for _ in 0..3 {
+            native.run_frame(&[], &mut Vec::new());
+            larger.run_frame(&[], &mut Vec::new());
+        }
+        let top = &larger.screens()[0];
+        assert_eq!(top.size(), ScreenSize::new(768, 576));
+        assert!(top.pixels().iter().all(|&pixel| pixel == 0xFFFF_FFFF));
+        let (mut native_state, mut larger_state) = (Vec::new(), Vec::new());
+        native.save_state(&mut native_state);
+        larger.save_state(&mut larger_state);
+        assert!(native_state == larger_state, "the scale is not saved");
+
+        // States load at any scale, and the scale stays.
+        larger.load_state(&native_state).expect("loads");
+        assert_eq!(larger.screens()[1].size(), ScreenSize::new(768, 576));
+        larger.reset();
+        larger.run_frame(&[], &mut Vec::new());
+        assert_eq!(larger.screens()[0].size(), ScreenSize::new(768, 576));
+        larger.set_render_scale(0);
+        assert_eq!(larger.screens()[0].size(), SCREEN);
+        larger.set_render_scale(100);
+        assert_eq!(larger.screens()[0].size(), ScreenSize::new(2048, 1536));
     }
 
     #[test]

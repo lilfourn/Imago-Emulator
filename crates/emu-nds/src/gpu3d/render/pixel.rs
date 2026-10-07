@@ -11,7 +11,7 @@
 //! through the other rather than the rear plane. Translucent pixels on an
 //! edge blend into both layers. Shadow polygons only darken the top layer.
 
-use super::raster::{Coverage, HEIGHT, Target, WIDTH};
+use super::raster::{Area, Coverage, Target};
 use super::shade::Shader;
 use super::texture::TextureMemory;
 use crate::gpu3d::color;
@@ -21,9 +21,6 @@ pub(crate) const NO_ID: u8 = 0xFF;
 
 /// The pixel is not on an opaque polygon's edge.
 pub(crate) const NO_EDGE: u8 = 0xFF;
-
-/// Pixels in a frame.
-pub(crate) const PIXELS: usize = WIDTH * HEIGHT;
 
 /// The attribute buffer: what a pixel holds besides colour and depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,11 +57,15 @@ impl PixelAttr {
     }
 }
 
-/// The frame being drawn. Colour, depth and attributes hold two layers:
-/// the visible pixels, indexed by `y * 256 + x`, then at `index + PIXELS`
-/// the pixels beneath anti-aliased edges.
+/// The frame being drawn, or the part of it in `area`. Colour, depth and
+/// attributes hold two layers: the visible pixels, indexed by
+/// [`Area::index`], then at `index + layer` the pixels beneath
+/// anti-aliased edges.
 #[derive(Debug, Clone)]
 pub(crate) struct Buffers {
+    pub(crate) area: Area,
+    /// Pixels in a layer: the area's cells.
+    pub(crate) layer: usize,
     /// Output pixels: 6-bit colour and 5-bit alpha.
     pub(crate) color: Box<[u32]>,
     /// 24-bit depth.
@@ -74,15 +75,26 @@ pub(crate) struct Buffers {
     pub(crate) stencil: Box<[bool]>,
 }
 
-impl Default for Buffers {
-    fn default() -> Self {
+impl Buffers {
+    /// Cleared buffers for `area`.
+    pub(crate) fn new(area: Area) -> Self {
+        let layer = area.cells();
         let attr = PixelAttr::rear_plane(0, false);
         Self {
-            color: vec![0; 2 * PIXELS].into_boxed_slice(),
-            depth: vec![0; 2 * PIXELS].into_boxed_slice(),
-            attrs: vec![attr; 2 * PIXELS].into_boxed_slice(),
-            stencil: vec![false; PIXELS].into_boxed_slice(),
+            area,
+            layer,
+            color: vec![0; 2 * layer].into_boxed_slice(),
+            depth: vec![0; 2 * layer].into_boxed_slice(),
+            attrs: vec![attr; 2 * layer].into_boxed_slice(),
+            stencil: vec![false; layer].into_boxed_slice(),
         }
+    }
+}
+
+impl Default for Buffers {
+    /// The whole frame at the native resolution.
+    fn default() -> Self {
+        Self::new(Area::NATIVE)
     }
 }
 
@@ -157,7 +169,7 @@ impl Target for PolygonTarget<'_> {
             Kind::Normal if passes => Some(index),
             // A pixel behind an anti-aliased edge may still show through.
             Kind::Normal if self.antialiasing && self.buffers.attrs[index].on_edge() => {
-                let beneath = index + PIXELS;
+                let beneath = index + self.buffers.layer;
                 self.depth_passes(depth, self.buffers.depth[beneath])
                     .then_some(beneath)
             }
@@ -189,9 +201,9 @@ impl Target for PolygonTarget<'_> {
             return;
         }
         if alpha == 31 && self.kind == Kind::Normal {
-            if self.antialiasing && coverage.edge && slot < PIXELS {
+            if self.antialiasing && coverage.edge && slot < self.buffers.layer {
                 // Keep what the edge covers, to blend with later.
-                let beneath = slot + PIXELS;
+                let beneath = slot + self.buffers.layer;
                 self.buffers.color[beneath] = self.buffers.color[slot];
                 self.buffers.depth[beneath] = self.buffers.depth[slot];
                 self.buffers.attrs[beneath] = self.buffers.attrs[slot];
@@ -214,10 +226,10 @@ impl Target for PolygonTarget<'_> {
         // An anti-aliased edge shows the pixel beneath it too.
         if self.antialiasing
             && self.kind == Kind::Normal
-            && slot < PIXELS
+            && slot < self.buffers.layer
             && self.buffers.attrs[slot].on_edge()
         {
-            self.blend_into(slot + PIXELS, rgb, alpha, depth);
+            self.blend_into(slot + self.buffers.layer, rgb, alpha, depth);
         }
     }
 }

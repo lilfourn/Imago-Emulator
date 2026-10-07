@@ -10,6 +10,7 @@ use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
 
 use crate::cart::{Cart, RomEvent};
+use crate::display::ScaledScreens;
 use crate::dma::{Dma, Owner, Timing};
 use crate::gba_slot::GbaSlot;
 use crate::gpu2d::Engine2d;
@@ -94,6 +95,9 @@ pub(crate) struct Hardware {
     /// Saved in states, so a state loaded while paused shows its frame.
     pub(crate) screen_a: Box<[u32]>,
     pub(crate) screen_b: Box<[u32]>,
+    /// The same, larger, with upscaled 3D: a display setting, not saved.
+    #[serde(skip)]
+    pub(crate) scaled: ScaledScreens,
     /// The BIOS images: our HLE vectors, or the user's dumps. Restored
     /// from media.
     #[serde(skip)]
@@ -158,6 +162,7 @@ impl Hardware {
             gpu3d: Gpu3d::new(),
             screen_a: blank_screen(),
             screen_b: blank_screen(),
+            scaled: ScaledScreens::default(),
             arm9_bios,
             arm7_bios,
             arm9: CpuIo::new(Owner::Arm9),

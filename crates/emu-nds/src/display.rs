@@ -3,10 +3,16 @@
 //! A frame is 263 lines of 2,130 bus cycles (355 dots of 6 cycles); lines
 //! 192–262 are VBlank. Each CPU has its own DISPSTAT, so each decides which
 //! of the VBlank, HBlank and VCount-match interrupts it wants.
+//!
+//! With upscaled 3D (NDS-9), the screens are also drawn larger into
+//! [`ScaledScreens`], for display only: engine B's lines as they are
+//! drawn, engine A's all at once at VBlank, on several threads, from
+//! copies taken as they were drawn.
 
 use crate::capture::{self, Control};
 use crate::dma::Timing;
-use crate::gpu2d::WIDTH;
+use crate::gpu2d::{self, LineCopy, WIDTH};
+use crate::gpu3d;
 use crate::hardware::{Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
@@ -18,12 +24,74 @@ pub(crate) const LINE_CYCLES: u64 = 2130;
 pub(crate) const HBLANK_START: u64 = 256 * 6;
 /// Lines per frame.
 pub(crate) const LINES: u16 = 263;
+/// Engine A lines drawn larger on each thread at VBlank.
+const SCALED_LINES_PER_THREAD: usize = 24;
 /// Lines shown.
 pub(crate) const VISIBLE_LINES: u16 = 192;
 /// The line where the 3D engine renders the coming frame.
 const RENDER_3D_LINE: u16 = 214;
 /// Bus cycles per frame.
 pub(crate) const FRAME_CYCLES: u64 = LINE_CYCLES * LINES as u64;
+
+/// Both engines' screens `scale` times larger than 256×192 in each
+/// direction, for display only (NDS-9): engine A's around the 3D engine's
+/// larger frame, engine B's enlarged. The game never reads them, and they
+/// are not saved: what a game sees is the same at every scale.
+#[derive(Debug, Clone)]
+pub(crate) struct ScaledScreens {
+    /// 1 when off; the screens are then empty.
+    pub(crate) scale: usize,
+    /// Engine A's screen, `256 * scale` pixels by `192 * scale`.
+    pub(crate) a: Box<[u32]>,
+    /// Engine B's screen.
+    pub(crate) b: Box<[u32]>,
+    /// Engine A's lines as drawn this frame, to draw larger at VBlank.
+    lines: Vec<LineCopy>,
+    /// Which of `lines` were drawn since the last VBlank.
+    fresh: Vec<bool>,
+}
+
+impl Default for ScaledScreens {
+    fn default() -> Self {
+        Self {
+            scale: 1,
+            a: Box::default(),
+            b: Box::default(),
+            lines: Vec::new(),
+            fresh: Vec::new(),
+        }
+    }
+}
+
+impl ScaledScreens {
+    /// Screens `scale` times larger showing `a` and `b`, two native
+    /// screens, enlarged.
+    fn enlarged(scale: usize, a: &[u32], b: &[u32]) -> Self {
+        if scale == 1 {
+            return Self::default();
+        }
+        let enlarge = |native: &[u32]| {
+            let mut out = vec![0; native.len() * scale * scale].into_boxed_slice();
+            let line_size = WIDTH * scale * scale;
+            for (line, out) in native
+                .chunks_exact(WIDTH)
+                .zip(out.chunks_exact_mut(line_size))
+            {
+                let line = line.try_into().expect("chunks are a line long");
+                gpu2d::enlarge_line(line, scale, out);
+            }
+            out
+        };
+        let lines = usize::from(VISIBLE_LINES);
+        Self {
+            scale,
+            a: enlarge(a),
+            b: enlarge(b),
+            lines: vec![LineCopy::default(); lines],
+            fresh: vec![false; lines],
+        }
+    }
+}
 
 /// What a display event did, for the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +136,7 @@ impl Hardware {
     /// takes engine A's line.
     pub(crate) fn draw_line(&mut self, line: u16) {
         let start = usize::from(line) * WIDTH;
-        let mut out = [0; WIDTH];
+        let mut a = [0; WIDTH];
         let vram = &self.vram;
         // POWCNT1 bit 2 powers the 3D rendering engine.
         let three_d = (self.powcnt1 & (1 << 2) != 0).then(|| self.gpu3d.line(line));
@@ -77,15 +145,78 @@ impl Hardware {
             &vram.engine(Engine::A),
             |offset| vram.read_16(Region::Lcdc, offset),
             three_d,
-            &mut out,
+            &mut a,
         );
-        self.screen_a[start..start + WIDTH].copy_from_slice(&out);
+        self.screen_a[start..start + WIDTH].copy_from_slice(&a);
         if self.capturing {
             self.capture(line);
         }
+        let mut b = [0; WIDTH];
         self.engine_b
-            .render_line(line, &self.vram.engine(Engine::B), |_| 0, None, &mut out);
-        self.screen_b[start..start + WIDTH].copy_from_slice(&out);
+            .render_line(line, &self.vram.engine(Engine::B), |_| 0, None, &mut b);
+        self.screen_b[start..start + WIDTH].copy_from_slice(&b);
+        if self.scaled.scale > 1 {
+            self.draw_scaled_line(line, &a, &b);
+        }
+    }
+
+    /// Takes `line` for the [`ScaledScreens`], given the line as engines A
+    /// and B drew it: B's enlarged now, A's copied to draw at VBlank.
+    fn draw_scaled_line(&mut self, line: u16, a: &[u32; WIDTH], b: &[u32; WIDTH]) {
+        let scaled = &mut self.scaled;
+        let line = usize::from(line);
+        let size = WIDTH * scaled.scale * scaled.scale;
+        gpu2d::enlarge_line(b, scaled.scale, &mut scaled.b[line * size..][..size]);
+        self.engine_a.copy_line(a, &mut scaled.lines[line]);
+        scaled.fresh[line] = true;
+    }
+
+    /// Draws engine A's lines taken this frame into its larger screen,
+    /// around the 3D engine's larger frame, a few lines to a thread.
+    fn finish_scaled_screens(&mut self) {
+        let scaled = &mut self.scaled;
+        let scale = scaled.scale;
+        let size = WIDTH * scale * scale;
+        let gpu3d = &self.gpu3d;
+        let lines = scaled.lines.chunks(SCALED_LINES_PER_THREAD);
+        let fresh = scaled.fresh.chunks(SCALED_LINES_PER_THREAD);
+        let screen = scaled.a.chunks_mut(SCALED_LINES_PER_THREAD * size);
+        std::thread::scope(|scope| {
+            for (first, ((lines, fresh), screen)) in (0..)
+                .step_by(SCALED_LINES_PER_THREAD)
+                .zip(lines.zip(fresh).zip(screen))
+            {
+                scope.spawn(move || {
+                    for (line, (copy, out)) in
+                        (first..).zip(lines.iter().zip(screen.chunks_mut(size)))
+                    {
+                        if fresh[line - first] {
+                            copy.draw(scale, |row| gpu3d.scaled_row(line * scale + row), out);
+                        }
+                    }
+                });
+            }
+        });
+        scaled.fresh.fill(false);
+    }
+
+    /// Draws the screens `scale` times larger too (clamped to 1 to
+    /// [`gpu3d::MAX_SCALE`]; 1 stops), 3D included from the next 3D frame.
+    /// Until each line is drawn again they show the native screens
+    /// enlarged.
+    pub(crate) fn set_render_scale(&mut self, scale: usize) {
+        let scale = scale.clamp(1, gpu3d::MAX_SCALE);
+        self.gpu3d.set_render_scale(scale);
+        self.scaled = ScaledScreens::enlarged(scale, &self.screen_a, &self.screen_b);
+    }
+
+    /// Takes over the display setup of `other`, the hardware this replaces
+    /// on a reset or state load: the 3D renderer with its buffers, and the
+    /// larger screens, which show this hardware's screens enlarged until
+    /// they are drawn again.
+    pub(crate) fn take_display_from(&mut self, other: &mut Self) {
+        self.gpu3d.take_renderer_from(&mut other.gpu3d);
+        self.scaled = ScaledScreens::enlarged(other.scaled.scale, &self.screen_a, &self.screen_b);
     }
 
     /// DISPCAPCNT, kept with the raw I/O registers.
@@ -125,6 +256,9 @@ impl Hardware {
         }
         match self.vcount {
             VISIBLE_LINES => {
+                if self.scaled.scale > 1 {
+                    self.finish_scaled_screens();
+                }
                 self.request_display_interrupt(1 << 3, irq::VBLANK);
                 self.trigger_dma(Timing::VBlank);
                 // Swap buffers takes effect and geometry resumes.

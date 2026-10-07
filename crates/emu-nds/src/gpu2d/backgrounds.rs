@@ -6,7 +6,7 @@
 //! pixels (see [`super::OPAQUE`]), 0 where transparent.
 
 use super::cache::HalfwordCache;
-use super::{Engine2d, IS_3D, OPAQUE, WIDTH, layer_color};
+use super::{Engine2d, WIDTH, layer_3d_pixel, layer_color};
 use crate::vram::{Engine, EngineMemory};
 
 /// What a background shows, by BG mode and number.
@@ -418,10 +418,14 @@ impl Engine2d {
     fn layer_3d(&self, pixels: &[u32; WIDTH], out: &mut [u32; WIDTH]) {
         let scroll = usize::from(self.registers.hofs[0]);
         for (screen_x, pixel) in out.iter_mut().enumerate() {
-            *pixel = match pixels.get((screen_x + scroll) & 0x1FF) {
-                Some(&value) if (value >> 18) & 0x1F != 0 => OPAQUE | IS_3D | (value & 0x7F_FFFF),
-                _ => 0,
-            };
+            *pixel = pixels
+                .get((screen_x + scroll) & 0x1FF)
+                .map_or(0, |&value| layer_3d_pixel(value));
         }
+    }
+
+    /// Whether BG0 is the 3D layer, when it is enabled.
+    pub(super) fn shows_3d_as_bg0(&self) -> bool {
+        self.bg_kind(0) == BgKind::ThreeD
     }
 }

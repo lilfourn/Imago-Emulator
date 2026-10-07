@@ -28,6 +28,7 @@ const EFFECTS: u8 = 1 << 5;
 const ALL: u8 = 0x3F;
 
 /// One line of every layer, ready to compose.
+#[derive(Debug, Clone)]
 pub(super) struct Layers {
     pub(super) backgrounds: [[u32; WIDTH]; 4],
     /// Which backgrounds were drawn this line.
@@ -46,6 +47,16 @@ impl Layers {
             objects: [ObjPixel::default(); WIDTH],
             window: [ALL; WIDTH],
         }
+    }
+
+    /// Empties every layer for a new line, as [`Layers::new`] makes them.
+    pub(super) fn clear(&mut self) {
+        for background in &mut self.backgrounds {
+            background.fill(0);
+        }
+        self.drawn = [false; 4];
+        self.objects.fill(ObjPixel::default());
+        self.window.fill(ALL);
     }
 }
 
@@ -89,6 +100,7 @@ fn rgb666(pixel: u32) -> u32 {
 }
 
 /// BLDCNT, BLDALPHA and BLDY, decoded once per line.
+#[derive(Debug, Clone, Default)]
 struct Effects {
     bldcnt: u32,
     eva: u32,
@@ -142,6 +154,66 @@ impl Effects {
     }
 }
 
+/// What composing a line's pixels needs from the registers: the effects,
+/// the backdrop, and the drawn backgrounds in front-to-back order.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Composer {
+    effects: Effects,
+    backdrop: u32,
+    priorities: [u8; 4],
+    order: [usize; 4],
+    count: usize,
+}
+
+impl Composer {
+    /// The colour of a pixel, as 18-bit colour, whose window enables the
+    /// layers and effects in `mask`, where the sprite pixel is `object`
+    /// and `background(n)` gives BG `n`'s layer pixel. `background` is
+    /// called only for backgrounds that could show: drawn, enabled by the
+    /// window and not already behind two layers.
+    #[inline]
+    pub(super) fn pixel(
+        &self,
+        mask: u8,
+        object: ObjPixel,
+        mut background: impl FnMut(usize) -> u32,
+    ) -> u32 {
+        let mut top = [(BACKDROP, self.backdrop), (NONE, 0)];
+        let mut found = 0;
+        let mut object_pending = object.color != 0 && mask & (1 << OBJ) != 0;
+        for &bg in &self.order[..self.count] {
+            if object_pending && object.priority <= self.priorities[bg] {
+                object_pending = false;
+                top[found] = (OBJ, object.color);
+                found += 1;
+                if found == 2 {
+                    break;
+                }
+            }
+            if mask & (1 << bg) == 0 {
+                continue;
+            }
+            let color = background(bg);
+            if color != 0 {
+                top[found] = (bg, color);
+                found += 1;
+                if found == 2 {
+                    break;
+                }
+            }
+        }
+        if object_pending && found < 2 {
+            top[found] = (OBJ, object.color);
+            found += 1;
+        }
+        if found < 2 {
+            top[found] = (BACKDROP, self.backdrop);
+        }
+        self.effects
+            .apply(mask & EFFECTS != 0, top[0], top[1], object.blend)
+    }
+}
+
 impl Engine2d {
     /// The window mask for `line`. `object_window` marks the opaque pixels
     /// of OBJ-window sprites.
@@ -178,8 +250,9 @@ impl Engine2d {
         }
     }
 
-    /// Composes `layers` into 18-bit colours.
-    pub(super) fn compose(&self, layers: &Layers, out: &mut [u32; WIDTH]) {
+    /// The composer for a line whose drawn backgrounds `layers` lists,
+    /// with the registers as they are now.
+    pub(super) fn composer(&self, layers: &Layers) -> Composer {
         let registers = &self.registers;
         let effects = Effects {
             bldcnt: u32::from(registers.bldcnt),
@@ -187,7 +260,6 @@ impl Engine2d {
             evb: u32::from((registers.bldalpha >> 8) & 0x1F).min(16),
             evy: u32::from(registers.bldy & 0x1F).min(16),
         };
-        let backdrop = self.bg_color(0);
         let priorities = registers.bgcnt.map(|control| (control & 3) as u8);
         // Drawn backgrounds front to back: by priority, then number.
         let mut order = [0; 4];
@@ -200,40 +272,22 @@ impl Engine2d {
                 }
             }
         }
-        let order = &order[..count];
+        Composer {
+            effects,
+            backdrop: self.bg_color(0),
+            priorities,
+            order,
+            count,
+        }
+    }
 
+    /// Composes `layers` into 18-bit colours.
+    pub(super) fn compose(&self, layers: &Layers, out: &mut [u32; WIDTH]) {
+        let composer = self.composer(layers);
         for (x, pixel) in out.iter_mut().enumerate() {
-            let mask = layers.window[x];
-            let object = layers.objects[x];
-            let mut top = [(BACKDROP, backdrop), (NONE, 0)];
-            let mut found = 0;
-            let mut object_pending = object.color != 0 && mask & (1 << OBJ) != 0;
-            for &bg in order {
-                if object_pending && object.priority <= priorities[bg] {
-                    object_pending = false;
-                    top[found] = (OBJ, object.color);
-                    found += 1;
-                    if found == 2 {
-                        break;
-                    }
-                }
-                let color = layers.backgrounds[bg][x];
-                if color != 0 && mask & (1 << bg) != 0 {
-                    top[found] = (bg, color);
-                    found += 1;
-                    if found == 2 {
-                        break;
-                    }
-                }
-            }
-            if object_pending && found < 2 {
-                top[found] = (OBJ, object.color);
-                found += 1;
-            }
-            if found < 2 {
-                top[found] = (BACKDROP, backdrop);
-            }
-            *pixel = effects.apply(mask & EFFECTS != 0, top[0], top[1], object.blend);
+            *pixel = composer.pixel(layers.window[x], layers.objects[x], |bg| {
+                layers.backgrounds[bg][x]
+            });
         }
     }
 }

@@ -26,6 +26,9 @@
 //! - `QUIET=1` prints the CPU line every 60 frames instead of every frame.
 //! - `DUMP=hex` prints the ARM9 code there at the end instead of around
 //!   its PC.
+//! - `SCALE=n` draws 3D at `n` times the native resolution (1 to 8), so
+//!   the screens and PNGs come out `n` times larger.
+//! - `INPUT` also takes `blow`, full loudness on the microphone.
 
 use std::{env, fs, io::BufWriter, path::Path, process};
 
@@ -66,6 +69,9 @@ fn main() {
                 eprintln!("cannot load {path}: {error}");
                 process::exit(1);
             });
+    }
+    if let Some(scale) = env::var("SCALE").ok().and_then(|text| text.parse().ok()) {
+        nds.set_render_scale(scale);
     }
     let cheats = cheat_list();
     let script = input_script();
@@ -165,6 +171,8 @@ fn parse_input(names: &str) -> Input {
     for name in names.split('+').filter(|name| !name.is_empty()) {
         if let Some(point) = name.strip_prefix("touch=") {
             input.touch = parse_point(point);
+        } else if name == "blow" {
+            input.microphone = Input::LOUDEST;
         } else if let Ok(button) = name.parse::<Button>() {
             input.buttons.set(button, true);
         } else {
@@ -201,8 +209,10 @@ fn snapshot_plan() -> Option<(u32, String)> {
 fn print_summary(nds: &Nds) {
     println!("{}", nds.debug_system_calls());
     // Test ROMs print a result line at the top left: count its ink.
-    let top = &nds.screens()[0].pixels()[..256 * 8];
-    let background = top[255];
+    let top_screen = &nds.screens()[0];
+    let width = usize::from(top_screen.size().width);
+    let top = &top_screen.pixels()[..width * 8 * width / 256];
+    let background = top[width - 1];
     let ink = top.iter().filter(|pixel| **pixel != background).count();
     println!("result_line_ink={ink}");
     for (index, screen) in nds.screens().iter().enumerate() {
@@ -233,6 +243,7 @@ fn print_summary(nds: &Nds) {
 
 /// Writes both screens, top above bottom, as one RGB PNG.
 fn save_screens(nds: &Nds, path: &str) {
+    let size = nds.screens()[0].size();
     let mut rgb = Vec::new();
     for screen in nds.screens() {
         for pixel in screen.pixels() {
@@ -244,7 +255,8 @@ fn save_screens(nds: &Nds, path: &str) {
         eprintln!("cannot create {path}: {error}");
         process::exit(1);
     });
-    let mut encoder = png::Encoder::new(BufWriter::new(file), 256, 384);
+    let (width, height) = (u32::from(size.width), 2 * u32::from(size.height));
+    let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     encoder

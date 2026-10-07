@@ -8,7 +8,9 @@
 //! draws that list with the rendering registers, and [`Gpu3d::line`] reads
 //! the result for engine A's BG0: per pixel, 6-bit red, green and blue in
 //! bits 0–17 and a 5-bit alpha in bits 18–22 (0 where there is no 3D
-//! pixel).
+//! pixel). With [`Gpu3d::set_render_scale`], it also draws each frame
+//! larger for the screen ([`Gpu3d::scaled_row`]); the game only ever sees
+//! the native frame.
 //!
 //! Commands execute instantly, so the FIFO only fills while a swap waits
 //! for VBlank, and the test and matrix busy flags never read as busy.
@@ -19,6 +21,8 @@ mod geometry;
 mod polygon;
 mod registers;
 mod render;
+
+pub(crate) use self::render::MAX_SCALE;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +50,8 @@ pub(crate) struct Gpu3d {
     fifo_irq: u8,
     /// The polygon list the rendering engine draws.
     rendering: PolygonList,
-    /// Frame buffers; redrawn by the next `render_frame`.
+    /// Frame buffers; redrawn by the next `render_frame`. The scale they
+    /// draw at is a display setting, so it is not saved either.
     #[serde(skip)]
     renderer: Renderer,
 }
@@ -213,6 +218,27 @@ impl Gpu3d {
     /// Row `y` (0–191) of the last frame drawn.
     pub(crate) fn line(&self, y: u16) -> &[u32; 256] {
         self.renderer.line(usize::from(y))
+    }
+
+    /// Also draws every frame `scale` times larger in each direction, for
+    /// the screen, from the next [`Gpu3d::render_frame`] on; 1 stops.
+    /// `scale` is clamped to 1–[`MAX_SCALE`].
+    pub(crate) fn set_render_scale(&mut self, scale: usize) {
+        self.renderer.set_scale(scale);
+    }
+
+    /// Moves `other`'s renderer, with its buffers and scale, into this
+    /// engine, which replaces it. The next [`Gpu3d::render_frame`]
+    /// redraws them.
+    pub(crate) fn take_renderer_from(&mut self, other: &mut Self) {
+        self.renderer = std::mem::take(&mut other.renderer);
+    }
+
+    /// Row `row` (0 to `192 * scale - 1`) of the last larger frame drawn:
+    /// `256 * scale` pixels, as [`Gpu3d::line`]'s. `None` at the native
+    /// scale.
+    pub(crate) fn scaled_row(&self, row: usize) -> Option<&[u32]> {
+        self.renderer.scaled_row(row)
     }
 }
 
@@ -483,6 +509,139 @@ mod tests {
         assert_eq!(pixel(&gpu, 64, 96), opaque([33, 33, 63]), "left edge");
         assert_eq!(pixel(&gpu, 100, 48), opaque([33, 33, 63]), "top edge");
         assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
+    }
+
+    /// Two quads with different polygon IDs, one fogged and one with a
+    /// slanted edge, under a translucent strip: everything the renderer
+    /// post-processes, with DISP3DCNT `control`.
+    fn busy_scene(gpu: &mut Gpu3d, control: u32) {
+        configure(gpu, control, 0x7C00 | 31 << 16 | 1 << 15);
+        gpu.write_register(0x330, 0x7FFF << 16 | 0x001F); // Edge colours.
+        gpu.write_register(0x358, 0x03E0 | 31 << 16); // Green fog.
+        for offset in (0x360..0x380).step_by(4) {
+            gpu.write_register(offset, 0x4040_4040); // Half density.
+        }
+        send(gpu, POLYGON_ATTR, &[SOLID | 1 << 15 | 8 << 24]);
+        send(gpu, COLOR, &[0x001F]);
+        quad(gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
+        send(gpu, POLYGON_ATTR, &[SOLID | 16 << 24]);
+        send(gpu, COLOR, &[0x03FF]);
+        send(gpu, BEGIN_VTXS, &[0]);
+        vertex(gpu, -ONE / 4, ONE, -ONE / 4);
+        vertex(gpu, -ONE, -ONE / 3, -ONE / 4);
+        vertex(gpu, ONE / 3, -ONE, -ONE / 4);
+        send(gpu, POLYGON_ATTR, &[15 << 16 | 0xC0 | 24 << 24]);
+        send(gpu, COLOR, &[0x7FFF]);
+        quad(gpu, [-ONE, -ONE / 8, ONE, ONE / 8], -ONE / 2);
+    }
+
+    /// Every row of `gpu`'s larger frame.
+    fn scaled_frame(gpu: &Gpu3d, scale: usize) -> Vec<u32> {
+        (0..192 * scale)
+            .flat_map(|row| gpu.scaled_row(row).expect("drawn larger").to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn the_native_frame_is_the_same_at_any_scale() {
+        let vram = Vram::default();
+        let everything = 1 << 4 | 1 << 5 | 1 << 7 | 1 << 3;
+        let mut native = Gpu3d::new();
+        busy_scene(&mut native, everything);
+        finish(&mut native, &vram);
+        assert!(native.scaled_row(0).is_none());
+        for scale in [2, 3] {
+            let mut gpu = Gpu3d::new();
+            gpu.set_render_scale(scale);
+            busy_scene(&mut gpu, everything);
+            finish(&mut gpu, &vram);
+            for y in 0..192 {
+                assert_eq!(gpu.line(y), native.line(y), "row {y} at {scale}x");
+            }
+        }
+    }
+
+    #[test]
+    fn the_larger_frame_matches_the_native_one_away_from_edges() {
+        let vram = Vram::default();
+        // No anti-aliasing or edge marking: only edges may differ.
+        let mut native = Gpu3d::new();
+        busy_scene(&mut native, 1 << 7 | 1 << 3);
+        finish(&mut native, &vram);
+        let mut gpu = Gpu3d::new();
+        gpu.set_render_scale(2);
+        busy_scene(&mut gpu, 1 << 7 | 1 << 3);
+        finish(&mut gpu, &vram);
+        let larger = scaled_frame(&gpu, 2);
+        let mut compared = 0;
+        for y in 1..191 {
+            for x in 1..255 {
+                let here = pixel(&native, x, y);
+                let flat =
+                    (y - 1..=y + 1).all(|y| (x - 1..=x + 1).all(|x| pixel(&native, x, y) == here));
+                if !flat {
+                    continue;
+                }
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let cell = larger[(2 * usize::from(y) + dy) * 512 + 2 * x + dx];
+                    assert_eq!(cell, here, "({x}, {y})");
+                }
+                compared += 1;
+            }
+        }
+        assert!(compared > 40_000, "{compared} flat pixels");
+    }
+
+    #[test]
+    fn bands_draw_the_frame_as_one_band_would() {
+        let vram = Vram::default();
+        let everything = 1 << 4 | 1 << 5 | 1 << 7 | 1 << 3;
+        for scale in [2, 3] {
+            let mut whole = Gpu3d::new();
+            whole.renderer.split(scale, 1);
+            busy_scene(&mut whole, everything);
+            finish(&mut whole, &vram);
+            let mut banded = Gpu3d::new();
+            banded.renderer.split(scale, 13);
+            busy_scene(&mut banded, everything);
+            finish(&mut banded, &vram);
+            assert!(
+                scaled_frame(&whole, scale) == scaled_frame(&banded, scale),
+                "at {scale}x"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_marking_keeps_its_on_screen_thickness() {
+        let mut gpu = Gpu3d::new();
+        gpu.set_render_scale(2);
+        configure(&mut gpu, 1 << 5, 0);
+        gpu.write_register(0x330, 0x7FFF << 16); // Edge colour 1: white.
+        send(&mut gpu, POLYGON_ATTR, &[SOLID | 8 << 24]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
+        finish(&mut gpu, &Vram::default());
+        // The quad spans x 128..384, y 96..288: edges two cells thick.
+        let cell = |x: usize, y: usize| gpu.scaled_row(y).expect("drawn larger")[x];
+        let white = opaque([63, 63, 63]);
+        let red = opaque([63, 0, 0]);
+        assert_eq!(
+            [cell(128, 192), cell(129, 192), cell(130, 192)],
+            [white, white, red]
+        );
+        assert_eq!(
+            [cell(382, 192), cell(383, 192), cell(381, 192)],
+            [white, white, red]
+        );
+        assert_eq!(
+            [cell(200, 96), cell(200, 97), cell(200, 98)],
+            [white, white, red]
+        );
+        assert_eq!(
+            [cell(200, 287), cell(200, 286), cell(200, 285)],
+            [white, white, red]
+        );
     }
 
     #[test]

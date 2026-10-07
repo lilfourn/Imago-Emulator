@@ -31,7 +31,26 @@ pub trait Core: Send {
 
     /// The screens as of the last completed frame, in [`CoreInfo::screens`]
     /// order. For the DS, index 0 is the top screen.
+    ///
+    /// Each is the size [`CoreInfo::screens`] gives, or a whole multiple
+    /// of it after [`Core::set_render_scale`]. Touch points and layouts
+    /// stay in [`CoreInfo::screens`] pixels whatever the frames' size.
     fn screens(&self) -> &[Frame];
+
+    /// Draws 3D at `scale` times the native resolution in each direction,
+    /// for systems with a 3D engine (the DS): from the next frame,
+    /// [`Core::screens`] come out `scale` times wider and taller, 3D drawn
+    /// at that resolution and everything else enlarged around it. 1 is
+    /// the native resolution; cores clamp `scale` to what they support.
+    ///
+    /// This is a display setting, not machine state: emulation, audio and
+    /// save states are the same at every scale (the game still sees
+    /// native-resolution 3D wherever it reads it back), states load at
+    /// any scale, and the setting stays through [`Core::load_state`] and
+    /// [`Core::reset`]. Cores without 3D ignore it.
+    fn set_render_scale(&mut self, scale: u32) {
+        let _ = scale;
+    }
 
     /// Power-cycles the system. The loaded game and its backup memory stay.
     fn reset(&mut self);
