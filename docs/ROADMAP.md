@@ -222,7 +222,7 @@ are done.
 
 | M | Done | Left |
 |---|---|---|
-| M12 | ARMv5TE, CP15 with TCMs, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro); MPU enforcement |
+| M12 | ARMv5TE, CP15 with TCMs and MPU enforcement, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro) |
 | M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS |
 | M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
 | M15 | Pokémon White shows no anti-piracy symptoms | Timing against melonDS traces; GBA slot (needs a decision on sharing GBA cartridge code across cores); HG/SS and B2/W2 |
