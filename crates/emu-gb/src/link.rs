@@ -155,6 +155,12 @@ impl Core for Linked {
             .is_some_and(|gb| Core::poke(gb, 0, address, value))
     }
 
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool {
+        self.players
+            .get_mut(player)
+            .is_some_and(|gb| gb.poke_bank(0, bank, address, value))
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         self.players[0].memory(region)
     }

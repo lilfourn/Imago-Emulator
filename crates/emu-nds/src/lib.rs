@@ -339,10 +339,16 @@ impl Core for Nds {
         }
     }
 
+    /// Main RAM, which both CPUs share, at 0x02000000–0x02FFFFFF with its
+    /// mirrors; and for cheats, the ARM7's timers, KEYINPUT and EXTKEYIN
+    /// (see `Hardware::peek_cheat_register`).
     fn peek(&self, player: usize, address: u32) -> Option<u8> {
-        let main_ram = address >> 24 == 0x02;
-        (player == 0 && main_ram)
-            .then(|| self.machine.hw.main_ram[address as usize & (hardware::MAIN_RAM_SIZE - 1)])
+        let hw = &self.machine.hw;
+        match address >> 24 {
+            _ if player != 0 => None,
+            0x02 => Some(hw.main_ram[address as usize & (hardware::MAIN_RAM_SIZE - 1)]),
+            _ => hw.peek_cheat_register(address),
+        }
     }
 
     fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
@@ -395,6 +401,32 @@ mod tests {
             put(0x300 + index * 4, word);
         }
         rom
+    }
+
+    /// A halfword through [`Core::peek`].
+    fn peek_half(nds: &Nds, address: u32) -> u16 {
+        u16::from_le_bytes([address, address + 1].map(|byte| nds.peek(0, byte).unwrap_or(0)))
+    }
+
+    #[test]
+    fn cheats_can_read_the_keys_and_the_arm7_timers() {
+        let rom = rom();
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        let mut input = Input::default();
+        input.buttons.set(Button::L, true);
+        input.buttons.set(Button::Y, true);
+        nds.run_frame(&[input], &mut Vec::new());
+        // Both active low: L is KEYINPUT bit 9, Y is EXTKEYIN bit 1.
+        assert_eq!(peek_half(&nds, 0x0400_0130), 0x01FF);
+        assert_eq!(peek_half(&nds, 0x0400_0136), 0x007D);
+        // Start ARM7 timer 0 (prescaler 1) and let it count.
+        nds.machine.hw.arm7_write_16(0x0400_0102, 0x0080);
+        let before = peek_half(&nds, 0x0400_0100);
+        nds.run_frame(&[input], &mut Vec::new());
+        assert_ne!(peek_half(&nds, 0x0400_0100), before);
+        assert_eq!(peek_half(&nds, 0x0400_0102), 0x0080);
+        assert_eq!(nds.peek(0, 0x0400_0000), None, "other I/O stays hidden");
+        assert_eq!(nds.peek(0, 0x0400_0110), None);
     }
 
     #[test]

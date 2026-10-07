@@ -79,8 +79,11 @@ pub trait Core: Send {
     }
 
     /// The byte at `address` in `player`'s CPU address space, for cheats
-    /// and debuggers, or `None` where that is not plain RAM (I/O registers,
-    /// ROM, unmapped space). Reading never has side effects.
+    /// and debuggers, or `None` where it cannot be read without side
+    /// effects. Plain RAM is readable; so are the few I/O registers that
+    /// cheat codes test, such as the keypad, where a core lists them. ROM,
+    /// other I/O and unmapped space are not. Reading never has side
+    /// effects.
     fn peek(&self, player: usize, address: u32) -> Option<u8> {
         let _ = (player, address);
         None
@@ -90,6 +93,16 @@ pub trait Core: Send {
     /// cheats and debuggers. Returns whether `address` is plain RAM.
     fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
         let _ = (player, address, value);
+        false
+    }
+
+    /// Writes the byte at `address` in RAM bank `bank` of the switchable
+    /// region holding `address`, without switching banks, for cheats that
+    /// name a bank (Game Boy GameShark `8x` and `9x` codes). Elsewhere it
+    /// is [`Core::poke`]. Returns whether `address` is plain RAM. Cores
+    /// without banked RAM write nothing.
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool {
+        let _ = (player, bank, address, value);
         false
     }
 

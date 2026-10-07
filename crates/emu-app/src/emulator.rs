@@ -225,7 +225,7 @@ pub enum Command {
     LoadState(u8),
     /// Copies this span of memory for the UI after every frame, or stops.
     WatchMemory(Option<MemorySpan>),
-    /// Replaces a player's cheats, applied before every frame.
+    /// Replaces a player's cheats, applied after every frame.
     SetCheats {
         /// Index into the core's players.
         player: usize,
@@ -267,6 +267,10 @@ impl emu_cheats::Memory for PlayerMemory<'_> {
 
     fn poke(&mut self, address: u32, value: u8) -> bool {
         self.core.poke(self.player, address, value)
+    }
+
+    fn poke_bank(&mut self, bank: u8, address: u32, value: u8) -> bool {
+        self.core.poke_bank(self.player, bank, address, value)
     }
 }
 
@@ -429,10 +433,10 @@ impl Runner {
                     self.publish();
                 }
             } else {
-                self.apply_cheats();
                 inputs.clear();
                 inputs.extend(self.latches.iter().map(Latch::input));
                 self.loaded.core.run_frame(&inputs, &mut audio);
+                self.apply_cheats();
                 for latch in &mut self.latches {
                     latch.advance();
                 }
@@ -523,7 +527,9 @@ impl Runner {
         }
     }
 
-    /// Runs each player's enabled cheats, as cheat devices did once a frame.
+    /// Runs each player's enabled cheats, as cheat devices did once a
+    /// frame. Frames end at VBlank, where the devices ran them too, and
+    /// button codes see the input the frame just ran with.
     fn apply_cheats(&mut self) {
         for (player, cheats) in self.cheats.iter().enumerate() {
             let mut memory = PlayerMemory {
@@ -889,13 +895,111 @@ mod tests {
     }
 
     #[test]
-    fn cheats_run_before_every_frame() {
+    fn cheats_run_after_every_frame() {
         let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
         let cheats = emu_cheats::parse(System::Gb, "[Hold]\n0000:00\n").expect("valid");
         emulator.send(Command::SetCheats { player: 0, cheats });
+        emulator.send(Command::WatchMemory(Some(MemorySpan {
+            player: 0,
+            start: 0,
+            length: 1,
+        })));
         thread::sleep(Duration::from_millis(50));
-        // The cheat zeroes the counter's low byte before each frame adds one.
-        assert_eq!(latest_count(&emulator) & 0xFF, 1);
+        // Each frame adds one; the cheat then zeroes the low byte.
+        let (_, bytes) = emulator.memory().expect("watching");
+        assert_eq!(bytes, [Some(0)]);
+    }
+
+    /// A GBA-like core with KEYINPUT at 0x04000130 and one byte of RAM at
+    /// 0x02000000, which every frame clears.
+    struct Keypad {
+        keys: u16,
+        ram: u8,
+        frames: [Frame; 1],
+    }
+
+    impl Core for Keypad {
+        fn info(&self) -> CoreInfo {
+            CoreInfo {
+                system: System::Gba,
+                screens: &SCREENS,
+                touch_screen: None,
+                players: 1,
+                frame_rate: FrameRate::new(1000, 1),
+                audio_sample_rate: 48_000,
+                state_version: 1,
+            }
+        }
+
+        fn run_frame(&mut self, inputs: &[Input], _: &mut Vec<StereoSample>) {
+            let input = inputs.first().copied().unwrap_or_default();
+            self.keys = !input.buttons.bits() & 0x03FF;
+            self.ram = 0;
+        }
+
+        fn screens(&self) -> &[Frame] {
+            &self.frames
+        }
+
+        fn reset(&mut self) {}
+
+        fn save_state(&self, _: &mut Vec<u8>) {}
+
+        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
+            Ok(())
+        }
+
+        fn peek(&self, _: usize, address: u32) -> Option<u8> {
+            match address {
+                0x0200_0000 => Some(self.ram),
+                0x0400_0130 => Some(self.keys as u8),
+                0x0400_0131 => Some((self.keys >> 8) as u8),
+                _ => None,
+            }
+        }
+
+        fn poke(&mut self, _: usize, address: u32, value: u8) -> bool {
+            let ram = address == 0x0200_0000;
+            if ram {
+                self.ram = value;
+            }
+            ram
+        }
+    }
+
+    #[test]
+    fn button_cheats_see_the_frame_s_own_input() {
+        let loaded = Loaded {
+            core: Box::new(Keypad {
+                keys: 0x03FF,
+                ram: 0,
+                frames: [Frame::new(SCREENS[0])],
+            }),
+            rom_paths: vec![PathBuf::from("/nonexistent/keypad.gba")],
+            rom_crc32: 0,
+        };
+        let (events, _events) = async_channel::unbounded();
+        let emulator = Emulator::start(loaded, events, None);
+        // CodeBreaker: if A is held, write 1.
+        let cheats =
+            emu_cheats::parse(System::Gba, "D0000020 0001\n32000000 0001\n").expect("valid");
+        emulator.send(Command::SetCheats { player: 0, cheats });
+        emulator.send(Command::WatchMemory(Some(MemorySpan {
+            player: 0,
+            start: 0x0200_0000,
+            length: 1,
+        })));
+        emulator.send(Command::SetInput {
+            player: 0,
+            input: Input {
+                buttons: [Button::A].into_iter().collect(),
+                touch: None,
+            },
+        });
+        thread::sleep(Duration::from_millis(50));
+        // The frame cleared the byte; the cheat, seeing A, set it again.
+        let (_, bytes) = emulator.memory().expect("watching");
+        assert_eq!(bytes, [Some(1)]);
     }
 
     #[test]

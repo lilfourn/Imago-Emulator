@@ -21,6 +21,8 @@
 //! - `STATE_IN=path` loads a save state before the first frame;
 //!   `STATE_OUT=path` writes one at the end.
 //! - `START_TIME=seconds` sets the real-time clock (Unix time) at power-on.
+//! - `CHEATS=game.cht` applies that cheat list after every frame, as the
+//!   app does.
 //! - `QUIET=1` prints the CPU line every 60 frames instead of every frame.
 //! - `DUMP=hex` prints the ARM9 code there at the end instead of around
 //!   its PC.
@@ -65,6 +67,7 @@ fn main() {
                 process::exit(1);
             });
     }
+    let cheats = cheat_list();
     let script = input_script();
     let snaps = snapshot_plan();
     let quiet = env::var_os("QUIET").is_some();
@@ -75,6 +78,7 @@ fn main() {
             .find(|(start, _)| *start <= frame)
             .map_or_else(Input::default, |(_, input)| *input);
         nds.run_frame(&[input], &mut Vec::new());
+        emu_cheats::apply(&cheats, &mut CheatMemory(&mut nds));
         if !quiet || frame % 60 == 59 {
             println!("frame={frame} {}", nds.debug_state());
         }
@@ -117,6 +121,31 @@ fn write_or_exit(path: &str, bytes: &[u8]) {
         eprintln!("cannot write {path}: {error}");
         process::exit(1);
     });
+}
+
+/// The DS as cheats see it.
+struct CheatMemory<'a>(&'a mut Nds);
+
+impl emu_cheats::Memory for CheatMemory<'_> {
+    fn peek(&self, address: u32) -> Option<u8> {
+        self.0.peek(0, address)
+    }
+
+    fn poke(&mut self, address: u32, value: u8) -> bool {
+        self.0.poke(0, address, value)
+    }
+}
+
+/// The cheats in `CHEATS`, if set.
+fn cheat_list() -> Vec<emu_cheats::Cheat> {
+    let Ok(path) = env::var("CHEATS") else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&read_or_exit(&path)).into_owned();
+    emu_cheats::parse(emu_core::System::Nds, &text).unwrap_or_else(|error| {
+        eprintln!("{path}: {error}");
+        process::exit(1);
+    })
 }
 
 /// `INPUT` as (first frame, input held) pairs.

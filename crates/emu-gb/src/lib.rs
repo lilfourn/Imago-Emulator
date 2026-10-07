@@ -264,6 +264,15 @@ impl Core for Gb {
         self.machine.bus.poke_ram(address, value)
     }
 
+    /// Banks are cartridge RAM's at 0xA000–0xBFFF and, on a Game Boy
+    /// Color, WRAM's at 0xD000–0xDFFF.
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool {
+        let Some(address) = u16::try_from(address).ok().filter(|_| player == 0) else {
+            return false;
+        };
+        self.machine.bus.poke_ram_bank(bank, address, value)
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         match region {
             MemoryRegion::MainRam => None,
@@ -318,6 +327,23 @@ mod tests {
         let cgb = Gb::new(&Media::new(&rom_for(Model::Cgb, &[]))).expect("valid rom");
         assert_eq!((dmg.model(), cgb.model()), (Model::Dmg, Model::Cgb));
         assert_eq!(cgb.registers().a, 0x11);
+    }
+
+    #[test]
+    fn bank_pokes_reach_unmapped_wram_banks() {
+        // LD A,3; LDH (SVBK),A
+        let program = [0x3E, 0x03, 0xE0, 0x70];
+        let mut gb = Gb::new(&Media::new(&rom_for(Model::Cgb, &program))).expect("valid rom");
+        // WRAM bank 1 is mapped at power-on; write bank 3 behind its back.
+        assert!(gb.poke_bank(0, 3, 0xD010, 0x63));
+        assert_eq!(Core::peek(&gb, 0, 0xD010), Some(0));
+        gb.step();
+        gb.step();
+        assert_eq!(Core::peek(&gb, 0, 0xD010), Some(0x63));
+        // Outside the banked regions it is a plain poke.
+        assert!(gb.poke_bank(0, 5, 0xC000, 0x11));
+        assert_eq!(Core::peek(&gb, 0, 0xC000), Some(0x11));
+        assert!(!gb.poke_bank(0, 1, 0x8000, 0x11));
     }
 
     #[test]

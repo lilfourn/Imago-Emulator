@@ -313,43 +313,65 @@ impl Cartridge {
         }
     }
 
-    /// The RAM byte index for `address` in the selected bank, if RAM is
-    /// enabled and present.
-    fn ram_index(&self, address: u16) -> Option<usize> {
-        let bank = match &self.mbc {
-            Mbc::RomOnly => 0,
-            // 512 bytes, echoed through the whole 8 KiB window.
-            Mbc::Mbc2 {
+    /// Whether the game has enabled RAM (always, without a controller).
+    fn ram_enabled(&self) -> bool {
+        match &self.mbc {
+            Mbc::RomOnly => true,
+            Mbc::Mbc1 { ram_enabled, .. }
+            | Mbc::Mbc2 { ram_enabled, .. }
+            | Mbc::Mbc3 { ram_enabled, .. }
+            | Mbc::Mbc5 { ram_enabled, .. } => *ram_enabled,
+        }
+    }
+
+    /// The RAM bank mapped at 0xA000, if RAM is enabled and mapped there
+    /// rather than a clock register.
+    fn selected_ram_bank(&self) -> Option<usize> {
+        match &self.mbc {
+            Mbc::RomOnly
+            | Mbc::Mbc2 {
                 ram_enabled: true, ..
-            } => return Some(usize::from(address & 0x01FF)),
+            } => Some(0),
             Mbc::Mbc1 {
                 ram_enabled: true,
                 bank_high,
                 advanced_mode,
                 ..
-            } => {
-                if *advanced_mode {
-                    usize::from(*bank_high)
-                } else {
-                    0
-                }
-            }
+            } => Some(if *advanced_mode {
+                usize::from(*bank_high)
+            } else {
+                0
+            }),
             Mbc::Mbc3 {
                 ram_enabled: true,
                 select: select @ 0..=0x07,
                 ..
-            } => usize::from(*select),
+            } => Some(usize::from(*select)),
             Mbc::Mbc5 {
                 ram_enabled: true,
                 ram_bank,
                 ..
-            } => usize::from(*ram_bank),
-            _ => return None,
-        };
+            } => Some(usize::from(*ram_bank)),
+            _ => None,
+        }
+    }
+
+    /// The RAM byte index for `address` in `bank`, if there is RAM.
+    fn ram_index_in(&self, bank: usize, address: u16) -> Option<usize> {
+        if let Mbc::Mbc2 { .. } = self.mbc {
+            // 512 bytes, echoed through the whole 8 KiB window.
+            return Some(usize::from(address & 0x01FF));
+        }
         if self.ram.is_empty() {
             return None;
         }
         Some((bank * 0x2000 + usize::from(address & 0x1FFF)) % self.ram.len())
+    }
+
+    /// The RAM byte index for `address` in the selected bank, if RAM is
+    /// enabled and present.
+    fn ram_index(&self, address: u16) -> Option<usize> {
+        self.ram_index_in(self.selected_ram_bank()?, address)
     }
 
     pub(crate) fn read_ram(&self, address: u16) -> u8 {
@@ -386,6 +408,19 @@ impl Cartridge {
             return;
         }
         if let Some(index) = self.ram_index(address) {
+            self.ram[index] = value;
+            self.generation += 1;
+        }
+    }
+
+    /// Writes `value` at `address` in RAM bank `bank`, whichever bank is
+    /// selected, for cheats. Like the game's own writes, it needs RAM
+    /// enabled.
+    pub(crate) fn write_ram_bank(&mut self, bank: u8, address: u16, value: u8) {
+        if !self.ram_enabled() {
+            return;
+        }
+        if let Some(index) = self.ram_index_in(usize::from(bank), address) {
             self.ram[index] = value;
             self.generation += 1;
         }
@@ -596,6 +631,19 @@ mod tests {
         cart.write_ram(0xA000, 0x12);
         assert_eq!(cart.read_ram(0xA000), 0x12);
         assert_eq!(cart.backup_generation(), Some(1));
+    }
+
+    #[test]
+    fn bank_writes_reach_unselected_banks() {
+        // MBC5 with four 8 KiB RAM banks.
+        let mut cart = Cartridge::new(&rom(0x1B, 3, 2), None, 0).expect("valid");
+        cart.write_ram_bank(2, 0xA010, 0x55);
+        assert_eq!(cart.backup_generation(), Some(0), "RAM is not enabled");
+        cart.write_rom(0x0000, 0x0A);
+        cart.write_ram_bank(2, 0xA010, 0x55);
+        assert_eq!(cart.read_ram(0xA010), 0x00, "bank 0 is still selected");
+        cart.write_rom(0x4000, 2);
+        assert_eq!(cart.read_ram(0xA010), 0x55);
     }
 
     #[test]

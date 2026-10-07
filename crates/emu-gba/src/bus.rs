@@ -482,6 +482,16 @@ impl Bus {
         }
     }
 
+    /// KEYINPUT (0x04000130–0x04000131), for cheats that test buttons;
+    /// `None` elsewhere.
+    pub(crate) fn peek_keys(&self, address: u32) -> Option<u8> {
+        match address {
+            0x0400_0130 => Some(self.keys as u8),
+            0x0400_0131 => Some((self.keys >> 8) as u8),
+            _ => None,
+        }
+    }
+
     /// Writes EWRAM or IWRAM, for cheats. Returns whether `address` is RAM.
     pub(crate) fn poke_ram(&mut self, address: u32, value: u8) -> bool {
         match address >> 24 {

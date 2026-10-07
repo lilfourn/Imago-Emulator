@@ -235,9 +235,11 @@ impl Core for Gba {
         }
     }
 
+    /// EWRAM, IWRAM and KEYINPUT.
     fn peek(&self, player: usize, address: u32) -> Option<u8> {
+        let bus = &self.machine.bus;
         (player == 0)
-            .then(|| self.machine.bus.peek_ram(address))
+            .then(|| bus.peek_ram(address).or_else(|| bus.peek_keys(address)))
             .flatten()
     }
 
@@ -297,6 +299,20 @@ mod tests {
             (CYCLES_PER_FRAME - 8..=CYCLES_PER_FRAME + 8).contains(&length),
             "{length}"
         );
+    }
+
+    #[test]
+    fn cheats_can_read_the_keypad() {
+        let rom = rom(&[0xEAFF_FFFE]); // B .
+        let mut gba = Gba::new(&Media::new(&rom)).expect("valid rom");
+        let mut input = Input::default();
+        input.buttons.set(emu_core::Button::L, true);
+        gba.run_frame(&[input], &mut Vec::new());
+        // KEYINPUT is active low: L is bit 9.
+        let keys = [0x0400_0130, 0x0400_0131].map(|address| gba.peek(0, address));
+        assert_eq!(keys, [Some(0xFF), Some(0x01)]);
+        assert_eq!(gba.peek(0, 0x0400_0132), None);
+        assert_eq!(gba.peek(1, 0x0400_0130), None);
     }
 
     #[test]

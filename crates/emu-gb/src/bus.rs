@@ -271,6 +271,22 @@ impl Bus {
         ram
     }
 
+    /// Writes RAM in bank `bank` of the switchable region holding
+    /// `address`, whichever bank is mapped, for cheats: cartridge RAM, or
+    /// CGB WRAM at 0xD000–0xDFFF (and its echo), where bank 0 means 1.
+    /// Elsewhere it is [`Bus::poke_ram`]. Returns whether `address` is RAM.
+    pub(crate) fn poke_ram_bank(&mut self, bank: u8, address: u16, value: u8) -> bool {
+        match address {
+            0xA000..=0xBFFF => self.cartridge.write_ram_bank(bank, address, value),
+            0xD000..=0xDFFF | 0xF000..=0xFDFF if self.cgb() => {
+                let bank = usize::from((bank & 7).max(1));
+                self.wram[bank * 0x1000 + usize::from(address & 0x0FFF)] = value;
+            }
+            _ => return self.poke_ram(address, value),
+        }
+        true
+    }
+
     fn boot_rom_byte(&self, address: u16) -> u8 {
         self.boot_rom
             .as_ref()
