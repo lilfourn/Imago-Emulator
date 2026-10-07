@@ -132,10 +132,91 @@ touch = ["RightThumb"]  # touch at the cursor (default: either stick click)
 rewind = ["LeftTrigger"]
 ```
 
-Battery saves (`game.sav`), save states (`game.ss1` to `game.ss4`) and
-cheats (`game.cht`) live next to the ROM. A linked pair keeps each game's
-`.sav` and `.cht`, and saves its states next to the first ROM as `game.ls1`
-to `game.ls4`. GBA `.sav` files hold the raw save memory, as in mGBA.
+Each action lists all of its inputs, so listing one moves it, and an empty
+list unbinds it. Gamepad controls have gilrs's names: `South`, `East`,
+`North` and `West` for the face buttons, `LeftTrigger` and `RightTrigger`
+for the shoulder buttons (L1 and R1), `LeftTrigger2` and `RightTrigger2` for
+the triggers below them, `Select`, `Start`, `Mode`, `LeftThumb` and
+`RightThumb` for the stick clicks, `DPadUp` and so on, and `LeftStickUp`
+and so on for the left stick pushed that way.
+
+### Gamepad hotkeys
+
+Hold Select and press another button to run an app command:
+
+| Chord | Does |
+|---|---|
+| Select + R1 / L1 | Save / load state |
+| Select + Start | Pause / resume |
+| Select + D-pad right / left | Next / previous state slot |
+| Select + D-pad up | Swap screens |
+| Select + D-pad down | Switch player (link play) |
+| Select + right trigger | Fast-forward on/off |
+
+The game sees neither button of a chord, even after you let go. Select
+alone still reaches the game, as a tap when you let go of it, and a button
+that isn't a hotkey, pressed while Select is held, reaches the game with
+Select held: a game's own Select combinations still work, and the hotkeys
+wait until Select comes up. Choose the modifier and the chords in
+`[hotkeys]`:
+
+```toml
+[hotkeys]
+modifier = ["Mode"]       # hold this instead; [] turns hotkeys off
+reset = ["West"]          # Mode + West resets
+rewind = ["LeftTrigger2"] # held actions last as long as the chord
+swap_screens = []         # no chord
+```
+
+The commands are `save_state`, `load_state`, `next_slot`, `previous_slot`,
+`pause`, `reset`, `toggle_fast_forward`, `toggle_slow_motion`,
+`swap_screens`, `switch_player` and `full_screen`; any held action
+(`rewind`, `fast_forward`, a button, a turbo button) works too. Hotkeys
+apply to every controller.
+
+### Turbo
+
+`turbo_a`, `turbo_b` and so on, for every button, press and release it over
+and over while held. None are bound by default:
+
+```toml
+[keys]
+turbo_a = ["l"]
+turbo_b = ["h"]
+
+[gamepad]
+turbo_a = ["RightThumb"]  # takes the stick click from touch
+
+[turbo]
+frames = 3                # pressed 3 frames, released 3 (the default)
+```
+
+Turbo counts emulated frames, not time, so it keeps pace with fast-forward
+and slow motion and repeats exactly from run to run. The default makes ten
+presses a second at 60 frames a second, slow enough for games that read
+their buttons every second or third frame; `frames = 1` alternates every
+frame. Every press lasts the full `frames`: letting go mid-press finishes
+it, so a quick tap presses once.
+
+### Bindings for one game
+
+A `game.bindings.toml` next to the ROM, in the same format, is laid over
+your bindings when the game starts. Whatever it lists wins over your
+controller profiles, which win over your `[gamepad]` section. In link
+play, the keyboard and gamepads use the bindings of the game they control.
+
+```toml
+# pokemon-emerald.bindings.toml: hold the bottom face button to mash A.
+[gamepad]
+turbo_a = ["South"]
+b = ["West"]
+```
+
+Battery saves (`game.sav`), save states (`game.ss1` to `game.ss4`),
+cheats (`game.cht`) and the game's own bindings (`game.bindings.toml`) live
+next to the ROM. A linked pair keeps each game's `.sav`, `.cht` and
+bindings, and saves its states next to the first ROM as `game.ls1` to
+`game.ls4`. GBA `.sav` files hold the raw save memory, as in mGBA.
 
 ## Link play
 

@@ -130,6 +130,15 @@ pub trait Core: Send {
   also sends pointer motion, which moves a touch cursor kept in
   touchscreen pixels (`cursor.rs`); the mouse and the cursor touch
   independently, and the mouse wins while both do.
+- Gamepad events pass through `chords.rs` before the bindings: while the
+  hotkey modifier (Select) is down, a hotkey control dispatches the same
+  GPUI action as its menu item, and neither control reaches the game.
+  Bindings are the user's file with the game's `game.bindings.toml`
+  laid over it, re-read whenever a game starts.
+- Turbo buttons cross to the emulation thread on their own
+  (`Command::SetTurbo`), not through the latch, whose minimum hold would
+  stretch short presses. `turbo.rs` pulses them by counting frames run,
+  so turbo is deterministic and keeps pace with fast-forward.
 - Cheats come from `game.cht`, which the view re-reads whenever the
   window regains focus and sends as a `Command`. They run after each
   frame: frames end at VBlank, where cheat devices hooked in, so button
@@ -184,6 +193,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Save state | next to the ROM, `game.ss1` | `emu-state` container |
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
+| One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
 | Layout, speeds, 3D resolution | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
 
 Writes go to `name.tmp` first and are renamed over the target.
