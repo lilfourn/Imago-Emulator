@@ -149,7 +149,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. ✅ | P0 · S / P1 · M13 |
 | UI-8 | Audio output at the device rate with dynamic rate control (adjust the resample ratio by up to ±0.5% based on buffer fill). ✅ | P0 · M3 |
 | UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch), thumbnail and age shown when switching. | P0 · S / P1 · M4 |
-| UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap, slow motion. | P0 · S / P1 · M4 |
+| UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap ✅ and slow motion (hold 1, or ⌘⇧F) ✅. | P0 · S / P1 · M4 |
 | UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
 | UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor (✅ viewer), tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |
 | UI-13 | Cheats: GameShark (✅ GB), Action Replay, CodeBreaker (✅ GBA, unencrypted) and raw patches ✅. | P2 · M11 |

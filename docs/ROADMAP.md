@@ -297,7 +297,7 @@ are done.
 | Rewind, four state slots, fast-forward toggle, gamepads | UI-6, UI-9–11 | M4 ✅ |
 | State-slot thumbnails in the slot notice | UI-9 | Phase 2 ✅ |
 | Link cable, per-player input | GB-6 | M6 ✅ |
-| Fast-forward speed cap | UI-10 | Later |
+| Fast-forward speed cap, slow motion | UI-10 | Phase 4 ✅ |
 | Debugger panels | UI-12 | M7 → M11 |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gap, gamepad touch | UI-2, UI-7 | M13 ✅ |
