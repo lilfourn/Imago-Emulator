@@ -8,7 +8,7 @@
 //! slice delay never shows. See `docs/decisions/0004-linked-cores.md`.
 
 use emu_core::{
-    Core, CoreInfo, Frame, Input, LoadError, Media, MemoryRegion, ScreenSize, StateError,
+    Core, CoreInfo, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize, StateError,
     StereoSample,
 };
 
@@ -161,6 +161,12 @@ impl Core for Linked {
             .is_some_and(|gb| gb.poke_bank(0, bank, address, value))
     }
 
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+        if let Some(gb) = self.players.get_mut(player) {
+            gb.set_rom_patches(0, patches);
+        }
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         self.players[0].memory(region)
     }
@@ -251,5 +257,23 @@ mod tests {
         linked.load_state(&state).expect("own state");
         assert_eq!(linked.players[0].cycles(), saved);
         assert_eq!(linked.info().players, 2);
+    }
+
+    #[test]
+    fn rom_patches_reach_one_player_and_outlast_linked_states() {
+        let master = rom(&MASTER);
+        let mut linked =
+            Linked::new(&[Media::new(&master), Media::new(&master)]).expect("valid roms");
+        let mut state = Vec::new();
+        linked.save_state(&mut state);
+        let patch = RomPatch {
+            address: 0x0101,
+            value: 0x07,
+            compare: Some(0x00),
+        };
+        linked.set_rom_patches(1, &[patch]);
+        linked.load_state(&state).expect("own state");
+        assert_eq!(linked.players[0].peek(0x0101), 0x00);
+        assert_eq!(linked.players[1].peek(0x0101), 0x07);
     }
 }

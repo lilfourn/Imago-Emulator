@@ -17,7 +17,7 @@ mod timing;
 
 use emu_arm::{Access, Cpu, Mode, Registers};
 use emu_core::{
-    Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
+    Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
     StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge;
@@ -245,6 +245,14 @@ impl Core for Gba {
 
     fn poke(&mut self, player: usize, address: u32, value: u8) -> bool {
         player == 0 && self.machine.bus.poke_ram(address, value)
+    }
+
+    /// Patches apply in the ROM window, 0x08000000-0x0DFFFFFF, at their
+    /// offset in every wait-state mirror; others are dropped.
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+        if player == 0 {
+            self.machine.bus.set_rom_patches(patches);
+        }
     }
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{Frame, Input, ScreenSize, StereoSample, System};
+use crate::{Frame, Input, RomPatch, ScreenSize, StereoSample, System};
 
 /// One emulated system with a game loaded.
 ///
@@ -104,6 +104,16 @@ pub trait Core: Send {
     fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool {
         let _ = (player, bank, address, value);
         false
+    }
+
+    /// Replaces the ROM patches for `player`'s cartridge: from now on, ROM
+    /// reads return the patched bytes, as cheat devices on the cartridge
+    /// bus made them (see [`RomPatch`]). Patches are not machine state:
+    /// save states leave them out, and they stay through
+    /// [`Core::load_state`] and [`Core::reset`] until replaced. An empty
+    /// list removes them. Cores without ROM-patching cheats ignore it.
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+        let _ = (player, patches);
     }
 
     /// A read-only view of a memory region, for debuggers, cheat search and

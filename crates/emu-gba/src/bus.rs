@@ -6,6 +6,7 @@
 //! and DMA events) at the exact cycle they are due.
 
 use emu_arm::{Access, Bus as CpuBus};
+use emu_core::RomPatch;
 use emu_gba_cart::Cartridge;
 use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,11 @@ pub(crate) struct Bus {
     #[serde(skip)]
     bios: Box<[u8]>,
     pub(crate) cartridge: Cartridge,
+    /// Cheats' changes to what cartridge reads return, by offset into the
+    /// 32 MiB window, so they cover every mirror. Like the ROM, never saved
+    /// in states.
+    #[serde(skip)]
+    rom_patches: Box<[RomPatch]>,
     ewram: Box<[u8]>,
     iwram: Box<[u8]>,
     pub(crate) ppu: Ppu,
@@ -89,6 +95,7 @@ impl Bus {
         let mut bus = Self {
             bios,
             cartridge,
+            rom_patches: Box::default(),
             ewram: vec![0; 0x4_0000].into_boxed_slice(),
             iwram: vec![0; 0x8000].into_boxed_slice(),
             ppu: Ppu::new(),
@@ -120,20 +127,53 @@ impl Bus {
         bus
     }
 
-    /// A freshly powered-on bus for a console reset, taking the BIOS and
-    /// the cartridge (save memory and clock included) from `other`.
+    /// A freshly powered-on bus for a console reset, taking the BIOS, the
+    /// cartridge (save memory and clock included) and the ROM patches from
+    /// `other`.
     pub(crate) fn reset_from(other: &mut Self) -> Self {
         let mut cartridge = std::mem::take(&mut other.cartridge);
         cartridge.restart_cycles(other.cycles);
-        Self::new(cartridge, std::mem::take(&mut other.bios))
+        let mut bus = Self::new(cartridge, std::mem::take(&mut other.bios));
+        bus.rom_patches = std::mem::take(&mut other.rom_patches);
+        bus
     }
 
-    /// Moves the ROM and BIOS out of `other`, which is about to be replaced
-    /// by a loaded save state.
+    /// Moves the ROM, its patches and the BIOS out of `other`, which is
+    /// about to be replaced by a loaded save state.
     pub(crate) fn take_media_from(&mut self, other: &mut Self) {
         self.cartridge.take_rom_from(&mut other.cartridge);
+        self.rom_patches = std::mem::take(&mut other.rom_patches);
         self.bios = std::mem::take(&mut other.bios);
         self.waits = WaitStates::new(self.waitcnt);
+    }
+
+    /// Replaces the ROM patches. Patches outside the cartridge's ROM window
+    /// (0x08000000-0x0DFFFFFF) are dropped; the rest apply at their offset
+    /// in all three wait-state mirrors.
+    pub(crate) fn set_rom_patches(&mut self, patches: &[RomPatch]) {
+        self.rom_patches = patches
+            .iter()
+            .filter(|patch| (0x0800_0000..0x0E00_0000).contains(&patch.address))
+            .map(|patch| RomPatch {
+                address: patch.address & 0x01FF_FFFF,
+                ..*patch
+            })
+            .collect();
+    }
+
+    /// `value`, read from the cartridge at `address`, as the ROM patches
+    /// change it. Cheat devices watched the cartridge bus, so they patch
+    /// whatever answers there.
+    fn patch_rom_16(&self, address: u32, value: u16) -> u16 {
+        if self.rom_patches.is_empty() {
+            return value;
+        }
+        let offset = address & 0x01FF_FFFE;
+        let [low, high] = value.to_le_bytes();
+        u16::from_le_bytes([
+            RomPatch::apply(&self.rom_patches, offset, low),
+            RomPatch::apply(&self.rom_patches, offset | 1, high),
+        ])
     }
 
     pub(crate) const fn cycles(&self) -> u64 {
@@ -424,7 +464,10 @@ impl Bus {
             0x05 => self.ppu.read_palette(address),
             0x06 => self.ppu.read_vram(address),
             0x07 => self.ppu.read_oam(address),
-            0x08..=0x0D => self.cartridge.read_16(address),
+            0x08..=0x0D => {
+                let value = self.cartridge.read_16(address);
+                self.patch_rom_16(address, value)
+            }
             // An 8-bit bus: the byte repeats across the halfword.
             0x0E | 0x0F => u16::from(self.cartridge.read_backup(address)) * 0x0101,
             _ => self.open_bus_16(address),
@@ -690,5 +733,40 @@ mod tests {
         assert_eq!(bus.read_8(0x0E00_0002, Access::NONSEQUENTIAL), 0xBB);
         assert_eq!(bus.read_8(0x0E00_0003, Access::NONSEQUENTIAL), 0xFF);
         assert_eq!(bus.read_32(0x0E00_0002, Access::NONSEQUENTIAL), 0xBBBB_BBBB);
+    }
+
+    #[test]
+    fn rom_patches_cover_every_mirror_and_width() {
+        let rom: Vec<u8> = (0..0x400).map(|index| index as u8).collect();
+        let mut bus = Bus::new(Cartridge::new(rom.into(), None, 0), Box::default());
+        let patch = |address, value| RomPatch {
+            address,
+            value,
+            compare: None,
+        };
+        bus.set_rom_patches(&[
+            patch(0x0800_0100, 0xCD),
+            patch(0x0800_0101, 0xAB),
+            // Not the cartridge's ROM: dropped.
+            patch(0x0200_0000, 0x11),
+        ]);
+        assert_eq!(bus.rom_patches.len(), 2);
+        for mirror in [0x0800_0100, 0x0A00_0100, 0x0C00_0100] {
+            assert_eq!(bus.read_16(mirror, Access::NONSEQUENTIAL), 0xABCD);
+        }
+        assert_eq!(bus.read_8(0x0800_0101, Access::NONSEQUENTIAL), 0xAB);
+        assert_eq!(bus.read_32(0x0800_0100, Access::NONSEQUENTIAL), 0x0302_ABCD);
+        assert_eq!(bus.read_16(0x0800_0102, Access::NONSEQUENTIAL), 0x0302);
+
+        // States leave them out, but resets and loaded states keep them;
+        // an empty list removes them.
+        let mut bus = Bus::reset_from(&mut bus);
+        let state = postcard::to_stdvec(&bus).expect("serializes");
+        let mut loaded: Bus = postcard::from_bytes(&state).expect("deserializes");
+        assert!(loaded.rom_patches.is_empty());
+        loaded.take_media_from(&mut bus);
+        assert_eq!(loaded.read_16(0x0800_0100, Access::NONSEQUENTIAL), 0xABCD);
+        loaded.set_rom_patches(&[]);
+        assert_eq!(loaded.read_16(0x0800_0100, Access::NONSEQUENTIAL), 0x0100);
     }
 }

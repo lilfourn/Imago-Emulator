@@ -22,7 +22,7 @@ mod serial;
 mod timer;
 
 use emu_core::{
-    Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
+    Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
     StateError, StereoSample, System, SystemFileKind,
 };
 use serde::{Deserialize, Serialize};
@@ -273,6 +273,13 @@ impl Core for Gb {
         self.machine.bus.poke_ram_bank(bank, address, value)
     }
 
+    /// Patches apply at 0x0000–0x7FFF, in every bank; others are dropped.
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+        if player == 0 {
+            self.machine.bus.cartridge.set_rom_patches(patches);
+        }
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         match region {
             MemoryRegion::MainRam => None,
@@ -344,6 +351,36 @@ mod tests {
         assert!(gb.poke_bank(0, 5, 0xC000, 0x11));
         assert_eq!(Core::peek(&gb, 0, 0xC000), Some(0x11));
         assert!(!gb.poke_bank(0, 1, 0x8000, 0x11));
+    }
+
+    #[test]
+    fn rom_patches_change_reads_and_outlast_states_and_resets() {
+        // LD A,(0x0150); LD (0xC000),A; JR -2
+        let rom = rom_with_program(&[0xFA, 0x50, 0x01, 0xEA, 0x00, 0xC0, 0x18, 0xFE]);
+        let mut gb = Gb::new(&Media::new(&rom)).expect("valid rom");
+        let mut unpatched = Vec::new();
+        gb.save_state(&mut unpatched);
+        gb.set_rom_patches(
+            0,
+            &[RomPatch {
+                address: 0x0150,
+                value: 0x99,
+                compare: None,
+            }],
+        );
+        let mut patched = Vec::new();
+        gb.save_state(&mut patched);
+        assert_eq!(patched, unpatched, "patches are not machine state");
+        gb.step();
+        gb.step();
+        assert_eq!(Core::peek(&gb, 0, 0xC000), Some(0x99));
+
+        gb.load_state(&unpatched).expect("own state loads");
+        assert_eq!(gb.peek(0x0150), 0x99);
+        gb.reset();
+        assert_eq!(gb.peek(0x0150), 0x99);
+        gb.set_rom_patches(0, &[]);
+        assert_eq!(gb.peek(0x0150), 0);
     }
 
     #[test]

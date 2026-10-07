@@ -2,7 +2,7 @@
 //! real-time clock (Pan Docs, "The Cartridge Header", "MBC1", "MBC3",
 //! "MBC5").
 
-use emu_core::{LoadError, System};
+use emu_core::{LoadError, RomPatch, System};
 use serde::{Deserialize, Serialize};
 
 /// Clock cycles per second, for the MBC3 real-time clock.
@@ -14,6 +14,10 @@ pub(crate) struct Cartridge {
     /// ROM file, never saved in states.
     #[serde(skip)]
     rom: Box<[u8]>,
+    /// Cheats' changes to what ROM reads return, at 0x0000–0x7FFF in any
+    /// bank. Like the ROM, never saved in states.
+    #[serde(skip)]
+    rom_patches: Box<[RomPatch]>,
     ram: Box<[u8]>,
     mbc: Mbc,
     has_battery: bool,
@@ -126,6 +130,7 @@ impl Cartridge {
         };
         let mut cartridge = Self {
             rom: padded.into_boxed_slice(),
+            rom_patches: Box::default(),
             ram: vec![0; ram_size].into_boxed_slice(),
             mbc,
             has_battery,
@@ -168,10 +173,21 @@ impl Cartridge {
         }
     }
 
-    /// Moves the ROM out of `other` into `self`; used after loading a save
-    /// state, which does not contain the ROM.
+    /// Moves the ROM and its patches out of `other` into `self`; used after
+    /// loading a save state, which contains neither.
     pub(crate) fn take_rom_from(&mut self, other: &mut Self) {
         self.rom = std::mem::take(&mut other.rom);
+        self.rom_patches = std::mem::take(&mut other.rom_patches);
+    }
+
+    /// Replaces the ROM patches. Patches outside 0x0000–0x7FFF are
+    /// dropped: only ROM reads pass through them.
+    pub(crate) fn set_rom_patches(&mut self, patches: &[RomPatch]) {
+        self.rom_patches = patches
+            .iter()
+            .filter(|patch| patch.address < 0x8000)
+            .copied()
+            .collect();
     }
 
     fn load_backup(&mut self, backup: &[u8], start_time: i64) {
@@ -246,7 +262,12 @@ impl Cartridge {
             (Mbc::Mbc5 { rom_bank, .. }, false) => usize::from(*rom_bank),
             (Mbc::Mbc2 { .. } | Mbc::Mbc3 { .. } | Mbc::Mbc5 { .. }, true) => 0,
         };
-        self.rom_byte(bank, address)
+        let byte = self.rom_byte(bank, address);
+        if self.rom_patches.is_empty() {
+            byte
+        } else {
+            RomPatch::apply(&self.rom_patches, u32::from(address), byte)
+        }
     }
 
     /// A write to 0x0000–0x7FFF: a bank controller register.
@@ -619,6 +640,44 @@ mod tests {
         assert_eq!(cart.read_rom(0x0000), 0);
         cart.write_rom(0x6000, 1);
         assert_eq!(cart.read_rom(0x0000), 0x40);
+    }
+
+    #[test]
+    fn rom_patches_apply_in_any_bank_their_compare_byte_matches() {
+        let mut cart = Cartridge::new(&rom(0x01, 0, 4), None, 0).expect("valid");
+        cart.set_rom_patches(&[
+            // Bank 2 only: each bank's first byte is its number.
+            RomPatch {
+                address: 0x4000,
+                value: 0x77,
+                compare: Some(2),
+            },
+            RomPatch {
+                address: 0x0001,
+                value: 0x55,
+                compare: None,
+            },
+            // Not ROM: dropped.
+            RomPatch {
+                address: 0xC000,
+                value: 0x66,
+                compare: None,
+            },
+        ]);
+        assert_eq!(cart.rom_patches.len(), 2);
+        assert_eq!(cart.read_rom(0x4000), 1);
+        assert_eq!(cart.read_rom(0x0001), 0x55);
+        cart.write_rom(0x2000, 2);
+        assert_eq!(cart.read_rom(0x4000), 0x77);
+        cart.write_rom(0x2000, 3);
+        assert_eq!(cart.read_rom(0x4000), 3);
+
+        // A loaded state's cartridge takes the patches along with the ROM.
+        let mut restored = Cartridge::default();
+        restored.take_rom_from(&mut cart);
+        assert_eq!(restored.read_rom(0x0001), 0x55);
+        restored.set_rom_patches(&[]);
+        assert_eq!(restored.read_rom(0x0001), 0);
     }
 
     #[test]

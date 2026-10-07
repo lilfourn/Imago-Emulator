@@ -9,7 +9,7 @@
 //! `docs/decisions/0004-linked-cores.md`.
 
 use emu_core::{
-    Core, CoreInfo, Frame, Input, LoadError, Media, MemoryRegion, ScreenSize, StateError,
+    Core, CoreInfo, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize, StateError,
     StereoSample,
 };
 
@@ -199,6 +199,12 @@ impl Core for Linked {
             .is_some_and(|gba| gba.poke(0, address, value))
     }
 
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+        if let Some(gba) = self.players.get_mut(player) {
+            gba.set_rom_patches(0, patches);
+        }
+    }
+
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         self.players[0].memory(region)
     }
@@ -294,5 +300,22 @@ mod tests {
                 "{length}"
             );
         }
+    }
+
+    #[test]
+    fn rom_patches_reach_one_player_and_outlast_linked_states() {
+        let mut linked = linked();
+        let mut state = Vec::new();
+        linked.save_state(&mut state);
+        let patch = RomPatch {
+            address: 0x0800_0000,
+            value: 0x55,
+            compare: None,
+        };
+        linked.set_rom_patches(1, &[patch]);
+        linked.load_state(&state).expect("own state");
+        let [first, second] = &mut linked.players;
+        assert_eq!(read(first, 0x0800_0000), 0xFFFE);
+        assert_eq!(read(second, 0x0800_0000), 0xFF55);
     }
 }
