@@ -143,6 +143,20 @@ impl Test {
     }
 }
 
+/// Patches the little-endian halfword at ROM `address` (GBA codes).
+pub(crate) fn patch_rom_half(address: u32, value: u16) -> Op {
+    let [low, high] = value.to_le_bytes();
+    let byte = |address, value| RomPatch {
+        address,
+        value,
+        compare: None,
+    };
+    Op::PatchRom(vec![
+        byte(address, low),
+        byte(address.wrapping_add(1), high),
+    ])
+}
+
 /// Runs `ops` in order against `memory`.
 pub(crate) fn run(ops: &[Op], memory: &mut (impl Memory + ?Sized)) {
     let mut next = 0;

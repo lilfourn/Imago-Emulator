@@ -146,6 +146,48 @@ fn encrypted_pro_action_replay_codes_are_detected() {
 }
 
 #[test]
+fn gba_rom_patches_count_as_codes_and_patch_halfwords() {
+    let patch = [
+        RomPatch {
+            address: 0x0800_2468,
+            value: 0x78,
+            compare: None,
+        },
+        RomPatch {
+            address: 0x0800_2469,
+            value: 0x56,
+            compare: None,
+        },
+    ];
+    // GameShark Advance: if [02000000] = 1, run the next code (the ROM
+    // patch); then write.
+    let cipher = Cipher::GAMESHARK_ADVANCE;
+    let text = format!(
+        "[Patch]\n{}{}{}",
+        line(cipher.encrypt(0xD200_0000_0000_0001)),
+        line(cipher.encrypt(0x6000_1234_0000_5678)),
+        line(cipher.encrypt(0x1200_0010_0000_270F)),
+    );
+    assert_eq!(devices(System::Gba, &text), [Device::GameSharkAdvance]);
+    let cheats = parse(System::Gba, &text).expect("valid");
+    let mut memory = TestMemory::default();
+    apply(&cheats, &mut memory);
+    // The failed condition skipped the patch's code, not the write.
+    assert_eq!(memory.half(0x0200_0010), 0x270F);
+    // Conditions don't gate ROM patches.
+    assert_eq!(rom_patches(&cheats), patch);
+    assert_eq!(RomPatch::apply(&patch, 0x0800_2468, 0x00), 0x78);
+
+    // Pro Action Replay v3: the value is on the second line.
+    let text = "[Patch]\n00000000 18001234\n00005678 00000000\n";
+    assert_eq!(devices(System::Gba, text), [Device::ProActionReplayRaw]);
+    let cheats = parse(System::Gba, text).expect("valid");
+    assert_eq!(rom_patches(&cheats), patch);
+    let off = parse(System::Gba, &text.replace("[Patch]", "[Patch] off")).expect("valid");
+    assert!(rom_patches(&off).is_empty());
+}
+
+#[test]
 fn unencrypted_codes_are_detected_and_tags_override() {
     assert_eq!(
         devices(

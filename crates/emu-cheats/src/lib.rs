@@ -43,9 +43,8 @@
 //! the devices: a CodeBreaker `9` code or a `DEADFACE` seed change applies
 //! to every code after it in the file. Game IDs, hooks and master codes
 //! are ignored, since the emulator applies cheats once per frame itself.
-//! What each format leaves out is in its module: GBA ROM patches, the
-//! devices' own buttons, GBA I/O writes, and Action Replay DS types
-//! `C4`–`C6`.
+//! What each format leaves out is in its module: the devices' own
+//! buttons, GBA I/O writes, and Action Replay DS types `C4`–`C6`.
 
 mod ards;
 mod cht;
