@@ -8,7 +8,10 @@
 mod apu;
 mod bios;
 mod bus;
+mod debug;
 mod dma;
+mod graphics;
+mod io_names;
 mod link;
 mod ppu;
 mod sio;
@@ -16,9 +19,10 @@ mod timer;
 mod timing;
 
 use emu_arm::{Access, Cpu, Mode, Registers};
+use emu_core::debug::{RunOutcome, Stop};
 use emu_core::{
-    Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
-    StateError, StereoSample, System, SystemFileKind,
+    Core, CoreInfo, Debugger, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, RomPatch,
+    ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge;
 use serde::{Deserialize, Serialize};
@@ -135,25 +139,63 @@ impl Gba {
 
     /// Runs one instruction (or one stretch of HALT, or one HLE BIOS call).
     pub fn step(&mut self) {
+        self.step_with(|cpu, bus| cpu.step(bus));
+    }
+
+    /// One step, as [`Gba::step`], with `execute` running the CPU's
+    /// instruction if that is what the step does. Returns whether the CPU
+    /// ran something (an instruction or an HLE BIOS call) rather than
+    /// waiting for DMA or an interrupt.
+    fn step_with(&mut self, execute: impl FnOnce(&mut Cpu, &mut Bus)) -> bool {
         let Machine { cpu, bus } = &mut self.machine;
-        if bus.run_pending_dma() {
+        let ran = if bus.run_pending_dma() {
             // The CPU waited for the transfer.
+            false
         } else if !bus.wake_if_requested() {
             bus.idle_to_next_event();
+            false
         } else if self.hle_bios
             && cpu.reg(15) == bios::SWI_ENTERED_PC
             && !cpu.thumb()
             && cpu.mode() == Mode::Supervisor
         {
             bios::call(cpu, bus);
+            true
         } else {
             cpu.set_irq_line(bus.irq_line());
-            cpu.step(bus);
-        }
+            execute(cpu, bus);
+            true
+        };
         if self.machine.bus.ppu.take_frame_ready() {
             self.present();
             self.frames += 1;
         }
+        ran
+    }
+
+    /// Runs `step` until a frame finishes or a step stops, for
+    /// [`Core::run_frame`] and [`Debugger::run_until`]. A frame ends at
+    /// VBlank; with the display off, after a frame's time.
+    fn run(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        mut step: impl FnMut(&mut Self) -> Option<Stop>,
+    ) -> RunOutcome {
+        self.set_input(&inputs.first().copied().unwrap_or_default());
+        let start = self.cycles();
+        let frame = self.frames;
+        let frame_done =
+            |gba: &Self| gba.frames != frame || gba.cycles() - start >= CYCLES_PER_FRAME;
+        let mut stop = None;
+        while stop.is_none() && !frame_done(self) {
+            stop = step(self);
+        }
+        let frame_done = frame_done(self);
+        if frame_done {
+            self.machine.bus.apu.drain_samples(audio);
+        }
+        RunOutcome { frame_done, stop }
     }
 
     /// The CPU, for test harnesses and debuggers.
@@ -187,14 +229,10 @@ impl Core for Gba {
     }
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
-        self.set_input(&inputs.first().copied().unwrap_or_default());
-        let start = self.cycles();
-        let frame = self.frames;
-        // A frame ends at VBlank; with the display off, after a frame's time.
-        while self.frames == frame && self.cycles() - start < CYCLES_PER_FRAME {
-            self.step();
-        }
-        self.machine.bus.apu.drain_samples(audio);
+        self.run(inputs, audio, |gba| {
+            gba.step();
+            None
+        });
     }
 
     fn screens(&self) -> &[Frame] {
@@ -266,6 +304,10 @@ impl Core for Gba {
             MemoryRegion::MainRam => None,
             MemoryRegion::VideoRam => Some(self.machine.bus.ppu.vram()),
         }
+    }
+
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        Some(self)
     }
 }
 

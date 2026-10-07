@@ -104,6 +104,14 @@ impl Ppu {
         &self.vram
     }
 
+    /// The register halfword at `offset` (0x00–0x56) as last written,
+    /// write-only registers such as the scroll offsets included, without
+    /// side effects. The renderer reads them this way; so do the debugger's
+    /// graphics viewers.
+    pub(crate) fn raw_register(&self, offset: usize) -> u16 {
+        self.register16(offset)
+    }
+
     /// HBlank begins on the current line. Returns interrupt requests.
     pub(crate) fn start_hblank(&mut self) -> (u16, Signals) {
         self.in_hblank = true;

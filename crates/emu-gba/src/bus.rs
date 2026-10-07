@@ -585,6 +585,75 @@ impl Bus {
         true
     }
 
+    /// The byte at `address` as the CPU reads it, without side effects or
+    /// time passing, for debuggers: the BIOS (readable here even while
+    /// code runs elsewhere), RAM, I/O registers (reads of which change
+    /// nothing on the GBA), palette RAM, VRAM, OAM, the ROM with its
+    /// patches, and SRAM or Flash. `None` for the EEPROM and unmapped
+    /// space.
+    pub(crate) fn peek(&self, address: u32) -> Option<u8> {
+        let byte = |half: u16| (half >> ((address & 1) * 8)) as u8;
+        Some(match address >> 24 {
+            0x00 if address < 0x4000 => self.bios[address as usize],
+            0x02 | 0x03 => return self.peek_ram(address),
+            0x04 if address & 0x00FF_FFFF < 0x400 => byte(self.read_io_16(address)),
+            0x05 => byte(self.ppu.read_palette(address)),
+            0x06 => byte(self.ppu.read_vram(address)),
+            0x07 => byte(self.ppu.read_oam(address)),
+            0x08..=0x0D if !self.cartridge.eeprom_at(address) => {
+                let offset = (address & 0x01FF_FFFE) as usize;
+                let rom = self.cartridge.rom();
+                // Past the end, the cartridge bus returns the address.
+                let value = rom
+                    .get(offset..offset + 2)
+                    .map_or((address >> 1) as u16, |bytes| {
+                        u16::from_le_bytes([bytes[0], bytes[1]])
+                    });
+                byte(self.patch_rom_16(address, value))
+            }
+            0x0E | 0x0F => self.cartridge.read_backup(address),
+            _ => return None,
+        })
+    }
+
+    /// Writes the byte at `address` without side effects or time passing,
+    /// for debuggers: EWRAM, IWRAM, palette RAM, VRAM and OAM, a byte at a
+    /// time (unlike CPU byte stores to video memory). Returns whether
+    /// `address` is one of those.
+    pub(crate) fn poke_memory(&mut self, address: u32, value: u8) -> bool {
+        let merge = |half: u16| {
+            let shift = (address & 1) * 8;
+            (half & !(0xFF << shift)) | u16::from(value) << shift
+        };
+        match address >> 24 {
+            0x02 | 0x03 => return self.poke_ram(address, value),
+            0x05 => {
+                let half = merge(self.ppu.read_palette(address));
+                self.ppu.write_palette(address, half);
+            }
+            0x06 => {
+                let half = merge(self.ppu.read_vram(address));
+                self.ppu.write_vram(address, half);
+            }
+            0x07 => {
+                let half = merge(self.ppu.read_oam(address));
+                self.ppu.write_oam(address, half);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The event scheduler, for debuggers.
+    pub(crate) fn scheduler(&self) -> &Scheduler<Event> {
+        &self.scheduler
+    }
+
+    /// Whether the CPU is halted, waiting for an interrupt.
+    pub(crate) fn halted(&self) -> bool {
+        self.halted
+    }
+
     /// Records an instruction fetch's value: the BIOS's last opcode for
     /// read protection, and the bus's open-bus value.
     fn note_fetch(&mut self, value: u32) {

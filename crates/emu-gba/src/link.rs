@@ -8,9 +8,13 @@
 //! the transfer's length in its own time. See
 //! `docs/decisions/0004-linked-cores.md`.
 
+use emu_core::debug::{
+    CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome,
+    ScheduledEvent, Stop, Stops,
+};
 use emu_core::{
-    Core, CoreInfo, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize, StateError,
-    StereoSample,
+    Core, CoreInfo, Debugger, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
+    StateError, StereoSample,
 };
 
 use crate::sio::Outgoing;
@@ -27,6 +31,16 @@ const SCREENS: [ScreenSize; 2] = [ScreenSize::new(240, 160), ScreenSize::new(240
 pub struct Linked {
     players: [Gba; 2],
     screens: [Frame; 2],
+    /// Where a debugger stopped the last run mid-frame, so the next one
+    /// carries on with the same slices.
+    resume: Option<Resume>,
+}
+
+/// A frame's end and the current slice's end, in player 0's clock cycles.
+#[derive(Debug, Clone, Copy)]
+struct Resume {
+    end: u64,
+    target: u64,
 }
 
 impl Linked {
@@ -45,6 +59,7 @@ impl Linked {
         let mut linked = Self {
             players: [Gba::new(first)?, Gba::new(second)?],
             screens: [Frame::new(SCREENS[0]), Frame::new(SCREENS[1])],
+            resume: None,
         };
         linked.plug_in();
         Ok(linked)
@@ -70,6 +85,75 @@ impl Linked {
         for (screen, gba) in self.screens.iter_mut().zip(&self.players) {
             screen.clone_from(&gba.screens[0]);
         }
+    }
+
+    /// Runs both consoles through exactly one frame's time, so every call
+    /// ends at the same point of the video frame, each step by `step`
+    /// (given the console and its player number), until the frame ends or
+    /// a step returns a stop. After a stop the next call carries on where
+    /// this one left off.
+    fn run(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        mut step: impl FnMut(&mut Gba, usize) -> Option<Stop>,
+    ) -> RunOutcome {
+        for (index, gba) in self.players.iter_mut().enumerate() {
+            gba.set_input(&inputs.get(index).copied().unwrap_or_default());
+        }
+        let Resume { end, mut target } = self.resume.take().unwrap_or_else(|| {
+            let now = self.players[0].cycles();
+            let end = now + CYCLES_PER_FRAME;
+            Resume {
+                end,
+                target: (now + SLICE_CYCLES).min(end),
+            }
+        });
+        loop {
+            for index in 0..self.players.len() {
+                while self.players[index].cycles() < target {
+                    let stop = step(&mut self.players[index], index);
+                    if self.players[index].machine.bus.sio.has_outgoing() {
+                        self.service_cable();
+                    }
+                    if stop.is_some() {
+                        self.resume = Some(Resume { end, target });
+                        return RunOutcome {
+                            frame_done: false,
+                            stop,
+                        };
+                    }
+                }
+            }
+            self.service_cable();
+            if self.players[0].cycles() >= end {
+                break;
+            }
+            target = (self.players[0].cycles() + SLICE_CYCLES).min(end);
+        }
+        self.present();
+
+        // Both consoles produce the same number of samples; play them mixed.
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        self.players[0].machine.bus.apu.drain_samples(&mut first);
+        self.players[1].machine.bus.apu.drain_samples(&mut second);
+        let mix = |a: i16, b: i16| ((i32::from(a) + i32::from(b)) / 2) as i16;
+        audio.extend(
+            first
+                .iter()
+                .zip(&second)
+                .map(|(a, b)| [mix(a[0], b[0]), mix(a[1], b[1])]),
+        );
+        RunOutcome {
+            frame_done: true,
+            stop: None,
+        }
+    }
+
+    /// The console CPU `cpu` (also its player number) is in.
+    fn player(&self, cpu: usize) -> &Gba {
+        &self.players[cpu.min(1)]
     }
 }
 
@@ -115,38 +199,10 @@ impl Core for Linked {
     }
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
-        for (index, gba) in self.players.iter_mut().enumerate() {
-            gba.set_input(&inputs.get(index).copied().unwrap_or_default());
-        }
-        // Exactly one frame's time, so every call ends at the same point of
-        // the video frame.
-        let end = self.players[0].cycles() + CYCLES_PER_FRAME;
-        while self.players[0].cycles() < end {
-            let target = (self.players[0].cycles() + SLICE_CYCLES).min(end);
-            for index in 0..self.players.len() {
-                while self.players[index].cycles() < target {
-                    self.players[index].step();
-                    if self.players[index].machine.bus.sio.has_outgoing() {
-                        self.service_cable();
-                    }
-                }
-            }
-            self.service_cable();
-        }
-        self.present();
-
-        // Both consoles produce the same number of samples; play them mixed.
-        let mut first = Vec::new();
-        let mut second = Vec::new();
-        self.players[0].machine.bus.apu.drain_samples(&mut first);
-        self.players[1].machine.bus.apu.drain_samples(&mut second);
-        let mix = |a: i16, b: i16| ((i32::from(a) + i32::from(b)) / 2) as i16;
-        audio.extend(
-            first
-                .iter()
-                .zip(&second)
-                .map(|(a, b)| [mix(a[0], b[0]), mix(a[1], b[1])]),
-        );
+        self.run(inputs, audio, |gba, _| {
+            gba.step();
+            None
+        });
     }
 
     fn screens(&self) -> &[Frame] {
@@ -154,6 +210,7 @@ impl Core for Linked {
     }
 
     fn reset(&mut self) {
+        self.resume = None;
         for gba in &mut self.players {
             gba.reset();
         }
@@ -174,6 +231,7 @@ impl Core for Linked {
             gba.machine = machine;
             gba.present();
         }
+        self.resume = None;
         self.present();
         Ok(())
     }
@@ -214,6 +272,67 @@ impl Core for Linked {
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         self.players[0].memory(region)
     }
+
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        Some(self)
+    }
+}
+
+/// CPU `i` is player `i`'s; each is debugged as a lone console's.
+impl Debugger for Linked {
+    fn cpus(&self) -> Vec<CpuInfo> {
+        (0..self.players.len())
+            .map(|player| CpuInfo {
+                name: "ARM7TDMI",
+                player,
+            })
+            .collect()
+    }
+
+    fn registers(&self, cpu: usize) -> Vec<Register> {
+        self.player(cpu).registers(0)
+    }
+
+    fn status(&self, cpu: usize) -> String {
+        self.player(cpu).status(0)
+    }
+
+    fn pc(&self, cpu: usize) -> u32 {
+        self.player(cpu).pc(0)
+    }
+
+    fn read(&self, cpu: usize, address: u32) -> Option<u8> {
+        self.player(cpu).read(0, address)
+    }
+
+    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool {
+        Debugger::write(&mut self.players[cpu.min(1)], 0, address, value)
+    }
+
+    fn disassemble(&self, cpu: usize, address: u32) -> Instruction {
+        self.player(cpu).disassemble(0, address)
+    }
+
+    fn io_registers(&self, cpu: usize) -> Vec<IoRegister> {
+        self.player(cpu).io_registers(0)
+    }
+
+    fn events(&self, cpu: usize) -> Vec<ScheduledEvent> {
+        self.player(cpu).events(0)
+    }
+
+    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics> {
+        self.player(cpu).graphics(0, request)
+    }
+
+    fn run_until(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        stops: &Stops,
+    ) -> RunOutcome {
+        self.run(inputs, audio, |gba, cpu| gba.step_checked(cpu, stops))
+    }
 }
 
 #[cfg(test)]
@@ -243,6 +362,34 @@ mod tests {
     fn linked() -> Linked {
         let rom = rom();
         Linked::new(&[Media::new(&rom), Media::new(&rom)]).expect("valid roms")
+    }
+
+    #[test]
+    fn a_breakpoint_stops_one_player_and_the_frame_resumes_in_step() {
+        use emu_core::debug::{Breakpoint, StopReason};
+
+        let (mut plain, mut debugged) = (linked(), linked());
+        let stops = Stops {
+            breakpoints: vec![Breakpoint {
+                cpu: 1,
+                address: 0x0800_0000,
+            }],
+            ..Stops::default()
+        };
+        let outcome = debugged.run_until(&[], &mut Vec::new(), &stops);
+        let stop = Stop {
+            cpu: 1,
+            reason: StopReason::Breakpoint,
+        };
+        assert_eq!(outcome.stop, Some(stop));
+        assert!(debugged.players[0].cycles() > 0, "player 0 ran its slice");
+        // Without stops the rest of the frame runs on the same slices.
+        debugged.run_frame(&[], &mut Vec::new());
+        plain.run_frame(&[], &mut Vec::new());
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        plain.save_state(&mut a);
+        debugged.save_state(&mut b);
+        assert!(a == b, "the stop changed the emulation");
     }
 
     #[test]
