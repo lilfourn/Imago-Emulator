@@ -445,7 +445,8 @@ impl Hardware {
             }
             0x1C0 => self.spi.write_control(value),
             0x1C2 => {
-                if let Some(cycles) = self.spi.write_data(value as u8) {
+                let now = self.now(Side::Arm7);
+                if let Some(cycles) = self.spi.write_data(value as u8, now) {
                     self.schedule_after(Side::Arm7, cycles, Event::SpiDone);
                 }
             }

@@ -840,6 +840,7 @@ mod tests {
     const TAP: Input = Input {
         buttons: Buttons::NONE,
         touch: Some(TouchPoint { x: 10, y: 20 }),
+        microphone: 0,
     };
 
     #[test]
@@ -847,7 +848,7 @@ mod tests {
         let (emulator, seen) = start_recorder();
         let a = Input {
             buttons: [Button::A].into_iter().collect(),
-            touch: None,
+            ..Input::default()
         };
         // Nothing runs while paused, so every press and release below
         // arrives between the same two frames, as a trackpad's tap can.
@@ -1002,7 +1003,7 @@ mod tests {
             player: 0,
             input: Input {
                 buttons: [Button::A].into_iter().collect(),
-                touch: None,
+                ..Input::default()
             },
         });
         thread::sleep(Duration::from_millis(50));

@@ -389,6 +389,7 @@ impl EmulatorView {
             input: Input {
                 buttons: self.sent.buttons,
                 touch: self.sent_touch,
+                microphone: if self.sent.blow { Input::LOUDEST } else { 0 },
             },
         });
     }
@@ -421,8 +422,12 @@ impl EmulatorView {
             Some(point) => Some(point),
             None => self.cursor_touch(state.touch),
         };
-        if state.buttons != self.sent.buttons || touch != self.sent_touch {
+        if state.buttons != self.sent.buttons
+            || touch != self.sent_touch
+            || state.blow != self.sent.blow
+        {
             self.sent.buttons = state.buttons;
+            self.sent.blow = state.blow;
             self.sent_touch = touch;
             self.send_input();
         }

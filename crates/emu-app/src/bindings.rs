@@ -1,6 +1,6 @@
 //! Bindings for held inputs: emulated buttons, fast-forward, slow motion,
-//! rewind and touching the screen at the gamepad cursor, from the keyboard
-//! or gamepads.
+//! rewind, touching the screen at the gamepad cursor and blowing into the
+//! DS microphone, from the keyboard or gamepads.
 //!
 //! One-shot commands (Open, Pause, Save State, ...) are GPUI actions bound
 //! to menu shortcuts in `app.rs`. This module covers only inputs that are
@@ -47,6 +47,8 @@ pub enum Held {
     Rewind,
     /// Touches the touchscreen at the gamepad cursor while held.
     Touch,
+    /// Blows into the microphone while held (DS).
+    Blow,
 }
 
 impl fmt::Display for Held {
@@ -57,6 +59,7 @@ impl fmt::Display for Held {
             Self::SlowMotion => f.write_str("slow_motion"),
             Self::Rewind => f.write_str("rewind"),
             Self::Touch => f.write_str("touch"),
+            Self::Blow => f.write_str("blow"),
         }
     }
 }
@@ -70,6 +73,7 @@ impl FromStr for Held {
             "slow_motion" => Ok(Self::SlowMotion),
             "rewind" => Ok(Self::Rewind),
             "touch" => Ok(Self::Touch),
+            "blow" => Ok(Self::Blow),
             _ => s
                 .parse()
                 .map(Self::Button)
@@ -93,8 +97,8 @@ pub struct Bindings {
 /// Laid out for playing on a keyboard: the left hand on WASD and the
 /// shoulders either side of it, the right hand on a square of four keys in
 /// the DS face-button positions (Y and X on top, B and A below). The arrow
-/// keys steer too.
-const KEY_DEFAULTS: [(Held, &str); 19] = [
+/// keys steer too, and B, for blow, blows into the microphone.
+const KEY_DEFAULTS: [(Held, &str); 20] = [
     (Held::Button(Button::Up), "w"),
     (Held::Button(Button::Left), "a"),
     (Held::Button(Button::Down), "s"),
@@ -114,6 +118,7 @@ const KEY_DEFAULTS: [(Held, &str); 19] = [
     (Held::FastForward, "tab"),
     (Held::SlowMotion, "1"),
     (Held::Rewind, "r"),
+    (Held::Blow, "b"),
 ];
 
 /// Nintendo layout by position: A is the right face button, B the bottom.
@@ -276,7 +281,7 @@ pub enum BindingsError {
     #[error("invalid bindings file: {0}")]
     Syntax(String),
     /// An action name is not a button, `fast_forward`, `slow_motion`,
-    /// `rewind` or `touch`.
+    /// `rewind`, `touch` or `blow`.
     #[error("unknown action {0:?} in bindings")]
     UnknownAction(String),
     /// One input is bound to two different actions.
@@ -337,6 +342,18 @@ mod tests {
         assert_eq!(key("e"), Some(Held::Button(Button::R)));
         assert_eq!(key("tab"), Some(Held::FastForward));
         assert_eq!(key("r"), Some(Held::Rewind));
+        assert_eq!(key("b"), Some(Held::Blow));
+    }
+
+    #[test]
+    fn blowing_can_be_bound_to_a_gamepad() {
+        let bindings = Bindings::from_toml("[gamepad]\nblow = [\"Mode\"]\n").expect("valid file");
+        assert_eq!(bindings.pad_action("any", "Mode"), Some(Held::Blow));
+        assert_eq!(
+            bindings.key_action("b"),
+            Some(Held::Blow),
+            "keys keep theirs"
+        );
     }
 
     #[test]

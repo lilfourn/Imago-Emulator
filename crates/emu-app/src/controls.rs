@@ -23,6 +23,8 @@ pub struct HeldState {
     pub rewind: bool,
     /// Touch the screen at the gamepad cursor.
     pub touch: bool,
+    /// Blow into the microphone.
+    pub blow: bool,
 }
 
 /// Held inputs by source.
@@ -78,6 +80,7 @@ impl Controls {
                 Held::SlowMotion => slow_motion = true,
                 Held::Rewind => state.rewind = true,
                 Held::Touch => state.touch = true,
+                Held::Blow => state.blow = true,
             }
         }
         state.pace = if fast_forward {
@@ -128,6 +131,15 @@ mod tests {
         controls.set("pad:1:RightThumb".to_owned(), None, false);
         let state = controls.state();
         assert!(!state.touch && state.buttons.contains(Button::A));
+    }
+
+    #[test]
+    fn blowing_is_held_like_a_button() {
+        let mut controls = Controls::default();
+        controls.set("key:b".to_owned(), Some(Held::Blow), true);
+        assert!(controls.state().blow);
+        controls.release_all();
+        assert!(!controls.state().blow);
     }
 
     #[test]

@@ -143,6 +143,7 @@ impl Nds {
             .touch
             .map(|point| (point.x.min(255) as u8, point.y.min(191) as u8));
         hw.spi.set_touch(touch);
+        hw.spi.set_microphone(input.microphone);
         if hw.spi.pen_down() {
             ext_keys &= !(1 << 6);
         }
@@ -435,6 +436,41 @@ mod tests {
         let mut rom = rom();
         rom[0x2C..0x30].copy_from_slice(&0x1000u32.to_le_bytes());
         assert!(Nds::new(&Media::new(&rom)).is_err());
+    }
+
+    #[test]
+    fn the_frame_s_microphone_reaches_the_touchscreen_controller() {
+        let rom = rom();
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        // libnds's micReadData12 through SPICNT and SPIDATA: control byte
+        // 0xE4 with chip select held, then two reads.
+        let read_microphone = |nds: &mut Nds| {
+            let hw = &mut nds.machine.hw;
+            hw.arm7_write_16(0x0400_01C0, 0x8A01);
+            hw.arm7_write_16(0x0400_01C2, 0xE4);
+            hw.arm7_write_16(0x0400_01C2, 0);
+            let high = hw.arm7_read_16(0x0400_01C2);
+            hw.arm7_write_16(0x0400_01C0, 0x8201);
+            hw.arm7_write_16(0x0400_01C2, 0);
+            let low = hw.arm7_read_16(0x0400_01C2);
+            (high & 0x7F) << 5 | low >> 3
+        };
+        nds.run_frame(&[Input::default()], &mut Vec::new());
+        assert_eq!(read_microphone(&mut nds), 0x800, "silence");
+        let blowing = Input {
+            microphone: Input::LOUDEST,
+            ..Input::default()
+        };
+        let readings: Vec<u16> = (0..4)
+            .map(|_| {
+                nds.run_frame(&[blowing], &mut Vec::new());
+                read_microphone(&mut nds)
+            })
+            .collect();
+        assert!(
+            readings.iter().all(|&value| value != 0x800 && value <= 0xFFF),
+            "{readings:X?}"
+        );
     }
 
     #[test]

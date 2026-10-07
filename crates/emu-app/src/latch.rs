@@ -94,7 +94,12 @@ impl Latch {
             None if self.touch_frames > 0 => self.shown.touch,
             None => None,
         };
-        self.shown = Input { buttons, touch };
+        // Blowing reaches the game as it is, without a minimum hold.
+        self.shown = Input {
+            buttons,
+            touch,
+            microphone: self.held.microphone,
+        };
     }
 }
 
@@ -132,6 +137,19 @@ mod tests {
     }
 
     #[test]
+    fn blowing_starts_and_stops_with_the_key() {
+        let mut latch = Latch::default();
+        let blowing = Input {
+            microphone: Input::LOUDEST,
+            ..buttons(&[Button::A])
+        };
+        latch.set(blowing);
+        assert_eq!(latch.input(), blowing);
+        latch.set(buttons(&[Button::A]));
+        assert_eq!(latch.input().microphone, 0);
+    }
+
+    #[test]
     fn a_tap_inside_one_frame_touches_for_touch_frames() {
         let mut latch = Latch::default();
         latch.set(touch(POINT));
@@ -165,6 +183,7 @@ mod tests {
         latch.set(Input {
             buttons: [Button::Up].into_iter().collect(),
             touch: Some(POINT),
+            ..Input::default()
         });
         run(&mut latch, 10);
         latch.set(Input::default());
@@ -255,6 +274,7 @@ mod tests {
         latch.set(Input {
             buttons: [Button::A].into_iter().collect(),
             touch: Some(POINT),
+            ..Input::default()
         });
         latch.set(touch(POINT));
         let seen = run(&mut latch, 4);
@@ -291,6 +311,7 @@ mod tests {
         latch.set(Input {
             buttons: [Button::Down, Button::A].into_iter().collect(),
             touch: Some(POINT),
+            ..Input::default()
         });
         latch.set(buttons(&[Button::Down]));
         latch.clear();
