@@ -22,6 +22,7 @@ use emu_cheats::Cheat;
 use emu_core::{Cartridge, Core, CoreInfo, Frame, Input, Media, System};
 
 use crate::audio::AudioSink;
+use crate::latch::Latch;
 use crate::persist;
 use crate::rewind::Rewind;
 use crate::speed::{self, Speed};
@@ -202,7 +203,8 @@ fn file_name(path: &Path) -> String {
 /// A request from the UI to the emulation thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Replaces a player's input from the next frame on.
+    /// Replaces a player's input from the next frame on, except that a
+    /// release waits until the game has seen the press (see `latch.rs`).
     SetInput {
         /// Index into the core's players.
         player: usize,
@@ -301,7 +303,7 @@ impl Emulator {
                 .map(|cartridge| loaded.core.backup_generation(cartridge).unwrap_or(0))
                 .collect(),
             loaded,
-            inputs: vec![Input::default(); players],
+            latches: vec![Latch::default(); players],
             cheats: vec![Vec::new(); players],
             watch: None,
             paused: false,
@@ -372,8 +374,9 @@ impl Drop for Emulator {
 /// State owned by the emulation thread.
 struct Runner {
     loaded: Loaded,
-    /// One per player.
-    inputs: Vec<Input>,
+    /// One per player: what they hold, each press kept long enough for
+    /// the game to see it.
+    latches: Vec<Latch>,
     /// One list per player.
     cheats: Vec<Vec<Cheat>>,
     /// Memory the UI is watching.
@@ -393,6 +396,7 @@ struct Runner {
 impl Runner {
     fn run(mut self, commands: &Receiver<Command>) {
         let frame_duration = self.loaded.core.info().frame_rate.frame_duration();
+        let mut inputs = Vec::new();
         let mut audio = Vec::new();
         let mut state = Vec::new();
         let mut deadline = Instant::now();
@@ -421,11 +425,17 @@ impl Runner {
                 if let Some(previous) = self.rewind.pop() {
                     // States in the history came from this core.
                     self.loaded.core.load_state(&previous).ok();
+                    self.clear_latches();
                     self.publish();
                 }
             } else {
                 self.apply_cheats();
-                self.loaded.core.run_frame(&self.inputs, &mut audio);
+                inputs.clear();
+                inputs.extend(self.latches.iter().map(Latch::input));
+                self.loaded.core.run_frame(&inputs, &mut audio);
+                for latch in &mut self.latches {
+                    latch.advance();
+                }
                 // Only normal speed plays sound: rate control absorbs
                 // ±0.5%, not a change of speed.
                 if self.speed == Speed::NORMAL
@@ -462,8 +472,8 @@ impl Runner {
     fn apply(&mut self, command: Command) {
         match command {
             Command::SetInput { player, input } => {
-                if let Some(slot) = self.inputs.get_mut(player) {
-                    *slot = input;
+                if let Some(latch) = self.latches.get_mut(player) {
+                    latch.set(input);
                 }
             }
             Command::SetSpeed(speed) => self.speed = speed,
@@ -475,6 +485,7 @@ impl Runner {
             Command::Reset => {
                 self.loaded.core.reset();
                 self.rewind.clear();
+                self.clear_latches();
                 self.notice("Reset");
             }
             Command::SaveState(slot) => match self.save_state(slot) {
@@ -494,11 +505,21 @@ impl Runner {
             Command::LoadState(slot) => match self.load_state(slot) {
                 Ok(()) => {
                     self.rewind.clear();
+                    self.clear_latches();
                     self.publish();
                     self.notice(format!("Loaded state {slot}"));
                 }
                 Err(error) => self.notice(format!("Could not load state: {error:#}")),
             },
+        }
+    }
+
+    /// Drops releases still waiting out a press's minimum hold: after the
+    /// game jumps to another moment, a press from before would land out of
+    /// place.
+    fn clear_latches(&mut self) {
+        for latch in &mut self.latches {
+            latch.clear();
         }
     }
 
@@ -635,9 +656,13 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use emu_core::{CoreInfo, FrameRate, ScreenSize, StateError, StereoSample, System};
+    use emu_core::{
+        Button, Buttons, CoreInfo, FrameRate, ScreenSize, StateError, StereoSample, System,
+        TouchPoint,
+    };
 
     use super::*;
+    use crate::latch::{BUTTON_FRAMES, TOUCH_FRAMES};
 
     const SCREENS: [ScreenSize; 1] = [ScreenSize::new(1, 1)];
 
@@ -725,6 +750,126 @@ mod tests {
         let mut frames = Vec::new();
         emulator.take_latest(u64::MAX, &mut frames);
         frames[0].pixels()[0]
+    }
+
+    /// Every frame's inputs, one per player, as a core saw them.
+    type Seen = Arc<Mutex<Vec<Vec<Input>>>>;
+
+    /// A two-player core that records every frame's inputs.
+    struct Recorder {
+        seen: Seen,
+        frames: [Frame; 1],
+    }
+
+    impl Core for Recorder {
+        fn info(&self) -> CoreInfo {
+            CoreInfo {
+                system: System::Gba,
+                screens: &SCREENS,
+                touch_screen: None,
+                players: 2,
+                frame_rate: FrameRate::new(1000, 1),
+                audio_sample_rate: 48_000,
+                state_version: 1,
+            }
+        }
+
+        fn run_frame(&mut self, inputs: &[Input], _: &mut Vec<StereoSample>) {
+            self.seen.lock().expect("unpoisoned").push(inputs.to_vec());
+        }
+
+        fn screens(&self) -> &[Frame] {
+            &self.frames
+        }
+
+        fn reset(&mut self) {}
+
+        fn save_state(&self, _: &mut Vec<u8>) {}
+
+        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
+            Ok(())
+        }
+    }
+
+    fn start_recorder() -> (Emulator, Seen) {
+        let seen = Seen::default();
+        let loaded = Loaded {
+            core: Box::new(Recorder {
+                seen: Arc::clone(&seen),
+                frames: [Frame::new(SCREENS[0])],
+            }),
+            rom_paths: vec![PathBuf::from("/nonexistent/recorder.gba")],
+            rom_crc32: 0,
+        };
+        let (events, _) = async_channel::unbounded();
+        (Emulator::start(loaded, events, None), seen)
+    }
+
+    /// Waits for the emulator to run `count` more frames.
+    fn run_frames(seen: &Seen, count: usize) {
+        let target = seen.lock().expect("unpoisoned").len() + count;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.lock().expect("unpoisoned").len() < target {
+            assert!(Instant::now() < deadline, "frames stopped running");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The number of recorded frames in which `player`'s input passed
+    /// `test`.
+    fn frames_where(seen: &Seen, player: usize, test: impl Fn(&Input) -> bool) -> usize {
+        let seen = seen.lock().expect("unpoisoned");
+        seen.iter().filter(|inputs| test(&inputs[player])).count()
+    }
+
+    const TAP: Input = Input {
+        buttons: Buttons::NONE,
+        touch: Some(TouchPoint { x: 10, y: 20 }),
+    };
+
+    #[test]
+    fn a_press_and_release_between_two_frames_still_reaches_the_game() {
+        let (emulator, seen) = start_recorder();
+        let a = Input {
+            buttons: [Button::A].into_iter().collect(),
+            touch: None,
+        };
+        // Nothing runs while paused, so every press and release below
+        // arrives between the same two frames, as a trackpad's tap can.
+        emulator.send(Command::TogglePause);
+        let release = Input::default();
+        for (player, input) in [(0, TAP), (0, release), (1, a), (1, release)] {
+            emulator.send(Command::SetInput { player, input });
+        }
+        emulator.send(Command::TogglePause);
+        run_frames(&seen, 10);
+        let touched = frames_where(&seen, 0, |input| input.touch.is_some());
+        let pressed = frames_where(&seen, 1, |input| input.buttons.contains(Button::A));
+        assert_eq!(
+            (touched, pressed),
+            (usize::from(TOUCH_FRAMES), usize::from(BUTTON_FRAMES))
+        );
+        // Each player saw only their own.
+        assert_eq!(frames_where(&seen, 0, |input| !input.buttons.is_empty()), 0);
+        assert_eq!(frames_where(&seen, 1, |input| input.touch.is_some()), 0);
+    }
+
+    #[test]
+    fn reset_drops_a_release_still_waiting() {
+        let (emulator, seen) = start_recorder();
+        emulator.send(Command::TogglePause);
+        emulator.send(Command::SetInput {
+            player: 0,
+            input: TAP,
+        });
+        emulator.send(Command::SetInput {
+            player: 0,
+            input: Input::default(),
+        });
+        emulator.send(Command::Reset);
+        emulator.send(Command::TogglePause);
+        run_frames(&seen, 10);
+        assert_eq!(frames_where(&seen, 0, |input| input.touch.is_some()), 0);
     }
 
     #[test]

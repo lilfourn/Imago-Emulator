@@ -14,6 +14,7 @@ mod controls;
 mod cursor;
 mod emulator;
 mod gamepad;
+mod latch;
 mod layout;
 mod memory_viewer;
 mod persist;
