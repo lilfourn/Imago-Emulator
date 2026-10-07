@@ -67,8 +67,11 @@ pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
         0x00 => soft_reset(cpu, bus),
         0x01 => register_ram_reset(bus, r0),
         0x02 | 0x03 => bus.halt(),
-        0x04 => return intr_wait(cpu, bus, r0 != 0, r1 as u16),
-        0x05 => return intr_wait(cpu, bus, true, 1),
+        0x04 => {
+            intr_wait(cpu, bus, r0 != 0, r1 as u16);
+            return;
+        }
+        0x05 => return vblank_intr_wait(cpu, bus),
         0x06 => divide(cpu, r0 as i32, r1 as i32),
         0x07 => divide(cpu, r1 as i32, r0 as i32),
         0x08 => cpu.set_reg(0, isqrt(r0)),
@@ -102,7 +105,7 @@ pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
 }
 
 fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
-    bus.abandon_intr_wait();
+    bus.forget_vblank_wait();
     let to_ram = bus.read_8(0x0300_7FFA, Access::NONSEQUENTIAL) != 0;
     for address in (0x0300_7E00..0x0300_8000).step_by(4) {
         bus.write_32(address, 0, Access::NONSEQUENTIAL);
@@ -142,31 +145,47 @@ fn register_ram_reset(bus: &mut Bus, flags: u32) {
 
 /// IntrWait: waits until one of `flags` is set in the BIOS interrupt flags
 /// at 0x03007FF8 (which the game's IRQ handler sets), then clears it.
+/// Returns whether the CPU halted to wait.
 ///
 /// While waiting, the CPU halts and returns to the SWI instruction itself,
-/// so the call runs again after each interrupt. The repeat must not discard
-/// flags the handler just set: R0 is zeroed for IntrWait's sake, and as
-/// VBlankIntrWait ignores R0, the bus also remembers which call halted.
-fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) {
+/// so the call runs again after each interrupt; R0 is zeroed so the repeat
+/// does not discard flags the handler just set.
+fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) -> bool {
     const BIOS_FLAGS: u32 = 0x0300_7FF8;
-    let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
-    let swi = cpu.reg(14).wrapping_sub(if thumb { 2 } else { 4 });
-    let repeat = bus.repeats_intr_wait(swi);
     let mut current = bus.read_16(BIOS_FLAGS, Access::NONSEQUENTIAL);
-    if discard && !repeat {
+    if discard {
         current &= !flags;
         bus.write_16(BIOS_FLAGS, current, Access::NONSEQUENTIAL);
     }
     bus.write_16(0x0400_0208, 1, Access::NONSEQUENTIAL);
-    if current & flags != 0 {
-        bus.write_16(BIOS_FLAGS, current & !flags, Access::NONSEQUENTIAL);
-    } else {
+    let waiting = current & flags == 0;
+    if waiting {
         cpu.set_reg(0, 0);
-        cpu.set_reg(14, swi);
-        bus.halt_in_intr_wait(swi);
+        cpu.set_reg(14, swi_address(cpu));
+        bus.halt();
+    } else {
+        bus.write_16(BIOS_FLAGS, current & !flags, Access::NONSEQUENTIAL);
     }
     bus.set_bios_open_bus(OPEN_BUS_AFTER_SWI);
     cpu.return_from_exception(bus);
+    waiting
+}
+
+/// VBlankIntrWait: IntrWait for VBlank that always discards old flags. It
+/// ignores R0, so the bus remembers the call that halted instead, and
+/// that call's repeat keeps the flag the handler just set.
+fn vblank_intr_wait(cpu: &mut Cpu, bus: &mut Bus) {
+    let swi = swi_address(cpu);
+    let repeat = bus.resumes_vblank_wait(swi);
+    if intr_wait(cpu, bus, !repeat, 1) {
+        bus.remember_vblank_wait(swi);
+    }
+}
+
+/// The address of the SWI instruction the CPU is handling.
+fn swi_address(cpu: &Cpu) -> u32 {
+    let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
+    cpu.reg(14).wrapping_sub(if thumb { 2 } else { 4 })
 }
 
 fn divide(cpu: &mut Cpu, numerator: i32, denominator: i32) {

@@ -74,10 +74,10 @@ pub(crate) struct Bus {
     /// KEYINPUT: buttons, active low.
     keys: u16,
     halted: bool,
-    /// The SWI instruction of the IntrWait call the CPU halted in, which it
-    /// repeats on waking. The repeat must keep the flags the IRQ handler
-    /// just set.
-    intr_wait_swi: Option<u32>,
+    /// The SWI instruction of the VBlankIntrWait call the CPU halted in,
+    /// which it repeats on waking. The repeat must keep the flag the IRQ
+    /// handler just set.
+    vblank_wait_swi: Option<u32>,
     /// The opcode the BIOS last fetched; BIOS reads from elsewhere see it.
     bios_open_bus: u32,
     executing_bios: bool,
@@ -115,7 +115,7 @@ impl Bus {
             waits: WaitStates::new(0),
             keys: 0x03FF,
             halted: false,
-            intr_wait_swi: None,
+            vblank_wait_swi: None,
             bios_open_bus: bios::OPEN_BUS_AFTER_BOOT,
             executing_bios: false,
             last_fetch: 0,
@@ -189,27 +189,26 @@ impl Bus {
         self.halted = true;
     }
 
-    /// Halts inside the IntrWait call made by the SWI at `swi`, which the
-    /// CPU repeats once it wakes.
-    pub(crate) fn halt_in_intr_wait(&mut self, swi: u32) {
-        self.halted = true;
-        self.intr_wait_swi = Some(swi);
+    /// Notes that the VBlankIntrWait call made by the SWI at `swi` halted
+    /// the CPU, which repeats the call once it wakes.
+    pub(crate) fn remember_vblank_wait(&mut self, swi: u32) {
+        self.vblank_wait_swi = Some(swi);
     }
 
-    /// Whether the IntrWait call made by the SWI at `swi` repeats one that
-    /// halted. Answers yes once per halt; calls from elsewhere, such as an
-    /// IRQ handler, leave the halted call's mark alone.
-    pub(crate) fn repeats_intr_wait(&mut self, swi: u32) -> bool {
-        let repeats = self.intr_wait_swi == Some(swi);
-        if repeats {
-            self.intr_wait_swi = None;
+    /// Whether the VBlankIntrWait call made by the SWI at `swi` repeats one
+    /// that halted. Answers yes once per halt; calls from elsewhere leave
+    /// the halted call's note alone.
+    pub(crate) fn resumes_vblank_wait(&mut self, swi: u32) -> bool {
+        let resumes = self.vblank_wait_swi == Some(swi);
+        if resumes {
+            self.vblank_wait_swi = None;
         }
-        repeats
+        resumes
     }
 
-    /// Forgets a halted IntrWait call that will never repeat.
-    pub(crate) fn abandon_intr_wait(&mut self) {
-        self.intr_wait_swi = None;
+    /// Forgets a halted VBlankIntrWait call that will never repeat.
+    pub(crate) fn forget_vblank_wait(&mut self) {
+        self.vblank_wait_swi = None;
     }
 
     pub(crate) fn set_bios_open_bus(&mut self, value: u32) {
