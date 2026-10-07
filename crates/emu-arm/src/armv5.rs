@@ -212,12 +212,18 @@ impl<M: Model> Processor<M> {
         if store {
             self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
             self.write_32(bus, second, self.r[rd + 1], Access::SEQUENTIAL);
+            if self.abort_if_refused(bus) {
+                return;
+            }
             if writeback || !pre {
                 self.write_back(bus, rn, offset_address);
             }
         } else {
             let low = self.read_32(bus, address, Access::NONSEQUENTIAL);
             let high = self.read_32(bus, second, Access::SEQUENTIAL);
+            if self.abort_if_refused(bus) {
+                return;
+            }
             bus.idle();
             if (writeback || !pre) && rn != rd && rn != rd + 1 {
                 self.write_back(bus, rn, offset_address);

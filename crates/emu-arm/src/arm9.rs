@@ -7,13 +7,25 @@
 //! TCM. Instruction fetches use the instruction TCM only; data accesses try
 //! the instruction TCM first, then the data TCM. Caches are not emulated:
 //! every access that misses TCM goes to the bus.
+//!
+//! With the protection unit on, CP15 checks every access first, TCM
+//! included, as melonDS does. A refused access spends a cycle without
+//! touching memory: a fetch returns BKPT, which the CPU takes as the
+//! prefetch abort it is on this core if it gets to execute it, and a data
+//! access returns 0 and leaves the instruction to take a data abort.
 
 use serde::{Deserialize, Serialize};
 
 use crate::cp15::Cp15;
 use crate::model::{Model, hooks::Hooks};
+use crate::protection::{EXECUTE, READ, WRITE};
 use crate::tcm::{Block, DTCM_SIZE, ITCM_SIZE};
 use crate::{Access, Bus, Processor};
+
+/// What a refused ARM fetch returns: BKPT #0.
+const REFUSED_ARM_FETCH: u32 = 0xE120_0070;
+/// What a refused Thumb fetch returns: BKPT #0.
+const REFUSED_THUMB_FETCH: u16 = 0xBE00;
 
 /// The DS's ARM9, an ARM946E-S.
 ///
@@ -32,6 +44,11 @@ pub struct Arm946es {
     dtcm: Block,
     /// Waiting for an interrupt (MCR p15, 0, Rd, c7, c0, 4 or c7, c8, 2).
     halted: bool,
+    /// The protection unit refused a data access in the current
+    /// instruction, so its later accesses do nothing. Always clear between
+    /// instructions, so not saved.
+    #[serde(skip)]
+    data_refused: bool,
 }
 
 impl Default for Arm946es {
@@ -41,11 +58,34 @@ impl Default for Arm946es {
             itcm: Block::new(ITCM_SIZE),
             dtcm: Block::new(DTCM_SIZE),
             halted: false,
+            data_refused: false,
         }
     }
 }
 
 impl Arm946es {
+    /// Whether a data access of kind `need` may go ahead: the protection
+    /// unit allows it and has refused nothing earlier in the instruction.
+    /// A refused access spends a cycle.
+    fn data_allowed<B: Bus>(&mut self, bus: &mut B, address: u32, need: u8, user: bool) -> bool {
+        if self.cp15.permits(address, need, user) && !self.data_refused {
+            return true;
+        }
+        self.data_refused = true;
+        bus.idle();
+        false
+    }
+
+    /// Whether an instruction fetch may go ahead; a refused one spends a
+    /// cycle.
+    fn fetch_allowed<B: Bus>(&self, bus: &mut B, address: u32, user: bool) -> bool {
+        if self.cp15.permits(address, EXECUTE, user) {
+            return true;
+        }
+        bus.idle();
+        false
+    }
+
     /// The TCM block a data read at `address` comes from.
     fn read_block(&self, address: u32) -> Option<&Block> {
         if self.cp15.itcm().readable(address) {
@@ -88,15 +128,19 @@ impl Model for Arm946es {}
 
 impl Hooks for Arm946es {
     const V5TE: bool = true;
+    const PROTECTION_UNIT: bool = true;
 
     /// CP15 returns to its reset values; TCM keeps its contents.
     fn reset(&mut self) {
         self.cp15 = Cp15::default();
         self.halted = false;
+        self.data_refused = false;
     }
 
-    fn fetch_32<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u32 {
-        if self.cp15.itcm().contains(address) {
+    fn fetch_32<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access, user: bool) -> u32 {
+        if !self.fetch_allowed(bus, address, user) {
+            REFUSED_ARM_FETCH
+        } else if self.cp15.itcm().contains(address) {
             bus.idle();
             self.itcm.read_32(address)
         } else {
@@ -104,8 +148,10 @@ impl Hooks for Arm946es {
         }
     }
 
-    fn fetch_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u16 {
-        if self.cp15.itcm().contains(address) {
+    fn fetch_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access, user: bool) -> u16 {
+        if !self.fetch_allowed(bus, address, user) {
+            REFUSED_THUMB_FETCH
+        } else if self.cp15.itcm().contains(address) {
             bus.idle();
             self.itcm.read_16(address)
         } else {
@@ -113,8 +159,10 @@ impl Hooks for Arm946es {
         }
     }
 
-    fn read_32<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u32 {
-        if let Some(block) = self.read_block(address) {
+    fn read_32<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access, user: bool) -> u32 {
+        if !self.data_allowed(bus, address, READ, user) {
+            0
+        } else if let Some(block) = self.read_block(address) {
             bus.idle();
             block.read_32(address)
         } else {
@@ -122,8 +170,10 @@ impl Hooks for Arm946es {
         }
     }
 
-    fn read_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u16 {
-        if let Some(block) = self.read_block(address) {
+    fn read_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access, user: bool) -> u16 {
+        if !self.data_allowed(bus, address, READ, user) {
+            0
+        } else if let Some(block) = self.read_block(address) {
             bus.idle();
             block.read_16(address)
         } else {
@@ -131,8 +181,10 @@ impl Hooks for Arm946es {
         }
     }
 
-    fn read_8<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u8 {
-        if let Some(block) = self.read_block(address) {
+    fn read_8<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access, user: bool) -> u8 {
+        if !self.data_allowed(bus, address, READ, user) {
+            0
+        } else if let Some(block) = self.read_block(address) {
             bus.idle();
             block.read_8(address)
         } else {
@@ -140,7 +192,17 @@ impl Hooks for Arm946es {
         }
     }
 
-    fn write_32<B: Bus>(&mut self, bus: &mut B, address: u32, value: u32, access: Access) {
+    fn write_32<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        address: u32,
+        value: u32,
+        access: Access,
+        user: bool,
+    ) {
+        if !self.data_allowed(bus, address, WRITE, user) {
+            return;
+        }
         if let Some(block) = self.write_block(address) {
             block.write_32(address, value);
             bus.idle();
@@ -149,7 +211,17 @@ impl Hooks for Arm946es {
         }
     }
 
-    fn write_16<B: Bus>(&mut self, bus: &mut B, address: u32, value: u16, access: Access) {
+    fn write_16<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        address: u32,
+        value: u16,
+        access: Access,
+        user: bool,
+    ) {
+        if !self.data_allowed(bus, address, WRITE, user) {
+            return;
+        }
         if let Some(block) = self.write_block(address) {
             block.write_16(address, value);
             bus.idle();
@@ -158,13 +230,31 @@ impl Hooks for Arm946es {
         }
     }
 
-    fn write_8<B: Bus>(&mut self, bus: &mut B, address: u32, value: u8, access: Access) {
+    fn write_8<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        address: u32,
+        value: u8,
+        access: Access,
+        user: bool,
+    ) {
+        if !self.data_allowed(bus, address, WRITE, user) {
+            return;
+        }
         if let Some(block) = self.write_block(address) {
             block.write_8(address, value);
             bus.idle();
         } else {
             bus.write_8(address, value, access);
         }
+    }
+
+    fn data_refused(&mut self) -> bool {
+        let refused = self.data_refused;
+        if refused {
+            self.data_refused = false;
+        }
+        refused
     }
 
     fn vector_base(&self) -> u32 {

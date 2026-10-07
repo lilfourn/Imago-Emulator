@@ -7,8 +7,8 @@
 //!
 //! - [`Cpu`] is the ARM7TDMI (ARMv4T) of the GBA and the DS's ARM7.
 //! - [`Arm9`] is the DS's ARM946E-S (ARMv5TE): the ARMv5TE instructions,
-//!   the CP15 system control coprocessor, tightly coupled memory, and
-//!   waiting for interrupts.
+//!   the CP15 system control coprocessor with its protection unit, tightly
+//!   coupled memory, and waiting for interrupts.
 //!
 //! References: ARM7TDMI and ARM946E-S Technical Reference Manuals, the ARM
 //! Architecture Reference Manual (ARMv5TE), GBATEK "ARM CPU Reference", and
@@ -29,6 +29,7 @@ mod arm9;
 mod armv5;
 pub mod cp15;
 mod model;
+mod protection;
 mod tcm;
 mod thumb;
 
@@ -206,6 +207,7 @@ mod vector {
     pub const UNDEFINED: u32 = 0x04;
     pub const SWI: u32 = 0x08;
     pub const PREFETCH_ABORT: u32 = 0x0C;
+    pub const DATA_ABORT: u32 = 0x10;
     pub const IRQ: u32 = 0x18;
 }
 
@@ -453,15 +455,16 @@ impl<M: Model> Processor<M> {
         }
         let instruction = self.pipeline[0];
         self.pipeline[0] = self.pipeline[1];
+        let user = self.user_permissions();
         if self.thumb() {
             self.r[15] &= !1;
             let access = self.fetch_access | Access::CODE;
-            self.pipeline[1] = u32::from(self.model.fetch_16(bus, self.r[15], access));
+            self.pipeline[1] = u32::from(self.model.fetch_16(bus, self.r[15], access, user));
             self.execute_thumb(bus, instruction as u16);
         } else {
             self.r[15] &= !3;
             let access = self.fetch_access | Access::CODE;
-            self.pipeline[1] = self.model.fetch_32(bus, self.r[15], access);
+            self.pipeline[1] = self.model.fetch_32(bus, self.r[15], access, user);
             let condition = instruction >> 28;
             if self.condition_passed(condition) {
                 self.execute_arm(bus, instruction);
@@ -493,15 +496,22 @@ impl<M: Model> Processor<M> {
     /// next instruction starts), matching the hardware's PC register.
     fn reload_pipeline<B: Bus>(&mut self, bus: &mut B) {
         let sequential = Access::CODE | Access::SEQUENTIAL;
+        let user = self.user_permissions();
         if self.thumb() {
-            self.pipeline[0] = u32::from(self.model.fetch_16(bus, self.r[15] & !1, Access::CODE));
+            let first = self
+                .model
+                .fetch_16(bus, self.r[15] & !1, Access::CODE, user);
+            self.pipeline[0] = u32::from(first);
             self.r[15] = self.r[15].wrapping_add(2);
-            self.pipeline[1] = u32::from(self.model.fetch_16(bus, self.r[15] & !1, sequential));
+            let second = self.model.fetch_16(bus, self.r[15] & !1, sequential, user);
+            self.pipeline[1] = u32::from(second);
             self.r[15] = self.r[15].wrapping_add(2);
         } else {
-            self.pipeline[0] = self.model.fetch_32(bus, self.r[15] & !3, Access::CODE);
+            self.pipeline[0] = self
+                .model
+                .fetch_32(bus, self.r[15] & !3, Access::CODE, user);
             self.r[15] = self.r[15].wrapping_add(4);
-            self.pipeline[1] = self.model.fetch_32(bus, self.r[15] & !3, sequential);
+            self.pipeline[1] = self.model.fetch_32(bus, self.r[15] & !3, sequential, user);
             self.r[15] = self.r[15].wrapping_add(4);
         }
         self.fetch_access = Access::SEQUENTIAL;
@@ -520,34 +530,60 @@ impl<M: Model> Processor<M> {
         self.r[15] = pc & !1;
     }
 
-    /// Reads a data word through the model (TCM or the bus).
+    /// Whether accesses have User mode's permissions rather than
+    /// privileged ones, for a protection unit to check.
+    fn user_permissions(&self) -> bool {
+        M::PROTECTION_UNIT && self.mode() == Mode::User
+    }
+
+    /// Reads a data word through the model (TCM or the bus). Data accesses
+    /// the protection unit refuses read 0 and write nothing; the
+    /// instruction then calls [`Processor::abort_if_refused`].
     fn read_32<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u32 {
-        self.model.read_32(bus, address, access)
+        let user = self.user_permissions();
+        self.model.read_32(bus, address, access, user)
     }
 
     /// Reads a data halfword through the model.
     fn read_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u16 {
-        self.model.read_16(bus, address, access)
+        let user = self.user_permissions();
+        self.model.read_16(bus, address, access, user)
     }
 
     /// Reads a data byte through the model.
     fn read_8<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u8 {
-        self.model.read_8(bus, address, access)
+        let user = self.user_permissions();
+        self.model.read_8(bus, address, access, user)
     }
 
     /// Writes a data word through the model.
     fn write_32<B: Bus>(&mut self, bus: &mut B, address: u32, value: u32, access: Access) {
-        self.model.write_32(bus, address, value, access);
+        let user = self.user_permissions();
+        self.model.write_32(bus, address, value, access, user);
     }
 
     /// Writes a data halfword through the model.
     fn write_16<B: Bus>(&mut self, bus: &mut B, address: u32, value: u16, access: Access) {
-        self.model.write_16(bus, address, value, access);
+        let user = self.user_permissions();
+        self.model.write_16(bus, address, value, access, user);
     }
 
     /// Writes a data byte through the model.
     fn write_8<B: Bus>(&mut self, bus: &mut B, address: u32, value: u8, access: Access) {
-        self.model.write_8(bus, address, value, access);
+        let user = self.user_permissions();
+        self.model.write_8(bus, address, value, access, user);
+    }
+
+    /// After an instruction's data accesses: if the protection unit
+    /// refused one, takes the data abort and returns true. The instruction
+    /// must then stop, loading no register and writing no base back
+    /// (ARMv5's base-restored abort model).
+    fn abort_if_refused<B: Bus>(&mut self, bus: &mut B) -> bool {
+        let refused = self.model.data_refused();
+        if refused {
+            self.data_abort(bus);
+        }
+        refused
     }
 
     fn condition_passed(&self, condition: u32) -> bool {
@@ -645,8 +681,23 @@ impl<M: Model> Processor<M> {
         self.enter_exception(bus, Mode::Undefined, vector::UNDEFINED, return_address);
     }
 
+    /// A data abort, for an instruction whose data access the protection
+    /// unit refused. Data instructions move R15 past themselves before
+    /// their accesses, so the instruction is 12 (ARM) or 6 (Thumb) bytes
+    /// behind it. LR is its address plus 8 in either state, so `SUBS PC,
+    /// LR, #8` retries it.
+    fn data_abort<B: Bus>(&mut self, bus: &mut B) {
+        let return_address = if self.thumb() {
+            self.r[15].wrapping_add(2)
+        } else {
+            self.r[15].wrapping_sub(4)
+        };
+        self.enter_exception(bus, Mode::Abort, vector::DATA_ABORT, return_address);
+    }
+
     /// BKPT (ARMv5): a prefetch abort. LR is the breakpoint's address plus
-    /// 4 in either state, so `SUBS PC, LR, #4` retries it.
+    /// 4 in either state, so `SUBS PC, LR, #4` retries it. A fetch the
+    /// protection unit refuses becomes BKPT, so this is its abort too.
     fn breakpoint<B: Bus>(&mut self, bus: &mut B) {
         let return_address = if self.thumb() {
             self.r[15]
