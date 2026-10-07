@@ -14,9 +14,12 @@
 //! whatever conditions come before them; the four patch slots of the
 //! device are not a limit here.
 //!
-//! Not supported: I/O writes (`C6`, `C7`) and button codes. The hook
-//! (`C4`), game ID and slowdown codes are ignored. Blocks nest; one left
-//! open ends with the cheat.
+//! I/O writes (`C6aaaaaa 0000yyyy` and `C7aaaaaa yyyyyyyy`) store a
+//! halfword or a word in the registers at 0x04000000 + `aaaaaa` through
+//! [`crate::Memory::poke_io_16`], as the CPU would.
+//!
+//! Not supported: button codes. The hook (`C4`), game ID and slowdown
+//! codes are ignored. Blocks nest; one left open ends with the cheat.
 
 use crate::decode::{Decoder, halves};
 use crate::detect::{CERTAIN, CODE, UNKNOWN, fits, region};
@@ -28,6 +31,11 @@ const DEADFACE: u32 = 0xDEAD_FACE;
 /// `a0aaaaa` from `aaaaaa`.
 fn address(bits: u32) -> u32 {
     (bits & 0x000F_FFFF) | (bits & 0x00F0_0000) << 4
+}
+
+/// The I/O register address of a `C6` or `C7` code.
+fn io_address(left: u32) -> u32 {
+    0x0400_0000 | (left & 0x00FF_FFFF)
 }
 
 /// The width a code's size field names, or `None` for size 3.
@@ -163,13 +171,23 @@ impl Decoder for ProActionReplay {
             // The hook tells the device where to run.
             return Ok(());
         }
+        if let 0xC6 | 0xC7 = kind {
+            // Bit 24 picks a word over a halfword.
+            let width = if kind == 0xC7 {
+                Width::Word
+            } else {
+                Width::Half
+            };
+            ops.push(Op::WriteIo {
+                address: io_address(left),
+                value: right & width.mask(),
+                width,
+            });
+            return Ok(());
+        }
         let unknown = || format!("unknown code {left:08X} {right:08X}");
         if kind & 1 != 0 {
-            return Err(if kind == 0xC7 {
-                "I/O writes (C6, C7) are not supported yet".to_owned()
-            } else {
-                unknown()
-            });
+            return Err(unknown());
         }
         let address = address(left);
         let condition = (left >> 27) & 7;
@@ -209,11 +227,7 @@ impl Decoder for ProActionReplay {
             return Ok(());
         }
         let Some(width) = width(size) else {
-            return Err(if kind == 0xC6 {
-                "I/O writes (C6, C7) are not supported yet".to_owned()
-            } else {
-                unknown()
-            });
+            return Err(unknown());
         };
         let value = right & width.mask();
         ops.push(match (action, width) {
@@ -307,7 +321,8 @@ pub(crate) fn plausibility(codes: &[u64]) -> i32 {
             let mask = width(size).map_or(0, Width::mask);
             match (kind, condition, action) {
                 (0xC4, ..) => CODE + fits(right, 0xFFFF),
-                (0xC6 | 0xC7, ..) => CODE,
+                (0xC6, ..) => CODE + region(io_address(left)) + fits(right, 0xFFFF),
+                (0xC7, ..) => CODE + region(io_address(left)),
                 _ if kind & 1 != 0 => UNKNOWN,
                 (_, 1.., _) if size == 3 => CODE,
                 (_, 1.., _) => CODE + region(address(left)) + fits(right, mask),
@@ -438,10 +453,29 @@ mod tests {
     }
 
     #[test]
+    fn io_writes_take_halfwords_and_words() {
+        assert_eq!(
+            read(&[0xC600_0050_0000_00FF, 0xC700_00D4_0200_0000]),
+            Ok(vec![
+                Op::WriteIo {
+                    address: 0x0400_0050,
+                    value: 0xFF,
+                    width: Width::Half
+                },
+                Op::WriteIo {
+                    address: 0x0400_00D4,
+                    value: 0x0200_0000,
+                    width: Width::Word
+                },
+            ])
+        );
+        assert!(plausibility(&[0xC600_0050_0000_00FF]) > 0);
+        assert!(plausibility(&[0xC612_3456_0000_00FF]) < 0);
+    }
+
+    #[test]
     fn unsupported_codes_say_why() {
         for (code, needle) in [
-            (0xC600_0100_0000_0001, "I/O"),
-            (0xC700_0100_0000_0001, "I/O"),
             (0x0000_0000_1222_0000, "button"),
             (0x0000_0000_4000_0000, "ENDIF"),
         ] {

@@ -247,6 +247,12 @@ impl Core for Gba {
         player == 0 && self.machine.bus.poke_ram(address, value)
     }
 
+    /// I/O registers at 0x04000000-0x040003FE, but not POSTFLG and
+    /// HALTCNT.
+    fn poke_io_16(&mut self, player: usize, address: u32, value: u16) -> bool {
+        player == 0 && self.machine.bus.poke_io_16(address, value)
+    }
+
     /// Patches apply in the ROM window, 0x08000000-0x0DFFFFFF, at their
     /// offset in every wait-state mirror; others are dropped.
     fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {

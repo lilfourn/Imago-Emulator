@@ -199,6 +199,12 @@ impl Core for Linked {
             .is_some_and(|gba| gba.poke(0, address, value))
     }
 
+    fn poke_io_16(&mut self, player: usize, address: u32, value: u16) -> bool {
+        self.players
+            .get_mut(player)
+            .is_some_and(|gba| gba.poke_io_16(0, address, value))
+    }
+
     fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
         if let Some(gba) = self.players.get_mut(player) {
             gba.set_rom_patches(0, patches);
@@ -317,5 +323,15 @@ mod tests {
         let [first, second] = &mut linked.players;
         assert_eq!(read(first, 0x0800_0000), 0xFFFE);
         assert_eq!(read(second, 0x0800_0000), 0xFF55);
+    }
+
+    #[test]
+    fn cheat_io_writes_reach_one_player() {
+        let mut linked = linked();
+        assert!(linked.poke_io_16(1, 0x0400_0050, 0x00FF));
+        assert!(!linked.poke_io_16(2, 0x0400_0050, 0x00FF));
+        let [first, second] = &mut linked.players;
+        assert_eq!(read(first, 0x0400_0050), 0);
+        assert_eq!(read(second, 0x0400_0050), 0x00FF);
     }
 }

@@ -44,7 +44,7 @@
 //! to every code after it in the file. Game IDs, hooks and master codes
 //! are ignored, since the emulator applies cheats once per frame itself.
 //! What each format leaves out is in its module: the devices' own
-//! buttons, GBA I/O writes, and Action Replay DS types `C4`–`C6`.
+//! buttons, and Action Replay DS types `C4`–`C6`.
 
 mod ards;
 mod cht;
@@ -89,6 +89,15 @@ pub trait Memory {
     /// is written.
     fn poke_bank(&mut self, bank: u8, address: u32, value: u8) -> bool {
         let _ = (bank, address, value);
+        false
+    }
+
+    /// Writes the 16-bit I/O register at `address` (halfword-aligned) as a
+    /// CPU store would, side effects and all. Returns whether it was
+    /// written: registers whose write would halt the CPU refuse. Only the
+    /// GBA's cheats write registers; by default nothing is written.
+    fn poke_io_16(&mut self, address: u32, value: u16) -> bool {
+        let _ = (address, value);
         false
     }
 }

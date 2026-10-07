@@ -273,6 +273,10 @@ impl emu_cheats::Memory for PlayerMemory<'_> {
     fn poke_bank(&mut self, bank: u8, address: u32, value: u8) -> bool {
         self.core.poke_bank(self.player, bank, address, value)
     }
+
+    fn poke_io_16(&mut self, address: u32, value: u16) -> bool {
+        self.core.poke_io_16(self.player, address, value)
+    }
 }
 
 /// The most recent frame, shared between the threads.

@@ -95,6 +95,14 @@ pub(crate) enum Op {
     },
     /// Skips the next operations; `usize::MAX` ends the cheat.
     Skip(usize),
+    /// Stores `value` in the I/O registers at `address`, as the CPU would:
+    /// a halfword, or a word as two halfwords, low first (GBA). `width` is
+    /// never a byte.
+    WriteIo {
+        address: u32,
+        value: u32,
+        width: Width,
+    },
     /// Changes what the game reads from ROM while the cheat is on. The
     /// frontend hands these to the core (see [`crate::rom_patches`]), so
     /// running the operation does nothing and conditions don't gate it.
@@ -242,6 +250,11 @@ pub(crate) fn run(ops: &[Op], memory: &mut (impl Memory + ?Sized)) {
                 }
             }
             &Op::Skip(skip) => next = next.saturating_add(skip),
+            &Op::WriteIo {
+                address,
+                value,
+                width,
+            } => write_io(memory, address, value, width),
             Op::PatchRom(_) => {}
         }
     }
@@ -254,6 +267,17 @@ pub(crate) fn read(memory: &(impl Memory + ?Sized), address: u32, width: Width) 
         let next = memory.peek(address.wrapping_add(byte))?;
         Some(value | u32::from(next) << (byte * 8))
     })
+}
+
+/// Stores `value` in the I/O registers at `address`, aligned as the CPU
+/// aligns a store of `width`, a halfword at a time, low first. No code
+/// writes a lone I/O byte, so a byte width writes nothing.
+fn write_io(memory: &mut (impl Memory + ?Sized), address: u32, value: u32, width: Width) {
+    let aligned = address & !(width as u32 - 1);
+    for half in 0..width as u32 / 2 {
+        let at = aligned.wrapping_add(half * 2);
+        memory.poke_io_16(at, (value >> (half * 16)) as u16);
+    }
 }
 
 /// Stores `value` little-endian at `address`, skipping unwritable bytes.

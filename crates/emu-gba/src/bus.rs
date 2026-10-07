@@ -545,6 +545,19 @@ impl Bus {
         true
     }
 
+    /// Writes the I/O register halfword at `address` (0x04000000-0x040003FE)
+    /// as a CPU store would, for cheats, without taking time. POSTFLG and
+    /// HALTCNT refuse: halting the CPU from outside its program would
+    /// stall the game. Returns whether the register was written.
+    pub(crate) fn poke_io_16(&mut self, address: u32, value: u16) -> bool {
+        let offset = address.wrapping_sub(0x0400_0000) & !1;
+        if offset >= 0x400 || offset == 0x300 {
+            return false;
+        }
+        self.write_io_16(offset, value);
+        true
+    }
+
     /// Records an instruction fetch's value: the BIOS's last opcode for
     /// read protection, and the bus's open-bus value.
     fn note_fetch(&mut self, value: u32) {
@@ -768,5 +781,26 @@ mod tests {
         assert_eq!(loaded.read_16(0x0800_0100, Access::NONSEQUENTIAL), 0xABCD);
         loaded.set_rom_patches(&[]);
         assert_eq!(loaded.read_16(0x0800_0100, Access::NONSEQUENTIAL), 0x0100);
+    }
+
+    #[test]
+    fn cheat_io_writes_act_like_stores_but_never_halt() {
+        let mut bus = Bus::new(
+            Cartridge::new(vec![0; 0x400].into(), None, 0),
+            Box::default(),
+        );
+        let cycles = bus.cycles();
+        assert!(bus.poke_io_16(0x0400_0000, 0x0403));
+        assert_eq!(bus.read_io_16(0x000), 0x0403);
+        // IF: writing 1 clears the bit.
+        bus.request_interrupt(0x0009);
+        assert!(bus.poke_io_16(0x0400_0202, 0x0001));
+        assert_eq!(bus.interrupt_flag, 0x0008);
+        // POSTFLG and HALTCNT, and anything outside the I/O registers.
+        for address in [0x0400_0300, 0x0400_0301, 0x0400_0400, 0x0200_0000] {
+            assert!(!bus.poke_io_16(address, 0), "{address:08X}");
+        }
+        assert!(!bus.halted);
+        assert_eq!(bus.cycles(), cycles);
     }
 }

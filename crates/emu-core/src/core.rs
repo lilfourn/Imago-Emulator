@@ -106,6 +106,18 @@ pub trait Core: Send {
         false
     }
 
+    /// Writes the 16-bit I/O register at `address` (halfword-aligned) in
+    /// `player`'s address space as a CPU store would, without taking any
+    /// time, for cheats that write registers (GBA Pro Action Replay `C6`
+    /// and `C7` codes). Registers whose write would stop or disturb the
+    /// CPU outside its own program, such as the GBA's HALTCNT, refuse.
+    /// Returns whether the register was written. Cores without such cheats
+    /// write nothing.
+    fn poke_io_16(&mut self, player: usize, address: u32, value: u16) -> bool {
+        let _ = (player, address, value);
+        false
+    }
+
     /// Replaces the ROM patches for `player`'s cartridge: from now on, ROM
     /// reads return the patched bytes, as cheat devices on the cartridge
     /// bus made them (see [`RomPatch`]). Patches are not machine state:

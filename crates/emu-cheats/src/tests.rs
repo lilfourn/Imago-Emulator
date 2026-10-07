@@ -188,6 +188,31 @@ fn gba_rom_patches_count_as_codes_and_patch_halfwords() {
 }
 
 #[test]
+fn pro_action_replay_io_writes_store_aligned_halfwords() {
+    let cipher = Cipher::PRO_ACTION_REPLAY;
+    let text = format!(
+        "[Brighten]\n{}{}",
+        line(cipher.encrypt(0xC600_0051_0000_00FF)),
+        line(cipher.encrypt(0xC700_00D6_1234_5678)),
+    );
+    assert_eq!(devices(System::Gba, &text), [Device::ProActionReplay]);
+    let mut memory = TestMemory::default();
+    run(System::Gba, &text, &mut memory);
+    // As the CPU aligns stores: the halfword to 0x50, the word to 0xD4.
+    assert_eq!(
+        memory.io,
+        [
+            (0x0400_0050, 0x00FF),
+            (0x0400_00D4, 0x5678),
+            (0x0400_00D6, 0x1234)
+        ]
+    );
+    // I/O writes are memory operations, not ROM patches.
+    let cheats = parse(System::Gba, &text).expect("valid");
+    assert!(rom_patches(&cheats).is_empty());
+}
+
+#[test]
 fn unencrypted_codes_are_detected_and_tags_override() {
     assert_eq!(
         devices(
