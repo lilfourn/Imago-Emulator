@@ -24,7 +24,7 @@ const OAM_SCAN_DOTS: u16 = 80;
 
 /// The four DMG shades, lightest first. Neutral greys match the reference
 /// screenshots of the common test-ROM suites.
-const DMG_SHADES: [u32; 4] = [
+pub(crate) const DMG_SHADES: [u32; 4] = [
     rgb(0xFF, 0xFF, 0xFF),
     rgb(0xAA, 0xAA, 0xAA),
     rgb(0x55, 0x55, 0x55),
@@ -155,6 +155,22 @@ impl Ppu {
 
     pub(crate) fn vram(&self) -> &[u8] {
         &self.vram
+    }
+
+    /// The hardware model, for the debugger's graphics viewers.
+    pub(crate) fn model(&self) -> Model {
+        self.model
+    }
+
+    /// CGB background palette RAM: 8 palettes of 4 little-endian BGR555
+    /// colours, as BCPD reads it.
+    pub(crate) fn bg_palette_ram(&self) -> &[u8] {
+        &self.bg_palettes
+    }
+
+    /// CGB object palette RAM, laid out as [`Ppu::bg_palette_ram`].
+    pub(crate) fn obj_palette_ram(&self) -> &[u8] {
+        &self.obj_palettes
     }
 
     /// Advances `dots` dots: four per M-cycle, or two in CGB double speed.

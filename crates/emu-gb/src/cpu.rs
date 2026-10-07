@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 pub trait Bus {
     /// Reads a byte. Takes one M-cycle.
     fn read(&mut self, address: u16) -> u8;
+    /// Reads a byte of the instruction stream (an opcode or operand).
+    /// Takes one M-cycle. Only debuggers tell it apart from a data read.
+    fn fetch(&mut self, address: u16) -> u8 {
+        self.read(address)
+    }
     /// Writes a byte. Takes one M-cycle.
     fn write(&mut self, address: u16, value: u8);
     /// Spends one M-cycle without a memory access.
@@ -163,6 +168,17 @@ impl Cpu {
         }
     }
 
+    /// Whether interrupts are enabled (IME).
+    pub(crate) fn ime(&self) -> bool {
+        self.ime
+    }
+
+    /// Whether HALT (or an illegal opcode, which freezes the CPU) is
+    /// keeping it from running instructions.
+    pub(crate) fn halted(&self) -> bool {
+        self.halted || self.locked
+    }
+
     /// Runs one instruction, one interrupt dispatch, or one M-cycle of
     /// HALT. Returns the opcode if an instruction ran (CB-prefixed
     /// instructions report `0xCB`).
@@ -189,7 +205,7 @@ impl Cpu {
             return None;
         }
 
-        let opcode = bus.read(self.regs.pc);
+        let opcode = bus.fetch(self.regs.pc);
         if self.halt_bug {
             self.halt_bug = false;
         } else {
@@ -224,7 +240,7 @@ impl Cpu {
     }
 
     fn fetch<B: Bus>(&mut self, bus: &mut B) -> u8 {
-        let value = bus.read(self.regs.pc);
+        let value = bus.fetch(self.regs.pc);
         self.regs.pc = self.regs.pc.wrapping_add(1);
         value
     }

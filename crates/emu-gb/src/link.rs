@@ -7,9 +7,12 @@
 //! M-cycles to send at the normal rate and 32 at the CGB's fast rate, so the
 //! slice delay never shows. See `docs/decisions/0004-linked-cores.md`.
 
+use emu_core::debug::{
+    CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome, Stop, Stops,
+};
 use emu_core::{
-    Core, CoreInfo, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize, StateError,
-    StereoSample,
+    Core, CoreInfo, Debugger, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
+    StateError, StereoSample,
 };
 
 use crate::{CYCLES_PER_FRAME, Gb, INFO, Machine};
@@ -25,6 +28,16 @@ const SCREENS: [ScreenSize; 2] = [ScreenSize::new(160, 144), ScreenSize::new(160
 pub struct Linked {
     players: [Gb; 2],
     screens: [Frame; 2],
+    /// Where a debugger stopped the last run mid-frame, so the next one
+    /// carries on with the same slices.
+    resume: Option<Resume>,
+}
+
+/// A frame's end and the current slice's end, in player 0's clock cycles.
+#[derive(Debug, Clone, Copy)]
+struct Resume {
+    end: u64,
+    target: u64,
 }
 
 impl Linked {
@@ -43,7 +56,74 @@ impl Linked {
         Ok(Self {
             players: [Gb::new(first)?, Gb::new(second)?],
             screens: [Frame::new(SCREENS[0]), Frame::new(SCREENS[1])],
+            resume: None,
         })
+    }
+
+    /// Runs both machines through a frame's time, each instruction by
+    /// `step` (given the machine and its player number), until the frame
+    /// ends or a step returns a stop. After a stop the next call carries
+    /// on where this one left off.
+    fn run(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        mut step: impl FnMut(&mut Gb, usize) -> Option<Stop>,
+    ) -> RunOutcome {
+        for (index, gb) in self.players.iter_mut().enumerate() {
+            gb.set_input(&inputs.get(index).copied().unwrap_or_default());
+        }
+        let Resume { end, mut target } = self.resume.take().unwrap_or_else(|| {
+            let now = self.players[0].cycles();
+            let end = now + CYCLES_PER_FRAME;
+            Resume {
+                end,
+                target: (now + SLICE_CYCLES).min(end),
+            }
+        });
+        loop {
+            for index in 0..self.players.len() {
+                while self.players[index].cycles() < target {
+                    if let Some(stop) = step(&mut self.players[index], index) {
+                        self.resume = Some(Resume { end, target });
+                        return RunOutcome {
+                            frame_done: false,
+                            stop: Some(stop),
+                        };
+                    }
+                }
+            }
+            self.service_cable();
+            if self.players[0].cycles() >= end {
+                break;
+            }
+            target = (self.players[0].cycles() + SLICE_CYCLES).min(end);
+        }
+        for (screen, gb) in self.screens.iter_mut().zip(&self.players) {
+            screen.clone_from(&gb.screens[0]);
+        }
+
+        // Both machines produce the same number of samples; play them mixed.
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        self.players[0].machine.bus.apu.drain_samples(&mut first);
+        self.players[1].machine.bus.apu.drain_samples(&mut second);
+        let mix = |a: i16, b: i16| ((i32::from(a) + i32::from(b)) / 2) as i16;
+        audio.extend(
+            first
+                .iter()
+                .zip(&second)
+                .map(|(a, b)| [mix(a[0], b[0]), mix(a[1], b[1])]),
+        );
+        RunOutcome {
+            frame_done: true,
+            stop: None,
+        }
+    }
+
+    /// The machine CPU `cpu` (also its player number) is in.
+    fn player(&self, cpu: usize) -> &Gb {
+        &self.players[cpu.min(1)]
     }
 
     /// Hands each started transfer to the other machine.
@@ -72,35 +152,10 @@ impl Core for Linked {
     }
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
-        for (index, gb) in self.players.iter_mut().enumerate() {
-            gb.set_input(&inputs.get(index).copied().unwrap_or_default());
-        }
-        let end = self.players[0].cycles() + CYCLES_PER_FRAME;
-        while self.players[0].cycles() < end {
-            let target = (self.players[0].cycles() + SLICE_CYCLES).min(end);
-            for gb in &mut self.players {
-                while gb.cycles() < target {
-                    gb.step();
-                }
-            }
-            self.service_cable();
-        }
-        for (screen, gb) in self.screens.iter_mut().zip(&self.players) {
-            screen.clone_from(&gb.screens[0]);
-        }
-
-        // Both machines produce the same number of samples; play them mixed.
-        let mut first = Vec::new();
-        let mut second = Vec::new();
-        self.players[0].machine.bus.apu.drain_samples(&mut first);
-        self.players[1].machine.bus.apu.drain_samples(&mut second);
-        let mix = |a: i16, b: i16| ((i32::from(a) + i32::from(b)) / 2) as i16;
-        audio.extend(
-            first
-                .iter()
-                .zip(&second)
-                .map(|(a, b)| [mix(a[0], b[0]), mix(a[1], b[1])]),
-        );
+        self.run(inputs, audio, |gb, _| {
+            gb.step();
+            None
+        });
     }
 
     fn screens(&self) -> &[Frame] {
@@ -108,6 +163,7 @@ impl Core for Linked {
     }
 
     fn reset(&mut self) {
+        self.resume = None;
         for gb in &mut self.players {
             gb.reset();
         }
@@ -126,6 +182,7 @@ impl Core for Linked {
         second.bus.take_media_from(&mut self.players[1].machine.bus);
         self.players[0].machine = first;
         self.players[1].machine = second;
+        self.resume = None;
         for (screen, gb) in self.screens.iter_mut().zip(&mut self.players) {
             gb.present();
             screen.clone_from(&gb.screens[0]);
@@ -169,6 +226,63 @@ impl Core for Linked {
 
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         self.players[0].memory(region)
+    }
+
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        Some(self)
+    }
+}
+
+/// CPU `i` is player `i`'s; each is debugged as a lone Game Boy's.
+impl Debugger for Linked {
+    fn cpus(&self) -> Vec<CpuInfo> {
+        (0..self.players.len())
+            .map(|player| CpuInfo {
+                name: "SM83",
+                player,
+            })
+            .collect()
+    }
+
+    fn registers(&self, cpu: usize) -> Vec<Register> {
+        Debugger::registers(self.player(cpu), 0)
+    }
+
+    fn status(&self, cpu: usize) -> String {
+        self.player(cpu).status(0)
+    }
+
+    fn pc(&self, cpu: usize) -> u32 {
+        self.player(cpu).pc(0)
+    }
+
+    fn read(&self, cpu: usize, address: u32) -> Option<u8> {
+        Debugger::read(self.player(cpu), 0, address)
+    }
+
+    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool {
+        Debugger::write(&mut self.players[cpu.min(1)], 0, address, value)
+    }
+
+    fn disassemble(&self, cpu: usize, address: u32) -> Instruction {
+        self.player(cpu).disassemble(0, address)
+    }
+
+    fn io_registers(&self, cpu: usize) -> Vec<IoRegister> {
+        self.player(cpu).io_registers(0)
+    }
+
+    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics> {
+        self.player(cpu).graphics(0, request)
+    }
+
+    fn run_until(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        stops: &Stops,
+    ) -> RunOutcome {
+        self.run(inputs, audio, |gb, cpu| gb.step_checked(cpu, stops).stop)
     }
 }
 
@@ -257,6 +371,42 @@ mod tests {
         linked.load_state(&state).expect("own state");
         assert_eq!(linked.players[0].cycles(), saved);
         assert_eq!(linked.info().players, 2);
+    }
+
+    #[test]
+    fn a_breakpoint_stops_one_player_and_the_frame_resumes_in_step() {
+        use emu_core::debug::{Breakpoint, StopReason};
+
+        let master = rom(&MASTER);
+        let slave = rom(&SLAVE);
+        let media = [Media::new(&master), Media::new(&slave)];
+        let mut plain = Linked::new(&media).expect("valid roms");
+        let mut debugged = Linked::new(&media).expect("valid roms");
+        // Player 1's LDH A, (SC), polled until the transfer ends.
+        let stops = Stops {
+            breakpoints: vec![Breakpoint {
+                cpu: 1,
+                address: 0x0108,
+            }],
+            ..Stops::default()
+        };
+        let outcome = debugged.run_until(&[], &mut Vec::new(), &stops);
+        assert_eq!(
+            outcome.stop,
+            Some(Stop {
+                cpu: 1,
+                reason: StopReason::Breakpoint
+            })
+        );
+        assert_eq!(debugged.pc(1), 0x0108);
+        // Without stops the rest of the frame runs on the same slices, so
+        // both pairs end the frame in the same state.
+        debugged.run_frame(&[], &mut Vec::new());
+        plain.run_frame(&[], &mut Vec::new());
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        plain.save_state(&mut a);
+        debugged.save_state(&mut b);
+        assert!(a == b, "the stop changed the emulation");
     }
 
     #[test]

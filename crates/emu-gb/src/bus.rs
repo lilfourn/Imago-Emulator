@@ -287,6 +287,18 @@ impl Bus {
         true
     }
 
+    /// Writes memory without side effects, for debuggers: cartridge RAM,
+    /// WRAM and HRAM, VRAM (the selected bank) and OAM. Returns whether
+    /// `address` is memory; ROM and I/O registers refuse.
+    pub(crate) fn poke_memory(&mut self, address: u16, value: u8) -> bool {
+        match address {
+            0x8000..=0x9FFF => self.ppu.write_vram(address, value),
+            0xFE00..=0xFE9F => self.ppu.write_oam(address, value),
+            _ => return self.poke_ram(address, value),
+        }
+        true
+    }
+
     fn boot_rom_byte(&self, address: u16) -> u8 {
         self.boot_rom
             .as_ref()

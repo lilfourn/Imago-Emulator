@@ -12,9 +12,12 @@ mod apu;
 mod bus;
 mod cartridge;
 mod cpu;
+mod debug;
 mod disasm;
+mod graphics;
 mod hdma;
 mod interrupts;
+mod io_names;
 mod joypad;
 mod link;
 mod model;
@@ -22,9 +25,10 @@ mod ppu;
 mod serial;
 mod timer;
 
+use emu_core::debug::RunOutcome;
 use emu_core::{
-    Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
-    StateError, StereoSample, System, SystemFileKind,
+    Core, CoreInfo, Debugger, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, RomPatch,
+    ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -134,10 +138,46 @@ impl Gb {
     /// use this to stop at Mooneye's `LD B, B` (0x40) breakpoint.
     pub fn step(&mut self) -> Option<u8> {
         let opcode = self.machine.cpu.step(&mut self.machine.bus);
-        if self.machine.bus.ppu.take_frame_ready() {
+        self.take_frame();
+        opcode
+    }
+
+    /// Shows the frame the PPU just finished, if it did; returns whether
+    /// it did.
+    fn take_frame(&mut self) -> bool {
+        let ready = self.machine.bus.ppu.take_frame_ready();
+        if ready {
             self.present();
         }
-        opcode
+        ready
+    }
+
+    /// Runs `step` until a frame finishes or a step stops, for
+    /// [`Core::run_frame`] and [`Debugger::run_until`]. A frame finishes
+    /// at VBlank, or after a frame's time with the LCD off (when no frame
+    /// ever completes) and after two frames' time in any case.
+    fn run(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        mut step: impl FnMut(&mut Self) -> RunOutcome,
+    ) -> RunOutcome {
+        self.set_input(&inputs.first().copied().unwrap_or_default());
+        let start = self.cycles();
+        let outcome = loop {
+            let mut outcome = step(self);
+            let elapsed = self.cycles() - start;
+            let lcd_off = !self.machine.bus.ppu.is_on();
+            outcome.frame_done |=
+                (lcd_off && elapsed >= CYCLES_PER_FRAME) || elapsed >= 2 * CYCLES_PER_FRAME;
+            if outcome.frame_done || outcome.stop.is_some() {
+                break outcome;
+            }
+        };
+        if outcome.frame_done {
+            self.machine.bus.apu.drain_samples(audio);
+        }
+        outcome
     }
 
     /// Sets the buttons held from now on. [`Core::run_frame`] calls this
@@ -199,24 +239,13 @@ impl Core for Gb {
     }
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
-        self.set_input(&inputs.first().copied().unwrap_or_default());
-        let start = self.cycles();
-        loop {
-            self.machine.cpu.step(&mut self.machine.bus);
-            if self.machine.bus.ppu.take_frame_ready() {
-                self.present();
-                break;
+        self.run(inputs, audio, |gb| {
+            gb.machine.cpu.step(&mut gb.machine.bus);
+            RunOutcome {
+                frame_done: gb.take_frame(),
+                stop: None,
             }
-            // With the LCD off no frame ever completes; keep time anyway.
-            let elapsed = self.cycles() - start;
-            if !self.machine.bus.ppu.is_on() && elapsed >= CYCLES_PER_FRAME {
-                break;
-            }
-            if elapsed >= 2 * CYCLES_PER_FRAME {
-                break;
-            }
-        }
-        self.machine.bus.apu.drain_samples(audio);
+        });
     }
 
     fn screens(&self) -> &[Frame] {
@@ -287,6 +316,10 @@ impl Core for Gb {
             MemoryRegion::MainRam => None,
             MemoryRegion::VideoRam => Some(self.machine.bus.ppu.vram()),
         }
+    }
+
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        Some(self)
     }
 }
 
