@@ -673,6 +673,17 @@ impl<M: Model> Processor<M> {
     }
 
     fn take_irq<B: Bus>(&mut self, bus: &mut B) {
+        // The cycle that decides to take the interrupt still fetches the
+        // next instruction, which the exception then throws away with the
+        // rest of the pipeline: entry costs 2S + 1N, as the ARM7TDMI's
+        // datasheet gives.
+        let user = self.user_permissions();
+        let access = self.fetch_access | Access::CODE;
+        if self.thumb() {
+            self.model.fetch_16(bus, self.r[15] & !1, access, user);
+        } else {
+            self.model.fetch_32(bus, self.r[15] & !3, access, user);
+        }
         // LR points one instruction past the next one, so handlers return
         // with SUBS PC, LR, #4.
         let return_address = if self.thumb() {
@@ -767,6 +778,58 @@ mod tests {
         cpu.set_cpsr(Mode::Supervisor.bits());
         assert_eq!(cpu.reg(8), 8);
         assert_eq!(cpu.registers().fiq[0], 88);
+    }
+
+    /// 64 KiB of RAM holding `MOV R0, R0` everywhere, logging every
+    /// access's address and type.
+    struct LoggingBus(Vec<(u32, Access)>);
+
+    impl Bus for LoggingBus {
+        fn read_32(&mut self, address: u32, access: Access) -> u32 {
+            self.0.push((address, access));
+            0xE1A0_0000
+        }
+        fn read_16(&mut self, address: u32, access: Access) -> u16 {
+            self.0.push((address, access));
+            0x46C0 // MOV R8, R8
+        }
+        fn read_8(&mut self, address: u32, access: Access) -> u8 {
+            self.0.push((address, access));
+            0
+        }
+        fn write_32(&mut self, address: u32, _: u32, access: Access) {
+            self.0.push((address, access));
+        }
+        fn write_16(&mut self, address: u32, _: u16, access: Access) {
+            self.0.push((address, access));
+        }
+        fn write_8(&mut self, address: u32, _: u8, access: Access) {
+            self.0.push((address, access));
+        }
+        fn idle(&mut self) {}
+    }
+
+    #[test]
+    fn taking_an_irq_fetches_once_before_the_vector() {
+        let mut bus = LoggingBus(Vec::new());
+        let mut cpu = Cpu::default();
+        cpu.set_cpsr(Mode::System.bits());
+        cpu.jump(&mut bus, 0x1000);
+        cpu.step(&mut bus);
+        bus.0.clear();
+
+        cpu.set_irq_line(true);
+        cpu.step(&mut bus);
+        let code = Access::CODE;
+        let sequential = Access::CODE | Access::SEQUENTIAL;
+        // The discarded fetch of 0x100C, then the vector's two fetches.
+        assert_eq!(
+            bus.0,
+            [(0x100C, sequential), (0x18, code), (0x1C, sequential)]
+        );
+        assert_eq!(cpu.mode(), Mode::Irq);
+        // SUBS PC, LR, #4 returns to the instruction at 0x1004.
+        assert_eq!(cpu.reg(14), 0x1008);
     }
 
     #[test]
