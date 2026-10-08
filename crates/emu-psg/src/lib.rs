@@ -535,7 +535,8 @@ impl Psg {
     }
 
     /// Reads register `register` (0x10 for NR10 to 0x2F), with unused bits
-    /// set.
+    /// set. The GBA's wave channel reads back its bank bits (NR30 bits 5–6)
+    /// and its 75% volume bit (NR32 bit 7) too.
     #[must_use]
     pub fn read(&self, register: u8) -> u8 {
         if register == 0x26 {
@@ -546,7 +547,11 @@ impl Psg {
             return u8::from(self.powered) << 7 | 0x70 | status;
         }
         let index = usize::from(register.wrapping_sub(0x10)) & 0x1F;
-        self.registers[index] | READ_MASKS[index]
+        let unused = match (self.variant, register) {
+            (Variant::Agb, 0x1A | 0x1C) => 0x1F,
+            _ => READ_MASKS[index],
+        };
+        self.registers[index] | unused
     }
 
     /// Writes register `register` (0x10 for NR10 to 0x26 for NR52).

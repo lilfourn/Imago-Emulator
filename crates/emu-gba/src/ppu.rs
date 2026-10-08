@@ -164,19 +164,26 @@ impl Ppu {
         (HEIGHT as u16..LINES - 1).contains(&self.vcount)
     }
 
-    pub(crate) fn read_register(&self, offset: usize) -> u16 {
-        match offset {
+    /// Reads the register at `offset` (0x00–0x5E), with unused bits as 0.
+    /// `None` for write-only and unused registers, which read as open bus.
+    pub(crate) fn read_register(&self, offset: usize) -> Option<u16> {
+        let readable = match offset {
             0x04 => {
                 let flags = u16::from(self.in_vblank())
                     | u16::from(self.in_hblank) << 1
                     | u16::from(self.vcount == self.dispstat() >> 8) << 2;
-                (self.dispstat() & 0xFF38) | flags
+                return Some((self.dispstat() & 0xFF38) | flags);
             }
-            0x06 => self.vcount,
-            // Readable registers; the rest are write-only.
-            0x00 | 0x02 | 0x08..=0x0E | 0x48 | 0x4A | 0x50 | 0x52 => self.register16(offset),
-            _ => 0,
-        }
+            0x06 => return Some(self.vcount),
+            0x00 | 0x02 | 0x0C | 0x0E => 0xFFFF,
+            // BG0 and BG1 have no display area overflow bit.
+            0x08 | 0x0A => 0xDFFF,
+            0x48 | 0x4A => 0x3F3F, // WININ, WINOUT
+            0x50 => 0x3FFF,        // BLDCNT
+            0x52 => 0x1F1F,        // BLDALPHA
+            _ => return None,
+        };
+        Some(self.register16(offset) & readable)
     }
 
     pub(crate) fn write_register(&mut self, offset: usize, value: u16) {

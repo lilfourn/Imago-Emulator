@@ -448,26 +448,31 @@ impl Bus {
         u16::from_le_bytes([self.io[offset], self.io[offset + 1]])
     }
 
-    fn read_io_16(&self, offset: u32) -> u16 {
+    /// Reads the I/O register halfword at `offset`, with the bits the
+    /// hardware does not read back as 0. `None` where nothing answers:
+    /// write-only registers and unused space, which read as open bus.
+    fn read_io_16(&self, offset: u32) -> Option<u16> {
         let offset = (offset & 0x3FE) as usize;
-        match offset {
-            0x000..=0x056 => self.ppu.read_register(offset),
-            0x060..=0x0A6 => {
-                let offset = offset as u32 - 0x60;
-                u16::from(self.apu.read_8(offset)) | u16::from(self.apu.read_8(offset + 1)) << 8
-            }
-            0x0B0..=0x0DE => self.dma.read(offset as u32 - 0xB0),
+        Some(match offset {
+            0x000..=0x05E => return self.ppu.read_register(offset),
+            0x060..=0x0AE => return self.apu.read_16(offset as u32 - 0x60),
+            0x0B0..=0x0DE => return self.dma.read(offset as u32 - 0xB0),
             0x100..=0x10E => self.timers.read(offset as u32 - 0x100, self.cycles),
             0x120..=0x12A | 0x134 => self.sio.read(offset as u32 - 0x120),
             0x130 => self.keys,
+            0x132 => self.io_16(0x132) & 0xC3FF,
+            0x140 => self.io_16(0x140) & 0x0040, // JOYCNT: IRQ enable
+            0x158 => self.io_16(0x158) & 0x0030, // JOYSTAT: general-purpose bits
             0x200 => self.interrupts.enable(),
             0x202 => self.interrupts.flag(),
             0x204 => self.waitcnt,
             0x208 => u16::from(self.interrupts.master()),
             0x300 => self.io_16(0x300) & 0x00FF,
-            // Not yet emulated (sound, DMA, timers, serial): read back.
-            _ => self.io_16(offset),
-        }
+            // JOY_RECV and JOY_TRANS (no Joy Bus device is ever attached),
+            // and the unused upper halves of 32-bit registers.
+            0x136 | 0x142 | 0x150..=0x156 | 0x15A | 0x206 | 0x20A | 0x302 => 0,
+            _ => return None,
+        })
     }
 
     fn write_io_16(&mut self, offset: u32, value: u16) {
@@ -559,7 +564,9 @@ impl Bus {
             }
             0x02 => half(&self.ewram, (address & 0x3_FFFE) as usize),
             0x03 => half(&self.iwram, (address & 0x7FFE) as usize),
-            0x04 if address & 0x00FF_FFFF < 0x400 => self.read_io_16(address),
+            0x04 if address & 0x00FF_FFFF < 0x400 => self
+                .read_io_16(address)
+                .unwrap_or_else(|| self.open_bus_16(address)),
             0x05 => self.ppu.read_palette(address),
             0x06 => self.ppu.read_vram(address),
             0x07 => self.ppu.read_oam(address),
@@ -660,7 +667,8 @@ impl Bus {
     /// The byte at `address` as the CPU reads it, without side effects or
     /// time passing, for debuggers: the BIOS (readable here even while
     /// code runs elsewhere), RAM, I/O registers (reads of which change
-    /// nothing on the GBA), palette RAM, VRAM, OAM, the ROM with its
+    /// nothing on the GBA; write-only ones show the value last written
+    /// rather than open bus), palette RAM, VRAM, OAM, the ROM with its
     /// patches, and SRAM or Flash. `None` for the EEPROM and unmapped
     /// space.
     pub(crate) fn peek(&self, address: u32) -> Option<u8> {
@@ -668,7 +676,11 @@ impl Bus {
         Some(match address >> 24 {
             0x00 if address < 0x4000 => self.bios[address as usize],
             0x02 | 0x03 => return self.peek_ram(address),
-            0x04 if address & 0x00FF_FFFF < 0x400 => byte(self.read_io_16(address)),
+            // Write-only registers show what was last written.
+            0x04 if address & 0x00FF_FFFF < 0x400 => byte(
+                self.read_io_16(address)
+                    .unwrap_or_else(|| self.io_16((address & 0x3FE) as usize)),
+            ),
             0x05 => byte(self.ppu.read_palette(address)),
             0x06 => byte(self.ppu.read_vram(address)),
             0x07 => byte(self.ppu.read_oam(address)),
@@ -959,7 +971,7 @@ mod tests {
         );
         let cycles = bus.cycles();
         assert!(bus.poke_io_16(0x0400_0000, 0x0403));
-        assert_eq!(bus.read_io_16(0x000), 0x0403);
+        assert_eq!(bus.read_io_16(0x000), Some(0x0403));
         // IF: writing 1 clears the bit.
         bus.request_interrupt(0x0009);
         assert!(bus.poke_io_16(0x0400_0202, 0x0001));
@@ -971,7 +983,7 @@ mod tests {
         assert_eq!(bus.cycles(), cycles);
         // Like a store's, the IF write lands a cycle later.
         bus.tick(1);
-        assert_eq!(bus.read_io_16(0x202), 0x0008);
+        assert_eq!(bus.read_io_16(0x202), Some(0x0008));
     }
 
     /// A bus with an empty cartridge.
@@ -983,15 +995,34 @@ mod tests {
     }
 
     #[test]
+    fn write_only_registers_read_as_open_bus_and_unused_halves_as_zero() {
+        let mut rom = vec![0; 0x400];
+        rom[..4].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        let mut bus = Bus::new(Cartridge::new(rom.into(), None, 0), Box::default());
+        let n = Access::NONSEQUENTIAL;
+        bus.read_32(0x0800_0000, Access::CODE);
+        bus.write_16(0x0400_0010, 0x1234, n); // BG0HOFS
+        assert_eq!(bus.read_16(0x0400_0010, n), 0xBEEF);
+        assert_eq!(bus.read_16(0x0400_0012, n), 0xDEAD);
+        assert_eq!(bus.read_32(0x0400_00A0, n), 0xDEAD_BEEF); // FIFO A
+        assert_eq!(bus.read_16(0x0400_0066, n), 0);
+        assert_eq!(bus.read_16(0x0400_020A, n), 0);
+        bus.write_16(0x0400_0008, 0xFFFF, n); // BG0CNT
+        assert_eq!(bus.read_16(0x0400_0008, n), 0xDFFF);
+        // Debuggers see what was written.
+        assert_eq!(bus.peek(0x0400_0010), Some(0x34));
+    }
+
+    #[test]
     fn interrupts_reach_the_cpu_three_cycles_after_the_request() {
         let mut bus = blank_bus();
         bus.write_io_16(0x200, 0x0008);
         bus.write_io_16(0x208, 1);
         bus.tick(1);
         bus.request_interrupt(0x0008);
-        assert_eq!(bus.read_io_16(0x202), 0);
+        assert_eq!(bus.read_io_16(0x202), Some(0));
         bus.tick(1);
-        assert_eq!(bus.read_io_16(0x202), 0x0008);
+        assert_eq!(bus.read_io_16(0x202), Some(0x0008));
         assert!(!bus.irq_line());
         bus.tick(1);
         assert!(!bus.irq_line());
@@ -1028,17 +1059,17 @@ mod tests {
         assert_eq!(written - start, 1);
         bus.write_io_16(0x200, 0x0008);
         bus.tick(1);
-        assert_eq!(bus.read_io_16(0x102), 0x00C0);
-        assert_eq!(bus.read_io_16(0x100), 0xFFFE);
+        assert_eq!(bus.read_io_16(0x102), Some(0x00C0));
+        assert_eq!(bus.read_io_16(0x100), Some(0xFFFE));
         bus.tick(1);
-        assert_eq!(bus.read_io_16(0x100), 0xFFFE);
+        assert_eq!(bus.read_io_16(0x100), Some(0xFFFE));
         bus.tick(1);
-        assert_eq!(bus.read_io_16(0x100), 0xFFFF);
+        assert_eq!(bus.read_io_16(0x100), Some(0xFFFF));
         // It overflows at written + 4, and IF shows it a cycle later.
         bus.tick(1);
-        assert_eq!(bus.read_io_16(0x100), 0xFFFE);
-        assert_eq!(bus.read_io_16(0x202), 0);
+        assert_eq!(bus.read_io_16(0x100), Some(0xFFFE));
+        assert_eq!(bus.read_io_16(0x202), Some(0));
         bus.tick(1);
-        assert_eq!(bus.read_io_16(0x202), 0x0008);
+        assert_eq!(bus.read_io_16(0x202), Some(0x0008));
     }
 }

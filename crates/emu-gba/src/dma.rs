@@ -103,12 +103,15 @@ impl Dma {
     }
 
     /// Reads a register at `offset` from 0x040000B0. Only the control
-    /// registers can be read.
-    pub(crate) fn read(&self, offset: u32) -> u16 {
+    /// registers can be read, without their five unused bits; the count
+    /// registers read as 0. `None` for the write-only addresses and the
+    /// unused space after the channels, which read as open bus.
+    pub(crate) fn read(&self, offset: u32) -> Option<u16> {
         let index = (offset / 12) as usize;
         match (self.channels.get(index), offset % 12) {
-            (Some(channel), 10) => channel.control,
-            _ => 0,
+            (Some(channel), 10) => Some(channel.control & 0xFFE0),
+            (Some(_), 8) => Some(0),
+            _ => None,
         }
     }
 
@@ -223,7 +226,7 @@ mod tests {
             (8, true, 4)
         );
         assert!(!dma.finish(3, 0x0200_0020, 0x0600_0020));
-        assert_eq!(dma.read(3 * 12 + 10) & 0x8000, 0);
+        assert_eq!(dma.read(3 * 12 + 10), Some(0x0400));
     }
 
     #[test]
