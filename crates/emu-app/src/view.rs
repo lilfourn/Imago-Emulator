@@ -9,17 +9,16 @@ use emu_core::{Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, 
 use gpui::{
     Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
-    ScrollWheelEvent, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb,
-    rgba,
+    SharedString, Subscription, Task, Window, WindowHandle, div, img, prelude::*, px, rgb, rgba,
 };
 
 use crate::app::{
-    ConnectLinkCable, EditCheats, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
-    LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
-    Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise,
-    RotateClockwise, SaveState, SwapScreens, SwitchPlayer, ToggleColorCorrection,
-    ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, ToggleMicrophone, TogglePause,
-    ToggleSlowMotion,
+    ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver, EditCheats, InsertGbaCartridge,
+    LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState, NextScreenGap,
+    NextStateSlot, OpenRom, PreviousStateSlot, Reset, Resolution3d1x, Resolution3d2x,
+    Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, SaveState, ShowDebugger,
+    SwapScreens, SwitchPlayer, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen,
+    ToggleMicrophone, TogglePause, ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Shortcut};
@@ -28,10 +27,11 @@ use crate::chords::{Chords, Effect};
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
 use crate::cursor::{self, Cursor};
-use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
+use crate::debugger::{self, Snapshot};
+use crate::debugger_window::DebuggerWindow;
+use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
-use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist;
 use crate::settings::{self, Settings};
@@ -66,8 +66,10 @@ pub struct EmulatorView {
     heard: u8,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
-    /// Where the memory viewer is looking, while it is open.
-    memory_viewer: Option<Viewer>,
+    /// The debugger window, once opened.
+    debugger: Option<WindowHandle<DebuggerWindow>>,
+    /// Games started so far, which numbers each for the debugger.
+    sessions: u64,
     session: Option<Session>,
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
@@ -94,6 +96,18 @@ pub struct EmulatorView {
     slot_preview_task: Option<Task<()>>,
     _gamepad: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the debugger window needs to know about the running game.
+pub struct DebugTarget {
+    /// Counts the games started, so a new one can be told apart.
+    pub session: u64,
+    /// The game's system.
+    pub system: System,
+    /// The player the keyboard controls, whose CPUs the debugger shows.
+    pub player: usize,
+    /// The emulation thread's latest snapshot for the debugger.
+    pub snapshot: Option<Arc<Snapshot>>,
 }
 
 /// A running game and the images last drawn for it.
@@ -184,7 +198,8 @@ impl EmulatorView {
             microphone: None,
             heard: 0,
             color_correction: true,
-            memory_viewer: None,
+            debugger: None,
+            sessions: 0,
             session: None,
             loading: None,
             placements: Vec::new(),
@@ -303,7 +318,7 @@ impl EmulatorView {
         self.active_player = 0;
         let bindings = self.reload_bindings();
         self.sync_held();
-        self.watch_memory();
+        self.sessions += 1;
         if info.players > 1 {
             self.layout.arrangement = Arrangement::Horizontal;
             window.set_window_title(&format!("{name} — {} link", info.system.name()));
@@ -419,6 +434,8 @@ impl EmulatorView {
                 self.listen();
                 cx.notify();
             }
+            // Wakes the debugger window, which redraws with this view.
+            Event::Debug => cx.notify(),
             Event::Notice(text) => self.show_notice(text, cx),
         }
     }
@@ -495,7 +512,6 @@ impl EmulatorView {
         }
         self.send_input();
         self.send_turbo();
-        self.watch_memory();
         self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
 
@@ -961,111 +977,52 @@ impl EmulatorView {
         }
     }
 
-    fn toggle_memory_viewer(&mut self, cx: &mut Context<Self>) {
-        self.memory_viewer = match self.memory_viewer {
-            Some(_) => None,
-            None => Some(Viewer::default()),
-        };
-        self.watch_memory();
-        cx.notify();
-    }
-
-    /// Tells the emulation thread which memory the viewer shows, if any.
-    fn watch_memory(&self) {
-        let span = self
-            .memory_viewer
-            .zip(self.session.as_ref())
-            .and_then(|(viewer, session)| {
-                let region = memory_viewer::regions(session.info.system).get(viewer.region)?;
-                let (start, length) = viewer.span(region);
-                Some(MemorySpan {
-                    player: self.active_player,
-                    start,
-                    length,
-                })
+    /// Opens the debugger window, or brings it to the front.
+    fn show_debugger(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.debugger
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
+        // The new window draws at once and reads this view, so open it
+        // once this update is over.
+        let main = cx.entity();
+        cx.defer(move |cx| {
+            let opened = DebuggerWindow::open(main.clone(), cx);
+            main.update(cx, |this, cx| match opened {
+                Ok(handle) => this.debugger = Some(handle),
+                Err(error) => this.show_notice(format!("Cannot open the debugger: {error:#}"), cx),
             });
-        self.send(Command::WatchMemory(span));
-    }
-
-    fn select_memory_region(&mut self, region: usize, cx: &mut Context<Self>) {
-        if let Some(viewer) = &mut self.memory_viewer {
-            viewer.select(region);
-            self.watch_memory();
-            cx.notify();
-        }
-    }
-
-    fn scroll_memory(&mut self, rows: f32, cx: &mut Context<Self>) {
-        let length = self.session.as_ref().and_then(|session| {
-            let regions = memory_viewer::regions(session.info.system);
-            Some(regions.get(self.memory_viewer?.region)?.length)
         });
-        if let (Some(viewer), Some(length)) = (&mut self.memory_viewer, length) {
-            let before = viewer.offset;
-            viewer.scroll(rows, length);
-            if viewer.offset != before {
-                self.watch_memory();
-                cx.notify();
-            }
+    }
+
+    /// Sends a step for the CPU the debugger window shows, if it is open.
+    fn step_in_debugger(&mut self, step: fn(usize) -> debugger::Command, cx: &mut Context<Self>) {
+        let cpu = self
+            .debugger
+            .and_then(|handle| handle.read(cx).ok().map(DebuggerWindow::cpu));
+        match cpu {
+            Some(cpu) => self.send_debug(step(cpu)),
+            None => self.debugger = None,
         }
     }
 
-    /// The memory viewer overlay: region tabs over a hex dump.
-    fn memory_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        const ROW_HEIGHT: f32 = 13.0;
-        let viewer = self.memory_viewer?;
+    /// What the debugger window needs to know about the running game.
+    pub fn debug_target(&self) -> Option<DebugTarget> {
         let session = self.session.as_ref()?;
-        let regions = memory_viewer::regions(session.info.system);
-        let tabs = regions.iter().enumerate().map(|(index, region)| {
-            let tab = div()
-                .id(index)
-                .px_1()
-                .rounded_sm()
-                .cursor_pointer()
-                .child(region.name)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.select_memory_region(index, cx);
-                }));
-            if index == viewer.region {
-                tab.bg(rgba(0xFFFF_FF33))
-            } else {
-                tab
-            }
-        });
-        let rows: Vec<String> = match session.emulator.memory() {
-            Some((span, bytes)) => (0u32..)
-                .zip(bytes.chunks(BYTES_PER_ROW as usize))
-                .map(|(row, chunk)| memory_viewer::hex_row(span.start + row * BYTES_PER_ROW, chunk))
-                .collect(),
-            None if regions.is_empty() => vec!["No memory to show for this system yet".to_owned()],
-            None => Vec::new(),
-        };
-        Some(
-            div()
-                .id("memory-viewer")
-                .absolute()
-                .top(px(8.0))
-                .left(px(8.0))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .bg(rgba(0x0000_00DD))
-                .font_family("Menlo")
-                // Small enough that a row fits the default window.
-                .text_size(px(10.0))
-                .line_height(px(ROW_HEIGHT))
-                .whitespace_nowrap()
-                .child(div().flex().gap_2().children(tabs))
-                .child(div().children(rows))
-                // Clicks here are for the viewer, not the screen below.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                    let delta = event.delta.pixel_delta(px(ROW_HEIGHT)).y;
-                    this.scroll_memory(-f32::from(delta) / ROW_HEIGHT, cx);
-                })),
-        )
+        Some(DebugTarget {
+            session: self.sessions,
+            system: session.info.system,
+            player: self.active_player,
+            snapshot: session.emulator.debug_snapshot(),
+        })
+    }
+
+    /// Sends a debugger request to the running game, if there is one.
+    pub fn send_debug(&self, command: debugger::Command) {
+        self.send(Command::Debug(command));
     }
 
     /// The gamepad cursor, drawn over every copy of the touchscreen and
@@ -1235,9 +1192,7 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
                 this.toggle_color_correction(cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleMemoryViewer, _, cx| {
-                this.toggle_memory_viewer(cx);
-            }))
+            .on_action(cx.listener(|this, _: &ShowDebugger, _, cx| this.show_debugger(cx)))
             .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
                 this.set_resolution_3d(1, cx);
             }))
@@ -1267,6 +1222,19 @@ impl Render for EmulatorView {
         let system = self.session.as_ref().map(|session| session.info.system);
         if system.is_some_and(has_gba_slot) {
             root = root.on_action(cx.listener(Self::insert_gba_cartridge));
+        }
+        // The debugger's step keys work from here too while it is open.
+        if self.debugger.is_some() {
+            root = root
+                .on_action(cx.listener(|this, _: &DebugStep, _, cx| {
+                    this.step_in_debugger(debugger::Command::Step, cx);
+                }))
+                .on_action(cx.listener(|this, _: &DebugStepOver, _, cx| {
+                    this.step_in_debugger(debugger::Command::StepOver, cx);
+                }))
+                .on_action(cx.listener(|this, _: &DebugNextFrame, _, cx| {
+                    this.step_in_debugger(|_| debugger::Command::NextFrame, cx);
+                }));
         }
 
         if let Some(session) = self.session.as_mut() {
@@ -1304,9 +1272,6 @@ impl Render for EmulatorView {
         }
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
-        }
-        if let Some(panel) = self.memory_panel(cx) {
-            root = root.child(panel);
         }
         if let Some(notice) = &self.notice {
             let mut card = div()

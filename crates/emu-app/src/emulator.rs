@@ -19,9 +19,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail, ensure};
 use emu_cheats::Cheat;
+use emu_core::debug::{Breakpoint, RunOutcome, StopReason};
 use emu_core::{Buttons, Cartridge, Core, CoreInfo, Frame, Input, Media, System};
 
 use crate::audio::AudioSink;
+use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
 use crate::persist;
 use crate::rewind::Rewind;
@@ -236,8 +238,8 @@ pub enum Command {
     SaveState(u8),
     /// Restores the save state in this slot's file.
     LoadState(u8),
-    /// Copies this span of memory for the UI after every frame, or stops.
-    WatchMemory(Option<MemorySpan>),
+    /// A request from the debugger window.
+    Debug(debugger::Command),
     /// Draws 3D at this many times the native resolution (DS), showing
     /// the change at once, even while paused.
     SetRenderScale(u32),
@@ -251,22 +253,15 @@ pub enum Command {
     },
 }
 
-/// A span of one player's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemorySpan {
-    /// Index into the core's players.
-    pub player: usize,
-    /// First address.
-    pub start: u32,
-    /// Bytes.
-    pub length: u32,
-}
-
 /// A notification from the emulation thread to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A new frame is in the shared slot.
     Frame,
+    /// A new debugger snapshot is in the shared slot. It has its own
+    /// wake-up: the debugger window must update even while the main
+    /// window, which takes the frames, is hidden and draws nothing.
+    Debug,
     /// Something the user should see briefly, such as "State saved".
     Notice(String),
 }
@@ -299,9 +294,10 @@ impl emu_cheats::Memory for PlayerMemory<'_> {
 #[derive(Default)]
 struct Latest {
     frames: Mutex<(u64, Vec<Frame>)>,
-    /// The watched memory as of that frame; `None` where unreadable.
-    memory: Mutex<Option<(MemorySpan, Vec<Option<u8>>)>>,
+    /// What the debugger window shows, as of that frame, while it is open.
+    debug: Mutex<Option<Arc<Snapshot>>>,
     unseen: AtomicBool,
+    debug_unseen: AtomicBool,
 }
 
 /// A running emulation thread. Dropping it stops the thread and flushes the
@@ -331,7 +327,7 @@ impl Emulator {
             latches: vec![Latch::default(); players],
             turbos: vec![Turbo::default(); players],
             cheats: vec![Vec::new(); players],
-            watch: None,
+            debug: Debugging::default(),
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
@@ -376,11 +372,12 @@ impl Emulator {
         Some(*sequence)
     }
 
-    /// The watched memory as of the latest frame: the span, and each byte
-    /// or `None` where it is not plain memory.
-    pub fn memory(&self) -> Option<(MemorySpan, Vec<Option<u8>>)> {
+    /// What the debugger window shows, as of the latest frame or debugger
+    /// command, while it is open and the core has a debugger.
+    pub fn debug_snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.latest.debug_unseen.store(false, Ordering::Release);
         self.latest
-            .memory
+            .debug
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -407,8 +404,8 @@ struct Runner {
     turbos: Vec<Turbo>,
     /// One list per player.
     cheats: Vec<Vec<Cheat>>,
-    /// Memory the UI is watching.
-    watch: Option<MemorySpan>,
+    /// The debugger's stops, view and run state.
+    debug: Debugging,
     paused: bool,
     /// How fast frames run; rewinding always steps at normal speed.
     speed: Speed,
@@ -419,6 +416,19 @@ struct Runner {
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
     audio: Option<AudioSink>,
+}
+
+/// The debugger's state on the emulation thread.
+#[derive(Debug, Default)]
+struct Debugging {
+    /// What the debugger window shows, while it is open.
+    view: Option<debugger::View>,
+    /// The user's breakpoints and watchpoints.
+    stops: emu_core::debug::Stops,
+    /// What a paused emulation runs towards: a step or a frame's end.
+    pending: Option<Pending>,
+    /// Why the emulation last stopped, until it runs on.
+    stopped: Option<emu_core::debug::Stop>,
 }
 
 impl Runner {
@@ -432,8 +442,9 @@ impl Runner {
 
         'running: loop {
             loop {
-                // Rewinding works while paused; everything else waits.
-                let next = if self.paused && !self.rewinding {
+                // Rewinding and debugger steps work while paused;
+                // everything else waits.
+                let next = if self.paused && !self.rewinding && self.debug.pending.is_none() {
                     commands.recv().map_err(|_| TryRecvError::Disconnected)
                 } else {
                     commands.try_recv()
@@ -461,7 +472,13 @@ impl Runner {
                 for (latch, turbo) in self.latches.iter().zip(&self.turbos) {
                     inputs.push(turbo.apply(latch.input()));
                 }
-                self.loaded.core.run_frame(&inputs, &mut audio);
+                let outcome = self.run_frame(&inputs, &mut audio);
+                if !outcome.frame_done {
+                    // A debugger stopped the frame part-way.
+                    self.settle(outcome);
+                    self.publish();
+                    continue;
+                }
                 self.apply_cheats();
                 for latch in &mut self.latches {
                     latch.advance();
@@ -477,6 +494,7 @@ impl Runner {
                     sink.push(&audio);
                 }
                 audio.clear();
+                self.settle(outcome);
                 self.publish();
                 state.clear();
                 self.loaded.core.save_state(&mut state);
@@ -522,23 +540,26 @@ impl Runner {
             Command::SetRewind(on) => self.rewinding = on,
             Command::TogglePause => {
                 self.paused = !self.paused;
+                self.debug.pending = None;
+                if !self.paused {
+                    self.debug.stopped = None;
+                }
+                // Show the debugger the change, even while paused.
+                self.publish();
                 self.notice(if self.paused { "Paused" } else { "Resumed" });
             }
             Command::Reset => {
                 self.loaded.core.reset();
                 self.rewind.clear();
                 self.clear_latches();
+                self.debug.stopped = None;
                 self.notice("Reset");
             }
             Command::SaveState(slot) => match self.save_state(slot) {
                 Ok(()) => self.notice(format!("Saved state {slot}")),
                 Err(error) => self.notice(format!("Could not save state: {error:#}")),
             },
-            Command::WatchMemory(span) => {
-                self.watch = span;
-                // Show it now, even while paused.
-                self.publish();
-            }
+            Command::Debug(command) => self.debug_command(command),
             Command::SetRenderScale(scale) => {
                 self.loaded.core.set_render_scale(scale);
                 self.publish();
@@ -556,6 +577,7 @@ impl Runner {
                 Ok(()) => {
                     self.rewind.clear();
                     self.clear_latches();
+                    self.debug.stopped = None;
                     self.publish();
                     self.notice(format!("Loaded state {slot}"));
                 }
@@ -590,7 +612,120 @@ impl Runner {
         }
     }
 
-    fn publish(&self) {
+    /// Runs one frame, or what is left of it, checking the debugger's
+    /// stops if there are any.
+    fn run_frame(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<emu_core::StereoSample>,
+    ) -> RunOutcome {
+        let mut stops = self.debug.stops.clone();
+        if let Some(pending) = self.debug.pending {
+            pending.add_to(&mut stops);
+        }
+        match self.loaded.core.debugger() {
+            Some(debugger) if !stops.is_empty() => debugger.run_until(inputs, audio, &stops),
+            _ => {
+                self.loaded.core.run_frame(inputs, audio);
+                RunOutcome {
+                    frame_done: true,
+                    stop: None,
+                }
+            }
+        }
+    }
+
+    /// Pauses after a run that stopped, or that finished the frame a
+    /// "next frame" ran towards.
+    fn settle(&mut self, outcome: RunOutcome) {
+        if let Some(mut stop) = outcome.stop {
+            let Some(debugger) = self.loaded.core.debugger() else {
+                return;
+            };
+            let pc = debugger.pc(stop.cpu);
+            // A step over a call ends at the breakpoint after it.
+            let returned = Pending::StepOver(Breakpoint {
+                cpu: stop.cpu,
+                address: pc,
+            });
+            if stop.reason == StopReason::Breakpoint && self.debug.pending == Some(returned) {
+                stop.reason = StopReason::Step;
+            }
+            if stop.reason != StopReason::Step {
+                let cpus = debugger.cpus();
+                self.notice(debugger::describe_stop(&stop, &cpus, pc));
+            }
+            self.paused = true;
+            self.debug.pending = None;
+            self.debug.stopped = Some(stop);
+        } else if outcome.frame_done && self.debug.pending == Some(Pending::NextFrame) {
+            self.paused = true;
+            self.debug.pending = None;
+        }
+    }
+
+    /// Acts on a debugger request, and shows the result at once, even
+    /// while paused.
+    fn debug_command(&mut self, command: debugger::Command) {
+        use debugger::Command;
+
+        match command {
+            Command::View(view) => self.debug.view = view,
+            Command::SetStops {
+                breakpoints,
+                watchpoints,
+            } => {
+                self.debug.stops.breakpoints = breakpoints;
+                self.debug.stops.watchpoints = watchpoints;
+            }
+            Command::Pause => {
+                self.paused = true;
+                self.debug.pending = None;
+            }
+            Command::Continue => {
+                self.paused = false;
+                self.debug.pending = None;
+                self.debug.stopped = None;
+            }
+            Command::Step(cpu) => self.run_towards(Pending::Step(cpu)),
+            Command::StepOver(cpu) => {
+                if let Some(debugger) = self.loaded.core.debugger() {
+                    let pending = Pending::step_over(debugger, cpu);
+                    self.run_towards(pending);
+                }
+            }
+            Command::NextFrame => self.run_towards(Pending::NextFrame),
+            Command::Write {
+                cpu,
+                address,
+                value,
+            } => {
+                if let Some(debugger) = self.loaded.core.debugger() {
+                    debugger.write(cpu, address, value);
+                }
+            }
+        }
+        self.publish();
+    }
+
+    /// Pauses, then runs towards `pending`.
+    fn run_towards(&mut self, pending: Pending) {
+        self.paused = true;
+        self.debug.pending = Some(pending);
+        self.debug.stopped = None;
+    }
+
+    /// Whether the emulation runs, and if not, why, for the debugger.
+    fn run_state(&self) -> RunState {
+        match (self.debug.pending, self.debug.stopped) {
+            (Some(_), _) => RunState::Stepping,
+            (None, Some(stop)) => RunState::Stopped(stop),
+            (None, None) if self.paused => RunState::Paused,
+            (None, None) => RunState::Running,
+        }
+    }
+
+    fn publish(&mut self) {
         {
             let mut latest = self
                 .latest
@@ -606,22 +741,24 @@ impl Runner {
                 *frames = screens.to_vec();
             }
         }
-        let watched = self.watch.map(|span| {
-            let bytes = (0..span.length)
-                .map(|offset| {
-                    let address = span.start.wrapping_add(offset);
-                    self.loaded.core.peek(span.player, address)
-                })
-                .collect();
-            (span, bytes)
-        });
+        let state = self.run_state();
+        let snapshot = match (self.debug.view, self.loaded.core.debugger()) {
+            (Some(view), Some(debugger)) => {
+                Some(Arc::new(debugger::snapshot(debugger, &view, state)))
+            }
+            _ => None,
+        };
+        let debugging = snapshot.is_some();
         *self
             .latest
-            .memory
+            .debug
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = watched;
+            .unwrap_or_else(PoisonError::into_inner) = snapshot;
         if !self.latest.unseen.swap(true, Ordering::AcqRel) {
             self.events.try_send(Event::Frame).ok();
+        }
+        if debugging && !self.latest.debug_unseen.swap(true, Ordering::AcqRel) {
+            self.events.try_send(Event::Debug).ok();
         }
     }
 
@@ -718,6 +855,9 @@ mod tests {
         System, TouchPoint,
     };
 
+    use emu_core::Debugger;
+    use emu_core::debug::{CpuInfo, Instruction, Register, Stops};
+
     use super::*;
     use crate::latch::{BUTTON_FRAMES, TOUCH_FRAMES};
 
@@ -787,6 +927,85 @@ mod tests {
             *byte = value;
             self.set(u32::from_le_bytes(bytes));
             true
+        }
+
+        fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+            Some(self)
+        }
+    }
+
+    /// Gives a test core a debugger with one CPU, whose memory is the
+    /// core's `peek` and `poke` and which runs frames whole, so tests can
+    /// watch memory through the debugger's snapshot.
+    macro_rules! peek_debugger {
+        ($core:ty) => {
+            impl Debugger for $core {
+                fn cpus(&self) -> Vec<CpuInfo> {
+                    vec![CpuInfo {
+                        name: "TEST",
+                        player: 0,
+                    }]
+                }
+                fn registers(&self, _: usize) -> Vec<Register> {
+                    Vec::new()
+                }
+                fn status(&self, _: usize) -> String {
+                    String::new()
+                }
+                fn pc(&self, _: usize) -> u32 {
+                    0
+                }
+                fn read(&self, _: usize, address: u32) -> Option<u8> {
+                    self.peek(0, address)
+                }
+                fn write(&mut self, _: usize, address: u32, value: u8) -> bool {
+                    self.poke(0, address, value)
+                }
+                fn disassemble(&self, _: usize, address: u32) -> Instruction {
+                    Instruction {
+                        address,
+                        bytes: vec![0],
+                        text: String::new(),
+                        call: false,
+                    }
+                }
+                fn run_until(
+                    &mut self,
+                    inputs: &[Input],
+                    audio: &mut Vec<StereoSample>,
+                    _: &Stops,
+                ) -> RunOutcome {
+                    self.run_frame(inputs, audio);
+                    RunOutcome {
+                        frame_done: true,
+                        stop: None,
+                    }
+                }
+            }
+        };
+    }
+
+    peek_debugger!(Counter);
+    peek_debugger!(Keypad);
+
+    /// Opens the debugger's view, with its memory from `address`.
+    fn watch_memory(emulator: &Emulator, address: u32) {
+        let view = debugger::View {
+            memory: address,
+            ..debugger::View::default()
+        };
+        emulator.send(Command::Debug(debugger::Command::View(Some(view))));
+    }
+
+    /// Waits for the debugger's snapshot to pass `test`.
+    fn wait_for(emulator: &Emulator, test: impl Fn(&Snapshot) -> bool) -> Arc<Snapshot> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(snapshot) = emulator.debug_snapshot().filter(|shown| test(shown)) {
+                return snapshot;
+            }
+            assert!(Instant::now() < deadline, "the debugger never showed it");
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -988,15 +1207,11 @@ mod tests {
         let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
         let cheats = emu_cheats::parse(System::Gb, "[Hold]\n0000:00\n").expect("valid");
         emulator.send(Command::SetCheats { player: 0, cheats });
-        emulator.send(Command::WatchMemory(Some(MemorySpan {
-            player: 0,
-            start: 0,
-            length: 1,
-        })));
+        watch_memory(&emulator, 0);
         thread::sleep(Duration::from_millis(50));
         // Each frame adds one; the cheat then zeroes the low byte.
-        let (_, bytes) = emulator.memory().expect("watching");
-        assert_eq!(bytes, [Some(0)]);
+        let snapshot = emulator.debug_snapshot().expect("watching");
+        assert_eq!(snapshot.memory[0], Some(0));
     }
 
     /// A GBA-like core with KEYINPUT at 0x04000130 and one byte of RAM at
@@ -1054,6 +1269,10 @@ mod tests {
             }
             ram
         }
+
+        fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+            Some(self)
+        }
     }
 
     #[test]
@@ -1073,11 +1292,7 @@ mod tests {
         let cheats =
             emu_cheats::parse(System::Gba, "D0000020 0001\n32000000 0001\n").expect("valid");
         emulator.send(Command::SetCheats { player: 0, cheats });
-        emulator.send(Command::WatchMemory(Some(MemorySpan {
-            player: 0,
-            start: 0x0200_0000,
-            length: 1,
-        })));
+        watch_memory(&emulator, 0x0200_0000);
         emulator.send(Command::SetInput {
             player: 0,
             input: Input {
@@ -1087,8 +1302,131 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(50));
         // The frame cleared the byte; the cheat, seeing A, set it again.
-        let (_, bytes) = emulator.memory().expect("watching");
-        assert_eq!(bytes, [Some(1)]);
+        let snapshot = emulator.debug_snapshot().expect("watching");
+        assert_eq!(snapshot.memory[0], Some(1));
+    }
+
+    /// A Game Boy running `program` at 0x0100 on the emulation thread.
+    fn start_game_boy(program: &[u8]) -> (Emulator, async_channel::Receiver<Event>) {
+        let mut rom = vec![0; 0x8000];
+        rom[0x100..0x100 + program.len()].copy_from_slice(program);
+        rom[0x14D] = rom[0x134..0x14D]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+        let core = emu_cores::create(System::Gb, &Media::new(&rom)).expect("valid rom");
+        let loaded = Loaded {
+            core,
+            rom_paths: vec![PathBuf::from("/nonexistent/debugged.gb")],
+            rom_crc32: 0,
+        };
+        let (events, receiver) = async_channel::unbounded();
+        (Emulator::start(loaded, events, None), receiver)
+    }
+
+    fn debug(emulator: &Emulator, command: debugger::Command) {
+        emulator.send(Command::Debug(command));
+    }
+
+    #[test]
+    fn breakpoints_pause_mid_frame_and_steps_run_one_instruction() {
+        // LD A, 0x42; LD (0xC000), A; INC A; NOP; JR -4 (back to INC A)
+        let program = [0x3E, 0x42, 0xEA, 0x00, 0xC0, 0x3C, 0x00, 0x18, 0xFC];
+        let (emulator, _events) = start_game_boy(&program);
+        watch_memory(&emulator, 0xC000);
+        let at_nop = Breakpoint {
+            cpu: 0,
+            address: 0x0106,
+        };
+        debug(
+            &emulator,
+            debugger::Command::SetStops {
+                breakpoints: vec![at_nop],
+                watchpoints: Vec::new(),
+            },
+        );
+        let stopped = wait_for(&emulator, |shown| {
+            matches!(shown.state, RunState::Stopped(_))
+        });
+        assert_eq!((stopped.pc, stopped.memory[0]), (0x0106, Some(0x42)));
+        assert!(stopped.code.iter().any(|line| line.address == 0x0106));
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            emulator.debug_snapshot().expect("open").pc,
+            0x0106,
+            "still there"
+        );
+
+        debug(&emulator, debugger::Command::Step(0));
+        let stepped = wait_for(&emulator, |shown| shown.pc == 0x0107);
+        let step = emu_core::debug::Stop {
+            cpu: 0,
+            reason: StopReason::Step,
+        };
+        assert_eq!(stepped.state, RunState::Stopped(step));
+
+        debug(
+            &emulator,
+            debugger::Command::Write {
+                cpu: 0,
+                address: 0xC000,
+                value: 0x99,
+            },
+        );
+        wait_for(&emulator, |shown| shown.memory[0] == Some(0x99));
+
+        // Round the loop to the breakpoint again.
+        debug(&emulator, debugger::Command::Continue);
+        let again = wait_for(&emulator, |shown| shown.pc == 0x0106);
+        assert!(
+            matches!(again.state, RunState::Stopped(stop) if stop.reason == StopReason::Breakpoint)
+        );
+    }
+
+    #[test]
+    fn stepping_over_a_call_stops_after_it_returns() {
+        // CALL 0x0150; JR -5 (back to the CALL); and at 0x0150, INC A; RET.
+        let mut program = vec![0; 0x52];
+        program[..5].copy_from_slice(&[0xCD, 0x50, 0x01, 0x18, 0xFB]);
+        program[0x50..].copy_from_slice(&[0x3C, 0xC9]);
+        let (emulator, _events) = start_game_boy(&program);
+        watch_memory(&emulator, 0xC000);
+        debug(
+            &emulator,
+            debugger::Command::SetStops {
+                breakpoints: vec![Breakpoint {
+                    cpu: 0,
+                    address: 0x0100,
+                }],
+                watchpoints: Vec::new(),
+            },
+        );
+        wait_for(&emulator, |shown| {
+            matches!(shown.state, RunState::Stopped(_))
+        });
+        debug(&emulator, debugger::Command::StepOver(0));
+        let returned = wait_for(&emulator, |shown| shown.pc == 0x0103);
+        let step = emu_core::debug::Stop {
+            cpu: 0,
+            reason: StopReason::Step,
+        };
+        assert_eq!(returned.state, RunState::Stopped(step));
+    }
+
+    #[test]
+    fn next_frame_runs_one_frame_then_pauses() {
+        let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        watch_memory(&emulator, 0);
+        debug(&emulator, debugger::Command::Pause);
+        let paused = wait_for(&emulator, |shown| shown.state == RunState::Paused);
+        let before = paused.memory[0].expect("readable");
+        debug(&emulator, debugger::Command::NextFrame);
+        let after = wait_for(&emulator, |shown| {
+            shown.state == RunState::Paused && shown.memory[0] != Some(before)
+        });
+        assert_eq!(after.memory[0], Some(before.wrapping_add(1)));
+        thread::sleep(Duration::from_millis(20));
+        let later = emulator.debug_snapshot().expect("open");
+        assert_eq!(later.memory[0], after.memory[0], "still paused");
     }
 
     /// Every `set_rom_patches` call a core received.

@@ -13,6 +13,8 @@ mod chords;
 mod color;
 mod controls;
 mod cursor;
+mod debugger;
+mod debugger_window;
 mod emulator;
 mod gamepad;
 mod latch;
