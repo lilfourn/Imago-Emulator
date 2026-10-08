@@ -25,11 +25,12 @@
 //! side, which is as far as edge marking looks, so every band's rows come
 //! out as if the frame were drawn whole.
 //!
-//! At the native resolution alone, the frame draws on a worker thread
-//! while the machine runs on: textures are copied and polygons sorted
-//! first, so the drawing reads nothing the machine can change, and the
-//! frame is waited for when its first line is needed, about 50 lines
-//! later. It comes out the same as if it were drawn at once.
+//! The native frame is drawn in bands too, a few, each on its own thread.
+//! At the native resolution alone, it draws while the machine runs on:
+//! textures are copied and polygons sorted first, so the drawing reads
+//! nothing the machine can change, and the frame is waited for when its
+//! first line is needed, about 50 lines later. It comes out the same as
+//! if it were drawn at once.
 
 mod pixel;
 mod post;
@@ -59,6 +60,10 @@ pub(crate) const MAX_SCALE: usize = 8;
 /// Bands the larger frame is split into, each drawn on its own thread.
 const BANDS: usize = 16;
 
+/// Bands the native frame is split into, so it is drawn by the time its
+/// first line is needed.
+const NATIVE_BANDS: usize = 4;
+
 /// What every polygon of a frame shares.
 struct Frame<'a> {
     list: &'a PolygonList,
@@ -71,8 +76,8 @@ struct Frame<'a> {
     order: &'a [usize],
 }
 
-/// Rows `owned` of the larger frame, drawn in buffers that reach a little
-/// beyond them.
+/// Rows `owned` of a frame, drawn in buffers that reach a little beyond
+/// them.
 #[derive(Debug, Clone)]
 struct Band {
     owned: Range<usize>,
@@ -81,12 +86,23 @@ struct Band {
 
 /// The frame at the native resolution, which the game sees, and the
 /// scratch space for drawing it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Canvas {
-    buffers: Buffers,
+    /// The native frame, in [`NATIVE_BANDS`] bands.
+    bands: Vec<Band>,
     memory: TextureMemory,
     /// Polygon indices in drawing order.
     order: Vec<usize>,
+}
+
+impl Default for Canvas {
+    fn default() -> Self {
+        Self {
+            bands: bands(1, NATIVE_BANDS),
+            memory: TextureMemory::default(),
+            order: Vec::new(),
+        }
+    }
 }
 
 /// A native frame drawing on a worker thread: everything it reads, owned.
@@ -129,6 +145,12 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) fn split(&mut self, scale: usize, count: usize) {
         self.bands = bands(scale, count);
+    }
+
+    /// Draws the native frame in `count` bands.
+    #[cfg(test)]
+    pub(crate) fn split_native(&mut self, count: usize) {
+        self.canvas().bands = bands(1, count);
     }
 
     /// How many times larger than the native frame the larger one is; 1
@@ -175,21 +197,13 @@ impl Renderer {
             toon,
             order: &canvas.order,
         };
-        let frame = &frame;
-        std::thread::scope(|scope| {
-            for band in &mut self.bands {
-                scope.spawn(move || draw_frame(&mut band.buffers, frame));
-            }
-            draw_frame(&mut canvas.buffers, frame);
-        });
+        draw_bands(self.bands.iter_mut().chain(&mut canvas.bands), &frame);
     }
 
     /// Row `y` of the last frame drawn, once it is drawn.
     pub(crate) fn line(&mut self, y: usize) -> &[u32; WIDTH] {
         static BLANK: [u32; WIDTH] = [0; WIDTH];
-        let buffers = &self.canvas().buffers;
-        buffers.color[..buffers.layer]
-            .get(y * WIDTH..(y + 1) * WIDTH)
+        band_row(&self.canvas().bands, y)
             .and_then(|row| row.try_into().ok())
             .unwrap_or(&BLANK)
     }
@@ -197,10 +211,7 @@ impl Renderer {
     /// Row `row` of the last larger frame drawn, `256 * scale` pixels, if
     /// there is one.
     pub(crate) fn scaled_row(&self, row: usize) -> Option<&[u32]> {
-        let band = self.bands.iter().find(|band| band.owned.contains(&row))?;
-        let area = band.buffers.area;
-        let start = area.index(0, row);
-        band.buffers.color.get(start..start + area.width())
+        band_row(&self.bands, row)
     }
 }
 
@@ -215,9 +226,26 @@ impl Job {
             toon: self.toon,
             order: &canvas.order,
         };
-        draw_frame(&mut canvas.buffers, &frame);
+        draw_bands(&mut canvas.bands, &frame);
         self.canvas
     }
+}
+
+/// Draws `frame` into every band, each on its own thread.
+fn draw_bands<'a>(bands: impl IntoIterator<Item = &'a mut Band>, frame: &Frame<'_>) {
+    std::thread::scope(|scope| {
+        for band in bands {
+            scope.spawn(move || draw_frame(&mut band.buffers, frame));
+        }
+    });
+}
+
+/// Row `row` of a frame drawn in `bands`, from the band that owns it.
+fn band_row(bands: &[Band], row: usize) -> Option<&[u32]> {
+    let band = bands.iter().find(|band| band.owned.contains(&row))?;
+    let area = band.buffers.area;
+    let start = area.index(0, row);
+    band.buffers.color.get(start..start + area.width())
 }
 
 impl Canvas {

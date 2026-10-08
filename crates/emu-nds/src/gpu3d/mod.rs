@@ -620,6 +620,23 @@ mod tests {
     }
 
     #[test]
+    fn the_native_frame_is_the_same_in_any_number_of_bands() {
+        let vram = Vram::default();
+        let everything = 1 << 4 | 1 << 5 | 1 << 7 | 1 << 3;
+        let frame = |bands: usize| {
+            let mut gpu = Gpu3d::new();
+            gpu.renderer.split_native(bands);
+            busy_scene(&mut gpu, everything);
+            finish(&mut gpu, &vram);
+            (0..192).flat_map(|y| *gpu.line(y)).collect::<Vec<u32>>()
+        };
+        let whole = frame(1);
+        for bands in [2, 4, 7, 192] {
+            assert!(frame(bands) == whole, "in {bands} bands");
+        }
+    }
+
+    #[test]
     fn edge_marking_keeps_its_on_screen_thickness() {
         let mut gpu = Gpu3d::new();
         gpu.set_render_scale(2);
