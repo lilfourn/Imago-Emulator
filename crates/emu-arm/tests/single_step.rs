@@ -190,19 +190,6 @@ impl Bus for TestBus<'_> {
     fn idle(&mut self) {}
 }
 
-/// Whether the case is a flag-setting multiply. ARMv4 leaves C
-/// unpredictable after those; NanoBoyAdvance reproduces the ARM7TDMI's
-/// internal multiplier carry, which no software relies on and this
-/// interpreter does not model, so C is not compared for them.
-fn carry_unpredictable(case: &Case) -> bool {
-    let op = case.opcode;
-    if case.initial.registers.cpsr & (1 << 5) != 0 {
-        return op & 0xFFC0 == 0x4340;
-    }
-    let multiply = op & 0x0FC0_00F0 == 0x0000_0090 || op & 0x0F80_00F0 == 0x0080_0090;
-    multiply && op & (1 << 20) != 0
-}
-
 /// Runs one case; `Err` describes the first difference.
 fn run(case: &Case) -> Result<(), String> {
     let access = Access::from_bits(case.initial.access as u8);
@@ -213,13 +200,8 @@ fn run(case: &Case) -> Result<(), String> {
     };
     cpu.step(&mut bus);
 
-    let mut ours = cpu.registers();
-    let mut theirs = case.final_state.registers.clone();
-    if carry_unpredictable(case) {
-        ours.cpsr &= !(1 << 29);
-        theirs.cpsr &= !(1 << 29);
-    }
-    let theirs = &theirs;
+    let ours = cpu.registers();
+    let theirs = &case.final_state.registers;
     if ours.r != theirs.r {
         let i = (0..16).find(|&i| ours.r[i] != theirs.r[i]).unwrap_or(0);
         return Err(format!(

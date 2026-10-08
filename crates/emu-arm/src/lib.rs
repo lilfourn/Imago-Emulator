@@ -31,6 +31,7 @@ pub mod cp15;
 mod describe;
 mod disasm;
 mod model;
+mod multiplier;
 mod protection;
 mod tcm;
 mod thumb;
@@ -747,6 +748,22 @@ impl<M: Model> Processor<M> {
 
     fn carry(&self) -> bool {
         self.cpsr & psr::C != 0
+    }
+
+    /// Sets C after a flag-setting multiply of `multiplicand` (Rm) by
+    /// `multiplier_operand` (Rs) plus `accumulator`, as the ARM7TDMI's
+    /// multiplier leaves it. ARMv5 leaves C alone.
+    fn set_multiply_carry(
+        &mut self,
+        kind: multiplier::Kind,
+        multiplicand: u32,
+        multiplier_operand: u32,
+        accumulator: u64,
+    ) {
+        if !M::V5TE {
+            let output = multiplier::multiply(kind, multiplicand, multiplier_operand, accumulator);
+            self.set_flag(psr::C, output.carry);
+        }
     }
 }
 

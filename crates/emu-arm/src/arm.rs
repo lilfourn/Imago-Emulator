@@ -17,6 +17,7 @@
 //! the check is a constant false).
 
 use crate::alu::{self, Shift};
+use crate::multiplier;
 use crate::{Access, Bus, Mode, Model, Processor, psr};
 
 impl<M: Model> Processor<M> {
@@ -245,6 +246,8 @@ impl<M: Model> Processor<M> {
         }
         if instruction & (1 << 20) != 0 {
             self.set_nz(result);
+            let addend = if accumulate { accumulator } else { 0 };
+            self.set_multiply_carry(multiplier::Kind::Short, rm, rs, u64::from(addend));
         }
         self.r[rd] = result;
         if rd == 15 {
@@ -276,6 +279,13 @@ impl<M: Model> Processor<M> {
         if instruction & (1 << 20) != 0 {
             self.set_flag(psr::N, result >> 63 != 0);
             self.set_flag(psr::Z, result == 0);
+            let kind = if signed {
+                multiplier::Kind::LongSigned
+            } else {
+                multiplier::Kind::LongUnsigned
+            };
+            let addend = if accumulate { accumulator } else { 0 };
+            self.set_multiply_carry(kind, rm, rs, addend);
         }
         self.r[rd_low] = result as u32;
         self.r[rd_high] = (result >> 32) as u32;

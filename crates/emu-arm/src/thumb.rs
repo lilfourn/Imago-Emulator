@@ -3,6 +3,7 @@
 //! address plus 4.
 
 use crate::alu::{self, Shift};
+use crate::multiplier;
 use crate::{Access, Bus, Model, Processor, psr};
 
 impl<M: Model> Processor<M> {
@@ -136,6 +137,7 @@ impl<M: Model> Processor<M> {
                 nonsequential = true;
                 let result = lhs.wrapping_mul(rhs);
                 self.set_nz(result);
+                self.set_multiply_carry(multiplier::Kind::Short, rhs, lhs, 0);
                 Some(result)
             }
             0xE => Some(self.set_logical(lhs & !rhs)),
