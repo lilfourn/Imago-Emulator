@@ -1,7 +1,10 @@
 //! The four DMA channels (GBATEK, "GBA DMA Transfers").
 //!
 //! This type holds the registers and decides what to copy; the bus performs
-//! the copies, paying the usual wait states, between CPU instructions.
+//! the copies, paying the usual wait states. A channel starts two cycles
+//! after its trigger (the enable bit, a blank period, a sound FIFO) and
+//! runs when the CPU next needs the bus, which waits; a higher-priority
+//! channel that starts meanwhile interrupts it.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,12 +18,18 @@ pub(crate) enum Timing {
     Special,
 }
 
+/// Cycles from a channel's trigger to its start.
+pub(crate) const START_DELAY: u64 = 2;
+
 /// One transfer, as the bus should run it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Transfer {
     pub(crate) source: u32,
     pub(crate) destination: u32,
+    /// Units left to move.
     pub(crate) count: u32,
+    /// Units in the whole transfer.
+    pub(crate) total: u32,
     pub(crate) words: bool,
     pub(crate) source_step: i32,
     pub(crate) destination_step: i32,
@@ -37,6 +46,8 @@ struct Channel {
     current_source: u32,
     current_destination: u32,
     current_count: u32,
+    /// Units in the transfer under way, as latched with `current_count`.
+    current_total: u32,
     pending: bool,
     /// The last value the channel moved, as a word (a halfword in both
     /// halves). Reads from the BIOS region, where nothing answers a DMA,
@@ -92,13 +103,20 @@ fn step(field: u16, size: i32) -> i32 {
     }
 }
 
+impl Channel {
+    /// Whether this is channel 1 or 2 feeding a sound FIFO.
+    fn feeds_fifo(&self, index: usize) -> bool {
+        (index == 1 || index == 2) && self.timing() == Timing::Special
+    }
+}
+
 impl Dma {
-    /// Writes a register at `offset` from 0x040000B0.
-    pub(crate) fn write(&mut self, offset: u32, value: u16) {
+    /// Writes a register at `offset` from 0x040000B0. Returns the channel
+    /// the write enabled to start at once, which the bus starts after
+    /// [`START_DELAY`] with [`Dma::start`].
+    pub(crate) fn write(&mut self, offset: u32, value: u16) -> Option<usize> {
         let index = (offset / 12) as usize;
-        let Some(channel) = self.channels.get_mut(index) else {
-            return;
-        };
+        let channel = self.channels.get_mut(index)?;
         match offset % 12 {
             0 => channel.source = (channel.source & 0xFFFF_0000) | u32::from(value),
             2 => channel.source = (channel.source & 0xFFFF) | u32::from(value) << 16,
@@ -117,13 +135,17 @@ impl Dma {
                     channel.current_source = channel.source & source_mask & align;
                     channel.current_destination = channel.destination & destination_mask & align;
                     channel.current_count = channel.count_for(index);
-                    channel.pending = channel.timing() == Timing::Immediate;
+                    channel.current_total = channel.current_count;
+                    if channel.timing() == Timing::Immediate {
+                        return Some(index);
+                    }
                 }
                 if !channel.enabled() {
                     channel.pending = false;
                 }
             }
         }
+        None
     }
 
     /// Reads a register at `offset` from 0x040000B0. Only the control
@@ -139,24 +161,45 @@ impl Dma {
         }
     }
 
-    /// Starts enabled channels waiting for `timing` (VBlank or HBlank).
-    pub(crate) fn trigger(&mut self, timing: Timing) {
-        for channel in &mut self.channels {
-            if channel.enabled() && channel.timing() == timing {
-                channel.pending = true;
-            }
-        }
+    /// The enabled channels waiting for `timing` (VBlank or HBlank), as a
+    /// bit set, for the bus to start after [`START_DELAY`].
+    pub(crate) fn triggered(&self, timing: Timing) -> u8 {
+        (0..4)
+            .filter(|&index| {
+                let channel = &self.channels[index];
+                channel.enabled() && channel.timing() == timing
+            })
+            .fold(0, |set, index| set | 1 << index)
     }
 
-    /// Starts a sound-mode channel feeding FIFO `fifo` (0 for A, 1 for B).
-    pub(crate) fn trigger_fifo(&mut self, fifo: usize) {
-        for channel in &mut self.channels[1..3] {
-            if channel.enabled()
-                && channel.timing() == Timing::Special
-                && channel.current_destination == FIFO_ADDRESSES[fifo]
-            {
-                channel.pending = true;
+    /// The sound-mode channels feeding FIFO `fifo` (0 for A, 1 for B), as
+    /// a bit set, for the bus to start after [`START_DELAY`].
+    pub(crate) fn triggered_by_fifo(&self, fifo: usize) -> u8 {
+        (1..3)
+            .filter(|&index| {
+                let channel = &self.channels[index];
+                channel.enabled()
+                    && channel.feeds_fifo(index)
+                    && channel.current_destination == FIFO_ADDRESSES[fifo]
+            })
+            .fold(0, |set, index| set | 1 << index)
+    }
+
+    /// Whether channel `index` is enabled.
+    pub(crate) fn enabled(&self, index: usize) -> bool {
+        self.channels[index].enabled()
+    }
+
+    /// Channel `index`, triggered [`START_DELAY`] cycles ago, starts if it
+    /// is still enabled. A sound FIFO channel moves four words each time;
+    /// one already waiting or interrupted keeps what it has left.
+    pub(crate) fn start(&mut self, index: usize) {
+        let channel = &mut self.channels[index];
+        if channel.enabled() {
+            if channel.feeds_fifo(index) && !channel.pending {
+                channel.current_count = 4;
             }
+            channel.pending = true;
         }
     }
 
@@ -168,12 +211,13 @@ impl Dma {
     /// What channel `index` should copy now.
     pub(crate) fn transfer(&self, index: usize) -> Transfer {
         let channel = &self.channels[index];
-        if (index == 1 || index == 2) && channel.timing() == Timing::Special {
+        if channel.feeds_fifo(index) {
             // Sound FIFO: four words to a fixed address.
             return Transfer {
                 source: channel.current_source,
                 destination: channel.current_destination,
-                count: 4,
+                count: channel.current_count,
+                total: 4,
                 words: true,
                 source_step: step(channel.control >> 7, 4),
                 destination_step: 0,
@@ -193,6 +237,7 @@ impl Dma {
             source: channel.current_source,
             destination: channel.current_destination,
             count: channel.current_count,
+            total: channel.current_total,
             words,
             source_step,
             destination_step: step(channel.control >> 5, size),
@@ -208,19 +253,28 @@ impl Dma {
         self.channels[index].latch = value;
     }
 
+    /// Stops channel `index`'s transfer, still pending, with `count` units
+    /// left from the addresses it reached, for a higher-priority channel.
+    pub(crate) fn pause(&mut self, index: usize, source: u32, destination: u32, count: u32) {
+        let channel = &mut self.channels[index];
+        channel.current_source = source;
+        channel.current_destination = destination;
+        channel.current_count = count;
+    }
+
     /// Ends channel `index`'s transfer with the addresses it reached.
     /// Returns whether it requests its interrupt.
     pub(crate) fn finish(&mut self, index: usize, source: u32, destination: u32) -> bool {
         let channel = &mut self.channels[index];
         channel.pending = false;
         channel.current_source = source;
-        let fifo = (index == 1 || index == 2) && channel.timing() == Timing::Special;
-        if !fifo {
+        if !channel.feeds_fifo(index) {
             channel.current_destination = destination;
         }
         let repeat = channel.control & (1 << 9) != 0 && channel.timing() != Timing::Immediate;
         if repeat {
             channel.current_count = channel.count_for(index);
+            channel.current_total = channel.current_count;
             if (channel.control >> 5) & 3 == 3 {
                 channel.current_destination = channel.destination;
             }
@@ -256,6 +310,8 @@ mod tests {
     fn immediate_transfer_runs_once_and_disables() {
         let mut dma = Dma::default();
         configure(&mut dma, 3, 0x0200_0000, 0x0600_0000, 8, 0x8400);
+        assert_eq!(dma.next_pending(), None);
+        dma.start(3);
         assert_eq!(dma.next_pending(), Some(3));
         let transfer = dma.transfer(3);
         assert_eq!(
@@ -272,7 +328,8 @@ mod tests {
         // Repeat, HBlank, destination increment-and-reload, IRQ.
         configure(&mut dma, 0, 0x0300_0000, 0x0400_0040, 1, 0xE260);
         assert_eq!(dma.next_pending(), None);
-        dma.trigger(Timing::HBlank);
+        assert_eq!(dma.triggered(Timing::HBlank), 0b0001);
+        dma.start(0);
         assert_eq!(dma.next_pending(), Some(0));
         assert!(dma.finish(0, 0x0300_0002, 0x0400_0042));
         assert_eq!(dma.transfer(0).destination, 0x0400_0040);
@@ -300,6 +357,27 @@ mod tests {
             (0x0800_0000, 0x0300_0000)
         );
         assert_eq!((transfer.source_step, transfer.destination_step), (4, 0));
+    }
+
+    #[test]
+    fn a_fifo_request_does_not_restart_an_interrupted_refill() {
+        let mut dma = Dma::default();
+        // DMA 1 feeding FIFO A: sound timing, repeat, words.
+        configure(&mut dma, 1, 0x0200_0000, 0x0400_00A0, 0, 0xB600);
+        dma.start(1);
+        assert_eq!(dma.transfer(1).count, 4);
+        dma.pause(1, 0x0200_0004, 0x0400_00A0, 3);
+        dma.start(1);
+        assert_eq!(dma.transfer(1).count, 3);
+    }
+
+    #[test]
+    fn the_eeprom_sees_the_length_latched_at_enable() {
+        let mut dma = Dma::default();
+        configure(&mut dma, 3, 0x0200_0000, 0x0D00_0000, 81, 0x8000);
+        dma.write(3 * 12 + 8, 1);
+        let transfer = dma.transfer(3);
+        assert_eq!((transfer.count, transfer.total), (81, 81));
     }
 
     #[test]

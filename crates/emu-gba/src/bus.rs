@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::apu::{self, Apu};
 use crate::bios;
-use crate::dma::{Dma, Timing};
+use crate::dma::{self, Dma, Timing};
 use crate::interrupts::{self, Interrupts};
 use crate::ppu::{self, Ppu};
 use crate::prefetch::{Lookup, Prefetch};
@@ -44,6 +44,8 @@ pub(crate) enum Event {
     AudioSample,
     /// The serial transfer in progress ends.
     SerialDone,
+    /// A triggered DMA channel starts.
+    DmaStart(u8),
 }
 
 /// Interrupt request bits outside the PPU's.
@@ -102,6 +104,14 @@ pub(crate) struct Bus {
     /// WAITCNT's prefetch bit was cleared since the last code fetch from
     /// the cartridge, which then starts a new burst.
     prefetch_switched_off: bool,
+    /// Internal CPU cycles still free because they overlap a DMA transfer
+    /// that began during an internal cycle.
+    idle_during_dma: u32,
+    /// The value the last DMA unit put on the bus, which an unmapped read
+    /// straight after a DMA returns instead of the last opcode.
+    dma_bus: u32,
+    /// Whether the access in progress follows a DMA's.
+    follows_dma: bool,
     scheduler: Scheduler<Event>,
     cycles: u64,
 }
@@ -140,6 +150,9 @@ impl Bus {
             code_in_cartridge: false,
             last_access_dma: false,
             prefetch_switched_off: false,
+            idle_during_dma: 0,
+            dma_bus: 0,
+            follows_dma: false,
             scheduler,
             cycles: 0,
         };
@@ -329,7 +342,7 @@ impl Bus {
                     let (request, signals) = self.ppu.start_hblank();
                     self.request_interrupt_at(request, due.time + 1);
                     if signals.hblank {
-                        self.dma.trigger(Timing::HBlank);
+                        self.start_dmas(self.dma.triggered(Timing::HBlank), due.time);
                     }
                     self.scheduler.schedule_at(
                         due.time + ppu::LINE_CYCLES - ppu::HDRAW_CYCLES,
@@ -341,7 +354,7 @@ impl Bus {
                     self.request_interrupt_at(request & ppu::irq::VBLANK, due.time + 1);
                     self.request_interrupt_at(request & ppu::irq::VCOUNT, due.time + 2);
                     if signals.vblank {
-                        self.dma.trigger(Timing::VBlank);
+                        self.start_dmas(self.dma.triggered(Timing::VBlank), due.time);
                     }
                     self.scheduler
                         .schedule_at(due.time + ppu::HDRAW_CYCLES, Event::HBlank);
@@ -367,6 +380,7 @@ impl Bus {
                     self.scheduler
                         .schedule_at(due.time + apu::CYCLES_PER_SAMPLE, Event::AudioSample);
                 }
+                Event::DmaStart(index) => self.dma.start(usize::from(index)),
                 Event::SerialDone => {
                     if self.sio.finish() {
                         self.request_interrupt_at(irq::SERIAL, due.time);
@@ -387,7 +401,7 @@ impl Bus {
             if timer < 2 {
                 let refill = self.apu.timer_overflow(timer);
                 for fifo in (0..2).filter(|fifo| refill & (1 << fifo) != 0) {
-                    self.dma.trigger_fifo(fifo);
+                    self.start_dmas(self.dma.triggered_by_fifo(fifo), time);
                 }
             }
         }
@@ -422,46 +436,90 @@ impl Bus {
         }
     }
 
-    /// Runs the highest-priority pending DMA transfer, if any. The CPU waits
-    /// while it runs. Returns whether one ran.
-    pub(crate) fn run_pending_dma(&mut self) -> bool {
-        let Some(index) = self.dma.next_pending() else {
-            return false;
-        };
+    /// Starts the DMA channels in `set` (bit `n` for channel `n`), which
+    /// their trigger at cycle `time` asked for, after their start delay.
+    fn start_dmas(&mut self, set: u8, time: u64) {
+        for index in (0..4u8).filter(|index| set & (1 << index) != 0) {
+            self.scheduler
+                .schedule_at(time + dma::START_DELAY, Event::DmaStart(index));
+        }
+    }
+
+    /// Before a CPU access to the bus: any DMA that has started runs
+    /// first, and the CPU waits. The second access of a SWP is locked to
+    /// the first, so it never waits.
+    fn yield_to_dma(&mut self, access: Access) {
+        self.idle_during_dma = 0;
+        if !access.contains(Access::DMA) && !access.contains(Access::LOCK) {
+            self.run_dma();
+        }
+    }
+
+    /// Runs every started DMA transfer, highest priority first, while the
+    /// CPU waits. Returns the cycles that took (0 if none had started).
+    pub(crate) fn run_dma(&mut self) -> u32 {
+        if self.dma.next_pending().is_none() {
+            return 0;
+        }
+        let start = self.cycles;
+        self.tick(1);
+        while let Some(index) = self.dma.next_pending() {
+            self.run_dma_channel(index);
+        }
+        self.tick(1);
+        u32::try_from(self.cycles - start).unwrap_or(u32::MAX)
+    }
+
+    /// Moves channel `index`'s units until its transfer ends or a
+    /// higher-priority channel starts, which then runs first.
+    fn run_dma_channel(&mut self, index: usize) {
         let transfer = self.dma.transfer(index);
         let (mut source, mut destination) = (transfer.source, transfer.destination);
-        if self.cartridge.eeprom_at(destination) {
+        if transfer.count == transfer.total && self.cartridge.eeprom_at(destination) {
             // The request's length tells the EEPROM's size.
-            self.cartridge.note_eeprom_dma(transfer.count);
+            self.cartridge.note_eeprom_dma(transfer.total);
         }
-        // Two internal cycles to start up.
-        self.tick(2);
         let mut latch = self.dma.latch(index);
-        for unit in 0..transfer.count {
-            let order = if unit == 0 {
-                Access::NONSEQUENTIAL
-            } else {
-                Access::SEQUENTIAL
+        // Each run's first cartridge access is non-sequential; everything
+        // else follows on.
+        let mut cartridge_seen = false;
+        let mut remaining = transfer.count;
+        while remaining > 0 {
+            let mut first_cartridge_access = |address: u32| {
+                let first = !cartridge_seen && address >= 0x0800_0000;
+                cartridge_seen |= first;
+                if first {
+                    Access::NONSEQUENTIAL | Access::DMA
+                } else {
+                    Access::SEQUENTIAL | Access::DMA
+                }
             };
-            let access = order | Access::DMA;
-            latch = self
-                .dma_read(source, transfer.words, access)
-                .unwrap_or(latch);
+            let read_access = first_cartridge_access(source);
+            let write_access = first_cartridge_access(destination);
+            if let Some(value) = self.dma_read(source, transfer.words, read_access) {
+                latch = value;
+                self.dma_bus = value;
+            }
             if transfer.words {
-                self.write_32(destination, latch, access);
+                self.write_32(destination, latch, write_access);
             } else {
                 // A halfword goes out on its own lane of the latch.
                 let half = (latch >> ((destination & 2) * 8)) as u16;
-                self.write_16(destination, half, access);
+                self.write_16(destination, half, write_access);
             }
             source = source.wrapping_add_signed(transfer.source_step);
             destination = destination.wrapping_add_signed(transfer.destination_step);
+            remaining -= 1;
+            if remaining > 0 && self.dma.next_pending() != Some(index) {
+                self.dma.set_latch(index, latch);
+                self.dma.pause(index, source, destination, remaining);
+                return;
+            }
         }
         self.dma.set_latch(index, latch);
         if self.dma.finish(index, source, destination) {
             self.request_interrupt(irq::DMA0 << index);
         }
-        true
     }
 
     /// One DMA read of a word, or of a halfword returned in both halves.
@@ -523,7 +581,18 @@ impl Bus {
                 self.apu.write_8(offset, value as u8);
                 self.apu.write_8(offset + 1, (value >> 8) as u8);
             }
-            0x0B0..=0x0DE => self.dma.write(offset as u32 - 0xB0, value),
+            0x0B0..=0x0DE => {
+                let offset = offset as u32 - 0xB0;
+                if let Some(index) = self.dma.write(offset, value) {
+                    self.start_dmas(1 << index, self.cycles);
+                }
+                // A channel disabled before it started never starts.
+                let index = (offset / 12) as u8;
+                if offset % 12 == 10 && !self.dma.enabled(usize::from(index)) {
+                    self.scheduler
+                        .cancel(|pending| *pending == Event::DmaStart(index));
+                }
+            }
             0x100..=0x10E => {
                 // The write lands a cycle later.
                 let event = match self.timers.stage(offset as u32 - 0x100, value) {
@@ -587,8 +656,15 @@ impl Bus {
         }
     }
 
+    /// What an unmapped read sees: the last value on the bus, which is the
+    /// last opcode fetched, or a DMA's last value right after a DMA.
     fn open_bus_16(&self, address: u32) -> u16 {
-        (self.last_fetch >> ((address & 2) * 8)) as u16
+        let bus = if self.follows_dma {
+            self.dma_bus
+        } else {
+            self.last_fetch
+        };
+        (bus >> ((address & 2) * 8)) as u16
     }
 
     fn read_16_raw(&mut self, address: u32) -> u16 {
@@ -790,7 +866,8 @@ impl Bus {
         let region = address >> 24;
         let code = access.contains(Access::CODE);
         let dma = access.contains(Access::DMA);
-        let after_dma = std::mem::replace(&mut self.last_access_dma, dma) && !dma;
+        self.follows_dma = std::mem::replace(&mut self.last_access_dma, dma);
+        let after_dma = self.follows_dma && !dma;
         if code {
             self.code_in_cartridge = (0x08..0x0E).contains(&region);
         }
@@ -870,6 +947,7 @@ fn is_save_region(address: u32) -> bool {
 
 impl CpuBus for Bus {
     fn read_32(&mut self, address: u32, access: Access) -> u32 {
+        self.yield_to_dma(access);
         if is_save_region(address) {
             self.wait_for_access(address, Width::Word, access);
             return u32::from(self.cartridge.read_backup(address)) * 0x0101_0101;
@@ -893,6 +971,7 @@ impl CpuBus for Bus {
     }
 
     fn read_16(&mut self, address: u32, access: Access) -> u16 {
+        self.yield_to_dma(access);
         if is_save_region(address) {
             self.wait_for_access(address, Width::Half, access);
             return u16::from(self.cartridge.read_backup(address)) * 0x0101;
@@ -912,11 +991,13 @@ impl CpuBus for Bus {
     }
 
     fn read_8(&mut self, address: u32, access: Access) -> u8 {
+        self.yield_to_dma(access);
         self.wait_for_access(address, Width::Byte, access);
         self.read_8_raw(address)
     }
 
     fn write_32(&mut self, address: u32, value: u32, access: Access) {
+        self.yield_to_dma(access);
         if is_save_region(address) {
             // The byte lane at the (unaligned) address reaches the 8-bit bus.
             self.wait_for_access(address, Width::Word, access);
@@ -931,6 +1012,7 @@ impl CpuBus for Bus {
     }
 
     fn write_16(&mut self, address: u32, value: u16, access: Access) {
+        self.yield_to_dma(access);
         if is_save_region(address) {
             self.wait_for_access(address, Width::Half, access);
             let byte = (value >> ((address & 1) * 8)) as u8;
@@ -943,12 +1025,22 @@ impl CpuBus for Bus {
     }
 
     fn write_8(&mut self, address: u32, value: u8, access: Access) {
+        self.yield_to_dma(access);
         self.wait_for_access(address, Width::Byte, access);
         self.write_8_raw(address, value);
     }
 
+    /// An internal cycle. A DMA that has started runs now, and the CPU's
+    /// internal cycles overlap it until the CPU needs the bus again.
     fn idle(&mut self) {
-        self.tick(1);
+        if self.dma.next_pending().is_some() {
+            self.idle_during_dma = self.run_dma();
+        }
+        if self.idle_during_dma == 0 {
+            self.tick(1);
+        } else {
+            self.idle_during_dma -= 1;
+        }
     }
 }
 
@@ -973,7 +1065,8 @@ mod tests {
         bus.write_io_16(0xDA, (destination >> 16) as u16);
         bus.write_io_16(0xDC, count);
         bus.write_io_16(0xDE, 0x8000);
-        while bus.run_pending_dma() {}
+        bus.tick(dma::START_DELAY as u32);
+        bus.run_dma();
     }
 
     /// Stores `bits`, one per halfword, at 0x02000000.
@@ -1018,11 +1111,62 @@ mod tests {
         bus.write_32(0x0400_00D4, 0x0200_0000, Access::NONSEQUENTIAL);
         bus.write_32(0x0400_00D8, 0x0300_0000, Access::NONSEQUENTIAL);
         bus.write_32(0x0400_00DC, 0x8400_0001, Access::NONSEQUENTIAL);
-        while bus.run_pending_dma() {}
+        bus.tick(dma::START_DELAY as u32);
+        bus.run_dma();
         // Two halfwords from the BIOS, which a DMA cannot read: each
         // repeats the latched word's half on its own lane.
         dma3(&mut bus, 0x0000_0000, 0x0300_0100, 2);
         assert_eq!(bus.read_32(0x0300_0100, Access::NONSEQUENTIAL), 0xCAFE_BABE);
+    }
+
+    /// Enables DMA 3 to copy one halfword from IWRAM to IWRAM, returning
+    /// the cycle the enabling write happened.
+    fn enable_iwram_dma(bus: &mut Bus) -> u64 {
+        let n = Access::NONSEQUENTIAL;
+        bus.write_32(0x0300_0000, 0x1234, n);
+        bus.write_32(0x0400_00D4, 0x0300_0000, n);
+        bus.write_32(0x0400_00D8, 0x0300_0100, n);
+        bus.write_32(0x0400_00DC, 0x8000_0001, n);
+        bus.cycles()
+    }
+
+    #[test]
+    fn dma_starts_two_cycles_after_enabling_and_waits_for_the_cpus_next_access() {
+        let mut bus = blank_bus();
+        let n = Access::NONSEQUENTIAL;
+        let enabled = enable_iwram_dma(&mut bus);
+        // Two one-cycle accesses fit before the start...
+        bus.read_16(0x0300_0004, n);
+        bus.read_16(0x0300_0004, n);
+        assert_eq!(bus.cycles() - enabled, 2);
+        assert_eq!(bus.read_io_16(0x0DE), Some(0x8000));
+        // ...and the next waits for the transfer: a cycle to start, a read,
+        // a write and a cycle to finish.
+        bus.read_16(0x0300_0004, n);
+        assert_eq!(bus.cycles() - enabled, 2 + 4 + 1);
+        assert_eq!(bus.read_16(0x0300_0100, n), 0x1234);
+        assert_eq!(bus.read_io_16(0x0DE), Some(0));
+    }
+
+    #[test]
+    fn an_unmapped_read_right_after_a_dma_sees_its_value() {
+        let mut bus = blank_bus();
+        enable_iwram_dma(&mut bus);
+        bus.tick(2);
+        assert_eq!(bus.read_16(0x0100_0000, Access::NONSEQUENTIAL), 0x1234);
+        assert_eq!(bus.read_16(0x0100_0000, Access::NONSEQUENTIAL), 0);
+    }
+
+    #[test]
+    fn internal_cycles_overlap_a_dma() {
+        let mut bus = blank_bus();
+        let enabled = enable_iwram_dma(&mut bus);
+        bus.tick(2);
+        // The transfer takes four cycles, which cover four internal cycles.
+        for _ in 0..5 {
+            bus.idle();
+        }
+        assert_eq!(bus.cycles() - enabled, 2 + 4 + 1);
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(16_777_216, 280_896),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 10,
+    state_version: 11,
 };
 
 /// A Game Boy Advance with a cartridge inserted.
@@ -147,14 +147,15 @@ impl Gba {
     /// One step, as [`Gba::step`], with `execute` running the CPU's
     /// instruction if that is what the step does. Returns whether the CPU
     /// ran something (an instruction or an HLE BIOS call) rather than
-    /// waiting for DMA or an interrupt.
+    /// sitting in HALT, waiting for an interrupt or a DMA.
     fn step_with(&mut self, execute: impl FnOnce(&mut Cpu, &mut Bus)) -> bool {
         let Machine { cpu, bus } = &mut self.machine;
-        let ran = if bus.run_pending_dma() {
-            // The CPU waited for the transfer.
-            false
-        } else if !bus.wake_if_requested() {
-            bus.idle_to_next_event();
+        let ran = if !bus.wake_if_requested() {
+            // Halted: DMA still runs; otherwise nothing happens until the
+            // next event. (A running CPU lets DMA in at its next access.)
+            if bus.run_dma() == 0 {
+                bus.idle_to_next_event();
+            }
             false
         } else if self.hle_bios
             && cpu.reg(15) == bios::SWI_ENTERED_PC
