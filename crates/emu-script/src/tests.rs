@@ -431,6 +431,25 @@ fn print_and_console_log_write_like_lua_print() {
 }
 
 #[test]
+fn long_text_is_cut() {
+    let mut core = TestCore::new();
+    let mut script = started(
+        r#"
+        print(("x"):rep(5000))
+        gui.text(0, 0, ("é"):rep(300))
+        "#,
+        &mut core,
+    );
+    let output = script.take_output();
+    assert_eq!(output.log[0].chars().count(), 4_097);
+    assert!(output.log[0].ends_with("x…"));
+    let Draw::Text { text, .. } = &output.draws[0] else {
+        panic!("text");
+    };
+    assert_eq!(text.chars().count(), 257);
+}
+
+#[test]
 fn state_slots_and_pausing_are_requests() {
     let mut core = TestCore::new();
     let mut script = started(

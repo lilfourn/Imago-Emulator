@@ -33,6 +33,10 @@ const MOST_LINES: usize = 1_000;
 /// Text drawn longer than this many characters is cut.
 const LONGEST_TEXT: usize = 256;
 
+/// Log lines longer than this many characters are cut, so a script's log
+/// stays small next to its memory limit.
+const LONGEST_LINE: usize = 4_096;
+
 /// Save-state slots scripts can use, as in the app's `.ss1` to `.ss9`.
 const SLOTS: std::ops::RangeInclusive<i64> = 1..=9;
 
@@ -303,7 +307,7 @@ fn gui(lua: &Lua) -> mlua::Result<Table> {
                 const NAME: &str = "gui.text";
                 let x = coordinate(lua, NAME, "x", &x)?;
                 let y = coordinate(lua, NAME, "y", &y)?;
-                let text: String = to_text(lua, text)?.chars().take(LONGEST_TEXT).collect();
+                let text = cut(to_text(lua, text)?, LONGEST_TEXT);
                 let color = self::color(lua, NAME, &color, Color::WHITE)?;
                 let screen = screen_number(lua, NAME, &screen)?;
                 draw(
@@ -368,7 +372,7 @@ fn console(lua: &Lua) -> mlua::Result<Table> {
                 .into_iter()
                 .map(|value| to_text(lua, value))
                 .collect::<mlua::Result<Vec<_>>>()?;
-            let line = parts.join("\t");
+            let line = cut(parts.join("\t"), LONGEST_LINE);
             let mut state = state_mut(lua)?;
             let log = &mut state.output.log;
             match log.len() {
@@ -382,6 +386,15 @@ fn console(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
     Ok(console)
+}
+
+/// `text`, ending in "…" after `most` characters if it is longer.
+fn cut(mut text: String, most: usize) -> String {
+    if let Some((end, _)) = text.char_indices().nth(most) {
+        text.truncate(end);
+        text.push('…');
+    }
+    text
 }
 
 /// Adds `shape` to this frame's drawing, unless there is already plenty.
