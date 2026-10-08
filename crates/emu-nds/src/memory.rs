@@ -28,17 +28,17 @@ pub(crate) enum Width {
     Word,
 }
 
+// The bytes are taken as one slice, so an access costs one bounds check
+// and one load rather than one per byte.
+
 pub(crate) fn half(memory: &[u8], index: usize) -> u16 {
-    u16::from_le_bytes([memory[index], memory[index + 1]])
+    let bytes = &memory[index..index + 2];
+    u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
 pub(crate) fn word(memory: &[u8], index: usize) -> u32 {
-    u32::from_le_bytes([
-        memory[index],
-        memory[index + 1],
-        memory[index + 2],
-        memory[index + 3],
-    ])
+    let bytes = &memory[index..index + 4];
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
 pub(crate) fn put_half(memory: &mut [u8], index: usize, value: u16) {

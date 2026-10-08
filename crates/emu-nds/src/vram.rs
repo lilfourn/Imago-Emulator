@@ -250,8 +250,8 @@ impl Vram {
             let bank = mask.trailing_zeros() as usize;
             if let Some((_, start)) = self.mapped[bank] {
                 let index = (offset - start) as usize;
-                let bytes = &self.banks[bank];
-                return u16::from_le_bytes([bytes[index], bytes[index + 1]]);
+                let bytes = &self.banks[bank][index..index + 2];
+                return u16::from_le_bytes([bytes[0], bytes[1]]);
             }
         }
         if mask == 0 {

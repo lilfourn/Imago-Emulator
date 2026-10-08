@@ -30,8 +30,8 @@ impl Hardware {
 
     pub(crate) fn raw_16(&self, side: Side, offset: u32) -> u16 {
         let index = (offset & IO_PAGE & !1) as usize;
-        let raw = self.raw(side);
-        u16::from_le_bytes([raw[index], raw[index + 1]])
+        let bytes = &self.raw(side)[index..index + 2];
+        u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
     fn set_raw_16(&mut self, side: Side, offset: u32, value: u16) {

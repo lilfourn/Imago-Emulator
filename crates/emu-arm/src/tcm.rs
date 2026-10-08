@@ -78,30 +78,42 @@ impl Block {
         address as usize & (self.0.len() - 1)
     }
 
+    // Every instruction fetched from TCM comes through these, so they are
+    // inlined, and multi-byte reads take their bytes as one slice: one
+    // bounds check and one load.
+
+    #[inline]
     pub(crate) fn read_32(&self, address: u32) -> u32 {
         let i = self.index(address & !3);
-        u32::from_le_bytes([self.0[i], self.0[i + 1], self.0[i + 2], self.0[i + 3]])
+        let bytes = &self.0[i..i + 4];
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 
+    #[inline]
     pub(crate) fn read_16(&self, address: u32) -> u16 {
         let i = self.index(address & !1);
-        u16::from_le_bytes([self.0[i], self.0[i + 1]])
+        let bytes = &self.0[i..i + 2];
+        u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
+    #[inline]
     pub(crate) fn read_8(&self, address: u32) -> u8 {
         self.0[self.index(address)]
     }
 
+    #[inline]
     pub(crate) fn write_32(&mut self, address: u32, value: u32) {
         let i = self.index(address & !3);
         self.0[i..i + 4].copy_from_slice(&value.to_le_bytes());
     }
 
+    #[inline]
     pub(crate) fn write_16(&mut self, address: u32, value: u16) {
         let i = self.index(address & !1);
         self.0[i..i + 2].copy_from_slice(&value.to_le_bytes());
     }
 
+    #[inline]
     pub(crate) fn write_8(&mut self, address: u32, value: u8) {
         let i = self.index(address);
         self.0[i] = value;
