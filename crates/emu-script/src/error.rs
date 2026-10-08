@@ -14,6 +14,19 @@ impl ScriptError {
         Self(message(error))
     }
 
+    /// Says why a call into the script unwound: it ran out of
+    /// instructions, as `spent` says, or something panicked.
+    pub(crate) fn from_panic(spent: Option<String>, payload: &(dyn std::any::Any + Send)) -> Self {
+        Self(spent.unwrap_or_else(|| {
+            let what = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("a panic");
+            format!("the script stopped on an internal error: {what}")
+        }))
+    }
+
     /// The message.
     #[must_use]
     pub fn message(&self) -> &str {

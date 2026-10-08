@@ -585,6 +585,49 @@ fn pcall_cannot_catch_the_loop_limit() {
 }
 
 #[test]
+fn loops_inside_library_calls_are_stopped() {
+    // A coroutine cannot yield from inside these, so the limit unwinds.
+    for source in [
+        r#"string.gsub("x", ".", function() while true do end end)"#,
+        r#"string.gsub("x", ".", function()
+            while true do pcall(function() while true do end end) end
+        end)"#,
+        r#"table.sort({3, 2, 1}, function() while true do end end)"#,
+        r#"print(setmetatable({}, {__tostring = function() while true do end end}))"#,
+        r#"string.gsub("x", ".", function()
+            while true do
+                coroutine.resume(coroutine.create(function()
+                    string.gsub("y", ".", function() while true do end end)
+                end))
+            end
+        end)"#,
+        r#"emu.on_frame(function()
+            table.sort({1, 2}, function() while true do pcall(error) end end)
+        end)"#,
+    ] {
+        let error = error_of(source);
+        assert!(
+            error.contains("is it stuck in a loop?"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_stopped_script_can_be_dropped_and_another_run() {
+    let mut core = TestCore::new();
+    let mut script = Script::new(
+        "test.lua",
+        "string.gsub('x', '.', function() while true do end end)",
+    )
+    .expect("compiles");
+    assert!(script.start(&mut core).is_err());
+    drop(script);
+    let mut script = started("print(memory.read_u8(0))", &mut core);
+    assert_eq!(script.take_output().log, ["0"]);
+}
+
+#[test]
 fn memory_is_limited() {
     let error = error_of("local t = {} for i = 1, 1e9 do t[i] = ('x'):rep(1000) .. i end");
     assert!(error.contains("more than 64 MiB"), "{error}");
@@ -637,34 +680,38 @@ fn a_failed_callback_still_reports_the_frame() {
 }
 
 #[test]
-fn finalizers_cannot_reenter_the_core_or_the_state() {
-    // Garbage whose finalizers call back in, collected while the script's
-    // own functions are busy allocating.
-    let source = r#"
-        local function litter()
-            for _ = 1, 200 do
-                setmetatable({}, {__gc = function()
-                    memory.read_u8(0)
-                    emu.on_frame(function() end)
-                    print("collected")
-                end})
-            end
-        end
-        emu.on_frame(function()
-            for _ = 1, 50 do
-                litter()
-                local registers = emu.registers()
-                joypad.get()
-                gui.text(0, 0, "x")
-            end
-            collectgarbage()
-        end)
-    "#;
+fn scripts_cannot_set_finalizers() {
+    // Lua runs __gc with hooks off, where no limit could stop a loop.
+    assert_eq!(
+        error_of("local t = setmetatable({}, {__gc = function() while true do end end})"),
+        "test.lua:1: setmetatable: scripts cannot use __gc"
+    );
     let mut core = TestCore::new();
-    let mut script = started(source, &mut core);
-    let mut pending = script.take_output();
-    for _ in 0..5 {
-        pending = frame(&mut script, &mut core, &pending, Buttons::NONE);
-    }
-    drop(script);
+    let mut script = started(
+        r#"
+        local t = setmetatable({}, {__index = function(_, key) return key end})
+        print(t.anything)
+        "#,
+        &mut core,
+    );
+    assert_eq!(script.take_output().log, ["anything"]);
+}
+
+#[test]
+fn metamethods_may_call_back_in() {
+    let mut core = TestCore::new();
+    let mut script = started(
+        r#"
+        local shown = setmetatable({}, {__tostring = function()
+            emu.on_frame(function() end)
+            return "frame " .. emu.frame() .. " byte " .. memory.read_u8(0)
+        end})
+        print(shown)
+        gui.text(0, 0, shown)
+        "#,
+        &mut core,
+    );
+    let output = script.take_output();
+    assert_eq!(output.log, ["frame 0 byte 0"]);
+    assert!(matches!(&output.draws[0], Draw::Text { text, .. } if text == "frame 0 byte 0"));
 }

@@ -50,6 +50,7 @@ mod sandbox;
 mod tests;
 
 use std::cell::RefCell;
+use std::panic::{self, AssertUnwindSafe};
 
 use emu_core::debug::{Breakpoint, RunOutcome, StopReason, Stops};
 use emu_core::{Core, Input, StereoSample};
@@ -148,8 +149,8 @@ impl Script {
     pub fn start(&mut self, core: &mut dyn Core) -> Result<(), ScriptError> {
         let machine = api::Machine::of(core);
         self.lua_error(api::state_mut(&self.lua).map(|mut state| state.machine = machine))?;
-        self.enter(core, |lua, main| match main {
-            Some(main) => resume(lua, main, ()),
+        self.enter(core, |_, main| match main {
+            Some(main) => resume(main, ()),
             None => Ok(()),
         })
     }
@@ -173,7 +174,7 @@ impl Script {
         }))?;
         self.enter(core, |lua, main| {
             if let Some(main) = main {
-                resume(lua, main, ())?;
+                resume(main, ())?;
             }
             for callback in &callbacks {
                 call(lua, callback, ())?;
@@ -302,6 +303,10 @@ impl Script {
     /// Runs `run` with the core lent to the script's `memory` and
     /// `emu.registers` functions, and with a full instruction budget.
     /// `run` gets the main body, if it is waiting to carry on.
+    ///
+    /// Running out of instructions unwinds out of Lua (see `sandbox.rs`),
+    /// and is caught here; so is any other panic, so that nothing a script
+    /// does takes the frontend's thread down with it.
     fn enter(
         &mut self,
         core: &mut dyn Core,
@@ -314,47 +319,53 @@ impl Script {
             .filter(|main| main.status() == ThreadStatus::Resumable);
         let core = RefCell::new(core);
         let lua = &self.lua;
-        let result = lua.scope(|scope| {
-            let host: Table = lua.named_registry_value(api::HOST)?;
-            host.raw_set(
-                "read",
-                scope.create_function(|_, (cpu, address, bytes): (usize, u32, u32)| {
-                    Ok(memory::read(&mut **core.borrow_mut(), cpu, address, bytes))
-                })?,
-            )?;
-            host.raw_set(
-                "write",
-                scope.create_function(
-                    |_, (cpu, address, bytes, value): (usize, u32, u32, u32)| {
-                        Ok(memory::write(
-                            &mut **core.borrow_mut(),
-                            cpu,
-                            address,
-                            bytes,
-                            value,
-                        ))
-                    },
-                )?,
-            )?;
-            host.raw_set(
-                "registers",
-                scope.create_function(|lua, cpu: usize| {
-                    // Let go of the core before building the table: Lua
-                    // may run a finalizer that reads memory as it
-                    // allocates.
-                    let registers = match core.borrow_mut().debugger() {
-                        Some(debugger) => debugger.registers(cpu),
-                        None => Vec::new(),
-                    };
-                    let table = lua.create_table()?;
-                    for register in registers {
-                        table.raw_set(register.name, register.value)?;
-                    }
-                    Ok(table)
-                })?,
-            )?;
-            run(lua, main.as_ref())
-        });
+        let lent = panic::catch_unwind(AssertUnwindSafe(|| {
+            lua.scope(|scope| {
+                let host: Table = lua.named_registry_value(api::HOST)?;
+                host.raw_set(
+                    "read",
+                    scope.create_function(|_, (cpu, address, bytes): (usize, u32, u32)| {
+                        Ok(memory::read(&mut **core.borrow_mut(), cpu, address, bytes))
+                    })?,
+                )?;
+                host.raw_set(
+                    "write",
+                    scope.create_function(
+                        |_, (cpu, address, bytes, value): (usize, u32, u32, u32)| {
+                            Ok(memory::write(
+                                &mut **core.borrow_mut(),
+                                cpu,
+                                address,
+                                bytes,
+                                value,
+                            ))
+                        },
+                    )?,
+                )?;
+                host.raw_set(
+                    "registers",
+                    scope.create_function(|lua, cpu: usize| {
+                        // Let go of the core before building the table: Lua
+                        // may run a finalizer that reads memory as it
+                        // allocates.
+                        let registers = match core.borrow_mut().debugger() {
+                            Some(debugger) => debugger.registers(cpu),
+                            None => Vec::new(),
+                        };
+                        let table = lua.create_table()?;
+                        for register in registers {
+                            table.raw_set(register.name, register.value)?;
+                        }
+                        Ok(table)
+                    })?,
+                )?;
+                run(lua, main.as_ref())
+            })
+        }));
+        let result = match lent {
+            Ok(result) => result.map_err(|error| ScriptError::from_lua(&error)),
+            Err(payload) => Err(ScriptError::from_panic(sandbox::spent(lua), &*payload)),
+        };
         if self
             .main
             .as_ref()
@@ -362,7 +373,7 @@ impl Script {
         {
             self.main = None;
         }
-        result.map_err(|error| ScriptError::from_lua(&error))
+        result
     }
 
     fn lua_error<T>(&self, result: mlua::Result<T>) -> Result<T, ScriptError> {
@@ -371,19 +382,16 @@ impl Script {
 }
 
 /// Carries on `thread` with `args` until it yields or ends. Fails if it
-/// raised an error, or if the instruction budget ran out, whose message
-/// comes first: running out can surface as some other error.
-fn resume(lua: &Lua, thread: &Thread, args: impl IntoLuaMulti) -> mlua::Result<()> {
-    let result = thread.resume::<()>(args);
-    sandbox::check(lua)?;
-    result
+/// raised an error.
+fn resume(thread: &Thread, args: impl IntoLuaMulti) -> mlua::Result<()> {
+    thread.resume::<()>(args)
 }
 
-/// Calls `function` with `args` in a coroutine of its own, which the
-/// instruction budget can stop even inside `pcall`.
+/// Calls `function` with `args` in a coroutine of its own, so that one
+/// calling `emu.frameadvance` can be told why that fails.
 fn call(lua: &Lua, function: &Function, args: impl IntoLuaMulti) -> mlua::Result<()> {
     let thread = lua.create_thread(function.clone())?;
-    resume(lua, &thread, args)?;
+    resume(&thread, args)?;
     if thread.status() == ThreadStatus::Resumable {
         return Err(mlua::Error::runtime(
             "emu.frameadvance waits for a frame only in the script's main body, not in a callback",

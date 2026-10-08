@@ -10,8 +10,16 @@
 //!   read the clock, so a script makes the same choices on every run.
 //! - **Memory**: at most [`MEMORY_LIMIT`]; past it allocations fail.
 //! - **Time**: each call into the script may run [`INSTRUCTION_LIMIT`] Lua
-//!   instructions. A script that runs longer, stuck in a loop, is stopped
-//!   by yielding the coroutine it runs in, which `pcall` cannot catch.
+//!   instructions. Past that the instruction hook unwinds with [`Spent`]:
+//!   with `catch_rust_panics` off, mlua's `pcall` and `xpcall` pass Rust
+//!   panics on rather than catching them, and a yield would be lost inside
+//!   a C function such as `string.gsub`, so only unwinding stops every
+//!   loop. [`crate::Script`] catches it. This
+//!   needs panics to unwind, as they do unless a build sets
+//!   `panic = "abort"`.
+//! - **No finalizers**: `setmetatable` refuses metatables with `__gc`,
+//!   since Lua runs finalizers with hooks off, where no limit could stop
+//!   them.
 
 use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Value, VmState};
 
@@ -25,8 +33,12 @@ pub const INSTRUCTION_LIMIT: u64 = 100_000_000;
 /// How often the instruction count is checked.
 const CHECK_EVERY: u32 = 10_000;
 
+/// What the instruction hook unwinds with once a call has run out of
+/// instructions.
+pub struct Spent;
+
 /// Instructions run since the last call into the script began, and
-/// whether that broke the limit.
+/// where it was when that broke the limit.
 #[derive(Debug, Default)]
 struct Budget {
     used: u64,
@@ -36,7 +48,10 @@ struct Budget {
 /// A fresh, sandboxed Lua state.
 pub fn new() -> mlua::Result<Lua> {
     let libs = StdLib::COROUTINE | StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH;
-    let lua = Lua::new_with(libs, LuaOptions::default())?;
+    // Lua's pcall and xpcall then pass Rust panics on, so the instruction
+    // limit's unwinding cannot be caught.
+    let options = LuaOptions::new().catch_rust_panics(false);
+    let lua = Lua::new_with(libs, options)?;
     lua.set_memory_limit(MEMORY_LIMIT)?;
     let globals = lua.globals();
     globals.raw_set("dofile", Value::Nil)?;
@@ -50,6 +65,14 @@ pub fn new() -> mlua::Result<Lua> {
         end
         string.dump = nil
         math.randomseed(0)
+
+        local setmetatable, rawget, type, error = setmetatable, rawget, type, error
+        function _G.setmetatable(object, metatable)
+            if type(metatable) == "table" and rawget(metatable, "__gc") ~= nil then
+                error("setmetatable: scripts cannot use __gc", 2)
+            end
+            return setmetatable(object, metatable)
+        end
         "#,
     )
     .set_name("=sandbox")
@@ -76,9 +99,10 @@ pub fn new() -> mlua::Result<Lua> {
                 INSTRUCTION_LIMIT / 1_000_000
             ));
         }
-        // Yielding unwinds to whoever resumed this coroutine, through any
-        // pcall; each coroutine yields in turn until the script's own does.
-        Ok(VmState::Yield)
+        drop(budget);
+        // Every check from here on unwinds again, in whichever coroutine
+        // runs, until the script has nothing left running.
+        std::panic::resume_unwind(Box::new(Spent))
     })?;
     Ok(lua)
 }
@@ -90,15 +114,10 @@ pub fn refill(lua: &Lua) {
     }
 }
 
-/// Fails if the call under way ran out of instructions.
-pub fn check(lua: &Lua) -> mlua::Result<()> {
-    match lua
-        .try_app_data_ref::<Budget>()
+/// Why the call under way ran out of instructions, if it did.
+pub fn spent(lua: &Lua) -> Option<String> {
+    lua.try_app_data_ref::<Budget>()
         .ok()
         .flatten()
         .and_then(|budget| budget.spent.clone())
-    {
-        Some(message) => Err(mlua::Error::RuntimeError(message)),
-        None => Ok(()),
-    }
 }
