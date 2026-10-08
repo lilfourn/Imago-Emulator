@@ -256,10 +256,7 @@ impl Script {
                     return (done, Ok(()));
                 }
             };
-            let Some(stop) = outcome
-                .stop
-                .filter(|stop| stop.reason == StopReason::Breakpoint)
-            else {
+            let Some(stop) = outcome.stop else {
                 return (outcome, Ok(()));
             };
             let Some(address) = core.debugger().map(|debugger| debugger.pc(stop.cpu)) else {
@@ -269,15 +266,22 @@ impl Script {
                 cpu: stop.cpu,
                 address,
             };
-            if !waiting.contains(&at) {
-                return (outcome, Ok(()));
-            }
-            let called = self.at_breakpoint(core, at);
-            let theirs = stops.breakpoints.contains(&at);
-            if called.is_err() || theirs || outcome.frame_done {
+            // Whatever stopped the CPU, it is about to run the instruction
+            // there: a step or watchpoint can stop it first, and the run
+            // that carries on starts on that instruction without stopping.
+            let called = if waiting.contains(&at) {
+                self.at_breakpoint(core, at)
+            } else {
+                Ok(())
+            };
+            // Only stops of the script's own carry on.
+            let ours = stop.reason == StopReason::Breakpoint
+                && waiting.contains(&at)
+                && !stops.breakpoints.contains(&at);
+            if called.is_err() || !ours || outcome.frame_done {
                 let outcome = RunOutcome {
                     frame_done: outcome.frame_done,
-                    stop: outcome.stop.filter(|_| theirs),
+                    stop: outcome.stop.filter(|_| !ours),
                 };
                 return (outcome, called);
             }

@@ -513,6 +513,26 @@ fn the_frontends_own_breakpoints_still_stop_the_frame() {
 }
 
 #[test]
+fn a_step_onto_a_scripts_address_still_calls_it_once() {
+    let mut core = TestCore::new();
+    let mut script = started("emu.on_exec(1, function() print('exec') end)", &mut core);
+    let step = Stops {
+        step: Some(0),
+        ..Stops::default()
+    };
+    let input = [Input::default()];
+    let (outcome, called) = script.run_frame(&mut core, &input, &mut Vec::new(), &step);
+    called.expect("callback runs");
+    assert_eq!(outcome.stop.map(|stop| stop.reason), Some(StopReason::Step));
+    assert_eq!(core.pc, 1);
+    assert_eq!(script.take_output().log, ["exec"]);
+    // Carrying on runs the instruction there, without calling again.
+    let (outcome, _) = script.run_frame(&mut core, &input, &mut Vec::new(), &Stops::default());
+    assert!(outcome.frame_done && outcome.stop.is_none());
+    assert!(script.take_output().log.is_empty());
+}
+
+#[test]
 fn errors_name_the_script_and_line() {
     assert_eq!(
         error_of("x = = 1"),
