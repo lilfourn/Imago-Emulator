@@ -81,8 +81,11 @@ callback is still the old.
 
 `emu.on_exec` stops at the instruction's address, without the Thumb bit,
 as a debugger breakpoint does, and runs the frame instruction by
-instruction while it waits, as the debugger does. An instruction that
-starts a frame is not caught.
+instruction while it waits, as the debugger does. Its callback runs once
+each time the CPU gets there, even when a debugger step or watchpoint
+stops the CPU there first, and only the debugger's own stops pause. If
+the CPU is already at the address when the callback is added, that
+visit is missed.
 
 ### `memory`
 
@@ -118,7 +121,7 @@ button, the release wins.
 
 | Function | What it does |
 |---|---|
-| `gui.text(x, y, text [, color [, screen]])` | Writes `text`, eight screen pixels tall, its top-left corner at `x`, `y`. White by default. |
+| `gui.text(x, y, text [, color [, screen]])` | Writes `text`, eight screen pixels tall, its top-left corner at `x`, `y`. White by default; cut after 256 characters. |
 | `gui.box(x1, y1, x2, y2 [, fill [, outline [, screen]]])` | A box with corners `x1, y1` and `x2, y2`, both inside it. No fill by default; the outline is the fill's colour, or white without a fill. |
 
 Positions are in the screen's own pixels (0–255 across a DS screen), and
@@ -135,8 +138,9 @@ console's own screens. On turned screens text stays upright.
 ### `console`
 
 `console.log(...)` and `print(...)` write their arguments as Lua's
-`print` does, separated by tabs. In the app, each line goes to stdout
-after the script's name, and the latest shows as a notice. In
+`print` does, separated by tabs, cutting a line after 4,096 characters
+and logging at most 1,000 lines a frame. In the app, each line goes to
+stdout after the script's name, and the latest shows as a notice. In
 emu-headless, lines go to stdout as they are, before its own `key=value`
 lines, so a test script can print `key=value` lines of its own.
 
@@ -146,8 +150,9 @@ Scripts get Lua's base library, `coroutine`, `table`, `string`, `utf8`
 and `math`, but no `io`, `os`, `require`/`package` or `debug`, so they
 cannot read or write files, start programs or read the clock. `dofile`,
 `loadfile` and `string.dump` are removed, and `load` reads source text
-only, never compiled chunks. `math.random` starts from the same seed
-every run.
+only, never compiled chunks. `setmetatable` refuses a metatable with
+`__gc`: Lua runs finalizers where no time limit can reach them.
+`math.random` starts from the same seed every run.
 
 So the same script with the same game and input runs the same way every
 time, frame for frame. One exception is Lua's own: the order `pairs`
@@ -156,7 +161,8 @@ when the order matters (as `input-macro.lua` does).
 
 A script may use 64 MiB of memory and run 100 million Lua instructions
 each time it is called, well under a second; a script stuck in a loop is
-stopped, even inside `pcall`. Any error stops the script, and the app
+stopped, even inside `pcall` or a callback from `string.gsub` or
+`table.sort`. Any error stops the script, and the app
 shows it as a notice naming the script and line, such as
 `hud.lua:3: attempt to index a nil value (global 'player') · script
 stopped`; the game runs on. emu-headless prints it and exits with status 1.

@@ -465,3 +465,6 @@ dumps and saves are git-ignored, and CI fails if one is committed. See the
 
 Recordings are encoded with the `jpeg-encoder` crate, which is based in
 part on the work of the Independent JPEG Group.
+
+Scripts run on Lua 5.4, copyright © 1994–2026 Lua.org, PUC-Rio, built in
+through the `mlua` crate; both are under the MIT license.
