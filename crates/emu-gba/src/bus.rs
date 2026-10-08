@@ -448,9 +448,13 @@ impl Bus {
     /// Before a CPU access to the bus: any DMA that has started runs
     /// first, and the CPU waits. The second access of a SWP is locked to
     /// the first, so it never waits.
+    #[inline]
     fn yield_to_dma(&mut self, access: Access) {
         self.idle_during_dma = 0;
-        if !access.contains(Access::DMA) && !access.contains(Access::LOCK) {
+        if self.dma.next_pending().is_some()
+            && !access.contains(Access::DMA)
+            && !access.contains(Access::LOCK)
+        {
             self.run_dma();
         }
     }
@@ -871,36 +875,39 @@ impl Bus {
     /// Spends the cycles an access of `width` to `address` takes: the
     /// region's wait states, with the prefetch unit's help for code from
     /// the cartridge.
+    #[inline]
     fn wait_for_access(&mut self, address: u32, width: Width, access: Access) {
-        let region = address >> 24;
-        let code = access.contains(Access::CODE);
         let dma = access.contains(Access::DMA);
         self.follows_dma = std::mem::replace(&mut self.last_access_dma, dma);
-        let after_dma = self.follows_dma && !dma;
-        if code {
+        let region = address >> 24;
+        if access.contains(Access::CODE) {
             self.code_in_cartridge = (0x08..0x0E).contains(&region);
         }
-        match region {
-            0x08..=0x0D => {
-                // A new 128 KiB page, or the CPU's first access after a
-                // DMA, starts a new burst.
-                let sequential =
-                    access.contains(Access::SEQUENTIAL) && address & 0x1_FFFF != 0 && !after_dma;
-                if code {
-                    self.fetch_from_cartridge(address, width, sequential);
-                } else {
-                    self.stop_prefetch();
-                    self.tick(self.waits.cycles(address, width, sequential));
-                }
-            }
-            0x0E | 0x0F => {
-                self.stop_prefetch();
-                self.tick(self.waits.cycles(address, width, false));
-            }
-            _ => {
-                let sequential = access.contains(Access::SEQUENTIAL);
-                self.tick(self.waits.cycles(address, width, sequential));
-            }
+        if (0x08..=0x0F).contains(&region) {
+            self.wait_for_cartridge(address, width, access);
+        } else {
+            let sequential = access.contains(Access::SEQUENTIAL);
+            self.tick(self.waits.cycles(address, width, sequential));
+        }
+    }
+
+    /// [`Bus::wait_for_access`] for the cartridge's ROM and save memory.
+    fn wait_for_cartridge(&mut self, address: u32, width: Width, access: Access) {
+        if address >> 24 >= 0x0E {
+            self.stop_prefetch();
+            self.tick(self.waits.cycles(address, width, false));
+            return;
+        }
+        // A new 128 KiB page, or the CPU's first access after a DMA, starts
+        // a new burst.
+        let after_dma = self.follows_dma && !access.contains(Access::DMA);
+        let sequential =
+            access.contains(Access::SEQUENTIAL) && address & 0x1_FFFF != 0 && !after_dma;
+        if access.contains(Access::CODE) {
+            self.fetch_from_cartridge(address, width, sequential);
+        } else {
+            self.stop_prefetch();
+            self.tick(self.waits.cycles(address, width, sequential));
         }
     }
 

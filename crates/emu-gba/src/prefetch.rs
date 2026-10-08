@@ -59,7 +59,11 @@ impl Prefetch {
     /// Lets `cycles` pass with the cartridge bus free. `enabled` is
     /// WAITCNT's prefetch bit: once it is clear, the read in flight
     /// finishes but no other starts.
+    #[inline]
     pub(crate) fn run(&mut self, cycles: u32, enabled: bool) {
+        if !(self.active && self.fetching) {
+            return;
+        }
         let mut cycles = cycles;
         while self.active && self.fetching && cycles >= self.countdown {
             cycles -= self.countdown;

@@ -47,7 +47,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(16_777_216, 280_896),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 11,
+    state_version: 12,
 };
 
 /// A Game Boy Advance with a cartridge inserted.

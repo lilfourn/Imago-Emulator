@@ -48,7 +48,6 @@ struct Channel {
     current_count: u32,
     /// Units in the transfer under way, as latched with `current_count`.
     current_total: u32,
-    pending: bool,
     /// The last value the channel moved, as a word (a halfword in both
     /// halves). Reads from the BIOS region, where nothing answers a DMA,
     /// copy it again.
@@ -58,6 +57,9 @@ struct Channel {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Dma {
     channels: [Channel; 4],
+    /// Channels that have started and wait for the bus, bit `n` for
+    /// channel `n`. The bus checks this before every CPU access.
+    pending: u8,
 }
 
 /// FIFO A and B, which channels 1 and 2 feed in sound mode.
@@ -141,7 +143,7 @@ impl Dma {
                     }
                 }
                 if !channel.enabled() {
-                    channel.pending = false;
+                    self.pending &= !(1 << index);
                 }
             }
         }
@@ -194,18 +196,20 @@ impl Dma {
     /// is still enabled. A sound FIFO channel moves four words each time;
     /// one already waiting or interrupted keeps what it has left.
     pub(crate) fn start(&mut self, index: usize) {
+        let waiting = self.pending & (1 << index) != 0;
         let channel = &mut self.channels[index];
         if channel.enabled() {
-            if channel.feeds_fifo(index) && !channel.pending {
+            if channel.feeds_fifo(index) && !waiting {
                 channel.current_count = 4;
             }
-            channel.pending = true;
+            self.pending |= 1 << index;
         }
     }
 
     /// The highest-priority channel waiting to run.
+    #[inline]
     pub(crate) fn next_pending(&self) -> Option<usize> {
-        self.channels.iter().position(|channel| channel.pending)
+        (self.pending != 0).then(|| self.pending.trailing_zeros() as usize)
     }
 
     /// What channel `index` should copy now.
@@ -265,8 +269,8 @@ impl Dma {
     /// Ends channel `index`'s transfer with the addresses it reached.
     /// Returns whether it requests its interrupt.
     pub(crate) fn finish(&mut self, index: usize, source: u32, destination: u32) -> bool {
+        self.pending &= !(1 << index);
         let channel = &mut self.channels[index];
-        channel.pending = false;
         channel.current_source = source;
         if !channel.feeds_fifo(index) {
             channel.current_destination = destination;
