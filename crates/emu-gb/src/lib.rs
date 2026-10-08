@@ -69,6 +69,10 @@ pub struct Gb {
     /// How the player chose to show games made for the original Game Boy,
     /// for powering on again.
     dmg_colors: DmgColors,
+    /// When the frame under way began, in clock cycles, while a debugger
+    /// holds it part-way: a frame with the LCD off lasts a frame's time
+    /// from there, however often it stops.
+    frame_start: Option<u64>,
 }
 
 /// Everything a save state captures.
@@ -160,6 +164,7 @@ impl Gb {
             machine: Machine::power_on(model, media.dmg_colors, cartridge, boot_rom),
             screens: [Frame::new(SCREENS[0])],
             dmg_colors: media.dmg_colors,
+            frame_start: None,
         })
     }
 
@@ -193,10 +198,10 @@ impl Gb {
         mut step: impl FnMut(&mut Self) -> RunOutcome,
     ) -> RunOutcome {
         self.set_input(&inputs.first().copied().unwrap_or_default());
-        let start = self.cycles();
+        let start = *self.frame_start.get_or_insert(self.cycles());
         let outcome = loop {
             let mut outcome = step(self);
-            let elapsed = self.cycles() - start;
+            let elapsed = self.cycles().saturating_sub(start);
             let lcd_off = !self.machine.bus.ppu.is_on();
             outcome.frame_done |=
                 (lcd_off && elapsed >= CYCLES_PER_FRAME) || elapsed >= 2 * CYCLES_PER_FRAME;
@@ -205,6 +210,7 @@ impl Gb {
             }
         };
         if outcome.frame_done {
+            self.frame_start = None;
             self.machine.bus.apu.drain_samples(audio);
         }
         outcome
@@ -287,6 +293,7 @@ impl Core for Gb {
         let (mut cartridge, boot_rom) = self.machine.bus.take_media();
         cartridge.power_cycle();
         self.machine = Machine::power_on(model, self.dmg_colors, cartridge, boot_rom);
+        self.frame_start = None;
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
@@ -299,6 +306,7 @@ impl Core for Gb {
             .map_err(|_| StateError::Malformed("not a Game Boy state"))?;
         machine.bus.take_media_from(&mut self.machine.bus);
         self.machine = machine;
+        self.frame_start = None;
         self.present();
         Ok(())
     }

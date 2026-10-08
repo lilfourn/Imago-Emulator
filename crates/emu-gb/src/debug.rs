@@ -226,6 +226,32 @@ mod tests {
     const PROGRAM: [u8; 9] = [0x3E, 0x42, 0xEA, 0x00, 0xC0, 0x3C, 0x00, 0x18, 0xFC];
 
     #[test]
+    fn a_frame_with_the_lcd_off_ends_however_often_it_stops() {
+        // XOR A; LDH (0x40), A turns the LCD off; JR -2 loops at 0x0103.
+        let mut gb = gb(&[0xAF, 0xE0, 0x40, 0x18, 0xFE]);
+        let stops = Stops {
+            breakpoints: vec![Breakpoint {
+                cpu: 0,
+                address: 0x0103,
+            }],
+            ..Stops::default()
+        };
+        // Turning the LCD off ends the first frame; time the one after.
+        while !gb.run_until(&[], &mut Vec::new(), &stops).frame_done {}
+        let start = gb.cycles();
+        let mut runs = 0;
+        while !gb.run_until(&[], &mut Vec::new(), &stops).frame_done {
+            runs += 1;
+            assert!(runs < 100_000, "the frame never ended");
+        }
+        let elapsed = gb.cycles() - start;
+        assert!(
+            (crate::CYCLES_PER_FRAME..crate::CYCLES_PER_FRAME + 16).contains(&elapsed),
+            "{elapsed}"
+        );
+    }
+
+    #[test]
     fn breakpoints_stop_before_the_instruction_and_resume_past_it() {
         let mut gb = gb(&PROGRAM);
         let stops = Stops {
