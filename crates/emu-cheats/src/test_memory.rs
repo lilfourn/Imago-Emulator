@@ -1,5 +1,6 @@
 //! Memory for tests: sparse RAM at 0x02000000–0x0203FFFF, a KEYINPUT
-//! register at 0x04000130, and Game Boy-style RAM banks.
+//! register at 0x04000130, Game Boy-style RAM banks, and a log of I/O
+//! register writes.
 
 use std::collections::HashMap;
 
@@ -12,6 +13,8 @@ pub(crate) struct TestMemory {
     pub(crate) keys: u16,
     /// Bytes written with [`Memory::poke_bank`], by bank and address.
     pub(crate) banks: HashMap<(u8, u32), u8>,
+    /// Halfwords written with [`Memory::poke_io_16`], in order.
+    pub(crate) io: Vec<(u32, u16)>,
 }
 
 impl Default for TestMemory {
@@ -20,6 +23,7 @@ impl Default for TestMemory {
             ram: HashMap::new(),
             keys: 0x03FF,
             banks: HashMap::new(),
+            io: Vec::new(),
         }
     }
 }
@@ -65,6 +69,11 @@ impl Memory for TestMemory {
 
     fn poke_bank(&mut self, bank: u8, address: u32, value: u8) -> bool {
         self.banks.insert((bank, address), value);
+        true
+    }
+
+    fn poke_io_16(&mut self, address: u32, value: u16) -> bool {
+        self.io.push((address, value));
         true
     }
 }

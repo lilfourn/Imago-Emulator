@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 pub trait Bus {
     /// Reads a byte. Takes one M-cycle.
     fn read(&mut self, address: u16) -> u8;
+    /// Reads a byte of the instruction stream (an opcode or operand).
+    /// Takes one M-cycle. Only debuggers tell it apart from a data read.
+    fn fetch(&mut self, address: u16) -> u8 {
+        self.read(address)
+    }
     /// Writes a byte. Takes one M-cycle.
     fn write(&mut self, address: u16, value: u8);
     /// Spends one M-cycle without a memory access.
@@ -71,6 +76,31 @@ impl Registers {
         sp: 0xFFFE,
         pc: 0x0100,
     };
+
+    /// The registers as the CGB boot ROM leaves them for a game made for
+    /// the original Game Boy, whose title bytes of a game Nintendo published
+    /// sum to `title_checksum` (0 for other games). HL points into the logo's
+    /// tile map for the two titles that use it (Pan Docs, "Power Up
+    /// Sequence").
+    #[must_use]
+    pub const fn cgb_dmg_mode_after_boot(title_checksum: u8) -> Self {
+        let [h, l] = match title_checksum {
+            0x43 | 0x58 => [0x99, 0x1A],
+            _ => [0x00, 0x7C],
+        };
+        Self {
+            a: 0x11,
+            f: 0x80,
+            b: title_checksum,
+            c: 0x00,
+            d: 0x00,
+            e: 0x08,
+            h,
+            l,
+            sp: 0xFFFE,
+            pc: 0x0100,
+        }
+    }
 
     /// The registers as the DMG boot ROM leaves them (Pan Docs, "Power Up
     /// Sequence").
@@ -163,6 +193,17 @@ impl Cpu {
         }
     }
 
+    /// Whether interrupts are enabled (IME).
+    pub(crate) fn ime(&self) -> bool {
+        self.ime
+    }
+
+    /// Whether HALT (or an illegal opcode, which freezes the CPU) is
+    /// keeping it from running instructions.
+    pub(crate) fn halted(&self) -> bool {
+        self.halted || self.locked
+    }
+
     /// Runs one instruction, one interrupt dispatch, or one M-cycle of
     /// HALT. Returns the opcode if an instruction ran (CB-prefixed
     /// instructions report `0xCB`).
@@ -189,7 +230,7 @@ impl Cpu {
             return None;
         }
 
-        let opcode = bus.read(self.regs.pc);
+        let opcode = bus.fetch(self.regs.pc);
         if self.halt_bug {
             self.halt_bug = false;
         } else {
@@ -224,7 +265,7 @@ impl Cpu {
     }
 
     fn fetch<B: Bus>(&mut self, bus: &mut B) -> u8 {
-        let value = bus.read(self.regs.pc);
+        let value = bus.fetch(self.regs.pc);
         self.regs.pc = self.regs.pc.wrapping_add(1);
         value
     }

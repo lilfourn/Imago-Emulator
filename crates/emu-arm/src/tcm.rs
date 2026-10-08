@@ -5,7 +5,8 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bytes of instruction TCM in the DS's ARM946E-S.
 pub(crate) const ITCM_SIZE: usize = 0x8000;
@@ -60,8 +61,9 @@ impl Window {
 }
 
 /// One block of TCM. Addresses wrap at its size, which is a power of two.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Box<[u8]>")]
+/// Saved as one byte string, which postcard lays out as it would the
+/// bytes one by one, only faster.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Block(Box<[u8]>);
 
 impl Block {
@@ -78,30 +80,42 @@ impl Block {
         address as usize & (self.0.len() - 1)
     }
 
+    // Every instruction fetched from TCM comes through these, so they are
+    // inlined, and multi-byte reads take their bytes as one slice: one
+    // bounds check and one load.
+
+    #[inline]
     pub(crate) fn read_32(&self, address: u32) -> u32 {
         let i = self.index(address & !3);
-        u32::from_le_bytes([self.0[i], self.0[i + 1], self.0[i + 2], self.0[i + 3]])
+        let bytes = &self.0[i..i + 4];
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 
+    #[inline]
     pub(crate) fn read_16(&self, address: u32) -> u16 {
         let i = self.index(address & !1);
-        u16::from_le_bytes([self.0[i], self.0[i + 1]])
+        let bytes = &self.0[i..i + 2];
+        u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
+    #[inline]
     pub(crate) fn read_8(&self, address: u32) -> u8 {
         self.0[self.index(address)]
     }
 
+    #[inline]
     pub(crate) fn write_32(&mut self, address: u32, value: u32) {
         let i = self.index(address & !3);
         self.0[i..i + 4].copy_from_slice(&value.to_le_bytes());
     }
 
+    #[inline]
     pub(crate) fn write_16(&mut self, address: u32, value: u16) {
         let i = self.index(address & !1);
         self.0[i..i + 2].copy_from_slice(&value.to_le_bytes());
     }
 
+    #[inline]
     pub(crate) fn write_8(&mut self, address: u32, value: u8) {
         let i = self.index(address);
         self.0[i] = value;
@@ -119,6 +133,47 @@ impl TryFrom<Box<[u8]>> for Block {
         } else {
             Err(format!("TCM block of {} bytes", bytes.len()))
         }
+    }
+}
+
+impl Serialize for Block {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Block {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = deserializer.deserialize_byte_buf(ByteBuf)?;
+        Self::try_from(bytes.into_boxed_slice()).map_err(de::Error::custom)
+    }
+}
+
+/// Reads a byte string, or a sequence of bytes from formats that write
+/// one.
+struct ByteBuf;
+
+impl<'de> Visitor<'de> for ByteBuf {
+    type Value = Vec<u8>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a byte string")
+    }
+
+    fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Vec<u8>, E> {
+        Ok(bytes.to_vec())
+    }
+
+    fn visit_byte_buf<E: de::Error>(self, bytes: Vec<u8>) -> Result<Vec<u8>, E> {
+        Ok(bytes)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+        let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(byte) = seq.next_element()? {
+            bytes.push(byte);
+        }
+        Ok(bytes)
     }
 }
 

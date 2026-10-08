@@ -161,6 +161,18 @@ pub struct Input {
     pub buttons: Buttons,
     /// Touchscreen contact, if the screen is being touched.
     pub touch: Option<TouchPoint>,
+    /// How loud the microphone hears the player during the frame (DS
+    /// only), from 0 for silence to [`Input::LOUDEST`] for as loud as it
+    /// reads. The core turns it into noise of that loudness, which is what
+    /// games listening for blowing or shouting look for; no voice comes
+    /// through.
+    pub microphone: u8,
+}
+
+impl Input {
+    /// The loudest [`Input::microphone`] level: blowing straight into the
+    /// microphone.
+    pub const LOUDEST: u8 = u8::MAX;
 }
 
 #[cfg(test)]

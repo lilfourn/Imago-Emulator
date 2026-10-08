@@ -50,58 +50,135 @@ pub(crate) const OPEN_BUS_AFTER_SWI: u32 = 0xE3A0_2004;
 /// The address the CPU's R15 holds once it has entered the SWI vector.
 pub(crate) const SWI_ENTERED_PC: u32 = 0x08 + 8;
 
+/// Cycles the real BIOS's SWI dispatcher (saving registers, finding the
+/// function, restoring and returning) takes beyond this HLE's own entry
+/// and return. The mGBA suite's BIOS timing tests measure 40 for Div,
+/// Sqrt and ArcTan alike once each function's own cycles are counted.
+const DISPATCH_CYCLES: u32 = 40;
+
+/// Cycles the real IntrWait spends between the interrupt handler's return
+/// and its own return, beyond this HLE's repeat of the call. The mGBA
+/// suite's timer count-up tests, all 936 of them, put it at 35.
+const INTR_WAIT_RETURN_CYCLES: u32 = 35;
+
 /// Runs the system call the CPU just entered, then returns from it as the
-/// BIOS's `MOVS PC, LR` would.
+/// BIOS's `MOVS PC, LR` would, taking as long as the real BIOS where that
+/// is known.
 pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
-    // The comment field of the SWI instruction picks the function.
+    // The comment field of the SWI instruction picks the function: in
+    // either state, the BIOS loads the byte two before the return address.
     let return_address = cpu.reg(14);
-    let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
-    let number = if thumb {
-        bus.read_16(return_address.wrapping_sub(2), Access::NONSEQUENTIAL) as u8
-    } else {
-        (bus.read_32(return_address.wrapping_sub(4), Access::NONSEQUENTIAL) >> 16) as u8
-    };
+    let number = bus.read_8(return_address.wrapping_sub(2), Access::NONSEQUENTIAL);
     let r = |i| cpu.reg(i);
     let (r0, r1, r2, r3) = (r(0), r(1), r(2), r(3));
-    match number {
-        0x00 => soft_reset(cpu, bus),
-        0x01 => register_ram_reset(bus, r0),
-        0x02 | 0x03 => bus.halt(),
-        0x04 => return intr_wait(cpu, bus, r0 != 0, r1 as u16),
-        0x05 => return intr_wait(cpu, bus, true, 1),
+    // The function's own cycles, where they are modelled.
+    let cycles = match number {
+        0x00 => {
+            soft_reset(cpu, bus);
+            0
+        }
+        0x01 => {
+            register_ram_reset(bus, r0);
+            0
+        }
+        0x02 | 0x03 => {
+            bus.halt();
+            0
+        }
+        0x04 => {
+            intr_wait(cpu, bus, r0 != 0, r1 as u16);
+            return;
+        }
+        0x05 => return vblank_intr_wait(cpu, bus),
         0x06 => divide(cpu, r0 as i32, r1 as i32),
         0x07 => divide(cpu, r1 as i32, r0 as i32),
-        0x08 => cpu.set_reg(0, isqrt(r0)),
-        0x09 => cpu.set_reg(0, arc_tan(r0 as i16 as i32) as u16 as u32),
-        0x0A => cpu.set_reg(0, u32::from(arc_tan2(r0 as i16 as i32, r1 as i16 as i32))),
-        0x0B => cpu_set(bus, r0, r1, r2),
-        0x0C => cpu_fast_set(bus, r0, r1, r2),
-        0x0D => cpu.set_reg(0, 0xBAAE_187F),
-        0x0E => bg_affine_set(bus, r0, r1, r2),
-        0x0F => obj_affine_set(bus, r0, r1, r2, r3),
-        0x10 => bit_unpack(bus, r0, r1, r2),
-        0x11 => lz77(bus, r0, r1, false),
-        0x12 => lz77(bus, r0, r1, true),
-        0x13 => huffman(bus, r0, r1),
-        0x14 => run_length(bus, r0, r1, false),
-        0x15 => run_length(bus, r0, r1, true),
-        0x16 => diff_unfilter(bus, r0, r1, false, false),
-        0x17 => diff_unfilter(bus, r0, r1, false, true),
-        0x18 => diff_unfilter(bus, r0, r1, true, true),
-        0x19 => bus.write_16(
-            0x0400_0088,
-            if r0 != 0 { 0x200 } else { 0 },
-            Access::NONSEQUENTIAL,
-        ),
-        0x1F => cpu.set_reg(0, midi_key_to_frequency(bus, r0, r1 as u8, r2 as u8)),
+        0x08 => {
+            cpu.set_reg(0, isqrt(r0));
+            sqrt_cycles(r0)
+        }
+        0x09 => {
+            let result = arc_tan(r0 as i32);
+            cpu.set_reg(0, result.angle as i16 as u32);
+            cpu.set_reg(1, result.a as u32);
+            cpu.set_reg(3, result.b as u32);
+            result.cycles
+        }
+        0x0A => {
+            let (angle, a, cycles) = arc_tan2(r0 as i32, r1 as i32);
+            cpu.set_reg(0, u32::from(angle));
+            if let Some(a) = a {
+                cpu.set_reg(1, a as u32);
+            }
+            cpu.set_reg(3, ARC_TAN2_R3);
+            cycles
+        }
+        0x0B => {
+            cpu_set(bus, r0, r1, r2);
+            0
+        }
+        0x0C => {
+            cpu_fast_set(bus, r0, r1, r2);
+            0
+        }
+        0x0D => {
+            cpu.set_reg(0, 0xBAAE_187F);
+            0
+        }
+        0x0E => {
+            bg_affine_set(bus, r0, r1, r2);
+            0
+        }
+        0x0F => {
+            obj_affine_set(bus, r0, r1, r2, r3);
+            0
+        }
+        0x10 => {
+            bit_unpack(bus, r0, r1, r2);
+            0
+        }
+        0x11 | 0x12 => {
+            lz77(bus, r0, r1, number == 0x12);
+            0
+        }
+        0x13 => {
+            huffman(bus, r0, r1);
+            0
+        }
+        0x14 | 0x15 => {
+            run_length(bus, r0, r1, number == 0x15);
+            0
+        }
+        0x16 => {
+            diff_unfilter(bus, r0, r1, false, false);
+            0
+        }
+        0x17 => {
+            diff_unfilter(bus, r0, r1, false, true);
+            0
+        }
+        0x18 => {
+            diff_unfilter(bus, r0, r1, true, true);
+            0
+        }
+        0x19 => {
+            let bias = if r0 != 0 { 0x200 } else { 0 };
+            bus.write_16(0x0400_0088, bias, Access::NONSEQUENTIAL);
+            0
+        }
+        0x1F => {
+            cpu.set_reg(0, midi_key_to_frequency(bus, r0, r1 as u8, r2 as u8));
+            0
+        }
         // Sound driver, multiboot and the rest are not emulated.
-        _ => {}
-    }
+        _ => 0,
+    };
+    bus.spend(DISPATCH_CYCLES + cycles);
     bus.set_bios_open_bus(OPEN_BUS_AFTER_SWI);
     cpu.return_from_exception(bus);
 }
 
 fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
+    bus.forget_vblank_wait();
     let to_ram = bus.read_8(0x0300_7FFA, Access::NONSEQUENTIAL) != 0;
     for address in (0x0300_7E00..0x0300_8000).step_by(4) {
         bus.write_32(address, 0, Access::NONSEQUENTIAL);
@@ -141,11 +218,12 @@ fn register_ram_reset(bus: &mut Bus, flags: u32) {
 
 /// IntrWait: waits until one of `flags` is set in the BIOS interrupt flags
 /// at 0x03007FF8 (which the game's IRQ handler sets), then clears it.
+/// Returns whether the CPU halted to wait.
 ///
 /// While waiting, the CPU halts and returns to the SWI instruction itself,
 /// so the call runs again after each interrupt; R0 is zeroed so the repeat
 /// does not discard flags the handler just set.
-fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) {
+fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) -> bool {
     const BIOS_FLAGS: u32 = 0x0300_7FF8;
     let mut current = bus.read_16(BIOS_FLAGS, Access::NONSEQUENTIAL);
     if discard {
@@ -153,31 +231,128 @@ fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) {
         bus.write_16(BIOS_FLAGS, current, Access::NONSEQUENTIAL);
     }
     bus.write_16(0x0400_0208, 1, Access::NONSEQUENTIAL);
-    if current & flags != 0 {
-        bus.write_16(BIOS_FLAGS, current & !flags, Access::NONSEQUENTIAL);
-    } else {
-        let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
-        let swi_length = if thumb { 2 } else { 4 };
+    let waiting = current & flags == 0;
+    if waiting {
         cpu.set_reg(0, 0);
-        cpu.set_reg(14, cpu.reg(14).wrapping_sub(swi_length));
+        cpu.set_reg(14, swi_address(cpu));
         bus.halt();
+    } else {
+        bus.write_16(BIOS_FLAGS, current & !flags, Access::NONSEQUENTIAL);
+        bus.spend(INTR_WAIT_RETURN_CYCLES);
     }
     bus.set_bios_open_bus(OPEN_BUS_AFTER_SWI);
     cpu.return_from_exception(bus);
+    waiting
 }
 
-fn divide(cpu: &mut Cpu, numerator: i32, denominator: i32) {
+/// VBlankIntrWait: IntrWait for VBlank that always discards old flags. It
+/// ignores R0, so the bus remembers the call that halted instead, and
+/// that call's repeat keeps the flag the handler just set.
+fn vblank_intr_wait(cpu: &mut Cpu, bus: &mut Bus) {
+    let swi = swi_address(cpu);
+    let repeat = bus.resumes_vblank_wait(swi);
+    if intr_wait(cpu, bus, !repeat, 1) {
+        bus.remember_vblank_wait(swi);
+    }
+}
+
+/// The address of the SWI instruction the CPU is handling.
+fn swi_address(cpu: &Cpu) -> u32 {
+    let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
+    cpu.reg(14).wrapping_sub(if thumb { 2 } else { 4 })
+}
+
+/// Div: R0 = quotient, R1 = remainder, R3 = |quotient|. Returns the
+/// cycles the BIOS's shift-and-subtract loop takes: 13 for each bit the
+/// numerator's magnitude is wider than the denominator's (at least one),
+/// plus 11 (mGBA's cycle model, which the mGBA suite's timing tests
+/// confirm).
+fn divide(cpu: &mut Cpu, numerator: i32, denominator: i32) -> u32 {
+    let loops = denominator
+        .unsigned_abs()
+        .leading_zeros()
+        .saturating_sub(numerator.unsigned_abs().leading_zeros())
+        .max(1);
     if denominator == 0 {
         // The real BIOS loops forever; return something harmless instead.
         cpu.set_reg(0, if numerator < 0 { u32::MAX } else { 1 });
         cpu.set_reg(1, numerator as u32);
         cpu.set_reg(3, 1);
-        return;
+    } else {
+        let quotient = numerator.wrapping_div(denominator);
+        cpu.set_reg(0, quotient as u32);
+        cpu.set_reg(1, numerator.wrapping_rem(denominator) as u32);
+        cpu.set_reg(3, quotient.unsigned_abs());
     }
-    let quotient = numerator.wrapping_div(denominator);
-    cpu.set_reg(0, quotient as u32);
-    cpu.set_reg(1, numerator.wrapping_rem(denominator) as u32);
-    cpu.set_reg(3, quotient.unsigned_abs());
+    11 + 13 * loops
+}
+
+/// The cycles the BIOS's Sqrt takes for `value`: it narrows a bound on
+/// the root by repeated long division, and each step of each loop costs a
+/// fixed number of cycles. This replays its loops (mGBA's cycle model,
+/// MPL-2.0, `src/gba/bios.c`; the mGBA suite's timing tests confirm it).
+fn sqrt_cycles(value: u32) -> u32 {
+    if value == 0 {
+        return 53;
+    }
+    let mut cycles = 15;
+    let (mut upper, mut bound) = (value, 1u32);
+    while bound < upper {
+        upper >>= 1;
+        bound <<= 1;
+        cycles += 6;
+    }
+    loop {
+        cycles += 6;
+        upper = value;
+        let mut accumulator = 0u32;
+        let mut lower = bound;
+        loop {
+            cycles += 5;
+            let old = lower;
+            if lower <= upper >> 1 {
+                lower <<= 1;
+            }
+            if old >= upper >> 1 {
+                break;
+            }
+        }
+        loop {
+            cycles += 8;
+            accumulator <<= 1;
+            if upper >= lower {
+                accumulator += 1;
+                upper -= lower;
+            }
+            if lower == bound {
+                break;
+            }
+            lower >>= 1;
+        }
+        let old = bound;
+        bound = (bound + accumulator) >> 1;
+        if bound >= old {
+            return cycles;
+        }
+    }
+}
+
+/// The cycles a MUL takes with `multiplier` as Rs, beyond its first:
+/// one per byte of significant multiplier bits.
+fn multiply_cycles(multiplier: i32) -> u32 {
+    let significant = |mask: u32| {
+        let top = multiplier as u32 & mask;
+        top == 0 || top == mask
+    };
+    if significant(0xFFFF_FF00) {
+        1
+    } else if significant(0xFFFF_0000) {
+        2
+    } else if significant(0xFF00_0000) {
+        3
+    } else {
+        4
+    }
 }
 
 fn isqrt(value: u32) -> u32 {
@@ -191,64 +366,109 @@ fn isqrt(value: u32) -> u32 {
     root
 }
 
-/// ArcTan: the BIOS's polynomial approximation, with `tan` in 1.14 fixed
-/// point, returning an angle where 0x4000 is 90 degrees.
-fn arc_tan(tan: i32) -> i32 {
-    let a = -((tan.wrapping_mul(tan)) >> 14);
-    let mut b = ((0xA9 * a) >> 14) + 0x390;
-    for constant in [0x91C, 0xFB6, 0x16AA, 0x2081, 0x3651, 0xA2F9] {
-        b = (b.wrapping_mul(a) >> 14) + constant;
-    }
-    tan.wrapping_mul(b) >> 16
+/// ArcTan's result and the intermediate values the BIOS leaves behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArcTan {
+    /// The angle, of which R0 gets the low 16 bits sign-extended.
+    angle: i32,
+    /// −tan² in 1.14 fixed point, left in R1.
+    a: i32,
+    /// The polynomial's last term, left in R3.
+    b: i32,
+    /// The cycles the BIOS takes: 37 plus each multiply's (mGBA's cycle
+    /// model, which the mGBA suite's timing tests confirm).
+    cycles: u32,
 }
 
-/// ArcTan2: the angle of (x, y) in 0..0x10000.
-fn arc_tan2(x: i32, y: i32) -> u16 {
-    let result = if y == 0 {
-        if x >= 0 { 0 } else { 0x8000 }
+/// ArcTan: the BIOS's polynomial approximation, with `tan` in 1.14 fixed
+/// point, returning an angle where 0x4000 is 90 degrees. Every step is the
+/// BIOS's 32-bit arithmetic, overflow included, so inputs outside
+/// −1.0..1.0 give the hardware's garbage too.
+fn arc_tan(tan: i32) -> ArcTan {
+    let square = tan.wrapping_mul(tan);
+    let a = (square >> 14).wrapping_neg();
+    let mut product = 0xA9_i32.wrapping_mul(a);
+    let mut cycles = 37 + multiply_cycles(square) + multiply_cycles(product);
+    let mut b = (product >> 14).wrapping_add(0x390);
+    for constant in [0x91C, 0xFB6, 0x16AA, 0x2081, 0x3651, 0xA2F9] {
+        product = b.wrapping_mul(a);
+        cycles += multiply_cycles(product);
+        b = (product >> 14).wrapping_add(constant);
+    }
+    ArcTan {
+        angle: tan.wrapping_mul(b) >> 16,
+        a,
+        b,
+        cycles,
+    }
+}
+
+/// What ArcTan2 leaves in R3.
+const ARC_TAN2_R3: u32 = 0x170;
+
+/// ArcTan2: the angle of (x, y) in 0..0x10000, from 32-bit coordinates.
+/// Also returns ArcTan's R1 value when it calls ArcTan, which it does
+/// unless the point is on an axis, and the cycles taken (11 on an axis,
+/// otherwise ArcTan's).
+fn arc_tan2(x: i32, y: i32) -> (u16, Option<i32>, u32) {
+    let ratio = |numerator: i32, denominator: i32| (numerator << 14).wrapping_div(denominator);
+    let (angle, a, cycles) = if y == 0 {
+        (if x >= 0 { 0 } else { 0x8000 }, None, 11)
     } else if x == 0 {
-        if y >= 0 { 0x4000 } else { 0xC000 }
-    } else if y >= 0 {
-        if x >= 0 && x >= y {
-            arc_tan((y << 14) / x)
-        } else if x < 0 && -x >= y {
-            arc_tan((y << 14) / x) + 0x8000
-        } else {
-            0x4000 - arc_tan((x << 14) / y)
-        }
-    } else if x <= 0 && -x > -y {
-        arc_tan((y << 14) / x) + 0x8000
-    } else if x > 0 && x >= -y {
-        arc_tan((y << 14) / x) + 0x1_0000
+        (if y >= 0 { 0x4000 } else { 0xC000 }, None, 11)
     } else {
-        0xC000 - arc_tan((x << 14) / y)
+        let (base, flip, tan) = if y >= 0 {
+            if x >= 0 && x >= y {
+                (0, false, ratio(y, x))
+            } else if x < 0 && x.wrapping_neg() >= y {
+                (0x8000, false, ratio(y, x))
+            } else {
+                (0x4000, true, ratio(x, y))
+            }
+        } else if x <= 0 && x.wrapping_neg() > y.wrapping_neg() {
+            (0x8000, false, ratio(y, x))
+        } else if x > 0 && x >= y.wrapping_neg() {
+            (0x1_0000, false, ratio(y, x))
+        } else {
+            (0xC000, true, ratio(x, y))
+        };
+        // The BIOS keeps ArcTan's result to 16 bits before adding.
+        let result = arc_tan(tan);
+        let angle = i32::from(result.angle as i16);
+        let angle = if flip { base - angle } else { base + angle };
+        (angle, Some(result.a), result.cycles)
     };
-    result as u16
+    (angle as u16, a, cycles)
 }
 
 /// CpuSet: copies or fills `control & 0x1FFFFF` halfwords or words.
-fn cpu_set(bus: &mut Bus, source: u32, destination: u32, control: u32) {
+///
+/// The BIOS moves words with LDMIA and STMIA and halfwords with LDRH and
+/// STRH, and never aligns the addresses it is given, so misaligned ones
+/// behave as those instructions do: word accesses ignore the low bits
+/// (except on SRAM's 8-bit bus, which sees the address as it is), and a
+/// halfword load from an odd address keeps only the high byte.
+fn cpu_set(bus: &mut Bus, mut source: u32, mut destination: u32, control: u32) {
+    if reads_protected_memory(source) {
+        return;
+    }
     let count = control & 0x1F_FFFF;
     let fill = control & (1 << 24) != 0;
     let words = control & (1 << 26) != 0;
     let step = if words { 4 } else { 2 };
-    let (mut source, mut destination) = if words {
-        (source & !3, destination & !3)
-    } else {
-        (source & !1, destination & !1)
+    let load = |bus: &mut Bus, address: u32, access: Access| {
+        if words {
+            bus.read_32(address, access)
+        } else {
+            u32::from(load_halfword(bus, address, access))
+        }
     };
-    let fill_value = if words {
-        bus.read_32(source, Access::NONSEQUENTIAL)
-    } else {
-        u32::from(bus.read_16(source, Access::NONSEQUENTIAL))
-    };
+    let fill_value = load(bus, source, Access::NONSEQUENTIAL);
     for _ in 0..count {
         let value = if fill {
             fill_value
-        } else if words {
-            bus.read_32(source, Access::SEQUENTIAL)
         } else {
-            u32::from(bus.read_16(source, Access::SEQUENTIAL))
+            load(bus, source, Access::SEQUENTIAL)
         };
         if words {
             bus.write_32(destination, value, Access::SEQUENTIAL);
@@ -260,11 +480,28 @@ fn cpu_set(bus: &mut Bus, source: u32, destination: u32, control: u32) {
     }
 }
 
-/// CpuFastSet: word copies or fills in blocks of eight words.
-fn cpu_fast_set(bus: &mut Bus, source: u32, destination: u32, control: u32) {
+/// Whether CpuSet and CpuFastSet refuse `source`: the BIOS will not copy
+/// from addresses whose bits 25–27 are clear, which keeps its own code
+/// (and the unmapped space after it) from being read out.
+fn reads_protected_memory(source: u32) -> bool {
+    source & 0x0E00_0000 == 0
+}
+
+/// Loads a halfword as LDRH does: from an odd address the ARM7TDMI
+/// rotates the aligned halfword right by 8, which leaves its high byte.
+fn load_halfword(bus: &mut Bus, address: u32, access: Access) -> u16 {
+    let value = bus.read_16(address, access);
+    if address & 1 == 0 { value } else { value >> 8 }
+}
+
+/// CpuFastSet: word copies or fills in blocks of eight words, moved with
+/// LDMIA and STMIA like CpuSet's words (addresses are not aligned).
+fn cpu_fast_set(bus: &mut Bus, mut source: u32, mut destination: u32, control: u32) {
+    if reads_protected_memory(source) {
+        return;
+    }
     let count = (control & 0x1F_FFFF).div_ceil(8) * 8;
     let fill = control & (1 << 24) != 0;
-    let (mut source, mut destination) = (source & !3, destination & !3);
     let fill_value = bus.read_32(source, Access::NONSEQUENTIAL);
     for _ in 0..count {
         let value = if fill {
@@ -572,6 +809,43 @@ fn midi_key_to_frequency(bus: &mut Bus, wave: u32, key: u8, fine: u8) -> u32 {
 mod tests {
     use super::*;
 
+    fn ram_bus() -> Bus {
+        let cartridge = emu_gba_cart::Cartridge::new(vec![0; 0x400].into(), None, 0);
+        Bus::new(cartridge, image())
+    }
+
+    #[test]
+    fn cpu_set_moves_misaligned_halfwords_as_ldrh_does() {
+        let mut bus = ram_bus();
+        bus.write_32(0x0200_0000, 0xDEAD_BEEF, Access::NONSEQUENTIAL);
+        bus.write_32(0x0200_0004, 0x3333_3333, Access::NONSEQUENTIAL);
+        cpu_set(&mut bus, 0x0200_0001, 0x0300_0000, 2);
+        assert_eq!(bus.read_32(0x0300_0000, Access::NONSEQUENTIAL), 0x00DE_00BE);
+    }
+
+    #[test]
+    fn cpu_set_and_cpu_fast_set_will_not_read_the_bios() {
+        let mut bus = ram_bus();
+        cpu_set(&mut bus, 0, 0x0300_0000, 1 << 26 | 4);
+        cpu_fast_set(&mut bus, 0x10, 0x0300_0010, 8);
+        for address in [0x0300_0000, 0x0300_0010] {
+            assert_eq!(bus.read_32(address, Access::NONSEQUENTIAL), 0);
+        }
+    }
+
+    /// Cycle counts the mGBA suite's BIOS timing tests imply, less the
+    /// dispatcher's.
+    #[test]
+    fn math_functions_take_the_bioss_time() {
+        let mut cpu = Cpu::default();
+        assert_eq!(divide(&mut cpu, 0x1234_5678, 0xFF), 284);
+        assert_eq!(divide(&mut cpu, 0xFF, 0x1234_5678), 24);
+        assert_eq!(sqrt_cycles(0), 53);
+        assert_eq!(sqrt_cycles(0xFF), 168);
+        assert_eq!(sqrt_cycles(0x1234_5678), 1084);
+        assert_eq!(arc_tan(0xFF).cycles, 53);
+    }
+
     #[test]
     fn integer_square_roots() {
         assert_eq!(isqrt(0), 0);
@@ -582,11 +856,97 @@ mod tests {
 
     #[test]
     fn arc_tan2_quadrants() {
-        assert_eq!(arc_tan2(1, 0), 0);
-        assert_eq!(arc_tan2(0, 1), 0x4000);
-        assert_eq!(arc_tan2(-1, 0), 0x8000);
-        assert_eq!(arc_tan2(0, -1), 0xC000);
-        let diagonal = arc_tan2(100, 100);
+        assert_eq!(arc_tan2(1, 0), (0, None, 11));
+        assert_eq!(arc_tan2(0, 1), (0x4000, None, 11));
+        assert_eq!(arc_tan2(-1, 0), (0x8000, None, 11));
+        assert_eq!(arc_tan2(0, -1), (0xC000, None, 11));
+        let (diagonal, _, _) = arc_tan2(100, 100);
         assert!((0x1FF0..=0x2010).contains(&diagonal), "{diagonal:x}");
+    }
+
+    /// Hardware results from the mGBA suite's BIOS math tests: R0, R1, R3.
+    #[test]
+    fn arc_tan_leaves_the_bioss_registers() {
+        let registers = |tan: u32| {
+            let result = arc_tan(tan as i32);
+            (result.angle as i16 as u32, result.a as u32, result.b as u32)
+        };
+        assert_eq!(registers(0x0000), (0, 0, 0xA2F9));
+        assert_eq!(registers(0x7FFF), (0x16D8, 0xFFFF_0004, 0x2_2DB6));
+        assert_eq!(registers(0xC001), (0xFFFF_D550, 0x1_BFFA, 0x2_71BD));
+        assert_eq!(registers(0xFFFF), (0xFFFF_A2FE, 8, 0xA2FF));
+        assert_eq!(registers(0xFFFF_0000), (0x5D07, 0, 0xA2F9));
+        assert_eq!(registers(0xFFFF_8001), (0xFFFF_E927, 0xFFFF_0004, 0x2_2DB6));
+    }
+
+    #[test]
+    fn arc_tan2_takes_32_bit_coordinates() {
+        let call = |x: u32, y: u32| {
+            let (angle, a, _) = arc_tan2(x as i32, y as i32);
+            (angle, a.map(|a| a as u32))
+        };
+        assert_eq!(call(0xFFFF_0000, 1), (0x8000, Some(0)));
+        assert_eq!(call(0xC000, 0x4000), (0x0D1B, Some(0xFFFF_F8E4)));
+        assert_eq!(call(0xFFFF_0001, 0xFFFF_0000), (0xA001, Some(0xFFFF_C002)));
+        assert_eq!(call(0xFFFF_8000, 0x1_0000), (0x52E4, Some(0xFFFF_F000)));
+        assert_eq!(call(0x4000, 0), (0, None));
+    }
+
+    #[test]
+    fn vblank_intr_wait_returns_once_per_frame() {
+        use emu_core::{Core, Media};
+        let mut rom = vec![0u8; 0x200];
+        let mut put = |address: usize, program: &[u32]| {
+            for (index, word) in program.iter().enumerate() {
+                let at = address + index * 4;
+                rom[at..at + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        };
+        put(
+            0x000,
+            &[
+                0xE3A0_0301, // MOV R0, #0x04000000
+                0xE3A0_1008, // MOV R1, #8
+                0xE1C0_10B4, // STRH R1, [R0, #4]  (DISPSTAT: VBlank IRQ)
+                0xE280_2C02, // ADD R2, R0, #0x200
+                0xE3A0_1001, // MOV R1, #1
+                0xE1C2_10B0, // STRH R1, [R2]  (IE: VBlank)
+                0xE1C2_10B8, // STRH R1, [R2, #8]  (IME)
+                0xE3A0_3403, // MOV R3, #0x03000000
+                0xE283_3C7F, // ADD R3, R3, #0x7F00
+                0xE283_30FC, // ADD R3, R3, #0xFC
+                0xE3A0_4408, // MOV R4, #0x08000000
+                0xE284_4C01, // ADD R4, R4, #0x100
+                0xE583_4000, // STR R4, [R3]  (the IRQ handler)
+                0xEF05_0000, // loop: SWI 0x05  (VBlankIntrWait)
+                0xE285_5001, // ADD R5, R5, #1
+                0xEAFF_FFFC, // B loop
+            ],
+        );
+        // The handler acknowledges the IRQ and sets the BIOS flag, as every
+        // game's does.
+        put(
+            0x100,
+            &[
+                0xE3A0_0301, // MOV R0, #0x04000000
+                0xE280_0C02, // ADD R0, R0, #0x200
+                0xE3A0_1001, // MOV R1, #1
+                0xE1C0_10B2, // STRH R1, [R0, #2]  (IF)
+                0xE3A0_2403, // MOV R2, #0x03000000
+                0xE282_2C7F, // ADD R2, R2, #0x7F00
+                0xE282_20F8, // ADD R2, R2, #0xF8
+                0xE1D2_30B0, // LDRH R3, [R2]
+                0xE383_3001, // ORR R3, R3, #1
+                0xE1C2_30B0, // STRH R3, [R2]
+                0xE12F_FF1E, // BX LR
+            ],
+        );
+        rom[0xB2] = 0x96;
+        let mut gba = crate::Gba::new(&Media::new(&rom)).expect("valid rom");
+        for _ in 0..10 {
+            gba.run_frame(&[], &mut Vec::new());
+        }
+        let frames_waited = gba.cpu().reg(5);
+        assert!((9..=10).contains(&frames_waited), "{frames_waited}");
     }
 }

@@ -6,6 +6,7 @@
 //! 1aaaaaaa 0000xxxx  halfword [a] = xxxx
 //! 2aaaaaaa xxxxxxxx  word [a] = xxxxxxxx
 //! 3000cccc xxxxxxxx  word = xxxxxxxx at cccc-1 addresses, two per line after
+//! 60aaaaaa y000xxxx  ROM halfword [8000000 + aaaaaa*2] reads as xxxx
 //! Daaaaaaa 0000xxxx  if halfword [a] = xxxx, run the next code
 //! E0zzxxxx 0aaaaaaa  if halfword [a] = xxxx, run the next zz codes
 //! Faaaaaaa 00000x0y  hook (ignored)
@@ -13,12 +14,14 @@
 //! DEADFACE 0000xxyy  new encryption seeds (see `tea.rs`)
 //! ```
 //!
-//! ROM patches (`6`) and button codes (`8`) are not supported: one needs a
-//! ROM-read hook, the other the device's own button.
+//! ROM patches (`6`) go to the core through [`crate::rom_patches`]; `y`,
+//! which said when the device switched a patch on, is ignored, and so is
+//! the device's limit of one patch. Button codes (`8`) are not supported:
+//! they need the device's own button.
 
 use crate::decode::{Decoder, halves};
 use crate::detect::{CERTAIN, CODE, UNKNOWN, fits, region};
-use crate::ops::{Op, Test, Width};
+use crate::ops::{self, Op, Test, Width};
 
 const ID: u32 = 0x001D_C0DE;
 const DEADFACE: u32 = 0xDEAD_FACE;
@@ -83,7 +86,9 @@ impl Decoder for GameSharkAdvance {
                 }
                 return Ok(());
             }
-            0x6 => return Err("ROM patches (type 6) are not supported yet".to_owned()),
+            0x6 if left & 0x0F00_0000 == 0 => {
+                ops::patch_rom_half(0x0800_0000 + (left & 0x00FF_FFFF) * 2, right as u16)
+            }
             0x8 => {
                 return Err(
                     "type 8 codes write only while the GameShark's button is held, \
@@ -208,13 +213,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_types_say_why() {
-        assert!(
-            read(&[0x6000_1234_0000_5678])
-                .expect_err("patch")
-                .1
-                .contains("ROM")
+    fn rom_patches_double_the_address() {
+        assert_eq!(
+            read(&[0x6000_1234_1000_5678]),
+            Ok(vec![ops::patch_rom_half(0x0800_2468, 0x5678)])
         );
+        assert!(read(&[0x6100_1234_0000_5678]).is_err());
+    }
+
+    #[test]
+    fn unsupported_types_say_why() {
         assert!(
             read(&[0x8212_3456_0000_0001])
                 .expect_err("button")

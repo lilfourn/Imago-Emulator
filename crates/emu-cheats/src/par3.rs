@@ -5,16 +5,25 @@
 //! sub-type, and `aaaaaa` packs the address `a0aaaaa` (bits 20–23 move to
 //! 24–27). Writes fill, write through a pointer or add; conditionals run
 //! the next one or two codes, a block up to `ELSE`/`ENDIF`, or end the
-//! cheat. `00000000` introduces slides, `ELSE`, `ENDIF` and the end of the
-//! list.
+//! cheat. `00000000` introduces slides, ROM patches, `ELSE`, `ENDIF` and
+//! the end of the list.
 //!
-//! Not supported: I/O writes (`C6`, `C7`), ROM patches and button codes.
-//! The hook (`C4`), game ID and slowdown codes are ignored. Blocks nest;
-//! one left open ends with the cheat.
+//! ROM patches (`00000000 18aaaaaa`, `1A`, `1C` and `1E`, each followed by
+//! `0000zzzz 00000000`) make the ROM halfword at 0x08000000 + `aaaaaa`×2
+//! read as `zzzz`. They go to the core through [`crate::rom_patches`],
+//! whatever conditions come before them; the four patch slots of the
+//! device are not a limit here.
+//!
+//! I/O writes (`C6aaaaaa 0000yyyy` and `C7aaaaaa yyyyyyyy`) store a
+//! halfword or a word in the registers at 0x04000000 + `aaaaaa` through
+//! [`crate::Memory::poke_io_16`], as the CPU would.
+//!
+//! Not supported: button codes. The hook (`C4`), game ID and slowdown
+//! codes are ignored. Blocks nest; one left open ends with the cheat.
 
 use crate::decode::{Decoder, halves};
 use crate::detect::{CERTAIN, CODE, UNKNOWN, fits, region};
-use crate::ops::{Modify, Op, Test, Width};
+use crate::ops::{self, Modify, Op, Test, Width};
 
 const ID: u32 = 0x001D_C0DE;
 const DEADFACE: u32 = 0xDEAD_FACE;
@@ -22,6 +31,11 @@ const DEADFACE: u32 = 0xDEAD_FACE;
 /// `a0aaaaa` from `aaaaaa`.
 fn address(bits: u32) -> u32 {
     (bits & 0x000F_FFFF) | (bits & 0x00F0_0000) << 4
+}
+
+/// The I/O register address of a `C6` or `C7` code.
+fn io_address(left: u32) -> u32 {
+    0x0400_0000 | (left & 0x00FF_FFFF)
 }
 
 /// The width a code's size field names, or `None` for size 3.
@@ -43,11 +57,19 @@ struct Block {
     otherwise: Option<usize>,
 }
 
+/// A two-line code waiting for its second line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstLine {
+    /// A slide's address and width.
+    Slide(u32, Width),
+    /// A ROM patch's address.
+    RomPatch(u32),
+}
+
 /// Reads decrypted Pro Action Replay v3 codes.
 #[derive(Debug, Default)]
 pub(crate) struct ProActionReplay {
-    /// A slide's address and width, waiting for its second line.
-    slide: Option<(u32, Width)>,
+    first_line: Option<FirstLine>,
     blocks: Vec<Block>,
 }
 
@@ -99,13 +121,14 @@ impl ProActionReplay {
                 );
             }
             0x18 | 0x1A | 0x1C | 0x1E => {
-                return Err("ROM patches are not supported yet".to_owned());
+                let address = 0x0800_0000 + (right & 0x00FF_FFFF) * 2;
+                self.first_line = Some(FirstLine::RomPatch(address));
             }
             0x40 => self.end_block(ops)?,
             0x60 => self.otherwise(ops)?,
             kind @ (0x80 | 0x82 | 0x84) => {
                 let width = width((kind >> 1) & 3).unwrap_or(Width::Word);
-                self.slide = Some((address(right), width));
+                self.first_line = Some(FirstLine::Slide(address(right), width));
             }
             _ => return Err(format!("unknown code 00000000 {right:08X}")),
         }
@@ -116,17 +139,26 @@ impl ProActionReplay {
 impl Decoder for ProActionReplay {
     fn code(&mut self, code: u64, ops: &mut Vec<Op>) -> Result<(), String> {
         let (left, right) = halves(code);
-        if let Some((address, width)) = self.slide.take() {
-            // yyyyyyyy ssccssss: value, then value step, count, address step.
-            ops.push(Op::Slide {
-                address,
-                value: left & width.mask(),
-                width,
-                count: (right >> 16) & 0xFF,
-                step: (right & 0xFFFF) * width as u32,
-                increment: right >> 24,
-            });
-            return Ok(());
+        match self.first_line.take() {
+            Some(FirstLine::Slide(address, width)) => {
+                // yyyyyyyy ssccssss: value, then value step, count, address
+                // step.
+                ops.push(Op::Slide {
+                    address,
+                    value: left & width.mask(),
+                    width,
+                    count: (right >> 16) & 0xFF,
+                    step: (right & 0xFFFF) * width as u32,
+                    increment: right >> 24,
+                });
+                return Ok(());
+            }
+            Some(FirstLine::RomPatch(address)) => {
+                // 0000zzzz 00000000.
+                ops.push(ops::patch_rom_half(address, left as u16));
+                return Ok(());
+            }
+            None => {}
         }
         if right == ID || left == DEADFACE {
             return Ok(());
@@ -139,13 +171,23 @@ impl Decoder for ProActionReplay {
             // The hook tells the device where to run.
             return Ok(());
         }
+        if let 0xC6 | 0xC7 = kind {
+            // Bit 24 picks a word over a halfword.
+            let width = if kind == 0xC7 {
+                Width::Word
+            } else {
+                Width::Half
+            };
+            ops.push(Op::WriteIo {
+                address: io_address(left),
+                value: right & width.mask(),
+                width,
+            });
+            return Ok(());
+        }
         let unknown = || format!("unknown code {left:08X} {right:08X}");
         if kind & 1 != 0 {
-            return Err(if kind == 0xC7 {
-                "I/O writes (C6, C7) are not supported yet".to_owned()
-            } else {
-                unknown()
-            });
+            return Err(unknown());
         }
         let address = address(left);
         let condition = (left >> 27) & 7;
@@ -185,11 +227,7 @@ impl Decoder for ProActionReplay {
             return Ok(());
         }
         let Some(width) = width(size) else {
-            return Err(if kind == 0xC6 {
-                "I/O writes (C6, C7) are not supported yet".to_owned()
-            } else {
-                unknown()
-            });
+            return Err(unknown());
         };
         let value = right & width.mask();
         ops.push(match (action, width) {
@@ -236,9 +274,10 @@ impl Decoder for ProActionReplay {
     }
 
     fn waiting_for(&self) -> Option<&'static str> {
-        self.slide
-            .is_some()
-            .then_some("the second line of a slide code")
+        self.first_line.map(|first| match first {
+            FirstLine::Slide(..) => "the second line of a slide code",
+            FirstLine::RomPatch(_) => "the second line of a ROM patch code",
+        })
     }
 
     fn finish(&mut self, ops: &mut Vec<Op>) {
@@ -250,9 +289,9 @@ impl Decoder for ProActionReplay {
 /// positive for plausible ones, very high for an ID or seed code.
 pub(crate) fn plausibility(codes: &[u64]) -> i32 {
     let mut score = 0;
-    let mut slide_line = false;
+    let mut second_line = false;
     for &code in codes {
-        if std::mem::take(&mut slide_line) {
+        if std::mem::take(&mut second_line) {
             continue;
         }
         let (left, right) = halves(code);
@@ -263,10 +302,13 @@ pub(crate) fn plausibility(codes: &[u64]) -> i32 {
                 0x00 if right == 0 => CODE,
                 0x08 => CODE + fits(right, 0x00FF_FF00),
                 0x10 | 0x12 | 0x14 => CODE + region(address(right)),
-                0x18 | 0x1A | 0x1C | 0x1E => CODE,
+                0x18 | 0x1A | 0x1C | 0x1E => {
+                    second_line = true;
+                    CODE
+                }
                 0x40 | 0x60 => CODE + fits(right, 0xFF00_0000),
                 0x80 | 0x82 | 0x84 => {
-                    slide_line = true;
+                    second_line = true;
                     CODE + region(address(right))
                 }
                 _ => UNKNOWN,
@@ -279,7 +321,8 @@ pub(crate) fn plausibility(codes: &[u64]) -> i32 {
             let mask = width(size).map_or(0, Width::mask);
             match (kind, condition, action) {
                 (0xC4, ..) => CODE + fits(right, 0xFFFF),
-                (0xC6 | 0xC7, ..) => CODE,
+                (0xC6, ..) => CODE + region(io_address(left)) + fits(right, 0xFFFF),
+                (0xC7, ..) => CODE + region(io_address(left)),
                 _ if kind & 1 != 0 => UNKNOWN,
                 (_, 1.., _) if size == 3 => CODE,
                 (_, 1.., _) => CODE + region(address(left)) + fits(right, mask),
@@ -400,11 +443,39 @@ mod tests {
     }
 
     #[test]
+    fn rom_patches_take_their_value_from_the_second_line() {
+        assert_eq!(
+            read(&[0x0000_0000_1A00_1234, 0x0000_5678_0000_0000]),
+            Ok(vec![ops::patch_rom_half(0x0800_2468, 0x5678)])
+        );
+        let error = read(&[0x0000_0000_1800_1234]).expect_err("cut off");
+        assert!(error.1.contains("ROM patch"), "{}", error.1);
+    }
+
+    #[test]
+    fn io_writes_take_halfwords_and_words() {
+        assert_eq!(
+            read(&[0xC600_0050_0000_00FF, 0xC700_00D4_0200_0000]),
+            Ok(vec![
+                Op::WriteIo {
+                    address: 0x0400_0050,
+                    value: 0xFF,
+                    width: Width::Half
+                },
+                Op::WriteIo {
+                    address: 0x0400_00D4,
+                    value: 0x0200_0000,
+                    width: Width::Word
+                },
+            ])
+        );
+        assert!(plausibility(&[0xC600_0050_0000_00FF]) > 0);
+        assert!(plausibility(&[0xC612_3456_0000_00FF]) < 0);
+    }
+
+    #[test]
     fn unsupported_codes_say_why() {
         for (code, needle) in [
-            (0xC600_0100_0000_0001, "I/O"),
-            (0xC700_0100_0000_0001, "I/O"),
-            (0x0000_0000_1822_0000, "ROM"),
             (0x0000_0000_1222_0000, "button"),
             (0x0000_0000_4000_0000, "ENDIF"),
         ] {

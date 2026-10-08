@@ -17,12 +17,16 @@ use crate::speed::Pace;
 pub struct HeldState {
     /// Emulated buttons held.
     pub buttons: Buttons,
+    /// Emulated buttons pressed and released over and over.
+    pub turbo: Buttons,
     /// Run faster or slower; fast-forward wins over slow motion.
     pub pace: Pace,
     /// Step backwards through history.
     pub rewind: bool,
     /// Touch the screen at the gamepad cursor.
     pub touch: bool,
+    /// Blow into the microphone.
+    pub blow: bool,
 }
 
 /// Held inputs by source.
@@ -74,10 +78,12 @@ impl Controls {
         for held in self.pressed.values() {
             match held {
                 Held::Button(button) => state.buttons.set(*button, true),
+                Held::Turbo(button) => state.turbo.set(*button, true),
                 Held::FastForward => fast_forward = true,
                 Held::SlowMotion => slow_motion = true,
                 Held::Rewind => state.rewind = true,
                 Held::Touch => state.touch = true,
+                Held::Blow => state.blow = true,
             }
         }
         state.pace = if fast_forward {
@@ -128,6 +134,28 @@ mod tests {
         controls.set("pad:1:RightThumb".to_owned(), None, false);
         let state = controls.state();
         assert!(!state.touch && state.buttons.contains(Button::A));
+    }
+
+    #[test]
+    fn turbo_is_held_apart_from_the_button() {
+        let mut controls = Controls::default();
+        controls.set("key:l".to_owned(), Some(Held::Turbo(Button::A)), true);
+        let state = controls.state();
+        assert!(state.turbo.contains(Button::A));
+        assert!(state.buttons.is_empty());
+        controls.set("key:k".to_owned(), Some(Held::Button(Button::A)), true);
+        controls.set("key:l".to_owned(), None, false);
+        let state = controls.state();
+        assert!(state.turbo.is_empty() && state.buttons.contains(Button::A));
+    }
+
+    #[test]
+    fn blowing_is_held_like_a_button() {
+        let mut controls = Controls::default();
+        controls.set("key:b".to_owned(), Some(Held::Blow), true);
+        assert!(controls.state().blow);
+        controls.release_all();
+        assert!(!controls.state().blow);
     }
 
     #[test]

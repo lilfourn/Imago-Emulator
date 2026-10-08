@@ -1,42 +1,58 @@
 //! The main window: draws the running game's screens and turns keyboard,
 //! gamepad, mouse and file events into emulator commands.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use emu_core::{CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
+use emu_core::{Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
+use emu_script::Draw;
 use gpui::{
-    Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
-    ScrollWheelEvent, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb,
-    rgba,
+    Context, Div, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point,
+    RenderImage, SharedString, Subscription, Task, Window, WindowHandle, div, img, prelude::*, px,
+    rgb, rgba,
 };
 
 use crate::app::{
-    ConnectLinkCable, EditCheats, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
-    LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, PreviousStateSlot, Reset,
-    RotateAnticlockwise, RotateClockwise, SaveState, SwapScreens, SwitchPlayer,
-    ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMemoryViewer, TogglePause,
-    ToggleSlowMotion,
+    ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver, EditCheats, FilterLcdGrid,
+    FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, InsertGbaCartridge,
+    LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState, NextScreenGap,
+    NextStateSlot, OpenRom, PreviousStateSlot, Reset, Resolution3d1x, Resolution3d2x,
+    Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, RunScript,
+    SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
+    ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause,
+    ToggleRecording, ToggleSlowMotion,
+};
+use crate::app::{
+    FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
 };
 use crate::audio::{self, AudioOutput};
-use crate::bindings::{self, Bindings};
+use crate::bindings::{self, Bindings, Shortcut};
 use crate::cheats;
+use crate::chords::{Chords, Effect};
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
 use crate::cursor::{self, Cursor};
-use crate::emulator::{self, Command, Emulator, Event, Loaded, MemorySpan};
+use crate::debugger::{self, Snapshot};
+use crate::debugger_window::DebuggerWindow;
+use crate::emulator::{self, Command, Emulator, Event, Loaded};
+use crate::filter::Filter;
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
-use crate::memory_viewer::{self, BYTES_PER_ROW, Viewer};
+use crate::meter::{self, Meter};
+use crate::microphone::{self, Loudness, Microphone};
 use crate::persist;
 use crate::settings::{self, Settings};
 use crate::slots::{self, SlotPreview};
-use crate::speed::Speeds;
+use crate::speed::{self, Pace, Speed, Speeds};
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
+
+/// How often the speed readout measures.
+const READOUT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Save-state slots, numbered from 1.
 const STATE_SLOTS: u8 = 4;
@@ -44,6 +60,8 @@ const STATE_SLOTS: u8 = 4;
 /// The root view of the main window.
 pub struct EmulatorView {
     focus: FocusHandle,
+    /// The bindings in force: the user's, with the active player's game's
+    /// own laid over them.
     bindings: Bindings,
     layout: Layout,
     /// Where the layout is saved for next launch, if there is a config
@@ -51,14 +69,42 @@ pub struct EmulatorView {
     settings_path: Option<PathBuf>,
     /// How fast fast-forward and slow motion run, from the settings file.
     speeds: Speeds,
+    /// How many times its own resolution DS 3D is drawn at.
+    resolution_3d: u32,
+    /// The computer's microphone, while the user has it on: off at every
+    /// launch.
+    microphone: Option<(Microphone, Loudness)>,
+    /// How loud the microphone was when the emulation thread was last
+    /// told.
+    heard: u8,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
-    /// Where the memory viewer is looking, while it is open.
-    memory_viewer: Option<Viewer>,
+    /// How the screens are filtered on their way to the window.
+    filter: Filter,
+    /// Whether the speed readout shows in the window's corner.
+    show_fps: bool,
+    /// What the speed readout says, once it has measured.
+    speed_readout: Option<SharedString>,
+    /// Measures the speed for the readout, with the number from
+    /// `sessions` of the game it counts.
+    fps_meter: Option<(u64, Meter)>,
+    /// Updates the readout while it shows.
+    readout_task: Option<Task<()>>,
+    /// How games made for the original Game Boy are shown, from the next
+    /// game opened.
+    dmg_colors: emu_core::DmgColors,
+    /// The debugger window, once opened.
+    debugger: Option<WindowHandle<DebuggerWindow>>,
+    /// Games started so far, which numbers each for the debugger.
+    sessions: u64,
     session: Option<Session>,
+    /// A script from the command line, to run with the first game.
+    startup_script: Option<PathBuf>,
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
     controls: Controls,
+    /// Gamepad hotkey chords in progress.
+    chords: Chords,
     /// Where the mouse touches the touchscreen, while its button is down.
     mouse_touch: Option<TouchPoint>,
     /// The gamepad's touchscreen cursor, once a gamepad has used it.
@@ -81,6 +127,18 @@ pub struct EmulatorView {
     _subscriptions: Vec<Subscription>,
 }
 
+/// What the debugger window needs to know about the running game.
+pub struct DebugTarget {
+    /// Counts the games started, so a new one can be told apart.
+    pub session: u64,
+    /// The game's system.
+    pub system: System,
+    /// The player the keyboard controls, whose CPUs the debugger shows.
+    pub player: usize,
+    /// The emulation thread's latest snapshot for the debugger.
+    pub snapshot: Option<Arc<Snapshot>>,
+}
+
 /// A running game and the images last drawn for it.
 struct Session {
     emulator: Emulator,
@@ -93,8 +151,12 @@ struct Session {
     sequence: u64,
     /// Per player: the cheat file's text when last sent to the emulator.
     cheat_texts: Vec<Option<String>>,
+    /// Per player: the user's bindings with the game's own laid over them.
+    bindings: Vec<Bindings>,
     /// The system's colour correction, if it has one.
     correction: Option<Correction>,
+    /// Whether the emulation thread is recording a movie.
+    recording: bool,
     /// Per placement: the image drawn there and what it shows.
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     _events: Task<()>,
@@ -112,7 +174,13 @@ struct ImageKey {
 
 impl EmulatorView {
     /// Creates the view, loading `roms` straight away if there are any.
-    pub fn new(roms: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `script` runs alongside the first game to start.
+    pub fn new(
+        roms: Vec<PathBuf>,
+        script: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
 
@@ -148,7 +216,7 @@ impl EmulatorView {
                     // but releases always count.
                     let release = matches!(event, PadEvent::Control { pressed: false, .. });
                     if window.is_window_active() || release {
-                        this.pad_event(&event, cx);
+                        this.pad_event(&event, window, cx);
                     }
                 });
                 if delivered.is_err() {
@@ -163,12 +231,24 @@ impl EmulatorView {
             layout: Layout::default(),
             settings_path,
             speeds: Speeds::default(),
+            resolution_3d: Settings::default().resolution_3d,
+            microphone: None,
+            heard: 0,
             color_correction: true,
-            memory_viewer: None,
+            filter: Filter::default(),
+            show_fps: false,
+            speed_readout: None,
+            fps_meter: None,
+            readout_task: None,
+            dmg_colors: Settings::default().dmg_colors,
+            debugger: None,
+            sessions: 0,
             session: None,
+            startup_script: script,
             loading: None,
             placements: Vec::new(),
             controls: Controls::default(),
+            chords: Chords::default(),
             mouse_touch: None,
             cursor: None,
             sent: HeldState::default(),
@@ -192,9 +272,17 @@ impl EmulatorView {
             Some(Ok(settings)) => {
                 view.layout = settings.layout;
                 view.speeds = settings.speed;
+                view.resolution_3d = settings.resolution_3d;
+                view.filter = settings.filter;
+                view.show_fps = settings.show_fps;
+                view.dmg_colors = settings.dmg_colors;
             }
             Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
+        }
+        view.refresh_menus(cx);
+        if view.show_fps {
+            view.start_readout(cx);
         }
         if !roms.is_empty() {
             view.open(roms, window, cx);
@@ -223,9 +311,10 @@ impl EmulatorView {
             .collect::<Vec<_>>()
             .join(" + ");
         self.show_notice(format!("Loading {name}…"), cx);
+        let dmg_colors = self.dmg_colors;
         let load = cx
             .background_executor()
-            .spawn(async move { emulator::load(&paths) });
+            .spawn(async move { emulator::load(&paths, dmg_colors) });
         self.loading = Some(cx.spawn_in(window, async move |this, cx| {
             let loaded = load.await;
             this.update_in(cx, |this, window, cx| match loaded {
@@ -251,6 +340,7 @@ impl EmulatorView {
         let rom_paths = loaded.rom_paths().to_vec();
         let player_rom_paths = loaded.player_rom_paths().to_vec();
         let emulator = Emulator::start(loaded, events, audio_sink);
+        emulator.send(Command::SetRenderScale(self.resolution_3d));
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
@@ -266,7 +356,9 @@ impl EmulatorView {
             frames: Vec::new(),
             sequence: 0,
             cheat_texts: vec![None; info.players.max(1)],
+            bindings: Vec::new(),
             correction: Correction::for_system(info.system),
+            recording: false,
             images: Vec::new(),
             _events: task,
             _audio: audio_output,
@@ -277,19 +369,93 @@ impl EmulatorView {
         self.mouse_touch = None;
         self.cursor = None;
         self.active_player = 0;
+        let bindings = self.reload_bindings();
         self.sync_held();
-        self.watch_memory();
+        self.sessions += 1;
         if info.players > 1 {
-            self.layout.arrangement = Arrangement::Horizontal;
+            // Linked consoles sit side by side; a DS's own two screens
+            // keep the chosen layout.
+            if consoles(&info) == 1 {
+                self.layout.arrangement = Arrangement::Horizontal;
+            }
             window.set_window_title(&format!("{name} — {} link", info.system.name()));
         } else {
             window.set_window_title(&format!("{name} — {}", info.system.name()));
         }
         let running = format!("Running {name}");
-        match self.reload_cheats() {
-            Some(cheats) => self.show_notice(format!("{running} · {cheats}"), cx),
-            None => self.show_notice(running, cx),
+        let notes = [Some(running), bindings, self.reload_cheats()];
+        let notice: Vec<String> = notes.into_iter().flatten().collect();
+        self.show_notice(notice.join(" · "), cx);
+        if let Some(script) = self.startup_script.take() {
+            self.run_script_file(script, cx);
         }
+    }
+
+    /// Asks for a Lua script, then runs it alongside the game.
+    fn run_script(&mut self, _: &RunScript, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.show_notice("Open a game first, then run a script", cx);
+            return;
+        }
+        self.prompt_for_file("Run", window, cx, |this, path, _, cx| {
+            this.run_script_file(path, cx);
+        });
+    }
+
+    /// Reads the script at `path` off the UI thread and hands it to the
+    /// emulation thread, which runs it.
+    fn run_script_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let read = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { fs::read_to_string(path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let source = read.await;
+            this.update(cx, |this, cx| match source {
+                Ok(source) => this.send(Command::RunScript {
+                    name: file_name(&path),
+                    source,
+                }),
+                Err(error) => {
+                    this.show_notice(format!("Cannot read {}: {error}", path.display()), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-reads the user's bindings file and lays each player's game
+    /// bindings file over it, putting the active player's in force.
+    /// Returns what went wrong, if anything.
+    fn reload_bindings(&mut self) -> Option<String> {
+        let mut problems = Vec::new();
+        let user = match bindings::default_path().map(|path| Bindings::load(&path)) {
+            Some(Ok(bindings)) => bindings,
+            Some(Err(error)) => {
+                problems.push(format!("{error}; using default bindings"));
+                Bindings::default()
+            }
+            None => Bindings::default(),
+        };
+        let session = self.session.as_mut()?;
+        session.bindings = session
+            .player_rom_paths
+            .iter()
+            .map(|rom| {
+                let path = persist::bindings_path(rom);
+                user.overlay_file(&path).unwrap_or_else(|error| {
+                    problems.push(format!("{} not applied: {error}", file_name(&path)));
+                    user.clone()
+                })
+            })
+            .collect();
+        self.bindings = session
+            .bindings
+            .get(self.active_player)
+            .cloned()
+            .unwrap_or(user);
+        (!problems.is_empty()).then(|| problems.join(" · "))
     }
 
     /// Re-reads each player's cheat file and sends the ones that changed to
@@ -358,8 +524,19 @@ impl EmulatorView {
 
     fn handle(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Frame => cx.notify(),
+            Event::Frame => {
+                self.listen();
+                cx.notify();
+            }
+            // Wakes the debugger window, which redraws with this view.
+            Event::Debug => cx.notify(),
             Event::Notice(text) => self.show_notice(text, cx),
+            Event::Recording(on) => {
+                if let Some(session) = &mut self.session {
+                    session.recording = on;
+                }
+                cx.notify();
+            }
         }
     }
 
@@ -389,7 +566,20 @@ impl EmulatorView {
             input: Input {
                 buttons: self.sent.buttons,
                 touch: self.sent_touch,
+                microphone: if self.sent.blow {
+                    Input::LOUDEST
+                } else {
+                    self.heard
+                },
             },
+        });
+    }
+
+    fn send_turbo(&self) {
+        self.send(Command::SetTurbo {
+            player: self.active_player,
+            buttons: self.sent.turbo,
+            frames: self.bindings.turbo_frames(),
         });
     }
 
@@ -406,9 +596,22 @@ impl EmulatorView {
             player: self.active_player,
             input: Input::default(),
         });
+        self.send(Command::SetTurbo {
+            player: self.active_player,
+            buttons: Buttons::NONE,
+            frames: self.bindings.turbo_frames(),
+        });
         self.active_player = player;
+        // Keyboard and gamepads now play the other player's game.
+        if let Some(bindings) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.bindings.get(player))
+        {
+            self.bindings = bindings.clone();
+        }
         self.send_input();
-        self.watch_memory();
+        self.send_turbo();
         self.show_notice(format!("Controlling player {}", player + 1), cx);
     }
 
@@ -421,10 +624,18 @@ impl EmulatorView {
             Some(point) => Some(point),
             None => self.cursor_touch(state.touch),
         };
-        if state.buttons != self.sent.buttons || touch != self.sent_touch {
+        if state.buttons != self.sent.buttons
+            || touch != self.sent_touch
+            || state.blow != self.sent.blow
+        {
             self.sent.buttons = state.buttons;
+            self.sent.blow = state.blow;
             self.sent_touch = touch;
             self.send_input();
+        }
+        if state.turbo != self.sent.turbo {
+            self.sent.turbo = state.turbo;
+            self.send_turbo();
         }
         if state.pace != self.sent.pace {
             self.send(Command::SetSpeed(self.speeds.speed(state.pace)));
@@ -450,15 +661,18 @@ impl EmulatorView {
         )
     }
 
-    /// The running game's touchscreen: its index and size.
+    /// The touchscreen of the console being played: its index and size.
+    /// Each of two linked DSes has its own.
     fn touchscreen(&self) -> Option<(usize, ScreenSize)> {
         let info = &self.session.as_ref()?.info;
-        let screen = info.touch_screen?;
+        let per_console = info.screens.len() / consoles(info);
+        let screen = info.touch_screen? + self.active_player.min(consoles(info) - 1) * per_console;
         Some((screen, *info.screens.get(screen)?))
     }
 
     fn release_all(&mut self) {
         self.controls.release_all();
+        self.chords.clear();
         self.mouse_touch = None;
         self.sync_held();
     }
@@ -483,22 +697,56 @@ impl EmulatorView {
         cx.notify();
     }
 
-    fn pad_event(&mut self, event: &PadEvent, cx: &mut Context<Self>) {
+    fn pad_event(&mut self, event: &PadEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PadEvent::Control {
                 controller,
                 control,
                 pressed,
             } => {
-                let action = self.bindings.pad_action(controller, control);
-                let source = format!("pad:{controller}:{control}");
-                self.controls.set(source, action, *pressed);
-                self.sync_held();
+                let hotkey = |control: &str| self.bindings.hotkey(control);
+                let effects = self.chords.event(hotkey, controller, control, *pressed);
+                for effect in effects {
+                    self.pad_effect(controller, effect, window, cx);
+                }
             }
             PadEvent::Pointer { dx, dy } => self.move_cursor((*dx, *dy)),
         }
         // Redraw the cursor, even when paused.
         cx.notify();
+    }
+
+    /// Carries out one effect of a control on `controller` going down or
+    /// up (see `chords.rs`).
+    fn pad_effect(
+        &mut self,
+        controller: &str,
+        effect: Effect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match effect {
+            Effect::Pass { control, pressed } => {
+                let action = self.bindings.pad_action(controller, &control);
+                let source = format!("pad:{controller}:{control}");
+                self.controls.set(source, action, pressed);
+                self.sync_held();
+            }
+            Effect::Hold { control, held } => {
+                let source = format!("pad:{controller}:{control}");
+                self.controls.set(source, Some(held), true);
+                self.sync_held();
+            }
+            Effect::Run(shortcut) => {
+                // Its handler updates this view, which is busy until this
+                // event is done, so it runs just after.
+                let action = shortcut_action(shortcut);
+                let focus = self.focus.clone();
+                window.defer(cx, move |window, cx| {
+                    focus.dispatch_action(action.as_ref(), window, cx);
+                });
+            }
+        }
     }
 
     /// Moves the gamepad cursor by `motion`, in the units of
@@ -629,8 +877,8 @@ impl EmulatorView {
         self.sync_held();
     }
 
-    /// Asks for a ROM file, then calls `then` with it.
-    fn prompt_for_rom(
+    /// Asks for a file, then calls `then` with it.
+    fn prompt_for_file(
         &mut self,
         prompt: &'static str,
         window: &mut Window,
@@ -657,12 +905,14 @@ impl EmulatorView {
     }
 
     fn open_rom(&mut self, _: &OpenRom, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt_for_rom("Open", window, cx, |this, path, window, cx| {
+        self.prompt_for_file("Open", window, cx, |this, path, window, cx| {
             this.open(vec![path], window, cx);
         });
     }
 
-    /// Restarts the running Game Boy game linked to a second one.
+    /// Restarts the running game linked to a second one: by link cable
+    /// for the Game Boy and Game Boy Advance, over local wireless for the
+    /// DS.
     fn connect_link_cable(
         &mut self,
         _: &ConnectLinkCable,
@@ -670,18 +920,14 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         let first = self.session.as_ref().and_then(|session| {
-            let has_cable = matches!(session.info.system, System::Gb | System::Gba);
-            let single = session.info.players == 1 && has_cable;
+            let single = session.info.players == 1;
             single.then(|| session.rom_paths[0].clone())
         });
         let Some(first) = first else {
-            self.show_notice(
-                "Open a Game Boy or Game Boy Advance game first, then connect the cable",
-                cx,
-            );
+            self.show_notice("Open a game first, then connect a second console", cx);
             return;
         };
-        self.prompt_for_rom("Connect", window, cx, move |this, second, window, cx| {
+        self.prompt_for_file("Connect", window, cx, move |this, second, window, cx| {
             this.open(vec![first, second], window, cx);
         });
     }
@@ -703,7 +949,7 @@ impl EmulatorView {
             self.show_notice("Open a DS game first, then insert a GBA cartridge", cx);
             return;
         };
-        self.prompt_for_rom("Insert", window, cx, move |this, cartridge, window, cx| {
+        self.prompt_for_file("Insert", window, cx, move |this, cartridge, window, cx| {
             this.open(vec![game, cartridge], window, cx);
         });
     }
@@ -764,17 +1010,69 @@ impl EmulatorView {
         self.set_layout(Layout { gap, ..self.layout }, cx);
     }
 
-    /// Switches to `layout` and saves it for next launch, noting any
-    /// failure to save.
+    /// Switches to `layout` and saves it for next launch.
     fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
         self.layout = layout;
         cx.notify();
+        self.save_settings(cx);
+    }
+
+    /// Draws DS 3D at `scale` times its own resolution and saves that for
+    /// next launch.
+    fn set_resolution_3d(&mut self, scale: u32, cx: &mut Context<Self>) {
+        self.resolution_3d = scale;
+        self.send(Command::SetRenderScale(scale));
+        let message = match (scale, self.session.as_ref().map(|s| s.info.system)) {
+            (1, _) => "3D at the native resolution".to_owned(),
+            (_, Some(System::Nds) | None) => format!("3D at {scale}× resolution"),
+            (_, Some(_)) => format!("3D at {scale}× resolution, for DS games"),
+        };
+        self.show_notice(message, cx);
+        self.save_settings(cx);
+    }
+
+    /// Starts or stops listening to the computer's microphone for DS games.
+    fn toggle_microphone(&mut self, cx: &mut Context<Self>) {
+        if self.microphone.take().is_some() {
+            self.heard = 0;
+            self.send_input();
+            self.show_notice("Microphone off", cx);
+            return;
+        }
+        match microphone::open() {
+            Ok(microphone) => {
+                self.microphone = Some(microphone);
+                self.show_notice("Microphone on: DS games hear how loud it is", cx);
+            }
+            Err(error) => self.show_notice(format!("{error:#}"), cx),
+        }
+    }
+
+    /// Passes on how loud the microphone has been since the last frame,
+    /// while it is on, as the active player's microphone input.
+    fn listen(&mut self) {
+        let Some((_, loudness)) = &self.microphone else {
+            return;
+        };
+        let heard = loudness.take();
+        if heard != self.heard {
+            self.heard = heard;
+            self.send_input();
+        }
+    }
+
+    /// Writes the settings for next launch, noting any failure.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.settings_path else {
             return;
         };
         let settings = Settings {
-            layout,
+            layout: self.layout,
             speed: self.speeds,
+            resolution_3d: self.resolution_3d,
+            filter: self.filter,
+            show_fps: self.show_fps,
+            dmg_colors: self.dmg_colors,
         };
         if let Err(error) = settings.save(path) {
             let message = format!("Cannot save settings to {}: {error}", path.display());
@@ -782,111 +1080,122 @@ impl EmulatorView {
         }
     }
 
-    fn toggle_memory_viewer(&mut self, cx: &mut Context<Self>) {
-        self.memory_viewer = match self.memory_viewer {
-            Some(_) => None,
-            None => Some(Viewer::default()),
+    /// Runs fast-forward at `speed` from now on, at once if it is on,
+    /// and saves that for next launch.
+    fn set_fast_forward(&mut self, speed: Speed, cx: &mut Context<Self>) {
+        self.speeds.fast_forward = speed;
+        if self.sent.pace == Pace::FastForward {
+            self.send(Command::SetSpeed(speed));
+        }
+        self.refresh_menus(cx);
+        self.show_notice(format!("Fast-forward speed: {}", speed.label()), cx);
+        self.save_settings(cx);
+    }
+
+    /// Shows or hides the speed readout, and saves that for next launch.
+    fn toggle_fps(&mut self, cx: &mut Context<Self>) {
+        self.show_fps = !self.show_fps;
+        if self.show_fps {
+            self.start_readout(cx);
+        } else {
+            self.readout_task = None;
+            self.speed_readout = None;
+            self.fps_meter = None;
+        }
+        self.refresh_menus(cx);
+        cx.notify();
+        self.save_settings(cx);
+    }
+
+    /// Measures the speed for the readout every [`READOUT_INTERVAL`], until
+    /// it is hidden.
+    fn start_readout(&mut self, cx: &mut Context<Self>) {
+        self.readout_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(READOUT_INTERVAL).await;
+                if this.update(cx, |this, cx| this.update_readout(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Measures the speed since the last time, for the readout.
+    fn update_readout(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            self.speed_readout = None;
+            return;
         };
-        self.watch_memory();
+        let now = Instant::now();
+        let frames = session.emulator.frames_shown();
+        self.speed_readout = match &mut self.fps_meter {
+            Some((game, meter)) if *game == self.sessions => {
+                let fps = meter.sample(now, frames);
+                Some(meter::readout(fps, session.info.frame_rate.hz()).into())
+            }
+            _ => {
+                // A new game: measure from here.
+                self.fps_meter = Some((self.sessions, Meter::new(now, frames)));
+                None
+            }
+        };
         cx.notify();
     }
 
-    /// Tells the emulation thread which memory the viewer shows, if any.
-    fn watch_memory(&self) {
-        let span = self
-            .memory_viewer
-            .zip(self.session.as_ref())
-            .and_then(|(viewer, session)| {
-                let region = memory_viewer::regions(session.info.system).get(viewer.region)?;
-                let (start, length) = viewer.span(region);
-                Some(MemorySpan {
-                    player: self.active_player,
-                    start,
-                    length,
-                })
+    /// Rebuilds the menus to check what is chosen now.
+    fn refresh_menus(&self, cx: &mut Context<Self>) {
+        cx.set_menus(crate::app::menus(MenuChecks {
+            fast_forward: self.speeds.fast_forward,
+            show_fps: self.show_fps,
+        }));
+    }
+
+    /// Opens the debugger window, or brings it to the front.
+    fn show_debugger(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.debugger
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
+        // The new window draws at once and reads this view, so open it
+        // once this update is over.
+        let main = cx.entity();
+        cx.defer(move |cx| {
+            let opened = DebuggerWindow::open(main.clone(), cx);
+            main.update(cx, |this, cx| match opened {
+                Ok(handle) => this.debugger = Some(handle),
+                Err(error) => this.show_notice(format!("Cannot open the debugger: {error:#}"), cx),
             });
-        self.send(Command::WatchMemory(span));
-    }
-
-    fn select_memory_region(&mut self, region: usize, cx: &mut Context<Self>) {
-        if let Some(viewer) = &mut self.memory_viewer {
-            viewer.select(region);
-            self.watch_memory();
-            cx.notify();
-        }
-    }
-
-    fn scroll_memory(&mut self, rows: f32, cx: &mut Context<Self>) {
-        let length = self.session.as_ref().and_then(|session| {
-            let regions = memory_viewer::regions(session.info.system);
-            Some(regions.get(self.memory_viewer?.region)?.length)
         });
-        if let (Some(viewer), Some(length)) = (&mut self.memory_viewer, length) {
-            let before = viewer.offset;
-            viewer.scroll(rows, length);
-            if viewer.offset != before {
-                self.watch_memory();
-                cx.notify();
-            }
+    }
+
+    /// Sends a step for the CPU the debugger window shows, if it is open.
+    fn step_in_debugger(&mut self, step: fn(usize) -> debugger::Command, cx: &mut Context<Self>) {
+        let cpu = self
+            .debugger
+            .and_then(|handle| handle.read(cx).ok().map(DebuggerWindow::cpu));
+        match cpu {
+            Some(cpu) => self.send_debug(step(cpu)),
+            None => self.debugger = None,
         }
     }
 
-    /// The memory viewer overlay: region tabs over a hex dump.
-    fn memory_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        const ROW_HEIGHT: f32 = 13.0;
-        let viewer = self.memory_viewer?;
+    /// What the debugger window needs to know about the running game.
+    pub fn debug_target(&self) -> Option<DebugTarget> {
         let session = self.session.as_ref()?;
-        let regions = memory_viewer::regions(session.info.system);
-        let tabs = regions.iter().enumerate().map(|(index, region)| {
-            let tab = div()
-                .id(index)
-                .px_1()
-                .rounded_sm()
-                .cursor_pointer()
-                .child(region.name)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.select_memory_region(index, cx);
-                }));
-            if index == viewer.region {
-                tab.bg(rgba(0xFFFF_FF33))
-            } else {
-                tab
-            }
-        });
-        let rows: Vec<String> = match session.emulator.memory() {
-            Some((span, bytes)) => (0u32..)
-                .zip(bytes.chunks(BYTES_PER_ROW as usize))
-                .map(|(row, chunk)| memory_viewer::hex_row(span.start + row * BYTES_PER_ROW, chunk))
-                .collect(),
-            None if regions.is_empty() => vec!["No memory to show for this system yet".to_owned()],
-            None => Vec::new(),
-        };
-        Some(
-            div()
-                .id("memory-viewer")
-                .absolute()
-                .top(px(8.0))
-                .left(px(8.0))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .bg(rgba(0x0000_00DD))
-                .font_family("Menlo")
-                // Small enough that a row fits the default window.
-                .text_size(px(10.0))
-                .line_height(px(ROW_HEIGHT))
-                .whitespace_nowrap()
-                .child(div().flex().gap_2().children(tabs))
-                .child(div().children(rows))
-                // Clicks here are for the viewer, not the screen below.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                    let delta = event.delta.pixel_delta(px(ROW_HEIGHT)).y;
-                    this.scroll_memory(-f32::from(delta) / ROW_HEIGHT, cx);
-                })),
-        )
+        Some(DebugTarget {
+            session: self.sessions,
+            system: session.info.system,
+            player: self.active_player,
+            snapshot: session.emulator.debug_snapshot(),
+        })
+    }
+
+    /// Sends a debugger request to the running game, if there is one.
+    pub fn send_debug(&self, command: debugger::Command) {
+        self.send(Command::Debug(command));
     }
 
     /// The gamepad cursor, drawn over every copy of the touchscreen and
@@ -922,13 +1231,43 @@ impl EmulatorView {
             .collect()
     }
 
-    fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
-        self.color_correction = !self.color_correction;
+    /// Rebuilds every screen's image at the next render, after a change
+    /// in how frames become images.
+    fn rebuild_images(&mut self) {
         if let Some(session) = &mut self.session {
-            // Rebuild every screen with the new colours.
             let images = session.images.iter_mut().filter_map(Option::take);
             self.stale_images.extend(images.map(|(_, image)| image));
         }
+    }
+
+    /// Shows games made for the original Game Boy with `colors` from the
+    /// next one opened, and saves that for next launch. A game already
+    /// running keeps its console until it is opened again.
+    fn set_dmg_colors(&mut self, colors: emu_core::DmgColors, cx: &mut Context<Self>) {
+        self.dmg_colors = colors;
+        let shown = match colors {
+            emu_core::DmgColors::Grey => "in grey, as on a Game Boy",
+            _ => "in colour, as on a Game Boy Color",
+        };
+        self.show_notice(
+            format!("Original Game Boy games: {shown}, from the next game opened"),
+            cx,
+        );
+        self.save_settings(cx);
+    }
+
+    /// Filters the screens with `filter` from now on, and saves that for
+    /// next launch.
+    fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        self.rebuild_images();
+        self.show_notice(format!("Filter: {}", filter.label()), cx);
+        self.save_settings(cx);
+    }
+
+    fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
+        self.color_correction = !self.color_correction;
+        self.rebuild_images();
         self.show_notice(
             if self.color_correction {
                 "Colour correction on"
@@ -942,12 +1281,14 @@ impl EmulatorView {
 
 impl Session {
     /// Brings the images up to date with the latest frame and with how
-    /// each placement draws its screen.
+    /// each placement draws its screen. Each frame is colour corrected,
+    /// turned and filtered, then enlarged by the whole factor left.
     fn refresh_images(
         &mut self,
         placements: &[Placement],
         scale_factor: f32,
         color_correction: bool,
+        filter: Filter,
         window: &mut Window,
     ) {
         if let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) {
@@ -980,12 +1321,18 @@ impl Session {
             if let Some((_, stale)) = slot.take() {
                 window.drop_image(stale).ok();
             }
+            // Frames drawn at a higher 3D resolution have several pixels
+            // to each console pixel.
+            let native = self.info.screens.get(placement.screen);
+            let cell = native.map_or(1, |native| frame.size().width / native.width.max(1));
             let corrected = correction.map(|correction| correction.frame(frame));
             let frame = corrected.as_ref().unwrap_or(frame);
             let turned =
                 (key.rotation != Rotation::Upright).then(|| video::turn(frame, key.rotation));
             let frame = turned.as_ref().unwrap_or(frame);
-            *slot = Some((key, video::render_image(frame, key.factor)));
+            let (filtered, factor) =
+                filter.apply(frame, key.factor, usize::from(cell), key.rotation);
+            *slot = Some((key, video::render_image(&filtered, factor)));
         }
     }
 }
@@ -1011,6 +1358,8 @@ impl Render for EmulatorView {
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::connect_link_cable))
             .on_action(cx.listener(Self::edit_cheats))
+            .on_action(cx.listener(Self::run_script))
+            .on_action(cx.listener(|this, _: &StopScript, _, _| this.send(Command::StopScript)))
             .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
                 let players = this.session.as_ref().map_or(1, |s| s.info.players);
                 this.switch_player((this.active_player + 1) % players.max(1), cx);
@@ -1056,8 +1405,63 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
                 this.toggle_color_correction(cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleMemoryViewer, _, cx| {
-                this.toggle_memory_viewer(cx);
+            .on_action(cx.listener(|this, _: &ShowDebugger, _, cx| this.show_debugger(cx)))
+            .on_action(cx.listener(|this, _: &FastForward2x, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[0], cx);
+            }))
+            .on_action(cx.listener(|this, _: &FastForward3x, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[1], cx);
+            }))
+            .on_action(cx.listener(|this, _: &FastForward4x, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[2], cx);
+            }))
+            .on_action(cx.listener(|this, _: &FastForwardUnlimited, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[3], cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFps, _, cx| this.toggle_fps(cx)))
+            .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
+                this.set_resolution_3d(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d2x, _, cx| {
+                this.set_resolution_3d(2, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d3x, _, cx| {
+                this.set_resolution_3d(3, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d4x, _, cx| {
+                this.set_resolution_3d(4, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMicrophone, _, cx| {
+                this.toggle_microphone(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveScreenshot, _, _| {
+                this.send(Command::SaveScreenshot);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRecording, _, _| {
+                this.send(Command::ToggleRecording);
+            }))
+            .on_action(cx.listener(|this, _: &crate::app::DmgColorsGrey, _, cx| {
+                this.set_dmg_colors(emu_core::DmgColors::Grey, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::app::DmgColorsGameBoyColor, _, cx| {
+                    this.set_dmg_colors(emu_core::DmgColors::ByTitle, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &FilterNone, _, cx| {
+                this.set_filter(Filter::None, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterLcdGrid, _, cx| {
+                this.set_filter(Filter::LcdGrid, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterScanlines, _, cx| {
+                this.set_filter(Filter::Scanlines, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterScale2x, _, cx| {
+                this.set_filter(Filter::Scale2x, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterScale3x, _, cx| {
+                this.set_filter(Filter::Scale3x, cx);
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
@@ -1074,13 +1478,30 @@ impl Render for EmulatorView {
         if system.is_some_and(has_gba_slot) {
             root = root.on_action(cx.listener(Self::insert_gba_cartridge));
         }
+        // The debugger's step keys work from here too while it is open.
+        if self.debugger.is_some() {
+            root = root
+                .on_action(cx.listener(|this, _: &DebugStep, _, cx| {
+                    this.step_in_debugger(debugger::Command::Step, cx);
+                }))
+                .on_action(cx.listener(|this, _: &DebugStepOver, _, cx| {
+                    this.step_in_debugger(debugger::Command::StepOver, cx);
+                }))
+                .on_action(cx.listener(|this, _: &DebugNextFrame, _, cx| {
+                    this.step_in_debugger(|_| debugger::Command::NextFrame, cx);
+                }));
+        }
 
         if let Some(session) = self.session.as_mut() {
-            self.placements = self.layout.place(session.info.screens, viewport);
+            let consoles = consoles(&session.info);
+            self.placements = self
+                .layout
+                .place_consoles(session.info.screens, consoles, viewport);
             session.refresh_images(
                 &self.placements,
                 scale_factor,
                 self.color_correction,
+                self.filter,
                 window,
             );
             for (placement, image) in self.placements.iter().zip(&session.images) {
@@ -1098,11 +1519,29 @@ impl Render for EmulatorView {
                         .object_fit(ObjectFit::Fill),
                 );
             }
+            let overlay = session.emulator.overlay();
+            root = root.children(overlay_layers(
+                &overlay,
+                &self.placements,
+                session.info.screens,
+            ));
         } else {
             self.placements.clear();
             root = root.child(welcome());
         }
         root = root.children(self.cursor_marks());
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.recording)
+        {
+            root = root.child(recording_mark());
+        }
+        if self.show_fps
+            && let Some(readout) = &self.speed_readout
+        {
+            root = root.child(speed_readout(readout.clone()));
+        }
 
         // A preview only lives as long as its notice.
         if self.notice.is_none() {
@@ -1110,9 +1549,6 @@ impl Render for EmulatorView {
         }
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
-        }
-        if let Some(panel) = self.memory_panel(cx) {
-            root = root.child(panel);
         }
         if let Some(notice) = &self.notice {
             let mut card = div()
@@ -1155,6 +1591,163 @@ fn welcome() -> impl IntoElement {
                 .text_color(rgb(0x0088_8888))
                 .child("Open a ROM with ⌘O, or drop a .gb, .gbc, .gba or .nds file here."),
         )
+}
+
+/// What a script drew, over every placement of the screens it drew on,
+/// each clipped to its screen.
+fn overlay_layers(draws: &[Draw], placements: &[Placement], screens: &[ScreenSize]) -> Vec<Div> {
+    if draws.is_empty() {
+        return Vec::new();
+    }
+    placements
+        .iter()
+        .filter_map(|placement| {
+            let size = *screens.get(placement.screen)?;
+            let mut shapes = draws
+                .iter()
+                .filter(|draw| draw.screen() == placement.screen)
+                .peekable();
+            shapes.peek()?;
+            let rect = placement.rect;
+            let layer = div()
+                .absolute()
+                .left(px(rect.x))
+                .top(px(rect.y))
+                .w(px(rect.width))
+                .h(px(rect.height))
+                .overflow_hidden();
+            Some(layer.children(shapes.flat_map(|draw| shape(draw, placement, size))))
+        })
+        .collect()
+}
+
+/// One drawn shape as elements placed inside `placement`'s layer. Text
+/// stays upright on turned screens, starting from where its corner lands.
+fn shape(draw: &Draw, placement: &Placement, size: ScreenSize) -> Vec<Div> {
+    let rect = placement.rect;
+    // Window pixels per screen pixel.
+    let scale = rect.width / f32::from(placement.rotation.turn_size(size).width.max(1));
+    let at = |x: f32, y: f32| {
+        let (left, top) = placement.window_point(size, (x, y));
+        (left - rect.x, top - rect.y)
+    };
+    match draw {
+        Draw::Rect {
+            x,
+            y,
+            width,
+            height,
+            fill,
+            outline,
+            ..
+        } => {
+            let (x, y) = (*x as f32, *y as f32);
+            let a = at(x, y);
+            let b = at(x + *width as f32, y + *height as f32);
+            let mut element = div()
+                .absolute()
+                .left(px(a.0.min(b.0)))
+                .top(px(a.1.min(b.1)))
+                .w(px((a.0 - b.0).abs()))
+                .h(px((a.1 - b.1).abs()));
+            if fill.is_visible() {
+                element = element.bg(rgba(fill.rgba()));
+            }
+            if outline.is_visible() {
+                element = element
+                    .border(px(scale.max(1.0)))
+                    .border_color(rgba(outline.rgba()));
+            }
+            vec![element]
+        }
+        Draw::Text {
+            x, y, text, color, ..
+        } => {
+            if !color.is_visible() {
+                return Vec::new();
+            }
+            let (left, top) = at(*x as f32, *y as f32);
+            let height = Draw::TEXT_HEIGHT as f32 * scale;
+            // A dark copy underneath keeps light text readable on light
+            // screens, as emulators' script text has been.
+            let shadow = (scale / 2.0).max(1.0);
+            let shadow_alpha = u32::from(color.alpha()) * 3 / 4;
+            let line = |offset: f32, color: u32| {
+                div()
+                    .absolute()
+                    .left(px(left + offset))
+                    .top(px(top + offset))
+                    .whitespace_nowrap()
+                    .font_family("Menlo")
+                    .text_size(px(height * 0.9))
+                    .line_height(px(height))
+                    .text_color(rgba(color))
+                    .child(SharedString::from(text.clone()))
+            };
+            vec![line(shadow, shadow_alpha), line(0.0, color.rgba())]
+        }
+    }
+}
+
+/// A red dot and "REC" in the window's corner while a recording is under
+/// way. The recording is of the core's frames, so it never shows this.
+fn recording_mark() -> impl IntoElement {
+    div()
+        .absolute()
+        .top(px(10.0))
+        .right(px(10.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .rounded_md()
+        .bg(rgba(0x0000_00AA))
+        .text_xs()
+        .child(div().size(px(8.0)).rounded_full().bg(rgb(0x00E5_3935)))
+        .child("REC")
+}
+
+/// The speed readout, small in the window's bottom right corner.
+fn speed_readout(text: SharedString) -> impl IntoElement {
+    div()
+        .absolute()
+        .bottom(px(8.0))
+        .right(px(8.0))
+        .px_1()
+        .rounded_sm()
+        .bg(rgba(0x0000_0099))
+        .text_xs()
+        .font_family("Menlo")
+        .child(text)
+}
+
+/// The menu action a gamepad hotkey runs.
+fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
+    match shortcut {
+        Shortcut::SaveState => Box::new(SaveState),
+        Shortcut::LoadState => Box::new(LoadState),
+        Shortcut::NextSlot => Box::new(NextStateSlot),
+        Shortcut::PreviousSlot => Box::new(PreviousStateSlot),
+        Shortcut::Pause => Box::new(TogglePause),
+        Shortcut::Reset => Box::new(Reset),
+        Shortcut::ToggleFastForward => Box::new(ToggleFastForward),
+        Shortcut::ToggleSlowMotion => Box::new(ToggleSlowMotion),
+        Shortcut::SwapScreens => Box::new(SwapScreens),
+        Shortcut::SwitchPlayer => Box::new(SwitchPlayer),
+        Shortcut::FullScreen => Box::new(ToggleFullScreen),
+    }
+}
+
+/// How many consoles a session shows side by side, each laid out on its
+/// own: one, or each player's for linked systems with several screens
+/// each (two DSes). Single-screen consoles share one layout instead.
+fn consoles(info: &CoreInfo) -> usize {
+    let players = info.players.max(1);
+    if info.screens.len() > players {
+        players
+    } else {
+        1
+    }
 }
 
 /// Whether `system` takes GBA games in a second slot.

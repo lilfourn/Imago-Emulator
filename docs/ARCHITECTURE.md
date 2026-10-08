@@ -9,7 +9,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 ```
                  emu-app (GPUI, binary: ds-emulator)     emu-headless (binary)
                     │        │                                 │
-                    │  emu-state, emu-cheats                   │
+                    │  emu-state, emu-cheats, emu-script ◄─────┤
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
                      ┌───────┼────────┐
@@ -26,14 +26,15 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-core` | The contract between cores and frontends: the `Core` trait and plain-data types. No dependencies beyond `thiserror`. |
 | `emu-sched` | A priority queue of cycle-timestamped events. |
 | `emu-state` | The save-state container format. |
-| `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. |
+| `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. Also its disassembler and a bus wrapper for watchpoints. |
 | `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
 | `emu-gba-cart` | The GBA cartridge: ROM, SRAM, Flash and EEPROM saves, and the GPIO clock. Shared by the GBA core and the DS's GBA slot ([decision 0006](decisions/0006-gba-slot.md)); depends only on `serde`. |
-| `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
-| `emu-gba` | Game Boy Advance: memory map and wait states, PPU, APU with DMA FIFOs, DMA, timers, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
-| `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs. |
+| `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges, and the Game Boy Color's palettes for games made for the original Game Boy (SameBoy's table, MIT). Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
+| `emu-gba` | Game Boy Advance: memory map, wait states and the Game Pak prefetch buffer, PPU, APU with DMA FIFOs, DMA, timers, the interrupt controller, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
+| `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
-| `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, and `poke_bank` for Game Boy banks. Knows code formats, not cores. |
+| `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
+| `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
@@ -55,6 +56,7 @@ pub trait Core: Send {
     fn info(&self) -> CoreInfo;                       // system, screens, timing, audio rate
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>); // one per player
     fn screens(&self) -> &[Frame];                     // DS: [top, bottom]
+    fn set_render_scale(&mut self, scale: u32);        // DS: 3D at N× resolution, display only
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
@@ -62,22 +64,30 @@ pub trait Core: Send {
     fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>);   // .sav bytes
     fn peek(&self, player: usize, address: u32) -> Option<u8>;  // plain RAM only
     fn poke(&mut self, player: usize, address: u32, value: u8) -> bool;
+    fn poke_bank(&mut self, player: usize, bank: u8, address: u32, value: u8) -> bool; // GB banks
+    fn poke_io_16(&mut self, player: usize, address: u32, value: u16) -> bool; // GBA registers
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]); // cheats' ROM patches
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
+    fn debugger(&mut self) -> Option<&mut dyn Debugger>; // see "Debugging" below
 }
 ```
 
 - **Construction is per system** (`emu_gba::Gba::new(&Media)`), so a core
   always has a game loaded. `Media` carries the ROM, the battery save, any
-  user-dumped BIOS/firmware, the RTC start time, and any cartridge in a
-  second slot (the DS's GBA slot, [decision 0006](decisions/0006-gba-slot.md)).
+  user-dumped BIOS/firmware, the RTC start time, any cartridge in a
+  second slot (the DS's GBA slot, [decision 0006](decisions/0006-gba-slot.md)),
+  and how a Game Boy shows games made for the original Game Boy: in grey,
+  or on a Game Boy Color in its colours.
 - **Players**: `CoreInfo::players` is 1, or 2 for a linked pair
   ([decision 0004](decisions/0004-linked-cores.md)). Each player has an
-  input and a cartridge; screens split evenly between players.
+  input and a cartridge; screens split evenly between players, so two
+  linked DSes have four: each console's top screen, then its bottom one.
+  `touch_screen` counts within a console, and each DS has its own.
 - **Battery saves are numbered by cartridge**: player `i`'s cartridge is
   `i`, and a DS's GBA slot cartridge is 1. Each keeps its own `.sav`.
 - **Input is per frame and per player**: a 12-bit button mask (bit order follows the GBA
   `KEYINPUT` register, then DS X/Y) plus an optional touch point in
-  bottom-screen pixels.
+  bottom-screen pixels and a microphone loudness, 0 to 255 (DS).
 - **Pixels** are `u32` `0xFFRRGGBB`. On little-endian hosts that is BGRA in
   memory, which GPUI and Metal upload without conversion.
 - **Audio** is interleaved `i16` stereo at the core's own rate; the frontend
@@ -85,20 +95,90 @@ pub trait Core: Send {
 - **Determinism**: cores never read the clock, randomness or files. Same
   media and inputs give the same frames and state bytes. Rewind, netplay and
   frame-CRC tests depend on it.
+- **ROM patches** are configuration, like the ROM itself: a core keeps the
+  set it was last given, applies it to every ROM read, leaves it out of
+  save states and keeps it through `load_state` and `reset`.
+- **The render scale** is configuration too: after `set_render_scale(n)`
+  a DS core's frames are n times wider and taller, 3D drawn at that
+  resolution. Touch points and layouts stay in `CoreInfo::screens` pixels,
+  and emulation, audio and state bytes are the same at every scale.
+
+## Debugging
+
+`emu_core::debug` is the debugger's half of the contract (PRD UI-12).
+Every core returns itself from `Core::debugger`:
+
+```rust
+pub trait Debugger {
+    fn cpus(&self) -> Vec<CpuInfo>;                   // GB: SM83; GBA: ARM7TDMI; DS: ARM9, ARM7
+    fn registers(&self, cpu: usize) -> Vec<Register>; // names and values
+    fn status(&self, cpu: usize) -> String;           // flags, mode, halted
+    fn pc(&self, cpu: usize) -> u32;                  // the next instruction
+    fn read(&self, cpu: usize, address: u32) -> Option<u8>;    // no side effects
+    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool; // memory, not ROM or I/O
+    fn disassemble(&self, cpu: usize, address: u32) -> Instruction;
+    fn io_registers(&self, cpu: usize) -> Vec<IoRegister>;
+    fn events(&self, cpu: usize) -> Vec<ScheduledEvent>;       // the scheduler's queue
+    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics>;
+    fn run_until(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>, stops: &Stops)
+        -> RunOutcome;                                // the frame, stopping mid-way
+}
+```
+
+- **CPUs are numbers**: the DS's ARM9 is 0 and its ARM7 1; in a linked
+  pair player 0's CPU is 0 and player 1's is 1, and in a linked DS pair
+  player 0's ARM9 and ARM7 are 0 and 1 and player 1's are 2 and 3. Each
+  `CpuInfo` says whose player it is, so the app debugs the player the
+  keyboard controls.
+- **Two ways to run a frame.** The app calls `run_frame` while nothing
+  could stop it, so breakpoints cost nothing until one is set. With
+  breakpoints, watchpoints or a step pending it calls `run_until`, which
+  runs the same frame with `Stops` checked after every instruction, and
+  returns at the first that applies. The next call, or `run_frame`,
+  carries on mid-frame. Each core writes its frame loop once, over a step
+  closure (GB, GBA) or a `Stepper` type parameter (the DS's slice loop);
+  for plain runs these inline back to the old loop. Pokémon White's
+  headless speed and CPU trace were unchanged by it.
+- **Breakpoints** are tested after each instruction against the next
+  one's address, so a run that starts on one runs it instead of stopping
+  at once. A step is "stop after one instruction of this CPU"; stepping
+  over a call is a breakpoint after it.
+- **Watchpoints** see the data accesses the CPU makes itself: the SM83
+  runs on a watching bus (its opcode fetches go through `Bus::fetch`, so
+  they never count), and the ARM CPUs on `emu_arm::Watched`, which an
+  ARM9 also tells about TCM accesses that never reach the bus
+  (`Bus::tcm_data`, a no-op elsewhere). DMA, the Game Boy's OAM DMA and
+  HDMA, sound, display capture and the HLE BIOS's own accesses are not
+  seen.
+- **Stopping mid-frame keeps timing**: a linked pair remembers the
+  frame's and slice's end, and the DS the end of the slice it stopped in,
+  so a stopped frame finishes on the same slices as one that never
+  stopped. Tests compare the save states.
+- **Reads have no side effects**: each core peeks its whole map,
+  including ROM and the I/O registers whose reads change nothing (the
+  DS's IPC FIFO and game card data ports read as unreadable). The I/O
+  view reads a table of GBATEK and Pan Docs names per CPU
+  (`io_names.rs`); the graphics viewers (`graphics.rs`) decode tiles,
+  maps, sprites and palettes from the PPU's memory into `Frame`s with
+  notes.
 
 ## Threads in the app
 
 ```
- main thread (GPUI)                         emulation thread
- ──────────────────                         ────────────────
+ main thread (GPUI)                         emulation thread                recording thread
+ ──────────────────                         ────────────────                ────────────────
  key/mouse events ──► Command (mpsc) ─────► apply between frames
                                             run_frame()
                                             apply cheats (Core::peek/poke)
- render(): copy latest frames ◄── Mutex ─── publish screens
+                                            run the Lua script, if any
+                                            record frame and sound ───────► JPEG, QuickTime
+ render(): copy latest frames ◄── Mutex ─── publish screens                 (bounded queue)
+           correct, turn, filter             │
            pre-scale to BGRA                 │
            img() per screen                  │
  cx.notify() ◄─── Event (async channel) ◄───┘ coalesced "frame ready", notices
-                                            flush battery save every 1 s
+                                            serialize for rewind ─────────► rewind thread:
+                                            flush battery save every 1 s    XOR, LZ4, history
                                             sleep to the next frame deadline
 ```
 
@@ -108,10 +188,18 @@ pub trait Core: Send {
 - Dropping the `Emulator` handle closes its command channel. The thread
   finishes the frame, flushes the battery save, and is joined. The view
   drops it on app quit for the same reason.
-- Frame pacing is a sleep to the next deadline. Sound stays in sync through
+- Frame pacing is a sleep to the next deadline, taken in naps of three
+  quarters of the time left, because macOS wakes a thread up to a quarter
+  of its sleep late (`speed::sleep_until`). Fast-forward (2× unless the
+  Emulation menu or settings say otherwise) and slow motion move the
+  deadlines closer or further apart. Sound stays in sync through
   a ring buffer and a resampler that nudges its ratio by up to ±0.5%
   ([decision 0003](decisions/0003-frame-pacing.md)). The `cpal` stream lives
   on the UI thread; the emulation thread owns the producer end.
+- The emulation thread counts the frames it runs and rewind steps it
+  takes (`Latest::frames_shown`); while View > Show FPS is on, the view
+  samples the count twice a second (`meter.rs`) for the readout in the
+  window's corner.
 - A gamepad thread polls `gilrs` and sends plain `PadEvent`s ("South
   pressed") to the view, which maps them through the same bindings as the
   keyboard. `controls.rs` combines every held key and control, so releasing
@@ -119,18 +207,67 @@ pub trait Core: Send {
   also sends pointer motion, which moves a touch cursor kept in
   touchscreen pixels (`cursor.rs`); the mouse and the cursor touch
   independently, and the mouse wins while both do.
+- Gamepad events pass through `chords.rs` before the bindings: while the
+  hotkey modifier (Select) is down, a hotkey control dispatches the same
+  GPUI action as its menu item, and neither control reaches the game.
+  Bindings are the user's file with the game's `game.bindings.toml`
+  laid over it, re-read whenever a game starts.
+- Turbo buttons cross to the emulation thread on their own
+  (`Command::SetTurbo`), not through the latch, whose minimum hold would
+  stretch short presses. `turbo.rs` pulses them by counting frames run,
+  so turbo is deterministic and keeps pace with fast-forward.
 - Cheats come from `game.cht`, which the view re-reads whenever the
   window regains focus and sends as a `Command`. They run after each
   frame: frames end at VBlank, where cheat devices hooked in, so button
-  codes see the frame's own input. DS cheats work on main RAM directly
-  and read KEYINPUT, EXTKEYIN and the ARM7's timers. melonDS instead
-  runs them on the ARM7's bus at its VBlank interrupt, as the real
-  Action Replay does; that reaches the same main RAM and registers.
-- The memory viewer asks the thread to copy a span of RAM (through
-  `Core::peek`) into the shared latest-frame slot after every frame.
-- The emulation thread records a save state after every frame into the
-  rewind history (`rewind.rs`): newest state whole, older ones as
-  LZ4-compressed XOR deltas, within 64 MiB.
+  codes see the frame's own input. ROM patches instead go to the core
+  when the list arrives (`Core::set_rom_patches`), so a cheat switched
+  off or deleted takes its patches with it. DS cheats work on main RAM
+  directly and read KEYINPUT, EXTKEYIN and the ARM7's timers. melonDS
+  instead runs them on the ARM7's bus at its VBlank interrupt, as the
+  real Action Replay does; that reaches the same main RAM and registers.
+- A Lua script (`scripting.rs`, the `emu-script` crate) runs here too.
+  The view reads the file and sends its text; the thread runs its main
+  body at once, then after each frame's cheats, lending it the core for
+  that call only. What it draws is published with the frame
+  (`Latest::overlay`) and painted by the view as GPUI elements over each
+  place its screen is shown, clipped to it. The buttons it presses join
+  the next frame's input after the latch and turbo, and its state and
+  pause requests go through the same paths as the menu's. Its
+  `emu.on_exec` callbacks run mid-frame through `Debugger::run_until`
+  with the debugger window's stops, and only the window's pause. A
+  script error drops the script with a notice. In `emu-headless` the
+  same script runs frame by frame, with state slots in memory.
+- The debugger window (`debugger_window.rs`) sends plain
+  `Command::Debug` requests: what to show, the breakpoint and watchpoint
+  lists, pause, continue, step, step over, next frame, and memory writes.
+  While it is open the thread copies a `Snapshot` out of the core's
+  `Debugger` after every frame and every debugger command (registers,
+  disassembly, 256 bytes of memory, and only the panel shown) and wakes
+  the window with its own coalesced event, so it updates even while the
+  game's window is hidden. A stop mid-frame pauses before cheats, input
+  latches, sound and rewind, which wait for the frame's end.
+- The emulation thread serializes the core after every frame for the
+  rewind history (`rewind.rs`), and a rewind thread
+  (`rewind_thread.rs`) does the rest: the newest state whole, older ones
+  as LZ4-compressed XOR deltas, within 64 MiB. A DS state is about 6 MB,
+  and the XOR and compression took as long as serializing, so the
+  emulation thread only serializes, into a buffer the rewind thread
+  handed back; if that thread falls two states behind, frames are
+  skipped rather than queued. Faster than normal speed, a frame is
+  recorded only about once per normal frame's time, so fast-forward
+  pays for some 60 snapshots a second, not one per frame, and rewinding
+  goes back through it as fast as it went by. Stepping back asks the
+  rewind thread for each state and waits for it.
+- Screenshots and recordings take the core's own frames on the emulation
+  thread, never the coalesced latest frame the view draws, which can skip
+  frames. A screenshot copies the screens between frames and leaves the
+  PNG encoding and writing to a short-lived thread. A recording
+  (`recorder.rs`) hands every frame that runs to its own thread, with
+  the sound the frame made, which the audio sink resamples and may drop
+  but the recording keeps whole. Its queue holds 16 frames; past that
+  the emulation waits for the writer, so no frame is lost even at
+  unlimited fast-forward. Frames that never run, while paused or
+  rewinding, are not in the movie.
 
 ## Video path
 
@@ -141,9 +278,28 @@ linear filter cover the remaining fraction. That is the "sharp bilinear"
 technique: crisp pixels without uneven pixel widths at non-integer sizes.
 
 Filters are CPU passes over frames before they become images
-([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). Today the
-only one is GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup
-table from each 15-bit console colour to its corrected pixel.
+([decision 0005](decisions/0005-video-filters-on-the-cpu.md)), in this
+order:
+1. GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup table
+   from each 15-bit console colour to its corrected pixel;
+2. rotation (`video::turn`, below);
+3. the filter chosen in View > Filter (`filter.rs`). LCD grid and
+   scanlines take over the integer pre-scale and darken part of each
+   console pixel's square of device pixels; Scale2x and Scale3x enlarge
+   two or three times, rounding diagonal edges, and leave the rest of the
+   pre-scale to `video.rs`. Their masks turn with the screen, and on DS
+   frames drawn at a higher 3D resolution they follow console pixels
+   (the scalers skip those frames). Each costs at most about 0.7 ms per
+   DS screen at 6×.
+
+DS 3D upscaling is the core's job, as that decision planned. At a render
+scale above 1, the DS draws each 3D frame twice: at the native
+resolution, which display capture can put in VRAM for the game, and
+larger, in 16 horizontal bands on scoped threads. Engine A copies each
+line that shows 3D, with the registers that composed it, and at VBlank
+composes those lines again around the larger 3D frame, a few lines to a
+thread; everything else is enlarged. The app draws the larger frames like
+any others and pre-scales them less.
 
 GPUI cannot rotate images either, so rotated layouts turn each screen on
 the CPU too (`video::turn`). The touch mapping in `layout.rs` uses the same
@@ -162,9 +318,13 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Save state | next to the ROM, `game.ss1` | `emu-state` container |
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
-| Screen layout | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
+| One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
+| Layout, speeds, 3D resolution, filter | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
+| Screenshot | next to the ROM, `game 2026-10-07 at 18.58.12.png` | 8-bit RGB PNG of the screens as the core drew them |
+| Recording | next to the ROM, `game 2026-10-07 at 18.58.12.mov` | QuickTime movie: Photo-JPEG video, 16-bit stereo PCM sound, see `emu-app/src/mov.rs` |
 
-Writes go to `name.tmp` first and are renamed over the target.
+Writes go to `name.tmp` first and are renamed over the target, except
+recordings, which are written as they go and indexed when they stop.
 
 ## Save-state container
 
@@ -201,7 +361,8 @@ order). A core's main loop:
 |---|---|---|
 | Unit tests | `#[cfg(test)]` in each module | `cargo test --workspace` |
 | Determinism | headless runner, run twice and diff | M1 test-ROM script |
-| Test ROMs | headless runner + manifest (TOOL-2) | M1 onward, in CI |
+| Scripts | `emu-script` unit tests against a test core; `emu-headless/tests/script.rs` runs a script twice on a ROM it builds and diffs the output | `cargo test` |
+| Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |
 | Trace diffing | trace logger vs. mGBA/SameBoy/melonDS (TOOL-3) | by hand while debugging |
 | Pokémon checkpoints | your own dumps, by hand | at each milestone |
 

@@ -32,6 +32,7 @@ const IDLE: u8 = 0xFF;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Eeprom {
     /// A power-of-two size, so addresses wrap with a mask.
+    #[serde(with = "crate::bytes")]
     memory: Vec<u8>,
     address_bytes: u32,
     write_enabled: bool,

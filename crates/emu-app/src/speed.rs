@@ -1,10 +1,11 @@
 //! Emulation speed: which speed the player asked for, how fast that is,
-//! and how far apart it puts frame deadlines.
+//! how far apart it puts frame deadlines, and sleeping to them.
 //!
 //! The emulation thread sleeps to each frame's deadline (see
 //! `docs/decisions/0003-frame-pacing.md`). A speed divides the gap between
 //! deadlines; an unlimited speed drops them and runs flat out.
 
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// The slowest rate allowed. One frame then waits at most ten frames'
@@ -58,6 +59,15 @@ impl Speed {
     /// The system's own frame rate.
     pub const NORMAL: Self = Self::Times(Rate::NORMAL);
 
+    /// The speed as menus and notices show it: "2×", "0.5×" or
+    /// "Unlimited".
+    pub fn label(self) -> String {
+        match self {
+            Self::Unlimited => "Unlimited".to_owned(),
+            Self::Times(rate) => format!("{}×", rate.get()),
+        }
+    }
+
     /// How far apart frame deadlines are at this speed, for frames
     /// `frame` long at normal speed; `None` if unlimited.
     pub fn frame_step(self, frame: Duration) -> Option<Duration> {
@@ -68,10 +78,18 @@ impl Speed {
     }
 }
 
+/// The fast-forward speeds the Emulation menu offers, in its order.
+pub const FAST_FORWARD_CHOICES: [Speed; 4] = [
+    Speed::Times(Rate(2.0)),
+    Speed::Times(Rate(3.0)),
+    Speed::Times(Rate(4.0)),
+    Speed::Unlimited,
+];
+
 /// The speeds fast-forward and slow motion run at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Speeds {
-    /// Unlimited unless capped.
+    /// Twice normal speed unless set.
     pub fast_forward: Speed,
     /// Half speed unless set.
     pub slow_motion: Rate,
@@ -80,7 +98,7 @@ pub struct Speeds {
 impl Default for Speeds {
     fn default() -> Self {
         Self {
-            fast_forward: Speed::Unlimited,
+            fast_forward: Speed::Times(Rate(2.0)),
             slow_motion: Rate(0.5),
         }
     }
@@ -95,6 +113,29 @@ impl Speeds {
             Pace::SlowMotion => Speed::Times(self.slow_motion),
         }
     }
+}
+
+/// How near a deadline [`sleep_until`] stops sleeping.
+const CLOSE_ENOUGH: Duration = Duration::from_micros(100);
+
+/// Sleeps until `deadline`, waking within about a tenth of a millisecond
+/// of it.
+///
+/// macOS wakes a sleeping thread late by up to a quarter of the time it
+/// asked for, so a single sleep to a deadline 10 ms away ends 2 to 2.5 ms
+/// late: every frame, and the input it reads, would start that much after
+/// its time. Sleeping three quarters of what is left, again and again,
+/// lands on the deadline in two or three wake-ups instead.
+pub fn sleep_until(deadline: Instant) {
+    while let Some(nap) = nap(deadline.saturating_duration_since(Instant::now())) {
+        thread::sleep(nap);
+    }
+}
+
+/// How long to sleep with `left` to go: three quarters of it, or not at
+/// all once that is under [`CLOSE_ENOUGH`].
+fn nap(left: Duration) -> Option<Duration> {
+    (left >= CLOSE_ENOUGH).then(|| left * 3 / 4)
 }
 
 /// When the next frame is due, given that the last was due at `deadline`
@@ -143,13 +184,21 @@ mod tests {
     fn each_pace_has_its_speed() {
         let speeds = Speeds::default();
         assert_eq!(speeds.speed(Pace::Normal), Speed::NORMAL);
-        assert_eq!(speeds.speed(Pace::FastForward), Speed::Unlimited);
+        assert_eq!(speeds.speed(Pace::FastForward), times(2.0));
         assert_eq!(speeds.speed(Pace::SlowMotion), times(0.5));
-        let capped = Speeds {
-            fast_forward: times(4.0),
+        let unlimited = Speeds {
+            fast_forward: Speed::Unlimited,
             ..speeds
         };
-        assert_eq!(capped.speed(Pace::FastForward), times(4.0));
+        assert_eq!(unlimited.speed(Pace::FastForward), Speed::Unlimited);
+    }
+
+    #[test]
+    fn speeds_are_labelled_as_multiples() {
+        let labels = FAST_FORWARD_CHOICES.map(Speed::label);
+        assert_eq!(labels, ["2×", "3×", "4×", "Unlimited"]);
+        assert_eq!(times(0.5).label(), "0.5×");
+        assert_eq!(FAST_FORWARD_CHOICES[0], Speeds::default().fast_forward);
     }
 
     #[test]
@@ -172,6 +221,33 @@ mod tests {
         let step = times(4.0).frame_step(FRAME);
         let behind = start + FRAME * 3 / 2;
         assert_eq!(next_deadline(start, behind, step), behind);
+    }
+
+    #[test]
+    fn naps_take_three_quarters_of_the_time_left() {
+        assert_eq!(
+            nap(Duration::from_millis(10)),
+            Some(Duration::from_micros(7500))
+        );
+        assert_eq!(
+            nap(Duration::from_micros(400)),
+            Some(Duration::from_micros(300))
+        );
+        assert_eq!(nap(Duration::from_micros(99)), None);
+        assert_eq!(nap(Duration::ZERO), None);
+    }
+
+    #[test]
+    fn sleeps_until_the_deadline_and_not_long_past_it() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(5);
+        sleep_until(deadline);
+        let woke = Instant::now();
+        assert!(woke + CLOSE_ENOUGH >= deadline, "woke early");
+        // Generous, for a busy machine: one plain sleep would be 1 ms late.
+        assert!(woke < deadline + Duration::from_millis(50), "woke late");
+        // A deadline already past returns at once.
+        sleep_until(start);
     }
 
     #[test]

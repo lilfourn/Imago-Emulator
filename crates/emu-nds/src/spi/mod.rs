@@ -103,10 +103,11 @@ impl Spi {
         self.data
     }
 
-    /// Writes SPIDATA (0x040001C2), exchanging a byte with the selected
-    /// device. Returns the cycles SPICNT stays busy, after which the
-    /// machine calls [`Spi::finish`]; `None` with the bus disabled.
-    pub(crate) fn write_data(&mut self, value: u8) -> Option<u64> {
+    /// Writes SPIDATA (0x040001C2) at the ARM7's bus cycle `now`,
+    /// exchanging a byte with the selected device. Returns the cycles
+    /// SPICNT stays busy, after which the machine calls [`Spi::finish`];
+    /// `None` with the bus disabled.
+    pub(crate) fn write_data(&mut self, value: u8, now: u64) -> Option<u64> {
         if self.control & ENABLE == 0 {
             return None;
         }
@@ -118,7 +119,7 @@ impl Spi {
         self.data = match device {
             Device::Power => self.power.transfer(value),
             Device::Firmware => self.firmware.transfer(value),
-            Device::Touch => self.touch.transfer(value),
+            Device::Touch => self.touch.transfer(value, now),
             Device::Reserved => 0,
         };
         if self.control & HOLD == 0 {
@@ -152,6 +153,11 @@ impl Spi {
             .set_pen(point.map(|(x, y)| calibration.adc(x, y)));
     }
 
+    /// Sets how loud the microphone hears the player, 0–255.
+    pub(crate) fn set_microphone(&mut self, loudness: u8) {
+        self.touch.set_microphone(loudness);
+    }
+
     /// Whether the pen touches the screen. EXTKEYIN bit 6 reads 0 then.
     pub(crate) fn pen_down(&self) -> bool {
         self.touch.pen_down()
@@ -174,6 +180,21 @@ impl Spi {
     pub(crate) fn calibration(&self) -> Calibration {
         self.firmware.calibration()
     }
+
+    /// The firmware's header and wifi settings, its first 0x200 bytes.
+    pub(crate) fn wifi_settings(&self) -> &[u8] {
+        self.firmware.wifi_settings()
+    }
+
+    /// The MAC address in the firmware's wifi settings.
+    pub(crate) fn mac_address(&self) -> [u8; 6] {
+        self.firmware.mac_address()
+    }
+
+    /// Changes the MAC address in the firmware's wifi settings.
+    pub(crate) fn set_mac_address(&mut self, mac: [u8; 6]) {
+        self.firmware.set_mac_address(mac);
+    }
 }
 
 #[cfg(test)]
@@ -191,7 +212,7 @@ mod tests {
             .map(|(i, &byte)| {
                 let hold = if i + 1 < bytes.len() { HOLD } else { 0 };
                 spi.write_control(ENABLE | control | hold);
-                spi.write_data(byte).expect("the bus is enabled");
+                spi.write_data(byte, 0).expect("the bus is enabled");
                 spi.finish();
                 spi.data()
             })
@@ -201,9 +222,9 @@ mod tests {
     #[test]
     fn transfers_take_time_and_may_interrupt() {
         let mut spi = Spi::new(None);
-        assert_eq!(spi.write_data(0), None, "the bus starts disabled");
+        assert_eq!(spi.write_data(0, 0), None, "the bus starts disabled");
         spi.write_control(ENABLE | IRQ_ENABLE | 2);
-        assert_eq!(spi.write_data(0), Some(256));
+        assert_eq!(spi.write_data(0, 0), Some(256));
         assert_ne!(spi.control() & BUSY, 0);
         assert!(spi.finish());
         assert!(!spi.finish());
@@ -218,9 +239,9 @@ mod tests {
         // libnds holds chip select through the read, then disables the bus.
         spi.write_control(ENABLE | FIRMWARE | HOLD);
         for byte in [0x03, 0x00, 0x00, 0x08] {
-            spi.write_data(byte);
+            spi.write_data(byte, 0);
         }
-        spi.write_data(0);
+        spi.write_data(0, 0);
         assert_eq!(spi.data(), b'M');
         spi.write_control(0);
         assert_eq!(exchange(&mut spi, FIRMWARE, &[0x9F, 0])[1], 0x20);
@@ -238,6 +259,32 @@ mod tests {
         spi.set_touch(None);
         let reply = exchange(&mut spi, TOUCH, &[0x90, 0, 0]);
         assert_eq!(u16::from(reply[1]) << 5 | u16::from(reply[2] >> 3), 0xFFF);
+    }
+
+    #[test]
+    fn the_microphone_hears_the_frame_s_loudness() {
+        let mut spi = Spi::new(None);
+        // libnds's micReadData12: control byte 0xE4, two reads.
+        let mic = |spi: &mut Spi| {
+            let reply = exchange(spi, TOUCH, &[0xE4, 0, 0]);
+            u16::from(reply[1] & 0x7F) << 5 | u16::from(reply[2] >> 3)
+        };
+        assert_eq!(mic(&mut spi), 0x800, "silence");
+        spi.set_microphone(255);
+        let mut readings: Vec<u16> = (0..64)
+            .map(|n| {
+                spi.write_control(ENABLE | TOUCH | HOLD);
+                spi.write_data(0xE4, n * 1000).expect("the bus is enabled");
+                spi.write_data(0, n * 1000);
+                let high = spi.data();
+                spi.write_control(ENABLE | TOUCH);
+                spi.write_data(0, n * 1000);
+                u16::from(high & 0x7F) << 5 | u16::from(spi.data() >> 3)
+            })
+            .collect();
+        readings.sort_unstable();
+        readings.dedup();
+        assert!(readings.len() > 32, "noise, not a constant: {readings:X?}");
     }
 
     #[test]

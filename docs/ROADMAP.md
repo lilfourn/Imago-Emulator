@@ -69,19 +69,21 @@ Frontend work in this phase: audio output, gamepads, the test-ROM suite and
 the trace logger. Doing them now, while the core is small, is cheaper than
 retrofitting.
 
-**Status (2026-10-05):** M1–M3 met on test ROMs; M4 met except state-slot
-thumbnails. 117 of 139 test ROMs pass
-(`crates/emu-gb/tests/test-roms-passing.txt`). The Pokémon checkpoints need
-your own cartridge dumps and have not been run.
+**Status (2026-10-08):** M1–M4 met on test ROMs. 152 of 159 test ROMs pass
+(`crates/emu-gb/tests/test-roms-passing.txt`), including every Mooneye
+acceptance test the harness runs on a DMG and all of Blargg's `dmg_sound`.
+The Pokémon checkpoints need your own cartridge dumps and have not been run.
 
 | Not yet passing | Why | Matters for games? |
 |---|---|---|
-| Mooneye PPU `intr_2_*`, `lcdon_*`, `stat_lyc_onoff` (7) | STAT mode bits lag the mode-2 interrupt by part of an M-cycle; the scanline renderer does not model it | Rarely; a few raster-effect demos |
-| Mooneye `boot_div`, `serial/boot_sclk_align` | Exact DIV and serial-clock phase left by the boot ROM | No |
-| Mooneye `timer/rapid_toggle` | TAC toggling glitch | No |
-| Mooneye MBC1 multicart | MBC1M wiring for compilation cartridges | Only those carts |
-| Blargg `dmg_sound` 09, 10, 12 | Wave-RAM access races while channel 3 plays | Rarely |
-| Blargg `oam_bug` | DMG OAM corruption bug | No (games avoid it) |
+| Blargg `oam_bug` 2, 4, 5, 7, 8 and the combined ROM (6) | The DMG's OAM corruption bug is not emulated | No (games avoid it) |
+
+Fixed on 2026-10-08: STAT now reports each mode a dot after the PPU enters
+it and the PPU locks VRAM and OAM (Mooneye `intr_2_*`, `lcdon_*`,
+`stat_lyc_onoff`, Blargg `oam_bug` 1); DIV and the serial clock keep the
+boot ROM's phase (`boot_div`, `boot_sclk_align`); an overflow from stopping
+the timer reloads at once (`rapid_toggle`); MBC1M multicarts; and DMG wave
+RAM while channel 3 plays (`dmg_sound` 09, 10, 12).
 
 ### M1. SM83 CPU ✅
 
@@ -109,7 +111,7 @@ your own cartridge dumps and have not been run.
 - **Exit:** Pokémon Red plays with sound; saving in game and restarting the
   app keeps the save. Most of Blargg `dmg_sound` passes.
 
-### M4. Save states, rewind and controllers ✅ (thumbnails pending)
+### M4. Save states, rewind and controllers ✅
 
 - Complete `save_state`/`load_state` for the GB core.
 - **Frontend:** rewind ring buffer (UI-11), state slots with thumbnails
@@ -122,17 +124,24 @@ your own cartridge dumps and have not been run.
 
 ## Phase 2 — Game Boy Color
 
-**Status (2026-10-05):** M5 and M6 met on test ROMs and unit tests. 135 of
-158 test ROMs pass. New gaps: `cgb-acid-hell` (2 pixels, mid-scanline
-effects) and DMG games are not colourised as on a real GBC (that needs the
-CGB boot ROM's palette table; SameBoy's open boot ROM is a candidate, see
-PRD Q5). The Pokémon checkpoints still need your own dumps.
+**Status (2026-10-08):** M5 and M6 met on test ROMs and unit tests. 152 of
+159 test ROMs pass. Games made for the original Game Boy run on a Game Boy
+Color in DMG mode by default, coloured as its boot ROM colours them: by
+title for Nintendo's games, from SameBoy's copy of the palette table (PRD
+Q5), or with one of the twelve button-combination palettes. dmg-acid2 run
+that way matches the CGB reference screenshot; View > Original Game Boy
+Games switches back to grey. Pokémon Red and Blue pick their red and blue
+palettes from the table, but without the dumps neither has been seen in
+game. Still open: `cgb-acid-hell` (2 pixels, mid-scanline effects). The
+Pokémon checkpoints still need your own dumps.
 
 ### M5. CGB mode and the MBC3 clock ✅ (test ROMs)
 
 - Palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. MBC3
   RTC with the latch sequence and day-counter carry, saved as the 48-byte
   trailer (read 44- and 48-byte forms).
+- DMG mode on a Game Boy Color for games made for the original Game Boy,
+  with the boot ROM's compatibility palettes.
 - **Exit:** cgb-acid2 passes. Pokémon Crystal's clock survives an emulator
   restart, day/night works, and Yellow runs with CGB palettes.
 
@@ -140,8 +149,8 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 
 - Serial transfer between two GB cores in one process: `emu_gb::Linked`
   runs both in 8-M-cycle lockstep slices ([decision 0004](decisions/0004-linked-cores.md)).
-  Open a game, then File > Connect Link Cable…, or pass two ROMs on the
-  command line. Click a screen or press ⌘T to control the other Game Boy.
+  Open a game, then File > Connect Second Console…, or pass two ROMs on
+  the command line. Click a screen or press ⌘T to control the other Game Boy.
 - **Exit:** trade a Pokémon between two instances of Red/Blue or
   Gold/Silver.
 
@@ -149,16 +158,17 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 
 ## Phase 3 — Game Boy Advance
 
-**Status (2026-10-05):** M7–M11 met on test ROMs and unit tests:
-- the ARM7TDMI passes all 45 SingleStepTests files (2.25 million cases);
-- jsmolka's arm, thumb, memory, bios, nes and save tests all pass.
+**Status (2026-10-07):** M7–M11 met on test ROMs and unit tests:
+- the ARM7TDMI passes all 45 SingleStepTests files (2.25 million cases),
+  multiply carry flag included;
+- jsmolka's arm, thumb, memory, bios, nes and save tests all pass;
+- armwrestler passes all eight of its pages;
+- the mGBA test suite passes 6,968 of the 6,998 checks in its 13
+  self-checking groups (`crates/emu-gba/tests/mgba-suite-passing.txt`).
 What's missing:
-- armwrestler and the mGBA test suite are not wired into the harness yet;
-- the debugger has only the memory viewer (no disassembly or registers);
-- cheats lack ROM patches (GameShark Advance `6`, Pro Action Replay
-  ROM codes) and GBA I/O writes;
-- [decision 0005](decisions/0005-video-filters-on-the-cpu.md) settles Q3
-  but awaits review.
+- 30 mGBA suite checks (see M8): CpuFastSet's timing, serial transfer
+  timing, a lone console's multi-player SIOCNT, and HBlank timings
+  measured around HALT.
 The Pokémon checkpoints (FireRed music, Emerald saves and clock, the
 FireRed–Emerald trade) need your own dumps.
 
@@ -168,15 +178,36 @@ FireRed–Emerald trade) need your own dumps.
   offsets. A `Bus` trait so the GBA and both DS CPUs can share the
   interpreter.
 - **Frontend:** first debugger panels (UI-12): disassembly, registers,
-  memory.
+  memory. ✅ View > Debugger, for every system: ARM/Thumb (ARMv4T and
+  ARMv5TE) and SM83 disassemblers, breakpoints and watchpoints that stop
+  mid-frame, step, step over and frame advance, registers, a memory
+  editor, tile/map/sprite/palette viewers, I/O registers and the
+  scheduler's queue.
 - **Exit:** jsmolka `arm.gba` and `thumb.gba` pass, plus armwrestler.
 
-### M8. Memory, DMA, timers, BIOS ✅ (jsmolka)
+### M8. Memory, DMA, timers, BIOS ✅ (jsmolka, mGBA suite)
 
-- Memory map with wait states, DMA, timers, IRQs, HLE BIOS for SWI calls,
-  and the GBA's events moved onto `emu-sched`.
+- Memory map with wait states and the Game Pak prefetch buffer, DMA,
+  timers, IRQs, HLE BIOS for SWI calls, and the GBA's events moved onto
+  `emu-sched`.
 - **Exit:** jsmolka memory and BIOS tests pass, along with most of the mGBA
   suite's timer and DMA tests.
+- mGBA suite, per group: memory 1,552/1,552, I/O read 130/130, timing
+  2,000/2,020, timer count-up 936/936, timer IRQ 90/90, shifter 140/140,
+  carry 93/93, multiply long 72/72, BIOS math 615/615, DMA 1,244/1,244, SIO
+  registers 89/90, SIO timing 0/4, misc. edge cases 7/12.
+- Getting there fixed, among others: interrupts, timer writes and timer
+  starts land with the hardware's few-cycle delays, and the prescalers
+  share one clock; DMA starts two cycles after its trigger, takes the bus
+  at the CPU's next access and keeps a per-channel latch; ROM opcodes
+  come through the prefetch buffer, which most games turn on; HLE BIOS
+  calls take the real BIOS's time; ArcTan2 takes 32-bit coordinates;
+  write-only registers read as open bus. Earlier, the suite found that
+  VBlankIntrWait never returned under the HLE BIOS.
+- Left: CpuFastSet's loop overhead (20 timing checks), serial transfer
+  timing (4), a lone console's multi-player SIOCNT (1), and five misc.
+  checks: HBlank flag timings measured around HALT and open bus while an
+  HBlank DMA repeats.
 
 ### M9. Video and sound ✅ (implemented; needs a dump to check)
 
@@ -202,17 +233,20 @@ FireRed–Emerald trade) need your own dumps.
   - `emu-cheats` with `game.cht` files (File > Edit Cheats…): device
     tags or detection; GameShark Advance / Action Replay v1/v2 and Pro
     Action Replay v3, encrypted (both seed sets, `DEADFACE`) or not;
-    CodeBreaker with its encryption; Game Boy GameShark bank codes; and
+    CodeBreaker with its encryption; Game Boy GameShark bank codes and
+    Game Genie; ROM patches (Game Genie, GameShark Advance `6`, Pro Action
+    Replay `18`–`1E`) and Pro Action Replay I/O writes (`C6`, `C7`); and
     Action Replay DS for Phase 4. Cheats run after each frame, at VBlank;
-  - a memory viewer (View > Memory Viewer);
-  - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3.
+  - a memory viewer, since grown into the debugger (View > Debugger);
+  - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3,
+    accepted once the filters were built on it in Phase 4.
 - **Exit:** trade between FireRed and Emerald over the emulated link cable.
 
 ---
 
 ## Phase 4 — Nintendo DS
 
-**Status (2026-10-06):** M12–M14 are implemented and M13's frontend items
+**Status (2026-10-07):** M12–M14 are implemented and M13's frontend items
 are done.
 - The DS core direct-boots retail games with an HLE BIOS, including the
   callback decompressors and SoftReset.
@@ -223,7 +257,22 @@ are done.
   dump, at about 3× full speed headless.
 - 3D has edge anti-aliasing, edge marking, fog, toon shading and shadows.
   Sound has all 16 channels and both capture units.
-- RockPolish's rockwrestler test ROM passes every test.
+- M16 so far: 3D draws at up to 8× its resolution (View > 3D Resolution),
+  with the 2D layers enlarged around it; in White's bedroom, headless on an
+  M5 Max, that runs at about 3.2× full speed at 2× and 2.7× at 4×. The
+  microphone hears a blow key (B) or the computer's microphone.
+- Local wireless: two consoles in one process share a clock, and the ARM7's
+  Wi-Fi chip sends beacons, connects and runs Nintendo's multiplayer
+  exchange ([decision 0007](decisions/0007-ds-local-wireless.md)). Two
+  Pokémon White games, each from a save at the C-Gear, see each other in
+  the Union Room, talk, and trade (Tepig for Patrat, scripted through
+  `examples/link_probe.rs`). The pair runs at about 1.6× full speed
+  headless; one console's speed is unchanged.
+- RockPolish's rockwrestler passes all 23 of its tests, and armwrestler
+  for the DS all eight of its pages, both checked by `cargo test`.
+- VBlankIntrWait, which libnds calls as swiWaitForVBlank, used to wait
+  forever under the HLE BIOS; the mGBA suite found the same bug on the GBA.
+  Both are fixed.
 - Action Replay DS cheats (`ards` in `game.cht`) run after each frame on
   main RAM, and button codes read KEYINPUT and EXTKEYIN. A button-activated
   pointer code changes only its target bytes in a White run (probe
@@ -231,11 +280,11 @@ are done.
 
 | M | Done | Left |
 |---|---|---|
-| M12 | ARMv5TE, CP15 with TCMs and MPU enforcement, lockstep CPUs, IPC | armwrestler-DS and a libnds hello world (need devkitPro) |
-| M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS |
+| M12 | ARMv5TE, CP15 with TCMs and MPU enforcement, lockstep CPUs, IPC; armwrestler-DS and rockwrestler pass | A libnds hello world: devkitPro publishes no built one, so it needs devkitARM to build |
+| M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS (the test-ROM runner reads text off the screen, not CRCs) |
 | M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
 | M15 | Pokémon White shows no anti-piracy symptoms; GBA slot with SRAM and Flash saves ([decision 0006](decisions/0006-gba-slot.md)) | Timing against melonDS traces; HG/SS and B2/W2; Pal Park with real GBA dumps |
-| M16 | — | 3D upscaling, microphone, local wireless |
+| M16 | 3D upscaling to 8× (NDS-9); microphone from a blow key or the computer's (NDS-10); local wireless, with a Union Room trade between two Pokémon Whites (NDS-10) | The exit's trade in Platinum or HG/SS (needs those dumps); DS Download Play |
 
 ### M12. Two CPUs
 
@@ -272,6 +321,13 @@ are done.
 
 - 3D upscaling, microphone or "blow" button, local wireless between two
   instances.
+- Done: 3D upscaling (`Core::set_render_scale`, View > 3D Resolution); the
+  microphone as a loudness in `Input` (hold B, or Emulation > Use
+  Microphone); local wireless between two consoles, `emu_nds::Linked`
+  ([decision 0007](decisions/0007-ds-local-wireless.md)). Open a DS game,
+  then File > Connect Second Console…, or pass two ROMs on the command
+  line. Two Pokémon Whites trade in the Union Room; Platinum and HG/SS are
+  untried.
 - **Exit:** trade between two instances of Platinum or HeartGold/SoulSilver
   over emulated local wireless.
 
@@ -307,9 +363,14 @@ are done.
 | State-slot thumbnails in the slot notice | UI-9 | Phase 2 ✅ |
 | Link cable, per-player input | GB-6 | M6 ✅ |
 | Fast-forward speed cap, slow motion | UI-10 | Phase 4 ✅ |
-| Debugger panels | UI-12 | M7 → M11 |
+| Per-game bindings, turbo, gamepad hotkey chords | UI-6 | Phase 4 ✅ |
+| Debugger panels | UI-12 | M7 → M11 ✅ |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gap, gamepad touch | UI-2, UI-7 | M13 ✅ |
 | Keyboard-first defaults, large window, full screen | UI-2, UI-5 | Phase 4 ✅ |
-| 3D upscaling | NDS-9 | M16 |
-| Shader chain, recording, achievements, scripting | UI-4, UI-14 | Later |
+| 3D upscaling (View > 3D Resolution) | NDS-9 | M16 ✅ |
+| Blow key, computer microphone | NDS-10 | M16 ✅ |
+| Two DSes in wireless range, side by side | NDS-10 | M16 ✅ |
+| Filters (LCD grid, scanlines, Scale2x/3x), screenshots, video recording | UI-4, UI-14 | Phase 4 ✅ |
+| Lua scripting: File > Run Script…, `--script`, headless | UI-14 | Phase 4 ✅ |
+| xBRZ, slang presets, achievements | UI-4, UI-14 | Later |

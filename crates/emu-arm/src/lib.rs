@@ -28,16 +28,23 @@ mod arm;
 mod arm9;
 mod armv5;
 pub mod cp15;
+mod describe;
+mod disasm;
 mod model;
+mod multiplier;
 mod protection;
 mod tcm;
 mod thumb;
+mod watch;
 
 use serde::{Deserialize, Serialize};
 
 pub use arm9::{Arm9, Arm946es};
 pub use cp15::Cp15;
+pub use describe::describe_psr;
+pub use disasm::{Architecture, Disassembly, disassemble_arm, disassemble_thumb};
 pub use model::{Arm7tdmi, Model};
+pub use watch::Watched;
 
 /// How a memory access relates to the previous one, as a bit set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -104,6 +111,13 @@ pub trait Bus {
     fn write_8(&mut self, address: u32, value: u8, access: Access);
     /// Spends one internal cycle without a memory access.
     fn idle(&mut self);
+    /// Notes a data access an ARM9 served from its tightly coupled memory,
+    /// which never reaches the bus: `bytes` (1, 2 or 4) at `address`,
+    /// whether it was a store, and the value. Only debuggers' watchpoints
+    /// care (see [`Watched`]); by default it does nothing.
+    fn tcm_data(&mut self, address: u32, bytes: u32, write: bool, value: u32) {
+        let _ = (address, bytes, write, value);
+    }
 }
 
 /// A processor mode, as encoded in CPSR bits 0–4.
@@ -209,6 +223,47 @@ mod vector {
     pub const PREFETCH_ABORT: u32 = 0x0C;
     pub const DATA_ABORT: u32 = 0x10;
     pub const IRQ: u32 = 0x18;
+}
+
+/// For each condition (0–15), whether it passes with each value of the
+/// flags NZCV (CPSR bits 31–28): bit `nzcv` of entry `condition`.
+const CONDITIONS: [u16; 16] = {
+    let mut table = [0; 16];
+    let mut condition = 0;
+    while condition < 16 {
+        let mut nzcv = 0;
+        while nzcv < 16 {
+            if passes(condition, nzcv) {
+                table[condition as usize] |= 1 << nzcv;
+            }
+            nzcv += 1;
+        }
+        condition += 1;
+    }
+    table
+};
+
+/// Whether `condition` passes with flags `nzcv` (N in bit 3, V in bit 0).
+const fn passes(condition: u32, nzcv: u32) -> bool {
+    let (n, z, c, v) = (nzcv & 8 != 0, nzcv & 4 != 0, nzcv & 2 != 0, nzcv & 1 != 0);
+    match condition {
+        0x0 => z,
+        0x1 => !z,
+        0x2 => c,
+        0x3 => !c,
+        0x4 => n,
+        0x5 => !n,
+        0x6 => v,
+        0x7 => !v,
+        0x8 => c && !z,
+        0x9 => !c || z,
+        0xA => n == v,
+        0xB => n != v,
+        0xC => !z && n == v,
+        0xD => z || n != v,
+        0xE => true,
+        _ => false,
+    }
 }
 
 /// CPSR after reset: Supervisor mode, ARM state, IRQs and FIQs off.
@@ -586,27 +641,9 @@ impl<M: Model> Processor<M> {
         refused
     }
 
+    /// Whether condition `condition` (0–15) passes with the current flags.
     fn condition_passed(&self, condition: u32) -> bool {
-        let flag = |bit: u32| self.cpsr & bit != 0;
-        let (n, z, c, v) = (flag(psr::N), flag(psr::Z), flag(psr::C), flag(psr::V));
-        match condition {
-            0x0 => z,
-            0x1 => !z,
-            0x2 => c,
-            0x3 => !c,
-            0x4 => n,
-            0x5 => !n,
-            0x6 => v,
-            0x7 => !v,
-            0x8 => c && !z,
-            0x9 => !c || z,
-            0xA => n == v,
-            0xB => n != v,
-            0xC => !z && n == v,
-            0xD => z || n != v,
-            0xE => true,
-            _ => false,
-        }
+        CONDITIONS[condition as usize] >> (self.cpsr >> 28) & 1 != 0
     }
 
     /// Saves R8–R14 of `mode` from the live registers into its banks.
@@ -660,6 +697,17 @@ impl<M: Model> Processor<M> {
     }
 
     fn take_irq<B: Bus>(&mut self, bus: &mut B) {
+        // The cycle that decides to take the interrupt still fetches the
+        // next instruction, which the exception then throws away with the
+        // rest of the pipeline: entry costs 2S + 1N, as the ARM7TDMI's
+        // datasheet gives.
+        let user = self.user_permissions();
+        let access = self.fetch_access | Access::CODE;
+        if self.thumb() {
+            self.model.fetch_16(bus, self.r[15] & !1, access, user);
+        } else {
+            self.model.fetch_32(bus, self.r[15] & !3, access, user);
+        }
         // LR points one instruction past the next one, so handlers return
         // with SUBS PC, LR, #4.
         let return_address = if self.thumb() {
@@ -724,6 +772,22 @@ impl<M: Model> Processor<M> {
     fn carry(&self) -> bool {
         self.cpsr & psr::C != 0
     }
+
+    /// Sets C after a flag-setting multiply of `multiplicand` (Rm) by
+    /// `multiplier_operand` (Rs) plus `accumulator`, as the ARM7TDMI's
+    /// multiplier leaves it. ARMv5 leaves C alone.
+    fn set_multiply_carry(
+        &mut self,
+        kind: multiplier::Kind,
+        multiplicand: u32,
+        multiplier_operand: u32,
+        accumulator: u64,
+    ) {
+        if !M::V5TE {
+            let output = multiplier::multiply(kind, multiplicand, multiplier_operand, accumulator);
+            self.set_flag(psr::C, output.carry);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -754,6 +818,58 @@ mod tests {
         cpu.set_cpsr(Mode::Supervisor.bits());
         assert_eq!(cpu.reg(8), 8);
         assert_eq!(cpu.registers().fiq[0], 88);
+    }
+
+    /// 64 KiB of RAM holding `MOV R0, R0` everywhere, logging every
+    /// access's address and type.
+    struct LoggingBus(Vec<(u32, Access)>);
+
+    impl Bus for LoggingBus {
+        fn read_32(&mut self, address: u32, access: Access) -> u32 {
+            self.0.push((address, access));
+            0xE1A0_0000
+        }
+        fn read_16(&mut self, address: u32, access: Access) -> u16 {
+            self.0.push((address, access));
+            0x46C0 // MOV R8, R8
+        }
+        fn read_8(&mut self, address: u32, access: Access) -> u8 {
+            self.0.push((address, access));
+            0
+        }
+        fn write_32(&mut self, address: u32, _: u32, access: Access) {
+            self.0.push((address, access));
+        }
+        fn write_16(&mut self, address: u32, _: u16, access: Access) {
+            self.0.push((address, access));
+        }
+        fn write_8(&mut self, address: u32, _: u8, access: Access) {
+            self.0.push((address, access));
+        }
+        fn idle(&mut self) {}
+    }
+
+    #[test]
+    fn taking_an_irq_fetches_once_before_the_vector() {
+        let mut bus = LoggingBus(Vec::new());
+        let mut cpu = Cpu::default();
+        cpu.set_cpsr(Mode::System.bits());
+        cpu.jump(&mut bus, 0x1000);
+        cpu.step(&mut bus);
+        bus.0.clear();
+
+        cpu.set_irq_line(true);
+        cpu.step(&mut bus);
+        let code = Access::CODE;
+        let sequential = Access::CODE | Access::SEQUENTIAL;
+        // The discarded fetch of 0x100C, then the vector's two fetches.
+        assert_eq!(
+            bus.0,
+            [(0x100C, sequential), (0x18, code), (0x1C, sequential)]
+        );
+        assert_eq!(cpu.mode(), Mode::Irq);
+        // SUBS PC, LR, #4 returns to the instruction at 0x1004.
+        assert_eq!(cpu.reg(14), 0x1008);
     }
 
     #[test]

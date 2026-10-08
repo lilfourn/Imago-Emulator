@@ -164,7 +164,9 @@ impl Hooks for Arm946es {
             0
         } else if let Some(block) = self.read_block(address) {
             bus.idle();
-            block.read_32(address)
+            let value = block.read_32(address);
+            bus.tcm_data(address, 4, false, value);
+            value
         } else {
             bus.read_32(address, access)
         }
@@ -175,7 +177,9 @@ impl Hooks for Arm946es {
             0
         } else if let Some(block) = self.read_block(address) {
             bus.idle();
-            block.read_16(address)
+            let value = block.read_16(address);
+            bus.tcm_data(address, 2, false, value.into());
+            value
         } else {
             bus.read_16(address, access)
         }
@@ -186,7 +190,9 @@ impl Hooks for Arm946es {
             0
         } else if let Some(block) = self.read_block(address) {
             bus.idle();
-            block.read_8(address)
+            let value = block.read_8(address);
+            bus.tcm_data(address, 1, false, value.into());
+            value
         } else {
             bus.read_8(address, access)
         }
@@ -206,6 +212,7 @@ impl Hooks for Arm946es {
         if let Some(block) = self.write_block(address) {
             block.write_32(address, value);
             bus.idle();
+            bus.tcm_data(address, 4, true, value);
         } else {
             bus.write_32(address, value, access);
         }
@@ -225,6 +232,7 @@ impl Hooks for Arm946es {
         if let Some(block) = self.write_block(address) {
             block.write_16(address, value);
             bus.idle();
+            bus.tcm_data(address, 2, true, value.into());
         } else {
             bus.write_16(address, value, access);
         }
@@ -244,6 +252,7 @@ impl Hooks for Arm946es {
         if let Some(block) = self.write_block(address) {
             block.write_8(address, value);
             bus.idle();
+            bus.tcm_data(address, 1, true, value.into());
         } else {
             bus.write_8(address, value, access);
         }

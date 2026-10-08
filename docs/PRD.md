@@ -94,7 +94,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | CORE-4 | Battery saves are exposed with a write counter. The frontend flushes them at most 1 s after a write, on quit, and atomically (write a temporary file, then rename). ✅ | P0 · M3 |
 | CORE-5 | The real-time clock starts at `Media::start_time` and advances with emulated cycles. Per-game RTC offsets are supported. | P0 · M5, M10 |
 | CORE-6 | No BIOS or firmware is required. Use an HLE GBA BIOS ✅ and DS direct boot by default; use the user's own dumps when provided ✅ GBA. | P0 · M8, M13 |
-| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ `memory`, `peek`/`poke` for plain RAM and the keypad and timer registers cheats test, `poke_bank` for Game Boy RAM banks | P1 · M11 |
+| CORE-7 | Cores expose memory regions for debuggers, cheats and game tools. ✅ `memory`, `peek`/`poke` for plain RAM and the keypad and timer registers cheats test, `poke_bank` for Game Boy RAM banks, `poke_io_16` for GBA registers, `set_rom_patches` for ROM patches; ✅ `debugger` for the debugger: registers, disassembly, side-effect-free reads and writes, runs that stop at breakpoints and watchpoints, I/O registers, scheduler, graphics | P1 · M11 |
 
 ### 6.2 Systems
 
@@ -103,11 +103,12 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | ID | Requirement | Priority |
 |---|---|---|
 | GB-1 | SM83 CPU: all opcodes including CB-prefixed, flags, interrupts, HALT/STOP, the EI delay, the HALT bug. ✅ | P0 · M1 |
-| GB-2 | Timer/DIV, joypad, and a scanline PPU (background, window, sprites with priority and the 10-per-line limit). ✅ | P0 · M2 |
+| GB-2 | Timer/DIV, joypad, and a scanline PPU (background, window, sprites with priority and the 10-per-line limit). ✅ STAT modes, interrupts and VRAM/OAM locking timed to the dot as Mooneye measures them. ✅ | P0 · M2 |
 | GB-3 | APU: two square channels (one with sweep), wave and noise, with length, envelope and frame sequencer. ✅ | P0 · M3 |
 | GB-4 | Cartridges: MBC1, MBC3 with RTC, MBC5, battery RAM. MBC3 RTC is saved in the de facto 48-byte trailer; 44- and 48-byte trailers are both read. ✅ | P0 · M3, M5 |
 | GB-5 | CGB mode: palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. ✅ | P0 · M5 |
 | GB-6 | Serial link cable between two instances in one process. ✅ | P1 · M6 |
+| GB-7 | Games made for the original Game Boy run on a Game Boy Color in DMG mode, coloured as its boot ROM colours them: by title, from SameBoy's MIT-licensed copy of the palette table, or with a button-combination palette; or in grey on a DMG. ✅ (colour by default; View > Original Game Boy Games, or `dmg_colors` in the settings file; Pokémon Red/Blue's palettes checked against the table, not in game) | P1 · M5 |
 
 **Game Boy Advance (`emu-gba`, `emu-arm`)**
 
@@ -132,8 +133,8 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | NDS-6 | 512 KB SPI flash saves for every DS Pokémon game. ✅ (by game code, including the infrared carts) | P0 · M14 |
 | NDS-7 | No anti-piracy symptoms in HG/SS, B/W or B2/W2 without patches. Any trigger is an emulator bug. | P0 · M15 |
 | NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. ✅ (SRAM and Flash, [decision 0006](decisions/0006-gba-slot.md); Pal Park itself untried without GBA dumps) | P1 · M15 |
-| NDS-9 | 3D upscaling (N× internal resolution, or a Metal compute rasterizer). | P1 · M16 |
-| NDS-10 | Local wireless between two instances (trades, battles). Microphone input or a "blow" button. | P2 · M16 |
+| NDS-9 | 3D upscaling (N× internal resolution, or a Metal compute rasterizer). ✅ 1×–8× internal resolution on the CPU (`Core::set_render_scale`); the game still reads native 3D. | P1 · M16 |
+| NDS-10 | Local wireless between two instances (trades, battles). Microphone input or a "blow" button. ✅ microphone: a blow key and the computer's microphone, as loudness in `Input`. ✅ local wireless: the Wi-Fi chip, and two consoles on one clock ([decision 0007](decisions/0007-ds-local-wireless.md)); two Pokémon Whites trade in the Union Room. Battles, Platinum and HG/SS untried. | P2 · M16 |
 | NDS-11 | HG/SS infrared cartridge (Pokéwalker). | P2 |
 
 ### 6.3 Frontend (`emu-app`)
@@ -143,26 +144,26 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-1 | Open a ROM from the File menu (⌘O), by drag and drop, or from the command line. ✅ | P0 · S |
 | UI-2 | DS screen layouts: stacked, side by side, single screen with swap. ✅ Hybrid (one large and one small screen), rotation and gap setting. ✅ Stacked with no gap by default, a launch window as large as the display allows, and full screen. ✅ | P0 · S / P1 · M13 |
 | UI-3 | Crisp scaling at any window size ("sharp bilinear"). ✅ Integer scaling, and GBA/GBC colour correction ✅. | P0 · S / P1 · M11 |
-| UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. | P2 |
+| UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. ✅ CPU filters (LCD grid, scanlines, Scale2x, Scale3x) after colour correction, chosen in View > Filter and saved in settings. Not done: xBRZ (its ports are GPL-3.0, see section 9) and slang presets (out of scope, [decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | P2 |
 | UI-5 | Input action layer: physical input → action → core buttons. Keyboard bindings in TOML with several keys per action. ✅ Keyboard-first defaults: WASD, face buttons on U I / J K. ✅ | P0 · S |
-| UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides, turbo, hotkey chords. | P1 · M4 |
+| UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides (✅ `game.bindings.toml` next to the ROM), turbo (✅ counted in emulated frames) and hotkey chords (✅ Select + button by default). | P1 · M4 |
 | UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. ✅ | P0 · S / P1 · M13 |
 | UI-8 | Audio output at the device rate with dynamic rate control (adjust the resample ratio by up to ±0.5% based on buffer fill). ✅ | P0 · M3 |
 | UI-9 | Save state slots with thumbnails. ✅ four slots (⌘S / ⌘L, ⌘[ / ⌘] to switch), thumbnail and age shown when switching. | P0 · S / P1 · M4 |
 | UI-10 | Fast-forward while held (Tab) ✅ and as a toggle (⌘F) ✅. Speed cap ✅ and slow motion (hold 1, or ⌘⇧F) ✅. | P0 · S / P1 · M4 |
 | UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
-| UI-12 | Debugger panels: disassembly with breakpoints and watchpoints, registers, memory editor (✅ viewer), tile/map/OAM/palette viewers, I/O registers, scheduler queue, trace logging. | P1 · M7 |
-| UI-13 | Cheats: GameShark (✅ GB, with 8x/9x bank codes), Action Replay (✅ DS; ✅ GBA GameShark Advance / Action Replay v1/v2 and Pro Action Replay v3, encrypted or not), CodeBreaker (✅ GBA, with encryption) and raw patches ✅. Not yet: Game Genie and other ROM patches. | P2 · M11 |
-| UI-14 | Screenshots and video recording, RetroAchievements (rcheevos), Lua scripting hooks. | P2 |
+| UI-12 | Debugger panels ✅ (View > Debugger): disassembly with breakpoints and watchpoints, registers, memory editor, tile/map/OAM/palette viewers, I/O registers, scheduler queue; trace logging ✅ (TOOL-3). | P1 · M7 |
+| UI-13 | Cheats: GameShark (✅ GB, with 8x/9x bank codes), Game Genie (✅ GB), Action Replay (✅ DS; ✅ GBA GameShark Advance / Action Replay v1/v2 and Pro Action Replay v3, encrypted or not, with ROM patches and I/O writes), CodeBreaker (✅ GBA, with encryption) and raw patches ✅ | P2 · M11 |
+| UI-14 | Screenshots (✅ PNG of the native screens, ⌘⇧S) and video recording (✅ every emulated frame and its sound, to a QuickTime movie, ⌘⇧R), RetroAchievements (rcheevos), Lua scripting hooks (✅ Lua 5.4 in `emu-script`: memory, buttons, state slots, pausing, drawing over the screens and breakpoint callbacks, sandboxed and deterministic; File > Run Script… ⌘⇧L, `--script` in the app and headless, [scripting.md](scripting.md)). | P2 |
 
 ### 6.4 Tooling
 
 | ID | Requirement | Priority |
 |---|---|---|
 | TOOL-1 | Headless runner: runs N frames and prints one `key=value` line per screen with a CRC-32, and optionally dumps PPM images. ✅ | P0 · S |
-| TOOL-2 | Test-ROM suite: a manifest of test ROMs and their pass criteria (serial output, Mooneye's Fibonacci registers, framebuffer CRC), a script that runs them all and prints a pass table, run in CI. Test ROMs are downloaded by script, never committed. ✅ | P0 · M1 |
+| TOOL-2 | Test-ROM suite: a manifest of test ROMs and their pass criteria (serial output, Mooneye's Fibonacci registers, framebuffer CRC), a script that runs them all and prints a pass table, run in CI. Test ROMs are downloaded by script, never committed. ✅ GB/GBC (c-sp bundle), GBA (jsmolka, armwrestler, mGBA suite) and DS (rockwrestler, armwrestler); menu-driven ROMs are driven by scripted presses and read off the screen or VRAM. CI runs all but the mGBA suite, which has no pinned download. | P0 · M1 |
 | TOOL-3 | Trace logger whose format can be diffed against mGBA, SameBoy and melonDS logs. ✅ | P1 · M1 |
-| TOOL-4 | CI on macOS: rustfmt, clippy with warnings denied, tests, and a check that no Nintendo files are tracked. ✅ written, not yet run on a remote | P0 · S |
+| TOOL-4 | CI on macOS: rustfmt, clippy with warnings denied, tests, and a check that no Nintendo files are tracked. ✅ runs on GitHub Actions for every push to main and every pull request | P0 · S |
 
 ## 7. Non-functional requirements
 
@@ -211,7 +212,7 @@ they are project policy, not legal advice.
 3. Default to HLE BIOS and direct boot. The app uses user-dumped system files
    only when the user points it at them.
 4. Read GPL code to understand it, but do not copy it unless the project
-   adopts a compatible license (see open question Q1). MIT, BSD and
+   adopts a compatible license (see open question Q1). MIT, BSD, zlib and
    MPL-2.0 code may be reused under its terms, with attribution.
 5. No decryption tooling, no 3DS or Switch keys, no builds tied to
    unreleased games, no paywalled builds.
@@ -236,7 +237,7 @@ they are project policy, not legal advice.
 |---|---|---|
 | Q1 | Which license? GPL-3.0-or-later would allow porting code from melonDS; MPL-2.0 matches mGBA; MIT or Apache-2.0 keeps reuse open. Choose before accepting outside contributions. | Before first public push |
 | Q2 | Stay on crates.io GPUI 0.2.2, or pin a newer Zed git revision? | M3 |
-| Q3 | ~~Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI?~~ Proposed: neither for now. Filters are CPU passes, and DS upscaling happens in the core ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | M11 |
+| Q3 | ~~Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI?~~ Decided: neither for now. Filters are CPU passes, and DS upscaling happens in the core ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | M11 |
 | Q4 | ~~Pace emulation from the audio clock or from display vsync?~~ Decided: a frame timer, with dynamic rate control on audio ([decision 0003](decisions/0003-frame-pacing.md)). | M3 |
-| Q5 | Bundle SameBoy's Expat-licensed open boot ROMs so the GB boots with an animation? | M2 |
+| Q5 | ~~Bundle SameBoy's Expat-licensed open boot ROMs so the GB boots with an animation?~~ Decided: no boot ROM is bundled, and games start as a boot ROM would leave them. Only the CGB boot ROM's compatibility palette table is taken from SameBoy, under its Expat (MIT) license, so games made for the original Game Boy get their Game Boy Color colours (GB-7). | M2 |
 | Q6 | ~~Write the optional CHIP-8 warm-up (M0) or start straight on the SM83?~~ Decided: straight to the SM83. | — |

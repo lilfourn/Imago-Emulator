@@ -1,8 +1,8 @@
 //! Cartridges: ROM, battery RAM, memory bank controllers and the MBC3
 //! real-time clock (Pan Docs, "The Cartridge Header", "MBC1", "MBC3",
-//! "MBC5").
+//! "MBC5"; Gekkio, "Game Boy: Complete Technical Reference", "MBC1M").
 
-use emu_core::{LoadError, System};
+use emu_core::{LoadError, RomPatch, System};
 use serde::{Deserialize, Serialize};
 
 /// Clock cycles per second, for the MBC3 real-time clock.
@@ -14,6 +14,10 @@ pub(crate) struct Cartridge {
     /// ROM file, never saved in states.
     #[serde(skip)]
     rom: Box<[u8]>,
+    /// Cheats' changes to what ROM reads return, at 0x0000–0x7FFF in any
+    /// bank. Like the ROM, never saved in states.
+    #[serde(skip)]
+    rom_patches: Box<[RomPatch]>,
     ram: Box<[u8]>,
     mbc: Mbc,
     has_battery: bool,
@@ -33,6 +37,10 @@ enum Mbc {
         bank_high: u8,
         /// Mode 1 applies BANK2 to 0x0000–0x3FFF and to RAM.
         advanced_mode: bool,
+        /// MBC1M, the wiring of multi-game compilation cartridges: BANK2
+        /// drives ROM bank bits 4–5 instead of 5–6, and BANK1 bit 4 is not
+        /// connected, so each game sees sixteen banks.
+        multicart: bool,
     },
     /// 512 half-bytes of RAM built into the controller.
     Mbc2 { ram_enabled: bool, rom_bank: u8 },
@@ -85,6 +93,7 @@ impl Cartridge {
                     bank_low: 1,
                     bank_high: 0,
                     advanced_mode: false,
+                    multicart: is_mbc1_multicart(rom),
                 },
                 kind == 0x03,
             ),
@@ -126,6 +135,7 @@ impl Cartridge {
         };
         let mut cartridge = Self {
             rom: padded.into_boxed_slice(),
+            rom_patches: Box::default(),
             ram: vec![0; ram_size].into_boxed_slice(),
             mbc,
             has_battery,
@@ -147,6 +157,7 @@ impl Cartridge {
                 bank_low,
                 bank_high,
                 advanced_mode,
+                multicart: _,
             } => {
                 (*ram_enabled, *bank_low, *bank_high, *advanced_mode) = (false, 1, 0, false);
             }
@@ -168,10 +179,21 @@ impl Cartridge {
         }
     }
 
-    /// Moves the ROM out of `other` into `self`; used after loading a save
-    /// state, which does not contain the ROM.
+    /// Moves the ROM and its patches out of `other` into `self`; used after
+    /// loading a save state, which contains neither.
     pub(crate) fn take_rom_from(&mut self, other: &mut Self) {
         self.rom = std::mem::take(&mut other.rom);
+        self.rom_patches = std::mem::take(&mut other.rom_patches);
+    }
+
+    /// Replaces the ROM patches. Patches outside 0x0000–0x7FFF are
+    /// dropped: only ROM reads pass through them.
+    pub(crate) fn set_rom_patches(&mut self, patches: &[RomPatch]) {
+        self.rom_patches = patches
+            .iter()
+            .filter(|patch| patch.address < 0x8000)
+            .copied()
+            .collect();
     }
 
     fn load_backup(&mut self, backup: &[u8], start_time: i64) {
@@ -182,6 +204,11 @@ impl Cartridge {
         {
             rtc.load_trailer(trailer, start_time);
         }
+    }
+
+    /// The ROM, padded to a power of two.
+    pub(crate) fn rom(&self) -> &[u8] {
+        &self.rom
     }
 
     /// Battery-backed RAM, for test ROMs that report results there.
@@ -222,12 +249,13 @@ impl Cartridge {
                 Mbc::Mbc1 {
                     bank_high,
                     advanced_mode,
+                    multicart,
                     ..
                 },
                 true,
             ) => {
                 if *advanced_mode {
-                    usize::from(*bank_high) << 5
+                    usize::from(*bank_high) << mbc1_high_shift(*multicart)
                 } else {
                     0
                 }
@@ -236,17 +264,27 @@ impl Cartridge {
                 Mbc::Mbc1 {
                     bank_low,
                     bank_high,
+                    multicart,
                     ..
                 },
                 false,
-            ) => usize::from(*bank_high) << 5 | usize::from(*bank_low),
+            ) => {
+                let shift = mbc1_high_shift(*multicart);
+                let low_mask = (1 << shift) - 1;
+                usize::from(*bank_high) << shift | usize::from(*bank_low) & low_mask
+            }
             (Mbc::Mbc2 { rom_bank, .. } | Mbc::Mbc3 { rom_bank, .. }, false) => {
                 usize::from(*rom_bank)
             }
             (Mbc::Mbc5 { rom_bank, .. }, false) => usize::from(*rom_bank),
             (Mbc::Mbc2 { .. } | Mbc::Mbc3 { .. } | Mbc::Mbc5 { .. }, true) => 0,
         };
-        self.rom_byte(bank, address)
+        let byte = self.rom_byte(bank, address);
+        if self.rom_patches.is_empty() {
+            byte
+        } else {
+            RomPatch::apply(&self.rom_patches, u32::from(address), byte)
+        }
     }
 
     /// A write to 0x0000–0x7FFF: a bank controller register.
@@ -263,6 +301,7 @@ impl Cartridge {
                 bank_low,
                 bank_high,
                 advanced_mode,
+                ..
             } => match address {
                 0x0000..=0x1FFF => *ram_enabled = value & 0x0F == 0x0A,
                 0x2000..=0x3FFF => *bank_low = (value & 0x1F).max(1),
@@ -425,6 +464,26 @@ impl Cartridge {
             self.generation += 1;
         }
     }
+}
+
+/// The ROM bank bit BANK2 starts at: 5 on a plain MBC1, 4 on an MBC1M.
+const fn mbc1_high_shift(multicart: bool) -> u32 {
+    if multicart { 4 } else { 5 }
+}
+
+/// Whether an MBC1 cartridge is an MBC1M multicart. These are all 8 Mbit
+/// (1 MiB) and repeat a game header, with its logo, at the start of bank
+/// 0x10 where the second game begins. Comparing the logo with bank 0's own
+/// avoids copying it here; a blank logo (one repeated byte) never counts,
+/// as no boot ROM would accept it.
+fn is_mbc1_multicart(rom: &[u8]) -> bool {
+    const SECOND_GAME: usize = 0x10 * 0x4000;
+    if rom.len() != 0x10_0000 {
+        return false;
+    }
+    let logo = &rom[0x104..0x134];
+    let second_logo = &rom[SECOND_GAME + 0x104..SECOND_GAME + 0x134];
+    logo == second_logo && logo.iter().any(|byte| *byte != logo[0])
 }
 
 /// The MBC3 real-time clock.
@@ -619,6 +678,71 @@ mod tests {
         assert_eq!(cart.read_rom(0x0000), 0);
         cart.write_rom(0x6000, 1);
         assert_eq!(cart.read_rom(0x0000), 0x40);
+    }
+
+    #[test]
+    fn mbc1_multicart_wiring_gives_each_game_sixteen_banks() {
+        let logo: Vec<u8> = (0..0x30u8).map(|i| i.wrapping_mul(7) | 1).collect();
+        let mut single = rom(0x01, 0, 64);
+        single[0x104..0x134].copy_from_slice(&logo);
+        let mut image = single.clone();
+        image[0x40104..0x40134].copy_from_slice(&logo);
+        let mut cart = Cartridge::new(&image, None, 0).expect("valid");
+        // BANK1 bit 4 is not wired: 0x12 reads bank 2, and 0x10 bank 0
+        // (the zero check still sees all five bits).
+        cart.write_rom(0x2000, 0x12);
+        assert_eq!(cart.read_rom(0x4000), 2);
+        cart.write_rom(0x2000, 0x10);
+        assert_eq!(cart.read_rom(0x4000), 0);
+        // BANK2 picks the game: bank bits 4–5.
+        cart.write_rom(0x4000, 0x02);
+        cart.write_rom(0x2000, 0x03);
+        assert_eq!(cart.read_rom(0x4000), 0x23);
+        cart.write_rom(0x6000, 1);
+        assert_eq!(cart.read_rom(0x0000), 0x20);
+
+        // Without the second header it is a plain MBC1.
+        let mut plain = Cartridge::new(&single, None, 0).expect("valid");
+        plain.write_rom(0x2000, 0x12);
+        assert_eq!(plain.read_rom(0x4000), 0x12);
+    }
+
+    #[test]
+    fn rom_patches_apply_in_any_bank_their_compare_byte_matches() {
+        let mut cart = Cartridge::new(&rom(0x01, 0, 4), None, 0).expect("valid");
+        cart.set_rom_patches(&[
+            // Bank 2 only: each bank's first byte is its number.
+            RomPatch {
+                address: 0x4000,
+                value: 0x77,
+                compare: Some(2),
+            },
+            RomPatch {
+                address: 0x0001,
+                value: 0x55,
+                compare: None,
+            },
+            // Not ROM: dropped.
+            RomPatch {
+                address: 0xC000,
+                value: 0x66,
+                compare: None,
+            },
+        ]);
+        assert_eq!(cart.rom_patches.len(), 2);
+        assert_eq!(cart.read_rom(0x4000), 1);
+        assert_eq!(cart.read_rom(0x0001), 0x55);
+        cart.write_rom(0x2000, 2);
+        assert_eq!(cart.read_rom(0x4000), 0x77);
+        cart.write_rom(0x2000, 3);
+        assert_eq!(cart.read_rom(0x4000), 3);
+
+        // A loaded state's cartridge takes the patches along with the ROM.
+        let mut restored = Cartridge::default();
+        restored.take_rom_from(&mut cart);
+        assert_eq!(restored.read_rom(0x0001), 0x55);
+        restored.set_rom_patches(&[]);
+        assert_eq!(restored.read_rom(0x0001), 0);
     }
 
     #[test]

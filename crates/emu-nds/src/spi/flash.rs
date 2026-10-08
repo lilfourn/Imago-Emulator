@@ -34,6 +34,7 @@ const IDLE: u8 = 0xFF;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Flash {
     /// A power-of-two size, so addresses wrap with a mask.
+    #[serde(with = "crate::bytes")]
     memory: Vec<u8>,
     /// JEDEC manufacturer, memory type and capacity.
     id: [u8; 3],
@@ -66,6 +67,10 @@ impl Flash {
 
     pub(crate) fn memory(&self) -> &[u8] {
         &self.memory
+    }
+
+    pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
+        &mut self.memory
     }
 
     /// Whether a program or erase changed the memory since the last call.

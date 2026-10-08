@@ -114,6 +114,7 @@ pub(crate) trait EngineMemory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Vram {
+    #[serde(with = "crate::bytes::array")]
     banks: [Box<[u8]>; 9],
     /// VRAMCNT_A to VRAMCNT_I.
     control: [u8; 9],
@@ -187,6 +188,12 @@ impl Vram {
         self.control[bank]
     }
 
+    /// The banks covering the 8 KiB page that holds `offset` in `region`
+    /// (wrapped to its size): bit n for bank n (0 = A … 8 = I).
+    pub(crate) fn banks_at(&self, region: Region, offset: u32) -> u16 {
+        self.pages[region.index()][(wrap(region, offset) / PAGE) as usize]
+    }
+
     /// Writes VRAMCNT for `bank` and remaps.
     pub(crate) fn set_control(&mut self, bank: usize, value: u8) {
         self.control[bank] = value & 0x9F;
@@ -244,8 +251,8 @@ impl Vram {
             let bank = mask.trailing_zeros() as usize;
             if let Some((_, start)) = self.mapped[bank] {
                 let index = (offset - start) as usize;
-                let bytes = &self.banks[bank];
-                return u16::from_le_bytes([bytes[index], bytes[index + 1]]);
+                let bytes = &self.banks[bank][index..index + 2];
+                return u16::from_le_bytes([bytes[0], bytes[1]]);
             }
         }
         if mask == 0 {

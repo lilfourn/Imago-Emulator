@@ -4,14 +4,27 @@
 //! finished frame into a shared slot and sends an [`Event`] to wake the UI.
 //! Wake-ups are coalesced, so a slow UI never queues stale frames.
 //!
+//! Screenshots and recordings take the core's own frames here, every one
+//! of them for a recording, rather than the coalesced ones the UI shows.
+//!
+//! A Lua script runs here too, after each frame (see `scripting.rs`): what
+//! it draws is published with the frame, and the buttons it presses go
+//! into the next.
+//!
 //! Pacing is a sleep to the next frame deadline, which fast-forward and
 //! slow motion move closer or further apart (see `speed.rs`). Sound stays
 //! in sync because the audio sink adjusts its resampling ratio to the
 //! buffer level (see `resample.rs`).
+//!
+//! After each frame is published, the core is serialized for rewind; a
+//! worker thread turns that into a compressed delta (see
+//! `rewind_thread.rs`). Faster than normal speed, only about one frame per
+//! normal frame's time is recorded (see `rewind.rs`).
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -19,13 +32,22 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail, ensure};
 use emu_cheats::Cheat;
-use emu_core::{Cartridge, Core, CoreInfo, Frame, Input, Media, System};
+use emu_core::debug::{Breakpoint, RunOutcome, StopReason};
+use emu_core::{Buttons, Cartridge, Core, CoreInfo, DmgColors, Frame, Input, Media, System};
+use emu_script::{Draw, Script, ScriptError, StateRequest};
 
 use crate::audio::AudioSink;
+use crate::capture;
+use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
 use crate::persist;
-use crate::rewind::Rewind;
+use crate::recorder::Recorder;
+use crate::rewind;
+use crate::rewind_thread::RewindThread;
+use crate::scripting::{self, Running};
 use crate::speed::{self, Speed};
+use crate::turbo::Turbo;
+use crate::video;
 
 /// How often dirty battery saves are written to disk.
 const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -71,11 +93,13 @@ struct RomFile {
 }
 
 impl RomFile {
-    /// The file as a core's media, its clock starting at `start_time`.
-    fn media(&self, start_time: i64) -> Media<'_> {
+    /// The file as a core's media, its clock starting at `start_time` and
+    /// a game for the original Game Boy shown with `dmg_colors`.
+    fn media(&self, start_time: i64, dmg_colors: DmgColors) -> Media<'_> {
         Media {
             backup: self.backup.as_deref(),
             start_time,
+            dmg_colors,
             ..Media::new(&self.rom)
         }
     }
@@ -86,6 +110,14 @@ impl RomFile {
 /// since the emulated clocks have no time zone of their own.
 fn local_clock_seconds() -> i64 {
     chrono::Local::now().naive_local().and_utc().timestamp()
+}
+
+/// The local date and time now, for naming screenshots and recordings as
+/// macOS names its own: `2026-10-07 at 18.58.12`.
+fn capture_stamp() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%d at %H.%M.%S")
+        .to_string()
 }
 
 fn read_rom(rom_path: &Path) -> anyhow::Result<RomFile> {
@@ -122,7 +154,7 @@ fn read_rom(rom_path: &Path) -> anyhow::Result<RomFile> {
 /// Fails if a file cannot be read, its system cannot be identified, linked
 /// ROMs are for different systems, two games would share a battery save
 /// file, or the core rejects them.
-pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
+pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Loaded> {
     let files = rom_paths
         .iter()
         .map(|path| read_rom(path))
@@ -130,14 +162,14 @@ pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
     let start_time = local_clock_seconds();
     let core = match files.as_slice() {
         [] => bail!("no ROM given"),
-        [one] => emu_cores::create(one.system, &one.media(start_time))?,
+        [one] => emu_cores::create(one.system, &one.media(start_time, dmg_colors))?,
         [first, second] if emu_cores::second_slot(first.system) == Some(second.system) => {
             let slotted = Media {
                 second_slot: Some(Cartridge {
                     rom: &second.rom,
                     backup: second.backup.as_deref(),
                 }),
-                ..first.media(start_time)
+                ..first.media(start_time, dmg_colors)
             };
             emu_cores::create(first.system, &slotted)?
         }
@@ -147,7 +179,10 @@ pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
                 files.iter().all(|file| file.system == system),
                 "linked games must be for the same system"
             );
-            let players: Vec<Media<'_>> = files.iter().map(|file| file.media(start_time)).collect();
+            let players: Vec<Media<'_>> = files
+                .iter()
+                .map(|file| file.media(start_time, dmg_colors))
+                .collect();
             emu_cores::create_linked(system, &players)?
         }
     };
@@ -193,6 +228,17 @@ fn ensure_separate_saves(core: &dyn Core, rom_paths: &[PathBuf]) -> anyhow::Resu
     Ok(())
 }
 
+/// `duration` as `m:ss`, or `h:mm:ss` from an hour.
+fn minutes_and_seconds(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -211,6 +257,17 @@ pub enum Command {
         /// What that player holds.
         input: Input,
     },
+    /// Replaces a player's turbo buttons from the next frame on: each is
+    /// pressed for `frames` frames, released for as many, and so on, past
+    /// the latch (see `turbo.rs`).
+    SetTurbo {
+        /// Index into the core's players.
+        player: usize,
+        /// The buttons whose turbo inputs that player holds.
+        buttons: Buttons,
+        /// Frames per press, and per gap.
+        frames: u8,
+    },
     /// Runs at this speed from the next frame on.
     SetSpeed(Speed),
     /// Steps backwards through recent frames while true.
@@ -223,26 +280,35 @@ pub enum Command {
     SaveState(u8),
     /// Restores the save state in this slot's file.
     LoadState(u8),
-    /// Copies this span of memory for the UI after every frame, or stops.
-    WatchMemory(Option<MemorySpan>),
-    /// Replaces a player's cheats, applied after every frame.
+    /// A request from the debugger window.
+    Debug(debugger::Command),
+    /// Draws 3D at this many times the native resolution (DS), showing
+    /// the change at once, even while paused.
+    SetRenderScale(u32),
+    /// Replaces a player's cheats: their ROM patches go to the core at
+    /// once, and the rest run after every frame.
     SetCheats {
         /// Index into the core's players.
         player: usize,
         /// The player's cheat list; disabled cheats are skipped.
         cheats: Vec<Cheat>,
     },
-}
-
-/// A span of one player's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemorySpan {
-    /// Index into the core's players.
-    pub player: usize,
-    /// First address.
-    pub start: u32,
-    /// Bytes.
-    pub length: u32,
+    /// Saves the screens as they are now as a PNG next to the first
+    /// player's ROM.
+    SaveScreenshot,
+    /// Starts recording every frame and its sound to a movie next to the
+    /// first player's ROM, or finishes the recording under way.
+    ToggleRecording,
+    /// Starts a Lua script, replacing any running: its main body runs at
+    /// once, and its callbacks after every frame.
+    RunScript {
+        /// The script's file name, for messages.
+        name: String,
+        /// Its source text.
+        source: String,
+    },
+    /// Stops the script running, and clears what it drew.
+    StopScript,
 }
 
 /// A notification from the emulation thread to the UI.
@@ -250,8 +316,14 @@ pub struct MemorySpan {
 pub enum Event {
     /// A new frame is in the shared slot.
     Frame,
+    /// A new debugger snapshot is in the shared slot. It has its own
+    /// wake-up: the debugger window must update even while the main
+    /// window, which takes the frames, is hidden and draws nothing.
+    Debug,
     /// Something the user should see briefly, such as "State saved".
     Notice(String),
+    /// A recording started (true) or finished (false).
+    Recording(bool),
 }
 
 /// One player's memory in a core, as cheats see it.
@@ -272,15 +344,25 @@ impl emu_cheats::Memory for PlayerMemory<'_> {
     fn poke_bank(&mut self, bank: u8, address: u32, value: u8) -> bool {
         self.core.poke_bank(self.player, bank, address, value)
     }
+
+    fn poke_io_16(&mut self, address: u32, value: u16) -> bool {
+        self.core.poke_io_16(self.player, address, value)
+    }
 }
 
 /// The most recent frame, shared between the threads.
 #[derive(Default)]
 struct Latest {
     frames: Mutex<(u64, Vec<Frame>)>,
-    /// The watched memory as of that frame; `None` where unreadable.
-    memory: Mutex<Option<(MemorySpan, Vec<Option<u8>>)>>,
+    /// What the script drew after that frame, to show over the screens.
+    overlay: Mutex<Arc<[Draw]>>,
+    /// What the debugger window shows, as of that frame, while it is open.
+    debug: Mutex<Option<Arc<Snapshot>>>,
     unseen: AtomicBool,
+    debug_unseen: AtomicBool,
+    /// Frames run, or stepped back through while rewinding, so far: what
+    /// the speed readout counts.
+    frames_shown: AtomicU64,
 }
 
 /// A running emulation thread. Dropping it stops the thread and flushes the
@@ -308,12 +390,18 @@ impl Emulator {
                 .collect(),
             loaded,
             latches: vec![Latch::default(); players],
+            turbos: vec![Turbo::default(); players],
             cheats: vec![Vec::new(); players],
-            watch: None,
+            debug: Debugging::default(),
+            recorder: None,
+            script: None,
+            overlay: Arc::default(),
+            mid_frame: false,
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
-            rewind: Rewind::new(REWIND_BUDGET_BYTES),
+            rewind: RewindThread::start(REWIND_BUDGET_BYTES),
+            recorded_at: None,
             events,
             latest: Arc::clone(&latest),
             audio,
@@ -354,11 +442,29 @@ impl Emulator {
         Some(*sequence)
     }
 
-    /// The watched memory as of the latest frame: the span, and each byte
-    /// or `None` where it is not plain memory.
-    pub fn memory(&self) -> Option<(MemorySpan, Vec<Option<u8>>)> {
+    /// What the script drew after the latest frame, in screen pixels.
+    pub fn overlay(&self) -> Arc<[Draw]> {
+        Arc::clone(
+            &self
+                .latest
+                .overlay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
+    /// How many frames have run, or been stepped back through while
+    /// rewinding, since the emulator started.
+    pub fn frames_shown(&self) -> u64 {
+        self.latest.frames_shown.load(Ordering::Relaxed)
+    }
+
+    /// What the debugger window shows, as of the latest frame or debugger
+    /// command, while it is open and the core has a debugger.
+    pub fn debug_snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.latest.debug_unseen.store(false, Ordering::Release);
         self.latest
-            .memory
+            .debug
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -381,15 +487,28 @@ struct Runner {
     /// One per player: what they hold, each press kept long enough for
     /// the game to see it.
     latches: Vec<Latch>,
+    /// One per player: the buttons they turbo, counted in frames.
+    turbos: Vec<Turbo>,
     /// One list per player.
     cheats: Vec<Vec<Cheat>>,
-    /// Memory the UI is watching.
-    watch: Option<MemorySpan>,
+    /// The debugger's stops, view and run state.
+    debug: Debugging,
+    /// The recording under way, if any.
+    recorder: Option<Recorder>,
+    /// The Lua script running alongside the game, if any.
+    script: Option<Running>,
+    /// What the script drew after the last frame.
+    overlay: Arc<[Draw]>,
+    /// A debugger stopped the frame under way part-way.
+    mid_frame: bool,
     paused: bool,
     /// How fast frames run; rewinding always steps at normal speed.
     speed: Speed,
     rewinding: bool,
-    rewind: Rewind,
+    rewind: RewindThread,
+    /// When rewind last recorded a frame, if it has since the history was
+    /// last cleared.
+    recorded_at: Option<Instant>,
     /// Per cartridge: the backup generation last written to disk.
     flushed_generations: Vec<u64>,
     events: async_channel::Sender<Event>,
@@ -397,19 +516,33 @@ struct Runner {
     audio: Option<AudioSink>,
 }
 
+/// The debugger's state on the emulation thread.
+#[derive(Debug, Default)]
+struct Debugging {
+    /// What the debugger window shows, while it is open.
+    view: Option<debugger::View>,
+    /// The user's breakpoints and watchpoints.
+    stops: emu_core::debug::Stops,
+    /// What a paused emulation runs towards: a step or a frame's end.
+    pending: Option<Pending>,
+    /// Why the emulation last stopped, until it runs on.
+    stopped: Option<emu_core::debug::Stop>,
+}
+
 impl Runner {
     fn run(mut self, commands: &Receiver<Command>) {
         let frame_duration = self.loaded.core.info().frame_rate.frame_duration();
         let mut inputs = Vec::new();
         let mut audio = Vec::new();
-        let mut state = Vec::new();
         let mut deadline = Instant::now();
         let mut last_flush = Instant::now();
 
         'running: loop {
             loop {
-                // Rewinding works while paused; everything else waits.
-                let next = if self.paused && !self.rewinding {
+                // Rewinding and debugger steps work while paused;
+                // everything else waits.
+                let waiting = self.paused && !self.rewinding && self.debug.pending.is_none();
+                let next = if waiting {
                     commands.recv().map_err(|_| TryRecvError::Disconnected)
                 } else {
                     commands.try_recv()
@@ -419,26 +552,53 @@ impl Runner {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break 'running,
                 }
-                if !self.paused || self.rewinding {
-                    // Don't race to catch up on time spent paused.
+                if waiting && (!self.paused || self.rewinding) {
+                    // Don't race to catch up on time spent paused. Only
+                    // after a wait: input arriving mid-play must not move
+                    // the frame clock, or each key press would delay the
+                    // frames after it by however late the thread woke.
                     deadline = deadline.max(Instant::now());
                 }
             }
 
             if self.rewinding {
-                if let Some(previous) = self.rewind.pop() {
-                    // States in the history came from this core.
-                    self.loaded.core.load_state(&previous).ok();
+                let core = &mut self.loaded.core;
+                // States in the history came from this core.
+                if self.rewind.pop_with(|previous| {
+                    core.load_state(previous).ok();
+                }) {
                     self.clear_latches();
                     self.publish();
+                    self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
+                if !self.mid_frame
+                    && let Some(script) = &mut self.script
+                {
+                    script.begin_frame();
+                }
                 inputs.clear();
-                inputs.extend(self.latches.iter().map(Latch::input));
-                self.loaded.core.run_frame(&inputs, &mut audio);
+                for (player, (latch, turbo)) in self.latches.iter().zip(&self.turbos).enumerate() {
+                    let input = turbo.apply(latch.input());
+                    inputs.push(match &self.script {
+                        Some(script) => script.input(player, input),
+                        None => input,
+                    });
+                }
+                let outcome = self.run_frame(&inputs, &mut audio);
+                self.mid_frame = !outcome.frame_done;
+                if !outcome.frame_done {
+                    // A debugger stopped the frame part-way.
+                    self.settle(outcome);
+                    self.publish();
+                    continue;
+                }
                 self.apply_cheats();
                 for latch in &mut self.latches {
                     latch.advance();
+                }
+                for turbo in &mut self.turbos {
+                    turbo.advance();
                 }
                 // Only normal speed plays sound: rate control absorbs
                 // ±0.5%, not a change of speed.
@@ -447,11 +607,15 @@ impl Runner {
                 {
                     sink.push(&audio);
                 }
+                self.record(&audio);
                 audio.clear();
+                self.settle(outcome);
+                // Last, once the frame is played and recorded: a state the
+                // script loads replaces it.
+                self.script_frame(&inputs);
                 self.publish();
-                state.clear();
-                self.loaded.core.save_state(&mut state);
-                self.rewind.push(&state);
+                self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
+                self.record_for_rewind(frame_duration);
             }
 
             if last_flush.elapsed() >= BACKUP_FLUSH_INTERVAL {
@@ -466,9 +630,10 @@ impl Runner {
             };
             let now = Instant::now();
             deadline = speed::next_deadline(deadline, now, speed.frame_step(frame_duration));
-            if deadline > now {
-                thread::sleep(deadline - now);
-            }
+            speed::sleep_until(deadline);
+        }
+        if let Some(recorder) = self.recorder.take() {
+            self.finish_recording(recorder);
         }
         self.flush_backup();
     }
@@ -480,50 +645,247 @@ impl Runner {
                     latch.set(input);
                 }
             }
+            Command::SetTurbo {
+                player,
+                buttons,
+                frames,
+            } => {
+                if let Some(turbo) = self.turbos.get_mut(player) {
+                    turbo.set(buttons, frames);
+                }
+            }
             Command::SetSpeed(speed) => self.speed = speed,
             Command::SetRewind(on) => self.rewinding = on,
             Command::TogglePause => {
                 self.paused = !self.paused;
+                self.debug.pending = None;
+                if !self.paused {
+                    self.debug.stopped = None;
+                }
+                // Show the debugger the change, even while paused.
+                self.publish();
                 self.notice(if self.paused { "Paused" } else { "Resumed" });
             }
             Command::Reset => {
                 self.loaded.core.reset();
-                self.rewind.clear();
+                self.clear_rewind();
                 self.clear_latches();
+                self.debug.stopped = None;
                 self.notice("Reset");
             }
             Command::SaveState(slot) => match self.save_state(slot) {
                 Ok(()) => self.notice(format!("Saved state {slot}")),
                 Err(error) => self.notice(format!("Could not save state: {error:#}")),
             },
-            Command::WatchMemory(span) => {
-                self.watch = span;
-                // Show it now, even while paused.
+            Command::Debug(command) => self.debug_command(command),
+            Command::SetRenderScale(scale) => {
+                self.loaded.core.set_render_scale(scale);
                 self.publish();
             }
             Command::SetCheats { player, cheats } => {
                 if let Some(slot) = self.cheats.get_mut(player) {
+                    // ROM patches live in the core, which applies them to
+                    // every read; the rest run after each frame.
+                    let patches = emu_cheats::rom_patches(&cheats);
+                    self.loaded.core.set_rom_patches(player, &patches);
                     *slot = cheats;
                 }
             }
             Command::LoadState(slot) => match self.load_state(slot) {
                 Ok(()) => {
-                    self.rewind.clear();
+                    self.clear_rewind();
                     self.clear_latches();
+                    self.debug.stopped = None;
                     self.publish();
                     self.notice(format!("Loaded state {slot}"));
                 }
                 Err(error) => self.notice(format!("Could not load state: {error:#}")),
             },
+            Command::SaveScreenshot => self.save_screenshot(),
+            Command::ToggleRecording => match self.recorder.take() {
+                Some(recorder) => self.finish_recording(recorder),
+                None => self.start_recording(),
+            },
+            Command::RunScript { name, source } => self.start_script(name, &source),
+            Command::StopScript => match self.script.take() {
+                Some(running) => {
+                    self.overlay = Arc::default();
+                    self.publish();
+                    self.notice(format!("Stopped {}", running.name));
+                }
+                None => self.notice("No script is running"),
+            },
         }
     }
 
-    /// Drops releases still waiting out a press's minimum hold: after the
-    /// game jumps to another moment, a press from before would land out of
-    /// place.
+    /// Compiles and starts a script, replacing any running, and shows
+    /// what its main body drew at once, even while paused.
+    fn start_script(&mut self, name: String, source: &str) {
+        self.script = None;
+        self.overlay = Arc::default();
+        match Script::new(&name, source) {
+            Ok(script) => {
+                self.notice(format!("Running {name}"));
+                let mut running = Running::new(name, script);
+                let started = running.script.start(&mut *self.loaded.core);
+                self.script = Some(running);
+                self.obey_script(started);
+            }
+            Err(error) => self.notice(scripting::failure(&name, &error)),
+        }
+        self.publish();
+    }
+
+    /// Tells the script the frame that ran with `inputs` has finished.
+    fn script_frame(&mut self, inputs: &[Input]) {
+        if let Some(running) = &mut self.script {
+            let result = running.script.after_frame(&mut *self.loaded.core, inputs);
+            self.obey_script(result);
+        }
+    }
+
+    /// Acts on what the script asked for since it was last asked, then
+    /// stops it if `result` says it failed or it has nothing left to do.
+    fn obey_script(&mut self, result: Result<(), ScriptError>) {
+        let Some(running) = &mut self.script else {
+            return;
+        };
+        let output = running.script.take_output();
+        let log = running.take(&output);
+        let name = running.name.clone();
+        let finished = running.script.finished();
+        self.overlay = output.draws.into();
+        if let Some(line) = log {
+            self.notice(line);
+        }
+        for request in output.states {
+            self.apply(match request {
+                StateRequest::Save(slot) => Command::SaveState(slot),
+                StateRequest::Load(slot) => Command::LoadState(slot),
+            });
+        }
+        if output.pause && !self.paused {
+            self.paused = true;
+            self.debug.pending = None;
+            self.notice(format!("Paused by {name}"));
+        }
+        if let Err(error) = result {
+            self.script = None;
+            self.overlay = Arc::default();
+            self.notice(scripting::failure(&name, &error));
+        } else if finished {
+            self.script = None;
+            self.overlay = Arc::default();
+            self.notice(format!("{name} finished"));
+        }
+    }
+
+    /// Lays the screens out as one picture as they are now, and saves it
+    /// as a PNG on a thread of its own, which says where.
+    fn save_screenshot(&self) {
+        let Some(rom) = self.loaded.player_rom_paths().first().cloned() else {
+            return;
+        };
+        let players = self.loaded.core.info().players;
+        let picture = capture::compose(self.loaded.core.screens(), players);
+        let stamp = capture_stamp();
+        let events = self.events.clone();
+        let saving = thread::Builder::new()
+            .name("screenshot".to_owned())
+            .spawn(move || {
+                let saved =
+                    persist::create_capture(&rom, &stamp, "png").and_then(|(path, mut file)| {
+                        file.write_all(&capture::encode_png(&picture))?;
+                        Ok(path)
+                    });
+                let text = match saved {
+                    Ok(path) => format!("Saved {}", file_name(&path)),
+                    Err(error) => format!("Could not save a screenshot: {error}"),
+                };
+                events.try_send(Event::Notice(text)).ok();
+            });
+        if let Err(error) = saving {
+            self.notice(format!("Could not save a screenshot: {error}"));
+        }
+    }
+
+    /// Starts recording from the next frame on.
+    fn start_recording(&mut self) {
+        let Some(rom) = self.loaded.player_rom_paths().first() else {
+            return;
+        };
+        let info = self.loaded.core.info();
+        let started =
+            persist::create_capture(rom, &capture_stamp(), "mov").and_then(|(path, file)| {
+                Recorder::start(path, file, &info, self.loaded.core.screens())
+            });
+        match started {
+            Ok(recorder) => {
+                self.notice(format!("Recording to {}", file_name(recorder.path())));
+                self.recorder = Some(recorder);
+                self.events.try_send(Event::Recording(true)).ok();
+            }
+            Err(error) => self.notice(format!("Could not start recording: {error}")),
+        }
+    }
+
+    /// Hands the frame just run, with the `audio` it made, to the
+    /// recording, if one is under way.
+    fn record(&mut self, audio: &[emu_core::StereoSample]) {
+        let stopped = self
+            .recorder
+            .as_ref()
+            .is_some_and(|recorder| !recorder.push(self.loaded.core.screens(), audio));
+        if stopped && let Some(recorder) = self.recorder.take() {
+            // The writer stopped after an error, which finishing reports.
+            self.finish_recording(recorder);
+        }
+    }
+
+    /// Finishes `recorder`'s movie and says how it went.
+    fn finish_recording(&self, recorder: Recorder) {
+        let name = file_name(recorder.path());
+        self.events.try_send(Event::Recording(false)).ok();
+        match recorder.finish() {
+            Ok(recording) => self.notice(format!(
+                "Saved {name}: {} of video",
+                minutes_and_seconds(recording.duration)
+            )),
+            Err(error) => self.notice(format!("Recording {name} failed: {error}")),
+        }
+    }
+
+    /// Records the frame just run for rewind, if one is due at this speed
+    /// for a system whose frames last `frame_duration`, and the rewind
+    /// thread has caught up.
+    fn record_for_rewind(&mut self, frame_duration: Duration) {
+        let now = Instant::now();
+        let due = self.recorded_at.is_none_or(|at| {
+            rewind::capture_due(self.speed, frame_duration, now.duration_since(at))
+        });
+        let core = &self.loaded.core;
+        if due && self.rewind.push_with(|state| core.save_state(state)) {
+            self.recorded_at = Some(now);
+        }
+    }
+
+    /// Forgets the rewind history, after the game jumps to another moment.
+    fn clear_rewind(&mut self) {
+        self.rewind.clear();
+        self.recorded_at = None;
+    }
+
+    /// Drops releases still waiting out a press's minimum hold, and turbo
+    /// presses being finished, and starts held turbo buttons again with a
+    /// press: after the game jumps to another moment, a press from before
+    /// would land out of place. Any frame under way is gone too.
     fn clear_latches(&mut self) {
+        self.mid_frame = false;
         for latch in &mut self.latches {
             latch.clear();
+        }
+        for turbo in &mut self.turbos {
+            turbo.clear();
         }
     }
 
@@ -540,7 +902,132 @@ impl Runner {
         }
     }
 
-    fn publish(&self) {
+    /// Runs one frame, or what is left of it, checking the debugger's
+    /// stops if there are any.
+    fn run_frame(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<emu_core::StereoSample>,
+    ) -> RunOutcome {
+        let mut stops = self.debug.stops.clone();
+        if let Some(pending) = self.debug.pending {
+            pending.add_to(&mut stops);
+        }
+        if let Some(running) = &mut self.script {
+            // The script's emu.on_exec stops are its own; only the
+            // debugger's come back.
+            let (outcome, called) =
+                running
+                    .script
+                    .run_frame(&mut *self.loaded.core, inputs, audio, &stops);
+            if called.is_err() {
+                self.obey_script(called);
+            }
+            return outcome;
+        }
+        match self.loaded.core.debugger() {
+            Some(debugger) if !stops.is_empty() => debugger.run_until(inputs, audio, &stops),
+            _ => {
+                self.loaded.core.run_frame(inputs, audio);
+                RunOutcome {
+                    frame_done: true,
+                    stop: None,
+                }
+            }
+        }
+    }
+
+    /// Pauses after a run that stopped, or that finished the frame a
+    /// "next frame" ran towards.
+    fn settle(&mut self, outcome: RunOutcome) {
+        if let Some(mut stop) = outcome.stop {
+            let Some(debugger) = self.loaded.core.debugger() else {
+                return;
+            };
+            let pc = debugger.pc(stop.cpu);
+            // A step over a call ends at the breakpoint after it.
+            let returned = Pending::StepOver(Breakpoint {
+                cpu: stop.cpu,
+                address: pc,
+            });
+            if stop.reason == StopReason::Breakpoint && self.debug.pending == Some(returned) {
+                stop.reason = StopReason::Step;
+            }
+            if stop.reason != StopReason::Step {
+                let cpus = debugger.cpus();
+                self.notice(debugger::describe_stop(&stop, &cpus, pc));
+            }
+            self.paused = true;
+            self.debug.pending = None;
+            self.debug.stopped = Some(stop);
+        } else if outcome.frame_done && self.debug.pending == Some(Pending::NextFrame) {
+            self.paused = true;
+            self.debug.pending = None;
+        }
+    }
+
+    /// Acts on a debugger request, and shows the result at once, even
+    /// while paused.
+    fn debug_command(&mut self, command: debugger::Command) {
+        use debugger::Command;
+
+        match command {
+            Command::View(view) => self.debug.view = view,
+            Command::SetStops {
+                breakpoints,
+                watchpoints,
+            } => {
+                self.debug.stops.breakpoints = breakpoints;
+                self.debug.stops.watchpoints = watchpoints;
+            }
+            Command::Pause => {
+                self.paused = true;
+                self.debug.pending = None;
+            }
+            Command::Continue => {
+                self.paused = false;
+                self.debug.pending = None;
+                self.debug.stopped = None;
+            }
+            Command::Step(cpu) => self.run_towards(Pending::Step(cpu)),
+            Command::StepOver(cpu) => {
+                if let Some(debugger) = self.loaded.core.debugger() {
+                    let pending = Pending::step_over(debugger, cpu);
+                    self.run_towards(pending);
+                }
+            }
+            Command::NextFrame => self.run_towards(Pending::NextFrame),
+            Command::Write {
+                cpu,
+                address,
+                value,
+            } => {
+                if let Some(debugger) = self.loaded.core.debugger() {
+                    debugger.write(cpu, address, value);
+                }
+            }
+        }
+        self.publish();
+    }
+
+    /// Pauses, then runs towards `pending`.
+    fn run_towards(&mut self, pending: Pending) {
+        self.paused = true;
+        self.debug.pending = Some(pending);
+        self.debug.stopped = None;
+    }
+
+    /// Whether the emulation runs, and if not, why, for the debugger.
+    fn run_state(&self) -> RunState {
+        match (self.debug.pending, self.debug.stopped) {
+            (Some(_), _) => RunState::Stepping,
+            (None, Some(stop)) => RunState::Stopped(stop),
+            (None, None) if self.paused => RunState::Paused,
+            (None, None) => RunState::Running,
+        }
+    }
+
+    fn publish(&mut self) {
         {
             let mut latest = self
                 .latest
@@ -556,22 +1043,29 @@ impl Runner {
                 *frames = screens.to_vec();
             }
         }
-        let watched = self.watch.map(|span| {
-            let bytes = (0..span.length)
-                .map(|offset| {
-                    let address = span.start.wrapping_add(offset);
-                    self.loaded.core.peek(span.player, address)
-                })
-                .collect();
-            (span, bytes)
-        });
         *self
             .latest
-            .memory
+            .overlay
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = watched;
+            .unwrap_or_else(PoisonError::into_inner) = Arc::clone(&self.overlay);
+        let state = self.run_state();
+        let snapshot = match (self.debug.view, self.loaded.core.debugger()) {
+            (Some(view), Some(debugger)) => {
+                Some(Arc::new(debugger::snapshot(debugger, &view, state)))
+            }
+            _ => None,
+        };
+        let debugging = snapshot.is_some();
+        *self
+            .latest
+            .debug
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = snapshot;
         if !self.latest.unseen.swap(true, Ordering::AcqRel) {
             self.events.try_send(Event::Frame).ok();
+        }
+        if debugging && !self.latest.debug_unseen.swap(true, Ordering::AcqRel) {
+            self.events.try_send(Event::Debug).ok();
         }
     }
 
@@ -584,7 +1078,8 @@ impl Runner {
             state_version: info.state_version,
             rom_crc32: self.loaded.rom_crc32,
         };
-        let screen = &self.loaded.core.screens()[0];
+        // At the screen's own size, whatever the 3D resolution.
+        let screen = video::shrink(&self.loaded.core.screens()[0], info.screens[0]);
         let size = screen.size();
         let rgb: Vec<u8> = screen
             .pixels()
@@ -663,9 +1158,12 @@ mod tests {
     use std::time::Duration;
 
     use emu_core::{
-        Button, Buttons, CoreInfo, FrameRate, ScreenSize, StateError, StereoSample, System,
-        TouchPoint,
+        Button, Buttons, CoreInfo, FrameRate, RomPatch, ScreenSize, StateError, StereoSample,
+        System, TouchPoint,
     };
+
+    use emu_core::Debugger;
+    use emu_core::debug::{CpuInfo, Instruction, Register, Stops};
 
     use super::*;
     use crate::latch::{BUTTON_FRAMES, TOUCH_FRAMES};
@@ -736,6 +1234,85 @@ mod tests {
             *byte = value;
             self.set(u32::from_le_bytes(bytes));
             true
+        }
+
+        fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+            Some(self)
+        }
+    }
+
+    /// Gives a test core a debugger with one CPU, whose memory is the
+    /// core's `peek` and `poke` and which runs frames whole, so tests can
+    /// watch memory through the debugger's snapshot.
+    macro_rules! peek_debugger {
+        ($core:ty) => {
+            impl Debugger for $core {
+                fn cpus(&self) -> Vec<CpuInfo> {
+                    vec![CpuInfo {
+                        name: "TEST",
+                        player: 0,
+                    }]
+                }
+                fn registers(&self, _: usize) -> Vec<Register> {
+                    Vec::new()
+                }
+                fn status(&self, _: usize) -> String {
+                    String::new()
+                }
+                fn pc(&self, _: usize) -> u32 {
+                    0
+                }
+                fn read(&self, _: usize, address: u32) -> Option<u8> {
+                    self.peek(0, address)
+                }
+                fn write(&mut self, _: usize, address: u32, value: u8) -> bool {
+                    self.poke(0, address, value)
+                }
+                fn disassemble(&self, _: usize, address: u32) -> Instruction {
+                    Instruction {
+                        address,
+                        bytes: vec![0],
+                        text: String::new(),
+                        call: false,
+                    }
+                }
+                fn run_until(
+                    &mut self,
+                    inputs: &[Input],
+                    audio: &mut Vec<StereoSample>,
+                    _: &Stops,
+                ) -> RunOutcome {
+                    self.run_frame(inputs, audio);
+                    RunOutcome {
+                        frame_done: true,
+                        stop: None,
+                    }
+                }
+            }
+        };
+    }
+
+    peek_debugger!(Counter);
+    peek_debugger!(Keypad);
+
+    /// Opens the debugger's view, with its memory from `address`.
+    fn watch_memory(emulator: &Emulator, address: u32) {
+        let view = debugger::View {
+            memory: address,
+            ..debugger::View::default()
+        };
+        emulator.send(Command::Debug(debugger::Command::View(Some(view))));
+    }
+
+    /// Waits for the debugger's snapshot to pass `test`.
+    fn wait_for(emulator: &Emulator, test: impl Fn(&Snapshot) -> bool) -> Arc<Snapshot> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(snapshot) = emulator.debug_snapshot().filter(|shown| test(shown)) {
+                return snapshot;
+            }
+            assert!(Instant::now() < deadline, "the debugger never showed it");
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -831,6 +1408,7 @@ mod tests {
     const TAP: Input = Input {
         buttons: Buttons::NONE,
         touch: Some(TouchPoint { x: 10, y: 20 }),
+        microphone: 0,
     };
 
     #[test]
@@ -838,7 +1416,7 @@ mod tests {
         let (emulator, seen) = start_recorder();
         let a = Input {
             buttons: [Button::A].into_iter().collect(),
-            touch: None,
+            ..Input::default()
         };
         // Nothing runs while paused, so every press and release below
         // arrives between the same two frames, as a trackpad's tap can.
@@ -861,6 +1439,43 @@ mod tests {
     }
 
     #[test]
+    fn turbo_alternates_frame_by_frame_past_the_latch() {
+        let (emulator, seen) = start_recorder();
+        let a: Buttons = [Button::A].into_iter().collect();
+        emulator.send(Command::SetTurbo {
+            player: 1,
+            buttons: a,
+            frames: 1,
+        });
+        run_frames(&seen, 10);
+        let held_until = seen.lock().expect("unpoisoned").len();
+        emulator.send(Command::SetTurbo {
+            player: 1,
+            buttons: Buttons::NONE,
+            frames: 1,
+        });
+        // A press under way finishes; then nothing.
+        run_frames(&seen, 3);
+        let released_from = seen.lock().expect("unpoisoned").len();
+        run_frames(&seen, 5);
+        let seen_now = seen.lock().expect("unpoisoned").clone();
+        let pressed: Vec<bool> = seen_now[..held_until]
+            .iter()
+            .map(|inputs| inputs[1].buttons.contains(Button::A))
+            .collect();
+        // Frames may run before the command arrives.
+        let start = pressed.iter().position(|a| *a).expect("turbo pressed A");
+        let turbo = &pressed[start..];
+        assert!(
+            turbo.windows(2).all(|pair| pair[0] != pair[1]),
+            "a one-frame press is not held for the latch's minimum: {turbo:?}"
+        );
+        let after = &seen_now[released_from..];
+        assert!(after.iter().all(|inputs| inputs[1].buttons.is_empty()));
+        assert_eq!(frames_where(&seen, 0, |input| !input.buttons.is_empty()), 0);
+    }
+
+    #[test]
     fn reset_drops_a_release_still_waiting() {
         let (emulator, seen) = start_recorder();
         emulator.send(Command::TogglePause);
@@ -876,6 +1491,24 @@ mod tests {
         emulator.send(Command::TogglePause);
         run_frames(&seen, 10);
         assert_eq!(frames_where(&seen, 0, |input| input.touch.is_some()), 0);
+    }
+
+    #[test]
+    fn counts_the_frames_shown() {
+        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while emulator.frames_shown() < 10 {
+            assert!(Instant::now() < deadline, "frames stopped running");
+            thread::sleep(Duration::from_millis(1));
+        }
+        emulator.send(Command::TogglePause);
+        wait_for_notice(&events, "Paused");
+        // Paused: the count stands still, and matches the game's own,
+        // which counts up from opaque black.
+        let shown = emulator.frames_shown();
+        assert_eq!(u64::from(latest_count(&emulator) & 0x00FF_FFFF), shown);
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(emulator.frames_shown(), shown);
     }
 
     #[test]
@@ -899,15 +1532,11 @@ mod tests {
         let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
         let cheats = emu_cheats::parse(System::Gb, "[Hold]\n0000:00\n").expect("valid");
         emulator.send(Command::SetCheats { player: 0, cheats });
-        emulator.send(Command::WatchMemory(Some(MemorySpan {
-            player: 0,
-            start: 0,
-            length: 1,
-        })));
+        watch_memory(&emulator, 0);
         thread::sleep(Duration::from_millis(50));
         // Each frame adds one; the cheat then zeroes the low byte.
-        let (_, bytes) = emulator.memory().expect("watching");
-        assert_eq!(bytes, [Some(0)]);
+        let snapshot = emulator.debug_snapshot().expect("watching");
+        assert_eq!(snapshot.memory[0], Some(0));
     }
 
     /// A GBA-like core with KEYINPUT at 0x04000130 and one byte of RAM at
@@ -965,6 +1594,10 @@ mod tests {
             }
             ram
         }
+
+        fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+            Some(self)
+        }
     }
 
     #[test]
@@ -984,22 +1617,293 @@ mod tests {
         let cheats =
             emu_cheats::parse(System::Gba, "D0000020 0001\n32000000 0001\n").expect("valid");
         emulator.send(Command::SetCheats { player: 0, cheats });
-        emulator.send(Command::WatchMemory(Some(MemorySpan {
-            player: 0,
-            start: 0x0200_0000,
-            length: 1,
-        })));
+        watch_memory(&emulator, 0x0200_0000);
         emulator.send(Command::SetInput {
             player: 0,
             input: Input {
                 buttons: [Button::A].into_iter().collect(),
-                touch: None,
+                ..Input::default()
             },
         });
         thread::sleep(Duration::from_millis(50));
         // The frame cleared the byte; the cheat, seeing A, set it again.
-        let (_, bytes) = emulator.memory().expect("watching");
-        assert_eq!(bytes, [Some(1)]);
+        let snapshot = emulator.debug_snapshot().expect("watching");
+        assert_eq!(snapshot.memory[0], Some(1));
+    }
+
+    /// A Game Boy running `program` at 0x0100 on the emulation thread.
+    fn start_game_boy(program: &[u8]) -> (Emulator, async_channel::Receiver<Event>) {
+        let mut rom = vec![0; 0x8000];
+        rom[0x100..0x100 + program.len()].copy_from_slice(program);
+        rom[0x14D] = rom[0x134..0x14D]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+        let core = emu_cores::create(System::Gb, &Media::new(&rom)).expect("valid rom");
+        let loaded = Loaded {
+            core,
+            rom_paths: vec![PathBuf::from("/nonexistent/debugged.gb")],
+            rom_crc32: 0,
+        };
+        let (events, receiver) = async_channel::unbounded();
+        (Emulator::start(loaded, events, None), receiver)
+    }
+
+    fn debug(emulator: &Emulator, command: debugger::Command) {
+        emulator.send(Command::Debug(command));
+    }
+
+    #[test]
+    fn breakpoints_pause_mid_frame_and_steps_run_one_instruction() {
+        // LD A, 0x42; LD (0xC000), A; INC A; NOP; JR -4 (back to INC A)
+        let program = [0x3E, 0x42, 0xEA, 0x00, 0xC0, 0x3C, 0x00, 0x18, 0xFC];
+        let (emulator, _events) = start_game_boy(&program);
+        watch_memory(&emulator, 0xC000);
+        let at_nop = Breakpoint {
+            cpu: 0,
+            address: 0x0106,
+        };
+        debug(
+            &emulator,
+            debugger::Command::SetStops {
+                breakpoints: vec![at_nop],
+                watchpoints: Vec::new(),
+            },
+        );
+        let stopped = wait_for(&emulator, |shown| {
+            matches!(shown.state, RunState::Stopped(_))
+        });
+        assert_eq!((stopped.pc, stopped.memory[0]), (0x0106, Some(0x42)));
+        assert!(stopped.code.iter().any(|line| line.address == 0x0106));
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            emulator.debug_snapshot().expect("open").pc,
+            0x0106,
+            "still there"
+        );
+
+        debug(&emulator, debugger::Command::Step(0));
+        let stepped = wait_for(&emulator, |shown| shown.pc == 0x0107);
+        let step = emu_core::debug::Stop {
+            cpu: 0,
+            reason: StopReason::Step,
+        };
+        assert_eq!(stepped.state, RunState::Stopped(step));
+
+        debug(
+            &emulator,
+            debugger::Command::Write {
+                cpu: 0,
+                address: 0xC000,
+                value: 0x99,
+            },
+        );
+        wait_for(&emulator, |shown| shown.memory[0] == Some(0x99));
+
+        // Round the loop to the breakpoint again.
+        debug(&emulator, debugger::Command::Continue);
+        let again = wait_for(&emulator, |shown| shown.pc == 0x0106);
+        assert!(
+            matches!(again.state, RunState::Stopped(stop) if stop.reason == StopReason::Breakpoint)
+        );
+    }
+
+    #[test]
+    fn stepping_over_a_call_stops_after_it_returns() {
+        // CALL 0x0150; JR -5 (back to the CALL); and at 0x0150, INC A; RET.
+        let mut program = vec![0; 0x52];
+        program[..5].copy_from_slice(&[0xCD, 0x50, 0x01, 0x18, 0xFB]);
+        program[0x50..].copy_from_slice(&[0x3C, 0xC9]);
+        let (emulator, _events) = start_game_boy(&program);
+        watch_memory(&emulator, 0xC000);
+        debug(
+            &emulator,
+            debugger::Command::SetStops {
+                breakpoints: vec![Breakpoint {
+                    cpu: 0,
+                    address: 0x0100,
+                }],
+                watchpoints: Vec::new(),
+            },
+        );
+        wait_for(&emulator, |shown| {
+            matches!(shown.state, RunState::Stopped(_))
+        });
+        debug(&emulator, debugger::Command::StepOver(0));
+        let returned = wait_for(&emulator, |shown| shown.pc == 0x0103);
+        let step = emu_core::debug::Stop {
+            cpu: 0,
+            reason: StopReason::Step,
+        };
+        assert_eq!(returned.state, RunState::Stopped(step));
+    }
+
+    #[test]
+    fn next_frame_runs_one_frame_then_pauses() {
+        let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        watch_memory(&emulator, 0);
+        debug(&emulator, debugger::Command::Pause);
+        let paused = wait_for(&emulator, |shown| shown.state == RunState::Paused);
+        let before = paused.memory[0].expect("readable");
+        debug(&emulator, debugger::Command::NextFrame);
+        let after = wait_for(&emulator, |shown| {
+            shown.state == RunState::Paused && shown.memory[0] != Some(before)
+        });
+        assert_eq!(after.memory[0], Some(before.wrapping_add(1)));
+        thread::sleep(Duration::from_millis(20));
+        let later = emulator.debug_snapshot().expect("open");
+        assert_eq!(later.memory[0], after.memory[0], "still paused");
+    }
+
+    /// Every `set_rom_patches` call a core received.
+    type PatchLog = Arc<Mutex<Vec<(usize, Vec<RomPatch>)>>>;
+
+    /// A Game Boy-like core that records the ROM patches it is given.
+    struct Patchable {
+        log: PatchLog,
+        frames: [Frame; 1],
+    }
+
+    impl Core for Patchable {
+        fn info(&self) -> CoreInfo {
+            CoreInfo {
+                system: System::Gb,
+                screens: &SCREENS,
+                touch_screen: None,
+                players: 1,
+                frame_rate: FrameRate::new(1000, 1),
+                audio_sample_rate: 48_000,
+                state_version: 1,
+            }
+        }
+
+        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {}
+
+        fn screens(&self) -> &[Frame] {
+            &self.frames
+        }
+
+        fn reset(&mut self) {}
+
+        fn save_state(&self, _: &mut Vec<u8>) {}
+
+        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
+            Ok(())
+        }
+
+        fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+            let mut log = self.log.lock().expect("unpoisoned");
+            log.push((player, patches.to_vec()));
+        }
+    }
+
+    #[test]
+    fn cheat_lists_hand_their_rom_patches_to_the_core() {
+        let log = PatchLog::default();
+        let loaded = Loaded {
+            core: Box::new(Patchable {
+                log: Arc::clone(&log),
+                frames: [Frame::new(SCREENS[0])],
+            }),
+            rom_paths: vec![PathBuf::from("/nonexistent/patchable.gb")],
+            rom_crc32: 0,
+        };
+        let (events, _events) = async_channel::unbounded();
+        let emulator = Emulator::start(loaded, events, None);
+        for text in ["[Jump]\n3E1-23F\n", "[Jump] off\n3E1-23F\n"] {
+            let cheats = emu_cheats::parse(System::Gb, text).expect("valid");
+            emulator.send(Command::SetCheats { player: 0, cheats });
+        }
+        // Dropping the handle applies the queued commands, then stops.
+        drop(emulator);
+        let jump = RomPatch {
+            address: 0x0123,
+            value: 0x3E,
+            compare: None,
+        };
+        assert_eq!(
+            *log.lock().expect("unpoisoned"),
+            [(0, vec![jump]), (0, Vec::new())]
+        );
+    }
+
+    /// Waits for a notice starting with `start`, returning it.
+    fn wait_for_notice(events: &async_channel::Receiver<Event>, start: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match events.try_recv() {
+                Ok(Event::Notice(text)) if text.starts_with(start) => return text,
+                Ok(_) => {}
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "no notice {start:?}");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+    }
+
+    /// The files in `dir` with `extension`.
+    fn files_with(dir: &Path, extension: &str) -> Vec<PathBuf> {
+        let entries = fs::read_dir(dir).expect("read dir");
+        let paths = entries.map(|entry| entry.expect("entry").path());
+        paths
+            .filter(|path| path.extension().is_some_and(|found| found == extension))
+            .collect()
+    }
+
+    #[test]
+    fn screenshots_land_next_to_the_rom() {
+        let dir = std::env::temp_dir().join(format!("emu-app-shots-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let (emulator, events) = start(dir.join("counter.gb"));
+        emulator.send(Command::SaveScreenshot);
+        let saved = wait_for_notice(&events, "Saved counter ");
+        let pngs = files_with(&dir, "png");
+        assert_eq!(pngs.len(), 1, "{saved}");
+        let bytes = fs::read(&pngs[0]).expect("the screenshot");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        drop(emulator);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn recordings_hold_every_frame_run_and_none_while_paused() {
+        let dir = std::env::temp_dir().join(format!("emu-app-movie-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let (emulator, events) = start(dir.join("counter.gb"));
+        emulator.send(Command::TogglePause);
+        wait_for_notice(&events, "Paused");
+        let first = latest_count(&emulator);
+        emulator.send(Command::ToggleRecording);
+        wait_for_notice(&events, "Recording to counter ");
+        // As fast as it goes, which the writer must keep up with.
+        emulator.send(Command::SetSpeed(Speed::Unlimited));
+        emulator.send(Command::TogglePause);
+        thread::sleep(Duration::from_millis(50));
+        emulator.send(Command::TogglePause);
+        wait_for_notice(&events, "Paused");
+        let last = latest_count(&emulator);
+        thread::sleep(Duration::from_millis(20));
+        emulator.send(Command::ToggleRecording);
+        let saved = wait_for_notice(&events, "Saved counter ");
+        assert!(saved.ends_with(" of video"), "{saved}");
+
+        let movies = files_with(&dir, "mov");
+        assert_eq!(movies.len(), 1);
+        let bytes = fs::read(&movies[0]).expect("the movie");
+        let jpegs = bytes
+            .windows(4)
+            .filter(|window| *window == [0xFF, 0xD8, 0xFF, 0xE0])
+            .count();
+        assert!(last > first + 10, "frames ran: {first} to {last}");
+        assert_eq!(jpegs as u32, last - first, "one picture per frame run");
+        drop(emulator);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn durations_read_as_minutes_and_seconds() {
+        assert_eq!(minutes_and_seconds(Duration::from_millis(83_900)), "1:23");
+        assert_eq!(minutes_and_seconds(Duration::from_secs(3723)), "1:02:03");
     }
 
     #[test]
@@ -1022,6 +1926,114 @@ mod tests {
         let notices: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(notices.contains(&Event::Notice("Saved state 2".to_owned())));
         assert!(notices.contains(&Event::Notice("Loaded state 2".to_owned())));
+        drop(emulator);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    fn run_script(emulator: &Emulator, source: &str) {
+        emulator.send(Command::RunScript {
+            name: "hud.lua".to_owned(),
+            source: source.to_owned(),
+        });
+    }
+
+    /// Waits for the script's drawing to pass `test`.
+    fn wait_for_overlay(emulator: &Emulator, test: impl Fn(&[Draw]) -> bool) -> Arc<[Draw]> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let overlay = emulator.overlay();
+            if test(&overlay) {
+                return overlay;
+            }
+            assert!(Instant::now() < deadline, "the script never drew it");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn scripts_read_write_and_draw_after_every_frame() {
+        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        run_script(
+            &emulator,
+            r#"
+            emu.on_frame(function()
+                gui.text(0, 0, "count " .. memory.read_u8(0))
+                memory.write_u8(1, 1)
+            end)
+            "#,
+        );
+        wait_for_notice(&events, "Running hud.lua");
+        let overlay = wait_for_overlay(&emulator, |drawn| !drawn.is_empty());
+        assert!(
+            matches!(&overlay[0], Draw::Text { text, .. } if text.starts_with("count ")),
+            "{overlay:?}"
+        );
+        // Byte 1 of the counter, which the script keeps at 1.
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(latest_count(&emulator) >> 8 & 0xFF, 1);
+
+        emulator.send(Command::StopScript);
+        wait_for_notice(&events, "Stopped hud.lua");
+        assert!(emulator.overlay().is_empty(), "stopping clears its drawing");
+        emulator.send(Command::StopScript);
+        wait_for_notice(&events, "No script is running");
+    }
+
+    #[test]
+    fn a_script_error_is_a_notice_and_stops_the_script() {
+        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        run_script(
+            &emulator,
+            r#"
+            emu.on_frame(function()
+                gui.box(0, 0, 0, 0)
+                if emu.frame() == 3 then error("boom") end
+            end)
+            "#,
+        );
+        wait_for_notice(&events, "hud.lua:4: boom · script stopped");
+        assert!(emulator.overlay().is_empty());
+        run_script(&emulator, "x = = 1");
+        wait_for_notice(&events, "hud.lua:1: unexpected symbol");
+        // The game runs on.
+        let before = latest_count(&emulator);
+        thread::sleep(Duration::from_millis(20));
+        assert!(latest_count(&emulator) > before);
+    }
+
+    #[test]
+    fn scripts_press_buttons_on_the_next_frame() {
+        let (emulator, seen) = start_recorder();
+        run_script(
+            &emulator,
+            "emu.on_frame(function() joypad.set({a = true}, 2) end)",
+        );
+        run_frames(&seen, 10);
+        let a = |input: &Input| input.buttons.contains(Button::A);
+        assert!(frames_where(&seen, 1, a) >= 5, "player 2 pressed A");
+        assert_eq!(frames_where(&seen, 0, a), 0, "player 1 did not");
+    }
+
+    #[test]
+    fn scripts_save_states_and_pause() {
+        let dir = std::env::temp_dir().join(format!("emu-app-script-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let (emulator, events) = start(dir.join("counter.gb"));
+        run_script(
+            &emulator,
+            r#"
+            emu.save_state(3)
+            emu.on_frame(function()
+                if emu.frame() == 5 then emu.pause() end
+            end)
+            "#,
+        );
+        wait_for_notice(&events, "Saved state 3");
+        wait_for_notice(&events, "Paused by hud.lua");
+        assert!(persist::state_path(&[dir.join("counter.gb")], 3).exists());
+        let paused = latest_count(&emulator);
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(latest_count(&emulator), paused);
         drop(emulator);
         fs::remove_dir_all(&dir).expect("clean up");
     }
@@ -1071,7 +2083,7 @@ mod tests {
             "slot",
             &[("platinum.nds", &nds_rom()), ("emerald.gba", &gba_rom())],
         );
-        let loaded = load(&paths).expect("loads");
+        let loaded = load(&paths, DmgColors::Grey).expect("loads");
         assert_eq!(
             (loaded.info().system, loaded.info().players),
             (System::Nds, 1)
@@ -1088,7 +2100,7 @@ mod tests {
             "link",
             &[("ruby.gba", &gba_rom()), ("sapphire.gba", &gba_rom())],
         );
-        let loaded = load(&paths).expect("loads");
+        let loaded = load(&paths, DmgColors::Grey).expect("loads");
         assert_eq!(
             (loaded.info().system, loaded.info().players),
             (System::Gba, 2)
@@ -1098,7 +2110,7 @@ mod tests {
             "mixed",
             &[("ruby.gba", &gba_rom()), ("platinum.nds", &nds_rom())],
         );
-        let error = load(&mixed)
+        let error = load(&mixed, DmgColors::Grey)
             .err()
             .expect("a GBA game cannot take a DS game");
         assert!(format!("{error:#}").contains("same system"), "{error:#}");
@@ -1107,12 +2119,28 @@ mod tests {
     }
 
     #[test]
+    fn two_ds_games_link_over_local_wireless() {
+        let (dir, paths) = rom_dir(
+            "wireless",
+            &[("white.nds", &nds_rom()), ("black.nds", &nds_rom())],
+        );
+        let loaded = load(&paths, DmgColors::Grey).expect("loads");
+        assert_eq!(
+            (loaded.info().system, loaded.info().players),
+            (System::Nds, 2)
+        );
+        assert_eq!(loaded.info().screens.len(), 4);
+        assert_eq!(loaded.player_rom_paths(), &paths[..]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
     fn games_that_would_share_a_save_file_are_refused() {
         let (dir, paths) = rom_dir(
             "shared-save",
             &[("pokemon.nds", &nds_rom()), ("pokemon.gba", &gba_rom())],
         );
-        let error = load(&paths).err().expect("refused");
+        let error = load(&paths, DmgColors::Grey).err().expect("refused");
         assert_eq!(
             format!("{error:#}"),
             "pokemon.nds and pokemon.gba would both save to pokemon.sav; rename one of them"

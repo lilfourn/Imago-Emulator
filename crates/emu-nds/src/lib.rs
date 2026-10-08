@@ -10,17 +10,22 @@
 mod bios;
 mod boot;
 mod bus;
+mod bytes;
 mod capture;
 mod cart;
+mod debug;
 mod display;
 mod dma;
 mod gba_slot;
 mod gpu2d;
 mod gpu3d;
+mod graphics;
 mod hardware;
 mod interrupt;
 mod io;
+mod io_names;
 mod ipc;
+mod link;
 mod machine;
 mod math;
 mod memory;
@@ -29,20 +34,23 @@ mod sound;
 mod spi;
 mod timer;
 mod vram;
+mod wifi;
 
 use emu_core::{
-    Button, Core, CoreInfo, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, ScreenSize,
-    StateError, StereoSample, System, SystemFileKind,
+    Button, Core, CoreInfo, Debugger, Frame, FrameRate, Input, LoadError, Media, MemoryRegion,
+    ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge as GbaCartridge;
+pub use link::Linked;
 
 use cart::Cart;
 use display::FRAME_CYCLES;
 use gba_slot::GbaSlot;
 use hardware::Hardware;
-use machine::Machine;
+use machine::{Machine, Plain, Stepper};
 use rtc::Rtc;
 use spi::Spi;
+use wifi::Wifi;
 
 const SCREEN: ScreenSize = ScreenSize::new(256, 192);
 const SCREENS: [ScreenSize; 2] = [SCREEN, SCREEN];
@@ -55,9 +63,9 @@ pub const INFO: CoreInfo = CoreInfo {
     touch_screen: Some(1),
     players: 1,
     frame_rate: FrameRate::new(33_513_982, 560_190),
-    audio_sample_rate: 32_768,
+    audio_sample_rate: sound::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 5,
+    state_version: 7,
 };
 
 /// A Nintendo DS with a game card inserted, and maybe a GBA cartridge.
@@ -120,6 +128,7 @@ impl Nds {
         hw.cart = Cart::new(media.rom.into(), media.backup);
         hw.gba_slot = gba_slot;
         hw.spi = Spi::new(media.system_file(SystemFileKind::NdsFirmware));
+        hw.wifi = Wifi::new(hw.spi.wifi_settings());
         hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
             machine: Machine::boot(hw, hle_bios),
@@ -143,6 +152,7 @@ impl Nds {
             .touch
             .map(|point| (point.x.min(255) as u8, point.y.min(191) as u8));
         hw.spi.set_touch(touch);
+        hw.spi.set_microphone(input.microphone);
         if hw.spi.pen_down() {
             ext_keys &= !(1 << 6);
         }
@@ -150,13 +160,20 @@ impl Nds {
         hw.check_keypad_interrupt();
     }
 
+    /// Copies the engines' screens, or their larger versions with
+    /// upscaled 3D, into the frames.
     fn present(&mut self) {
         let hw = &self.machine.hw;
+        let (a, b) = if hw.scaled.scale > 1 {
+            (&hw.scaled.a, &hw.scaled.b)
+        } else {
+            (&hw.screen_a, &hw.screen_b)
+        };
         // POWCNT1 bit 15 puts engine A on the top screen.
         let (top, bottom) = if hw.powcnt1 & 0x8000 != 0 {
-            (&hw.screen_a, &hw.screen_b)
+            (a, b)
         } else {
-            (&hw.screen_b, &hw.screen_a)
+            (b, a)
         };
         let [top_frame, bottom_frame] = &mut self.screens;
         top_frame.pixels_mut().copy_from_slice(top);
@@ -193,6 +210,12 @@ impl Nds {
             ),
             hw.vcount,
         )
+    }
+
+    /// The wifi hardware's state, as one `key=value` line for debugging.
+    #[must_use]
+    pub fn debug_wifi(&self) -> String {
+        self.machine.hw.wifi.describe()
     }
 
     /// BIOS functions each CPU has called, with counts, for debugging.
@@ -244,10 +267,70 @@ impl Nds {
         ]
     }
 
+    /// Whether a saved `machine` fits this session.
+    fn check_state(&self, machine: &Machine) -> Result<(), StateError> {
+        if machine.hw.gba_slot.is_occupied() == self.machine.hw.gba_slot.is_occupied() {
+            Ok(())
+        } else {
+            Err(StateError::Malformed(
+                "the state's GBA slot does not match this session's",
+            ))
+        }
+    }
+
+    /// Replaces the machine with a saved one that [`Nds::check_state`]
+    /// accepted, keeping the media and display settings.
+    fn install(&mut self, mut machine: Machine) {
+        machine.hw.take_media_from(&mut self.machine.hw);
+        machine.hw.take_display_from(&mut self.machine.hw);
+        self.machine = machine;
+        // The rendered 3D image is not saved.
+        let hw = &mut self.machine.hw;
+        hw.gpu3d.render_frame(&hw.vram);
+        self.present();
+    }
+
     /// Bus cycles (33.51 MHz) since power-on.
     #[must_use]
     pub fn cycles(&self) -> u64 {
         self.machine.now()
+    }
+
+    /// Runs slices, each instruction by `stepper`, until a frame finishes
+    /// or `stepper` stops one part-way, for [`Core::run_frame`] and
+    /// [`Debugger::run_until`]. Returns whether the frame finished; the
+    /// next call carries on after a stop.
+    fn run<S: Stepper>(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        stepper: &mut S,
+    ) -> bool {
+        self.set_input(&inputs.first().copied().unwrap_or_default());
+        if self.machine.hw.spi.powered_off() {
+            // The game switched the console off: dark screens, no sound.
+            for screen in &mut self.screens {
+                screen.pixels_mut().fill(0xFF00_0000);
+            }
+            return true;
+        }
+        let start = self.machine.now();
+        // A frame ends at VBlank, or after a frame's time if that never
+        // comes.
+        while self.machine.now() - start < FRAME_CYCLES {
+            let progress = self.machine.run_slice_with(stepper, |_, _| {});
+            if progress.stopped {
+                return false;
+            }
+            if progress.frame_done {
+                break;
+            }
+        }
+        // A lone console's frames reach nobody.
+        self.machine.hw.wifi.take_transmissions();
+        self.machine.hw.sound.drain_samples(audio);
+        self.present();
+        true
     }
 }
 
@@ -257,28 +340,23 @@ impl Core for Nds {
     }
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
-        self.set_input(&inputs.first().copied().unwrap_or_default());
-        if self.machine.hw.spi.powered_off() {
-            // The game switched the console off: dark screens, no sound.
-            for screen in &mut self.screens {
-                screen.pixels_mut().fill(0xFF00_0000);
-            }
-            return;
-        }
-        let start = self.machine.now();
-        // A frame ends at VBlank, or after a frame's time if that never
-        // comes.
-        while self.machine.now() - start < FRAME_CYCLES {
-            if self.machine.run_slice(|_, _| {}).frame_done {
-                break;
-            }
-        }
-        self.machine.hw.sound.drain_samples(audio);
-        self.present();
+        self.run(inputs, audio, &mut Plain);
     }
 
     fn screens(&self) -> &[Frame] {
         &self.screens
+    }
+
+    /// Up to 8 times the native resolution. The game's own 3D reads (display
+    /// capture) still see the native frame, which is drawn as well.
+    fn set_render_scale(&mut self, scale: u32) {
+        let scale = usize::try_from(scale).unwrap_or(usize::MAX);
+        let hw = &mut self.machine.hw;
+        hw.set_render_scale(scale);
+        let scale = hw.scaled.scale as u16;
+        let size = ScreenSize::new(SCREEN.width * scale, SCREEN.height * scale);
+        self.screens = [Frame::new(size), Frame::new(size)];
+        self.present();
     }
 
     fn reset(&mut self) {
@@ -293,8 +371,10 @@ impl Core for Nds {
         std::mem::swap(&mut hw.spi, &mut old.spi);
         std::mem::swap(&mut hw.rtc, &mut old.rtc);
         std::mem::swap(&mut hw.gba_slot, &mut old.gba_slot);
+        hw.wifi = Wifi::new(hw.spi.wifi_settings());
         hw.rtc.restart_cycles(now);
         hw.gba_slot.restart_cycles(now);
+        hw.take_display_from(old);
         self.machine = Machine::boot(hw, self.machine.hle_bios);
     }
 
@@ -304,19 +384,10 @@ impl Core for Nds {
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let mut machine: Machine = postcard::from_bytes(state)
+        let machine: Machine = postcard::from_bytes(state)
             .map_err(|_| StateError::Malformed("not a Nintendo DS state"))?;
-        if machine.hw.gba_slot.is_occupied() != self.machine.hw.gba_slot.is_occupied() {
-            return Err(StateError::Malformed(
-                "the state's GBA slot does not match this session's",
-            ));
-        }
-        machine.hw.take_media_from(&mut self.machine.hw);
-        self.machine = machine;
-        // The rendered 3D image is not saved.
-        let hw = &mut self.machine.hw;
-        hw.gpu3d.render_frame(&hw.vram);
-        self.present();
+        self.check_state(&machine)?;
+        self.install(machine);
         Ok(())
     }
 
@@ -364,6 +435,10 @@ impl Core for Nds {
             MemoryRegion::MainRam => Some(&self.machine.hw.main_ram),
             MemoryRegion::VideoRam => None,
         }
+    }
+
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        Some(self)
     }
 }
 
@@ -438,6 +513,43 @@ mod tests {
     }
 
     #[test]
+    fn the_frame_s_microphone_reaches_the_touchscreen_controller() {
+        let rom = rom();
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        // libnds's micReadData12 through SPICNT and SPIDATA: control byte
+        // 0xE4 with chip select held, then two reads.
+        let read_microphone = |nds: &mut Nds| {
+            let hw = &mut nds.machine.hw;
+            hw.arm7_write_16(0x0400_01C0, 0x8A01);
+            hw.arm7_write_16(0x0400_01C2, 0xE4);
+            hw.arm7_write_16(0x0400_01C2, 0);
+            let high = hw.arm7_read_16(0x0400_01C2);
+            hw.arm7_write_16(0x0400_01C0, 0x8201);
+            hw.arm7_write_16(0x0400_01C2, 0);
+            let low = hw.arm7_read_16(0x0400_01C2);
+            (high & 0x7F) << 5 | low >> 3
+        };
+        nds.run_frame(&[Input::default()], &mut Vec::new());
+        assert_eq!(read_microphone(&mut nds), 0x800, "silence");
+        let blowing = Input {
+            microphone: Input::LOUDEST,
+            ..Input::default()
+        };
+        let readings: Vec<u16> = (0..4)
+            .map(|_| {
+                nds.run_frame(&[blowing], &mut Vec::new());
+                read_microphone(&mut nds)
+            })
+            .collect();
+        assert!(
+            readings
+                .iter()
+                .all(|&value| value != 0x800 && value <= 0xFFF),
+            "{readings:X?}"
+        );
+    }
+
+    #[test]
     fn both_cpus_run_their_programs() {
         let rom = rom();
         let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
@@ -478,6 +590,56 @@ mod tests {
         nds.run_frame(&[], &mut Vec::new());
         nds.run_frame(&[], &mut Vec::new());
         assert_eq!(nds.screens()[0].pixels()[0], 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn render_scale_enlarges_the_screens_but_not_the_state() {
+        let rom = white_screen_rom();
+        let mut native = Nds::new(&Media::new(&rom)).expect("valid header");
+        let mut larger = Nds::new(&Media::new(&rom)).expect("valid header");
+        larger.set_render_scale(3);
+        for _ in 0..3 {
+            native.run_frame(&[], &mut Vec::new());
+            larger.run_frame(&[], &mut Vec::new());
+        }
+        let top = &larger.screens()[0];
+        assert_eq!(top.size(), ScreenSize::new(768, 576));
+        assert!(top.pixels().iter().all(|&pixel| pixel == 0xFFFF_FFFF));
+        let (mut native_state, mut larger_state) = (Vec::new(), Vec::new());
+        native.save_state(&mut native_state);
+        larger.save_state(&mut larger_state);
+        assert!(native_state == larger_state, "the scale is not saved");
+
+        // States load at any scale, and the scale stays.
+        larger.load_state(&native_state).expect("loads");
+        assert_eq!(larger.screens()[1].size(), ScreenSize::new(768, 576));
+        larger.reset();
+        larger.run_frame(&[], &mut Vec::new());
+        assert_eq!(larger.screens()[0].size(), ScreenSize::new(768, 576));
+        larger.set_render_scale(0);
+        assert_eq!(larger.screens()[0].size(), SCREEN);
+        larger.set_render_scale(100);
+        assert_eq!(larger.screens()[0].size(), ScreenSize::new(2048, 1536));
+    }
+
+    #[test]
+    fn sound_comes_at_the_rate_the_core_reports() {
+        let rom = rom();
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        let mut audio = Vec::new();
+        // The first frame runs from power-on to the first VBlank.
+        nds.run_frame(&[], &mut audio);
+        audio.clear();
+        let start = nds.cycles();
+        for _ in 0..600 {
+            nds.run_frame(&[], &mut audio);
+        }
+        let seconds = (nds.cycles() - start) as f64 / 33_513_982.0;
+        let rate = audio.len() as f64 / seconds;
+        assert!(
+            (rate - f64::from(INFO.audio_sample_rate)).abs() < 1.0,
+            "{rate} Hz"
+        );
     }
 
     #[test]

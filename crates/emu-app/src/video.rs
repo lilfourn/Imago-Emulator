@@ -6,9 +6,10 @@
 //! fractional scale, gives the "sharp bilinear" look: crisp pixels with
 //! smooth, even edges at any window size.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use emu_core::Frame;
+use emu_core::{Frame, ScreenSize};
 use gpui::RenderImage;
 
 use crate::layout::Rotation;
@@ -41,9 +42,42 @@ pub fn turn(frame: &Frame, rotation: Rotation) -> Frame {
     turned
 }
 
+/// `frame` at `size`, a whole fraction of its own: every pixel of a
+/// frame drawn at a higher 3D resolution keeps the middle of its square.
+/// Frames already at `size`, or not a whole multiple of it, come back as
+/// they are.
+pub fn shrink(frame: &Frame, size: ScreenSize) -> Cow<'_, Frame> {
+    let own = frame.size();
+    let factor = usize::from(own.width / size.width.max(1));
+    let whole = factor > 1
+        && own == ScreenSize::new(size.width * factor as u16, size.height * factor as u16);
+    if !whole {
+        return Cow::Borrowed(frame);
+    }
+    let width = usize::from(own.width);
+    let source = frame.pixels();
+    let mut small = Frame::new(size);
+    for (row, line) in small.rows_mut().enumerate() {
+        let y = row * factor + factor / 2;
+        for (column, pixel) in line.iter_mut().enumerate() {
+            *pixel = source[y * width + column * factor + factor / 2];
+        }
+    }
+    Cow::Owned(small)
+}
+
 /// `frame` as BGRA bytes, enlarged `factor` times with nearest-neighbour
 /// sampling.
 pub fn upscale_bgra(frame: &Frame, factor: usize) -> Vec<u8> {
+    if factor <= 1 {
+        // Filtered and upscaled-3D frames come already large; a plain
+        // conversion compiles to a fast copy.
+        return frame
+            .pixels()
+            .iter()
+            .flat_map(|pixel| pixel.to_le_bytes())
+            .collect();
+    }
     let size = frame.size();
     let row_bytes = usize::from(size.width) * factor * 4;
     let mut out = Vec::with_capacity(row_bytes * usize::from(size.height) * factor);
@@ -118,6 +152,22 @@ mod tests {
             pixels(Rotation::Anticlockwise),
             ((2, 3), vec![c, f, b, e, a, d])
         );
+    }
+
+    #[test]
+    fn shrinking_keeps_the_middle_of_each_square() {
+        let mut frame = Frame::new(ScreenSize::new(4, 2));
+        let pixels: Vec<u32> = (0..8).map(|value| rgb(value, 0, 0)).collect();
+        frame.pixels_mut().copy_from_slice(&pixels);
+        let small = shrink(&frame, ScreenSize::new(2, 1));
+        assert_eq!(small.size(), ScreenSize::new(2, 1));
+        // Squares of 2: the middle is the bottom right pixel.
+        assert_eq!(small.pixels(), [rgb(5, 0, 0), rgb(7, 0, 0)]);
+        assert!(matches!(shrink(&frame, frame.size()), Cow::Borrowed(_)));
+        assert!(matches!(
+            shrink(&frame, ScreenSize::new(3, 2)),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]

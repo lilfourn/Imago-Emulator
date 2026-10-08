@@ -62,18 +62,18 @@ pub fn create(system: System, media: &Media<'_>) -> Result<Box<dyn Core>, LoadEr
 }
 
 /// Powers on `system` with one game per entry of `media`, joined by a
-/// link cable: one core with a player per game.
+/// link cable (Game Boy, Game Boy Advance) or in local wireless range of
+/// each other (DS): one core with a player per game.
 ///
 /// # Errors
 ///
-/// Returns [`LoadError::Unsupported`] for systems without link play yet,
-/// or the core's error if it rejects a ROM.
+/// Returns the core's error if it rejects a ROM or the number of games.
 pub fn create_linked(system: System, media: &[Media<'_>]) -> Result<Box<dyn Core>, LoadError> {
-    match system {
-        System::Gb => Ok(Box::new(emu_gb::Linked::new(media)?)),
-        System::Gba => Ok(Box::new(emu_gba::Linked::new(media)?)),
-        System::Nds => Err(LoadError::Unsupported("link play for this system")),
-    }
+    Ok(match system {
+        System::Gb => Box::new(emu_gb::Linked::new(media)?),
+        System::Gba => Box::new(emu_gba::Linked::new(media)?),
+        System::Nds => Box::new(emu_nds::Linked::new(media)?),
+    })
 }
 
 #[cfg(test)]
@@ -110,6 +110,24 @@ mod tests {
             create(System::Gba, &media),
             Err(LoadError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn two_ds_games_link_over_local_wireless() {
+        let mut rom = vec![0; 0x400];
+        for (offset, value) in [
+            (0x20, 0x200u32),
+            (0x24, 0x0200_4000),
+            (0x30, 0x300),
+            (0x34, 0x0238_0000),
+        ] {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let core = create_linked(System::Nds, &[Media::new(&rom), Media::new(&rom)])
+            .expect("two DS games link");
+        let info = core.info();
+        assert_eq!((info.players, info.screens.len()), (2, 4));
+        assert!(create_linked(System::Nds, &[Media::new(&rom)]).is_err());
     }
 
     #[test]

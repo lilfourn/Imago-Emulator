@@ -1,8 +1,8 @@
 # 0005 — Video filters run on the CPU; DS upscaling belongs to the core
 
-- Status: proposed (settles PRD open question Q3; awaiting the owner's
-  review)
-- Date: 2026-10-05
+- Status: accepted (settles PRD open question Q3)
+- Date: 2026-10-05; accepted 2026-10-07, when the filters were built this
+  way
 - Deciders: Claude, for Luke Fournier's review
 
 ## Context
@@ -43,3 +43,15 @@ a shader hook.
 - Upscaled DS frames cost more CPU, both in the rasterizer and in the
   image upload. Plan the M14 renderer with that in mind, for example by
   rasterizing on a worker thread.
+- Done in M16 that way: `Core::set_render_scale` draws DS 3D at up to 8×,
+  in bands on threads, and the app needed no change to its drawing.
+- Done in Phase 4 that way: View > Filter's LCD grid, scanlines, Scale2x
+  and Scale3x are `Frame` → `Frame` passes in `emu-app/src/filter.rs`,
+  after colour correction and rotation. The shading filters do the integer
+  pre-scale themselves, darkening part of each console pixel's square of
+  device pixels, and follow console pixels on upscaled DS frames. The
+  costliest, a shading filter at 6×, takes about 0.7 ms per DS screen on
+  an Apple-silicon laptop (release build), within the UI thread's 4 ms.
+- xBRZ is not among them: every Rust port is GPL-3.0, which the
+  project's reuse policy (PRD section 9) rules out until a licence is
+  chosen. Scale2x and Scale3x are written from their published rules.

@@ -210,6 +210,7 @@ impl Dma {
     }
 
     /// The highest-priority channel waiting to run.
+    #[inline]
     pub(crate) fn next_pending(&self) -> Option<usize> {
         self.channels.iter().position(|channel| channel.pending)
     }

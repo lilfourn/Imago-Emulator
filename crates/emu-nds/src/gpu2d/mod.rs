@@ -14,7 +14,8 @@
 //! A line is drawn in three steps: each background and the sprites into
 //! their own line buffers ([`backgrounds`], [`objects`]); the window mask,
 //! layer priority and special effects ([`compose`]); then the display mode
-//! and master brightness, here.
+//! and master brightness, here. For upscaled 3D, [`scaled`] draws the
+//! lines again around a larger 3D layer.
 //!
 //! Layer line buffers hold `u32` layer pixels: 0 is transparent; otherwise
 //! [`OPAQUE`] is set and the low 15 bits are a BGR555 colour, or, with
@@ -27,12 +28,15 @@ mod color;
 mod compose;
 mod objects;
 mod registers;
+mod scaled;
 
 use serde::{Deserialize, Serialize};
 
 use crate::vram::{Engine, EngineMemory};
 use compose::Layers;
 use registers::Registers;
+
+pub(crate) use scaled::{LineCopy, enlarge_line};
 
 /// Pixels per line.
 pub(crate) const WIDTH: usize = 256;
@@ -45,6 +49,26 @@ const IS_3D: u32 = 1 << 30;
 /// The layer pixel for a BGR555 colour (bit 15 ignored).
 fn layer_color(bgr555: u16) -> u32 {
     OPAQUE | u32::from(bgr555 & 0x7FFF)
+}
+
+/// An 18-bit colour through MASTER_BRIGHT, `master_bright`, to
+/// `0xFFRRGGBB`, as [`Engine2d::render_line`] outputs a line.
+fn output_pixel(master_bright: u16, color: u32) -> u32 {
+    let factor = u32::from(master_bright & 0x1F).min(16);
+    color::to_argb(match master_bright >> 14 {
+        1 => color::brighten(color, factor),
+        2 => color::darken(color, factor),
+        _ => color,
+    })
+}
+
+/// The layer pixel for a 3D pixel: transparent where its alpha is 0.
+fn layer_3d_pixel(pixel: u32) -> u32 {
+    if (pixel >> 18) & 0x1F != 0 {
+        OPAQUE | IS_3D | (pixel & 0x7F_FFFF)
+    } else {
+        0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +84,14 @@ pub(crate) struct Engine2d {
     /// capture. Rebuilt every line, so not saved.
     #[serde(skip, default = "blank_line")]
     capture: [u16; WIDTH],
+    /// The last line's layers, for drawing it again around a larger 3D
+    /// layer ([`Engine2d::copy_line`]). Rebuilt every line, so not saved.
+    #[serde(skip)]
+    layers: Option<Box<Layers>>,
+    /// Whether the last line showed 3D: the graphics display mode, with
+    /// the 3D layer drawn as BG0.
+    #[serde(skip)]
+    showed_3d: bool,
 }
 
 fn blank_line() -> [u16; WIDTH] {
@@ -74,6 +106,8 @@ impl Engine2d {
             palette: vec![0; 0x200].into_boxed_slice(),
             oam: vec![0; 0x200].into_boxed_slice(),
             capture: blank_line(),
+            layers: None,
+            showed_3d: false,
         }
     }
 
@@ -138,12 +172,19 @@ impl Engine2d {
         // Drawn in every display mode: capture can record it while VRAM
         // display shows something else.
         let mut graphics = [0; WIDTH];
-        self.graphics_line(line, memory, bg0_3d, &mut graphics);
+        let mut layers = self
+            .layers
+            .take()
+            .unwrap_or_else(|| Box::new(Layers::new()));
+        let drew_3d = self.graphics_line(line, memory, bg0_3d, &mut layers, &mut graphics);
+        self.layers = Some(layers);
         for (captured, &color) in self.capture.iter_mut().zip(&graphics) {
             *captured = 0x8000 | color::narrow(color);
         }
         let dispcnt = self.registers.dispcnt;
-        match (dispcnt >> 16) & 3 {
+        let display_mode = (dispcnt >> 16) & 3;
+        self.showed_3d = display_mode == 1 && drew_3d;
+        match display_mode {
             0 => out.fill(color::to_argb(color::WHITE)),
             1 => self.output(&graphics, out),
             2 => self.output(&vram_display_line(line, (dispcnt >> 18) & 3, lcdc), out),
@@ -154,28 +195,31 @@ impl Engine2d {
         self.registers.step_affine();
     }
 
-    /// Composes `line`'s BG, 3D and OBJ layers into 18-bit colours.
+    /// Composes `line`'s BG, 3D and OBJ layers, drawn into `layers`, into
+    /// 18-bit colours. Returns whether the 3D layer was drawn as BG0.
     fn graphics_line(
         &self,
         line: u32,
         memory: &impl EngineMemory,
         bg0_3d: Option<&[u32; WIDTH]>,
+        layers: &mut Layers,
         out: &mut [u32; WIDTH],
-    ) {
+    ) -> bool {
+        layers.clear();
         let dispcnt = self.registers.dispcnt;
         if dispcnt & (1 << 7) != 0 {
             // Forced blank.
             out.fill(color::WHITE);
-            return;
+            return false;
         }
-        let mut layers = Layers::new();
         layers.drawn = self.draw_backgrounds(line, memory, bg0_3d, &mut layers.backgrounds);
         let mut object_window = [false; WIDTH];
         if dispcnt & (1 << 12) != 0 {
             self.draw_objects(line, memory, &mut layers.objects, &mut object_window);
         }
         self.window_line(line, &object_window, &mut layers.window);
-        self.compose(&layers, out);
+        self.compose(layers, out);
+        layers.drawn[0] && self.shows_3d_as_bg0()
     }
 
     /// Applies MASTER_BRIGHT to 18-bit colours and converts them to
@@ -585,6 +629,91 @@ mod tests {
         let row = render_with_3d(&mut engine, &vram, 0, Some(&line_3d));
         assert_eq!(row[0], color::to_argb(0x3F));
         assert_eq!(row[255], argb(0), "past the 3D image is transparent");
+    }
+
+    /// `engine`'s last line, drawn as `native`, drawn again `scale` times
+    /// larger around the larger 3D layer's `rows`.
+    fn draw_larger(
+        engine: &Engine2d,
+        native: &[u32; WIDTH],
+        scale: usize,
+        rows: &[Vec<u32>],
+    ) -> Vec<u32> {
+        let mut copy = LineCopy::default();
+        engine.copy_line(native, &mut copy);
+        let mut out = vec![0; WIDTH * scale * scale];
+        copy.draw(scale, |row| rows.get(row).map(Vec::as_slice), &mut out);
+        out
+    }
+
+    #[test]
+    fn a_line_drawn_larger_composes_the_larger_3d_layer() {
+        let mut engine = Engine2d::new(Engine::A);
+        let vram = vram();
+        engine.write_palette(0, BLUE);
+        engine.write_register(0x50, 1 << 13); // backdrop is a 2nd target
+        engine.write_register(0x6C, 1 << 14 | 4); // brighten by 4/16
+        set_dispcnt(&mut engine, GRAPHICS | 1 << 3 | 1 << 8);
+        let red = 0x3F | 31 << 18;
+        let mut line_3d = [0; WIDTH];
+        line_3d[0] = red;
+        let native = render_with_3d(&mut engine, &vram, 0, Some(&line_3d));
+        // Pixel 0's square at 2x: red, half-alpha red; nothing, red.
+        let mut rows = vec![vec![0; 512]; 2];
+        rows[0][0] = red;
+        rows[0][1] = 0x3F | 15 << 18;
+        rows[1][1] = red;
+        let out = draw_larger(&engine, &native, 2, &rows);
+        let shown = |color| color::to_argb(color::brighten(color, 4));
+        assert_eq!(out[0], native[0]);
+        assert_eq!(out[1], shown(color::blend_3d(0x3F, color::widen(BLUE), 15)));
+        assert_eq!(out[512], shown(color::widen(BLUE)));
+        assert_eq!(out[513], native[0]);
+        assert_eq!(&out[2..4], &[native[1]; 2], "no 3D there, as at 1x");
+    }
+
+    #[test]
+    fn a_line_drawn_larger_keeps_windows_and_scrolling() {
+        let mut engine = Engine2d::new(Engine::A);
+        let vram = vram();
+        engine.write_palette(0, BLUE);
+        // Window 0 over x 0..8 shows everything but BG0.
+        set_dispcnt(&mut engine, GRAPHICS | 1 << 3 | 1 << 8 | 1 << 13);
+        engine.write_register(0x40, 0x0008);
+        engine.write_register(0x44, 0x00C0);
+        engine.write_register(0x48, 0x003E);
+        engine.write_register(0x4A, 0x003F);
+        engine.write_register(0x10, 1); // BG0HOFS: one pixel left
+        let native = render_with_3d(&mut engine, &vram, 0, Some(&[0x3F | 31 << 18; WIDTH]));
+        let mut green = vec![0x3F << 6 | 31 << 18; 512];
+        green[2] = 0x3F << 12 | 31 << 18;
+        let out = draw_larger(&engine, &native, 2, &[green.clone(), green]);
+        assert_eq!(out[15], argb(BLUE), "inside the window");
+        assert_eq!(out[16], color::to_argb(0x3F << 6), "outside, the larger 3D");
+        assert_eq!(out[16 + 512], color::to_argb(0x3F << 6));
+        // Scrolled by two cells: the end of the row is past the 3D frame.
+        assert_eq!(out[509], color::to_argb(0x3F << 6));
+        assert_eq!(out[510], argb(BLUE));
+    }
+
+    #[test]
+    fn lines_without_3d_come_out_enlarged() {
+        let (mut engine, vram) = scene();
+        let native = render(&mut engine, &vram, 0);
+        let rows = vec![vec![0x3F | 31 << 18; 512]; 2];
+        let enlarged: Vec<u32> = native.iter().flat_map(|&pixel| [pixel; 2]).collect();
+        assert_eq!(
+            draw_larger(&engine, &native, 2, &rows),
+            [&enlarged[..], &enlarged[..]].concat()
+        );
+        // 3D, but the frame is forced blank.
+        set_dispcnt(&mut engine, GRAPHICS | 1 << 3 | 1 << 8 | 1 << 7);
+        let native = render_with_3d(&mut engine, &vram, 0, Some(&[0x3F | 31 << 18; WIDTH]));
+        assert!(
+            draw_larger(&engine, &native, 2, &rows)
+                .iter()
+                .all(|&pixel| pixel == native[0])
+        );
     }
 
     #[test]

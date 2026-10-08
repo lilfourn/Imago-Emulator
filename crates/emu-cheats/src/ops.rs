@@ -1,7 +1,9 @@
 //! Memory operations for the formats that are flat lists of codes: raw
-//! patches, GameShark, CodeBreaker, GameShark Advance and Pro Action
-//! Replay. Each code becomes one operation, so "skip the next n codes"
-//! skips n operations.
+//! patches, GameShark, Game Genie, CodeBreaker, GameShark Advance and Pro
+//! Action Replay. Each code becomes one operation, so "skip the next n
+//! codes" skips n operations.
+
+use emu_core::RomPatch;
 
 use crate::Memory;
 
@@ -93,6 +95,18 @@ pub(crate) enum Op {
     },
     /// Skips the next operations; `usize::MAX` ends the cheat.
     Skip(usize),
+    /// Stores `value` in the I/O registers at `address`, as the CPU would:
+    /// a halfword, or a word as two halfwords, low first (GBA). `width` is
+    /// never a byte.
+    WriteIo {
+        address: u32,
+        value: u32,
+        width: Width,
+    },
+    /// Changes what the game reads from ROM while the cheat is on. The
+    /// frontend hands these to the core (see [`crate::rom_patches`]), so
+    /// running the operation does nothing and conditions don't gate it.
+    PatchRom(Vec<RomPatch>),
 }
 
 /// How [`Op::Modify`] combines values.
@@ -135,6 +149,20 @@ impl Test {
             Self::Never => false,
         }
     }
+}
+
+/// Patches the little-endian halfword at ROM `address` (GBA codes).
+pub(crate) fn patch_rom_half(address: u32, value: u16) -> Op {
+    let [low, high] = value.to_le_bytes();
+    let byte = |address, value| RomPatch {
+        address,
+        value,
+        compare: None,
+    };
+    Op::PatchRom(vec![
+        byte(address, low),
+        byte(address.wrapping_add(1), high),
+    ])
 }
 
 /// Runs `ops` in order against `memory`.
@@ -222,6 +250,12 @@ pub(crate) fn run(ops: &[Op], memory: &mut (impl Memory + ?Sized)) {
                 }
             }
             &Op::Skip(skip) => next = next.saturating_add(skip),
+            &Op::WriteIo {
+                address,
+                value,
+                width,
+            } => write_io(memory, address, value, width),
+            Op::PatchRom(_) => {}
         }
     }
 }
@@ -233,6 +267,17 @@ pub(crate) fn read(memory: &(impl Memory + ?Sized), address: u32, width: Width) 
         let next = memory.peek(address.wrapping_add(byte))?;
         Some(value | u32::from(next) << (byte * 8))
     })
+}
+
+/// Stores `value` in the I/O registers at `address`, aligned as the CPU
+/// aligns a store of `width`, a halfword at a time, low first. No code
+/// writes a lone I/O byte, so a byte width writes nothing.
+fn write_io(memory: &mut (impl Memory + ?Sized), address: u32, value: u32, width: Width) {
+    let aligned = address & !(width as u32 - 1);
+    for half in 0..width as u32 / 2 {
+        let at = aligned.wrapping_add(half * 2);
+        memory.poke_io_16(at, (value >> (half * 16)) as u16);
+    }
 }
 
 /// Stores `value` little-endian at `address`, skipping unwritable bytes.

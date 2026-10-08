@@ -10,6 +10,7 @@ use emu_sched::Scheduler;
 use serde::{Deserialize, Serialize};
 
 use crate::cart::{Cart, RomEvent};
+use crate::display::ScaledScreens;
 use crate::dma::{Dma, Owner, Timing};
 use crate::gba_slot::GbaSlot;
 use crate::gpu2d::Engine2d;
@@ -22,6 +23,7 @@ use crate::sound::{self, Sound};
 use crate::spi::Spi;
 use crate::timer::Timers;
 use crate::vram::{Engine, Vram};
+use crate::wifi::Wifi;
 
 /// Main RAM: 4 MiB, mirrored through 0x02000000–0x02FFFFFF.
 pub(crate) const MAIN_RAM_SIZE: usize = 0x40_0000;
@@ -43,6 +45,8 @@ pub(crate) enum Event {
     CartSpiDone,
     /// A byte on the ARM7's SPI bus is done.
     SpiDone,
+    /// The wifi hardware has something to do.
+    Wifi,
 }
 
 /// One CPU's private devices and clock.
@@ -78,10 +82,13 @@ impl CpuIo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Hardware {
+    #[serde(with = "crate::bytes")]
     pub(crate) main_ram: Box<[u8]>,
+    #[serde(with = "crate::bytes")]
     pub(crate) shared_wram: Box<[u8]>,
+    #[serde(with = "crate::bytes")]
     pub(crate) arm7_wram: Box<[u8]>,
     pub(crate) vram: Vram,
     /// WRAMCNT: how the 32 KiB shared WRAM splits between the CPUs.
@@ -94,6 +101,9 @@ pub(crate) struct Hardware {
     /// Saved in states, so a state loaded while paused shows its frame.
     pub(crate) screen_a: Box<[u32]>,
     pub(crate) screen_b: Box<[u32]>,
+    /// The same, larger, with upscaled 3D: a display setting, not saved.
+    #[serde(skip)]
+    pub(crate) scaled: ScaledScreens,
     /// The BIOS images: our HLE vectors, or the user's dumps. Restored
     /// from media.
     #[serde(skip)]
@@ -109,6 +119,7 @@ pub(crate) struct Hardware {
     pub(crate) gba_slot: GbaSlot,
     pub(crate) spi: Spi,
     pub(crate) rtc: Rtc,
+    pub(crate) wifi: Wifi,
     /// KEYINPUT: A, B, Select, Start, Right, Left, Up, Down, R, L; active low.
     pub(crate) keys: u16,
     /// EXTKEYIN bits 0 (X), 1 (Y), 6 (pen down) and 7 (hinge), active low.
@@ -125,7 +136,9 @@ pub(crate) struct Hardware {
     pub(crate) capturing: bool,
     /// Raw values of I/O registers without side effects, for reading back:
     /// one 0x2000-byte page per CPU.
+    #[serde(with = "crate::bytes")]
     pub(crate) io9: Box<[u8]>,
+    #[serde(with = "crate::bytes")]
     pub(crate) io7: Box<[u8]>,
     pub(crate) scheduler: Scheduler<Event>,
 }
@@ -158,6 +171,7 @@ impl Hardware {
             gpu3d: Gpu3d::new(),
             screen_a: blank_screen(),
             screen_b: blank_screen(),
+            scaled: ScaledScreens::default(),
             arm9_bios,
             arm7_bios,
             arm9: CpuIo::new(Owner::Arm9),
@@ -169,6 +183,7 @@ impl Hardware {
             gba_slot: GbaSlot::default(),
             spi: Spi::new(None),
             rtc: Rtc::new(0),
+            wifi: Wifi::new(&[]),
             keys: 0x03FF,
             ext_keys: 0x007F,
             powcnt1: 0,
@@ -270,6 +285,27 @@ impl Hardware {
         self.sound = sound;
         self.scheduler
             .schedule_at(time + sound::CYCLES_PER_SAMPLE, Event::SoundSample);
+    }
+
+    /// Brings the wifi hardware up to bus cycle `time`, for its event.
+    pub(crate) fn run_wifi(&mut self, time: u64) {
+        self.wifi.advance(time);
+        self.sync_wifi();
+    }
+
+    /// Raises the ARM7's wifi interrupt if the wifi hardware asks, and
+    /// moves its event to its next deadline, after anything that may have
+    /// changed either.
+    pub(crate) fn sync_wifi(&mut self) {
+        if self.wifi.take_irq() {
+            self.arm7.interrupts.request(irq::WIFI);
+        }
+        if let Some(deadline) = self.wifi.reschedule() {
+            self.scheduler.cancel(|event| *event == Event::Wifi);
+            if let Some(time) = deadline {
+                self.scheduler.schedule_at(time, Event::Wifi);
+            }
+        }
     }
 
     /// Replaces timer `index`'s overflow event on `side` after it changed.

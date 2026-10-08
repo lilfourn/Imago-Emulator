@@ -2,7 +2,9 @@
 //!
 //! Instructions are decoded from bits 27–20 and 7–4, as the hardware's
 //! decoder and NanoBoyAdvance do, so odd encodings behave as the tests
-//! recorded them. R15 reads as the instruction's address plus 8 while an
+//! recorded them. Those 12 bits are looked up in a table built at compile
+//! time ([`decode`]), so running an instruction starts with one lookup
+//! rather than a chain of tests. R15 reads as the instruction's address plus 8 while an
 //! instruction runs; handlers advance it (or reload the pipeline) at the
 //! cycle the hardware does, which is visible to instructions that store
 //! R15 or read it after a register shift.
@@ -17,44 +19,123 @@
 //! the check is a constant false).
 
 use crate::alu::{self, Shift};
+use crate::armv5;
+use crate::multiplier;
 use crate::{Access, Bus, Mode, Model, Processor, psr};
+
+/// Which handler runs an ARM instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    BranchExchange,
+    Swap,
+    Multiply,
+    MultiplyLong,
+    HalfwordTransfer,
+    MoveFromPsr,
+    MoveToPsr,
+    DataProcessing,
+    SingleTransfer,
+    BlockTransfer,
+    Branch,
+    SoftwareInterrupt,
+    Undefined,
+    // ARMv5TE's, in `armv5.rs`.
+    CountLeadingZeros,
+    BranchLinkExchangeRegister,
+    Breakpoint,
+    SaturatingArithmetic,
+    SignedHalfwordMultiply,
+    DoublewordTransfer,
+    CoprocessorRegisterTransfer,
+}
+
+/// Every instruction's [`Kind`] by its bits 27–20 and 7–4 (see
+/// [`table_index`]), for ARMv4T and for ARMv5TE.
+static DECODE: [[Kind; 4096]; 2] = [table(false), table(true)];
+
+/// An instruction's index in [`DECODE`]'s tables: bits 27–20 then 7–4.
+fn table_index(instruction: u32) -> usize {
+    (((instruction >> 16) & 0xFF0) | ((instruction >> 4) & 0xF)) as usize
+}
+
+/// [`decode`] for every value of bits 27–20 and 7–4.
+const fn table(v5: bool) -> [Kind; 4096] {
+    let mut table = [Kind::Undefined; 4096];
+    let mut index = 0;
+    while index < table.len() {
+        let bits = index as u32;
+        table[index] = decode((bits & 0xFF0) << 16 | (bits & 0xF) << 4, v5);
+        index += 1;
+    }
+    table
+}
+
+/// The kind of instruction whose bits 27–20 and 7–4 are `key` (the rest
+/// clear), on ARMv5TE if `v5` and otherwise ARMv4T.
+const fn decode(key: u32, v5: bool) -> Kind {
+    if v5 && let Some(kind) = armv5::decode(key) {
+        return kind;
+    }
+    if key & 0x0FF0_00F0 == 0x0120_0010 {
+        Kind::BranchExchange
+    } else if key & 0x0FB0_00F0 == 0x0100_0090 {
+        Kind::Swap
+    } else if key & 0x0FC0_00F0 == 0x0000_0090 {
+        Kind::Multiply
+    } else if key & 0x0F80_00F0 == 0x0080_0090 {
+        Kind::MultiplyLong
+    } else if key & 0x0E00_0090 == 0x0000_0090 {
+        Kind::HalfwordTransfer
+    } else if key & 0x0FB0_00F0 == 0x0100_0000 {
+        Kind::MoveFromPsr
+    } else if key & 0x0FB0_00F0 == 0x0120_0000 || key & 0x0FB0_0000 == 0x0320_0000 {
+        Kind::MoveToPsr
+    } else if key & 0x0C00_0000 == 0 {
+        Kind::DataProcessing
+    } else if key & 0x0E00_0010 == 0x0600_0010 {
+        Kind::Undefined
+    } else if key & 0x0C00_0000 == 0x0400_0000 {
+        Kind::SingleTransfer
+    } else if key & 0x0E00_0000 == 0x0800_0000 {
+        Kind::BlockTransfer
+    } else if key & 0x0E00_0000 == 0x0A00_0000 {
+        Kind::Branch
+    } else if key & 0x0F00_0000 == 0x0F00_0000 {
+        Kind::SoftwareInterrupt
+    } else {
+        // Coprocessor instructions: the ARM7TDMI has no coprocessor, and
+        // the ARM9's only one (CP15) takes no CDP, LDC or STC.
+        Kind::Undefined
+    }
+}
 
 impl<M: Model> Processor<M> {
     pub(crate) fn execute_arm<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
-        if M::V5TE && self.execute_arm_v5(bus, instruction) {
-            return;
-        }
-        let key = instruction & 0x0FF0_00F0;
-        if key & 0x0FF0_00F0 == 0x0120_0010 {
-            self.branch_exchange(bus, instruction);
-        } else if key & 0x0FB0_00F0 == 0x0100_0090 {
-            self.swap(bus, instruction);
-        } else if key & 0x0FC0_00F0 == 0x0000_0090 {
-            self.multiply(bus, instruction);
-        } else if key & 0x0F80_00F0 == 0x0080_0090 {
-            self.multiply_long(bus, instruction);
-        } else if key & 0x0E00_0090 == 0x0000_0090 {
-            self.halfword_transfer(bus, instruction);
-        } else if key & 0x0FB0_00F0 == 0x0100_0000 {
-            self.move_from_psr(instruction);
-        } else if key & 0x0FB0_00F0 == 0x0120_0000 || key & 0x0FB0_0000 == 0x0320_0000 {
-            self.move_to_psr(instruction);
-        } else if key & 0x0C00_0000 == 0 {
-            self.data_processing(bus, instruction);
-        } else if key & 0x0E00_0010 == 0x0600_0010 {
-            self.undefined(bus);
-        } else if key & 0x0C00_0000 == 0x0400_0000 {
-            self.single_transfer(bus, instruction);
-        } else if key & 0x0E00_0000 == 0x0800_0000 {
-            self.block_transfer(bus, instruction);
-        } else if key & 0x0E00_0000 == 0x0A00_0000 {
-            self.branch(bus, instruction);
-        } else if key & 0x0F00_0000 == 0x0F00_0000 {
-            self.software_interrupt(bus);
-        } else {
-            // Coprocessor instructions: the ARM7TDMI has no coprocessor, and
-            // the ARM9's only one (CP15) takes no CDP, LDC or STC.
-            self.undefined(bus);
+        match DECODE[usize::from(M::V5TE)][table_index(instruction)] {
+            Kind::BranchExchange => self.branch_exchange(bus, instruction),
+            Kind::Swap => self.swap(bus, instruction),
+            Kind::Multiply => self.multiply(bus, instruction),
+            Kind::MultiplyLong => self.multiply_long(bus, instruction),
+            Kind::HalfwordTransfer => self.halfword_transfer(bus, instruction),
+            Kind::MoveFromPsr => self.move_from_psr(instruction),
+            Kind::MoveToPsr => self.move_to_psr(instruction),
+            Kind::DataProcessing => self.data_processing(bus, instruction),
+            Kind::SingleTransfer => self.single_transfer(bus, instruction),
+            Kind::BlockTransfer => self.block_transfer(bus, instruction),
+            Kind::Branch => self.branch(bus, instruction),
+            Kind::SoftwareInterrupt => self.software_interrupt(bus),
+            Kind::Undefined => self.undefined(bus),
+            Kind::CountLeadingZeros => self.count_leading_zeros(bus, instruction),
+            Kind::BranchLinkExchangeRegister => {
+                self.branch_link_exchange_register(bus, instruction);
+            }
+            Kind::Breakpoint => self.breakpoint(bus),
+            Kind::SaturatingArithmetic => self.saturating_arithmetic(bus, instruction),
+            Kind::SignedHalfwordMultiply => self.signed_halfword_multiply(bus, instruction),
+            Kind::DoublewordTransfer => self.doubleword_transfer(bus, instruction),
+            Kind::CoprocessorRegisterTransfer => {
+                self.coprocessor_register_transfer(bus, instruction);
+            }
         }
     }
 
@@ -245,6 +326,8 @@ impl<M: Model> Processor<M> {
         }
         if instruction & (1 << 20) != 0 {
             self.set_nz(result);
+            let addend = if accumulate { accumulator } else { 0 };
+            self.set_multiply_carry(multiplier::Kind::Short, rm, rs, u64::from(addend));
         }
         self.r[rd] = result;
         if rd == 15 {
@@ -276,6 +359,13 @@ impl<M: Model> Processor<M> {
         if instruction & (1 << 20) != 0 {
             self.set_flag(psr::N, result >> 63 != 0);
             self.set_flag(psr::Z, result == 0);
+            let kind = if signed {
+                multiplier::Kind::LongSigned
+            } else {
+                multiplier::Kind::LongUnsigned
+            };
+            let addend = if accumulate { accumulator } else { 0 };
+            self.set_multiply_carry(kind, rm, rs, addend);
         }
         self.r[rd_low] = result as u32;
         self.r[rd_high] = (result >> 32) as u32;

@@ -23,11 +23,58 @@
 //! for W-buffering. Colour and texture coordinates are always
 //! perspective-correct, weighted by each polygon's W values scaled to 16
 //! bits as the hardware does.
+//!
+//! Above the native resolution (an [`Area`] with a `scale` over 1), the
+//! same rules apply on a grid `scale` times finer, with vertices at their
+//! fine positions; line segments and dots are drawn `scale` cells thick,
+//! as thick as they are on the screen.
 
 use crate::gpu3d::polygon::{MAX_POLYGON_VERTICES, ScreenVertex};
 
 pub(crate) const WIDTH: usize = 256;
 pub(crate) const HEIGHT: usize = 192;
+
+/// The part of the frame being drawn: rows `top..top + rows` of a grid
+/// `scale` times finer than the screen's pixels in each direction. The
+/// whole frame, or one band of it, drawn on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Area {
+    /// Grid cells per screen pixel, across and down.
+    pub(crate) scale: usize,
+    /// The first row.
+    pub(crate) top: usize,
+    /// How many rows.
+    pub(crate) rows: usize,
+}
+
+impl Area {
+    /// The whole screen at its own resolution.
+    pub(crate) const NATIVE: Self = Self {
+        scale: 1,
+        top: 0,
+        rows: HEIGHT,
+    };
+
+    /// Cells across.
+    pub(crate) const fn width(self) -> usize {
+        WIDTH * self.scale
+    }
+
+    /// Cells in the area.
+    pub(crate) const fn cells(self) -> usize {
+        self.width() * self.rows
+    }
+
+    /// One past the last row.
+    pub(crate) const fn bottom(self) -> usize {
+        self.top + self.rows
+    }
+
+    /// Where the cell at column `x` of row `y` is in the area's buffers.
+    pub(crate) const fn index(self, x: usize, y: usize) -> usize {
+        (y - self.top) * self.width() + x
+    }
+}
 
 /// Extra fractional bits on interpolated colours and texture coordinates.
 const ATTR_SHIFT: u32 = 8;
@@ -49,7 +96,7 @@ impl Coverage {
     };
 }
 
-/// Receives a polygon's pixels; `index` is `y * 256 + x`.
+/// Receives a polygon's pixels; `index` is [`Area::index`].
 pub(crate) trait Target {
     /// Where in the frame to draw the pixel at `index` with `depth`, or
     /// `None` to skip it. May have side effects, such as setting stencil
@@ -92,15 +139,22 @@ struct Crossing {
     attrs: [i64; 5],
 }
 
-fn prepare(vertices: &[ScreenVertex], points: &mut [Point; MAX_POLYGON_VERTICES]) -> usize {
+/// Loads `vertices` into `points`, placed on a grid `scale` times finer
+/// than the screen's pixels. Returns how many there are.
+fn prepare(
+    vertices: &[ScreenVertex],
+    scale: usize,
+    points: &mut [Point; MAX_POLYGON_VERTICES],
+) -> usize {
     let largest = vertices.iter().map(|v| v.w.max(1)).max().unwrap_or(1);
     let shift = (32 - largest.leading_zeros()).saturating_sub(16);
     for (point, vertex) in points.iter_mut().zip(vertices) {
         let [r, g, b] = vertex.color.map(i32::from);
         let [s, t] = vertex.texcoord;
+        let (x, y) = vertex.position(scale as i32);
         *point = Point {
-            x: vertex.x,
-            y: vertex.y,
+            x,
+            y,
             depth: i64::from(vertex.depth),
             weight: i64::from((vertex.w.max(1) >> shift).max(1)),
             attrs: [r, g, b, s, t].map(|a| i64::from(a) << ATTR_SHIFT),
@@ -203,6 +257,7 @@ fn span<const ANTIALIAS: bool, T: Target>(
     right: &Crossing,
     outline: bool,
     w_buffer: bool,
+    area: Area,
     target: &mut T,
 ) {
     // The row's first and last pixels (plus one), and where the left
@@ -232,7 +287,7 @@ fn span<const ANTIALIAS: bool, T: Target>(
         (0, 0)
     };
     let den = (right.x - left.x).max(1);
-    for x in start.max(0)..end.min(WIDTH as i64) {
+    for x in start.max(0)..end.min(area.width() as i64) {
         let centre = (x << 16) + 0x8000;
         let (on_left, on_right) = (x < left_end, x >= right_start);
         let coverage = if ANTIALIAS && (on_left || on_right) {
@@ -269,7 +324,7 @@ fn span<const ANTIALIAS: bool, T: Target>(
         } else {
             (left.depth + (right.depth - left.depth) * num / den, None)
         };
-        emit(target, y * WIDTH + x as usize, depth, coverage, || {
+        emit(target, area.index(x as usize, y), depth, coverage, || {
             let weight = known.unwrap_or_else(weight);
             std::array::from_fn(|i| lerp(left.attrs[i], right.attrs[i], weight))
         });
@@ -298,28 +353,35 @@ impl Chain {
     }
 }
 
-/// Fills a convex polygon: the pixels whose centres it covers.
-pub(crate) fn fill<T: Target>(vertices: &[ScreenVertex], w_buffer: bool, target: &mut T) {
-    fill_rows::<false, T>(vertices, w_buffer, target);
+/// Fills a convex polygon: the pixels in `area` whose centres it covers.
+pub(crate) fn fill<T: Target>(
+    vertices: &[ScreenVertex],
+    w_buffer: bool,
+    area: Area,
+    target: &mut T,
+) {
+    fill_rows::<false, T>(vertices, w_buffer, area, target);
 }
 
-/// Fills a convex polygon with anti-aliased edges: every pixel it covers
-/// at all, with the share it covers.
+/// Fills a convex polygon with anti-aliased edges: every pixel in `area`
+/// it covers at all, with the share it covers.
 pub(crate) fn fill_antialiased<T: Target>(
     vertices: &[ScreenVertex],
     w_buffer: bool,
+    area: Area,
     target: &mut T,
 ) {
-    fill_rows::<true, T>(vertices, w_buffer, target);
+    fill_rows::<true, T>(vertices, w_buffer, area, target);
 }
 
 fn fill_rows<const ANTIALIAS: bool, T: Target>(
     vertices: &[ScreenVertex],
     w_buffer: bool,
+    area: Area,
     target: &mut T,
 ) {
     let mut storage = [Point::default(); MAX_POLYGON_VERTICES];
-    let len = prepare(vertices, &mut storage);
+    let len = prepare(vertices, area.scale, &mut storage);
     let points = &storage[..len];
     if len < 3 {
         return;
@@ -342,7 +404,7 @@ fn fill_rows<const ANTIALIAS: bool, T: Target>(
     }
     let run_of = |a: usize, b: usize| runs[if b == (a + 1) % len { a } else { b }];
     let first = points[top].y;
-    for y in first.max(0)..bottom.min(HEIGHT as i32) {
+    for y in first.max(area.top as i32)..bottom.min(area.bottom() as i32) {
         let (Some((a, b)), Some((c, d))) = (forward.edge(points, y), backward.edge(points, y))
         else {
             continue;
@@ -355,53 +417,67 @@ fn fill_rows<const ANTIALIAS: bool, T: Target>(
             (other, one)
         };
         let outline = y == first || y == bottom - 1;
-        span::<ANTIALIAS, T>(y as usize, &left, &right, outline, w_buffer, target);
+        span::<ANTIALIAS, T>(y as usize, &left, &right, outline, w_buffer, area, target);
     }
 }
 
-/// One point of the line from `a` to `b`, `step` of `steps` along.
+/// One point of the line from `a` to `b`, `step` of `steps` along: one
+/// screen pixel's worth, a square of `area.scale` cells from the point
+/// down and to the right.
 fn line_point<T: Target>(
     a: &Point,
     b: &Point,
-    step: i32,
-    steps: i32,
+    (step, steps): (i32, i32),
     w_buffer: bool,
+    area: Area,
     target: &mut T,
 ) {
     let along = |from: i32, to: i32| from + (2 * (to - from) * step + steps).div_euclid(2 * steps);
     let (x, y) = (along(a.x, b.x), along(a.y, b.y));
-    if !(0..WIDTH as i32).contains(&x) || !(0..HEIGHT as i32).contains(&y) {
+    let scale = area.scale as i32;
+    let columns = x.max(0)..(x + scale).min(area.width() as i32);
+    let rows = y.max(area.top as i32)..(y + scale).min(area.bottom() as i32);
+    if columns.is_empty() || rows.is_empty() {
         return;
     }
     let (num, den) = (i64::from(step), i64::from(steps));
     let weight = weight_of_b(num, den, a.weight, b.weight);
     let depth = depth_between(a.depth, b.depth, num, den, weight, w_buffer);
-    emit(
-        target,
-        y as usize * WIDTH + x as usize,
-        depth,
-        Coverage::EDGE,
-        || std::array::from_fn(|i| lerp(a.attrs[i], b.attrs[i], weight)),
-    );
+    for row in rows {
+        for column in columns.clone() {
+            emit(
+                target,
+                area.index(column as usize, row as usize),
+                depth,
+                Coverage::EDGE,
+                || std::array::from_fn(|i| lerp(a.attrs[i], b.attrs[i], weight)),
+            );
+        }
+    }
 }
 
-/// Draws a polygon's edges one pixel wide: line segments, dots and
-/// wire-frames. Every pixel is an edge, wholly covered.
-pub(crate) fn outline<T: Target>(vertices: &[ScreenVertex], w_buffer: bool, target: &mut T) {
+/// Draws a polygon's edges one screen pixel wide, within `area`: line
+/// segments, dots and wire-frames. Every pixel is an edge, wholly covered.
+pub(crate) fn outline<T: Target>(
+    vertices: &[ScreenVertex],
+    w_buffer: bool,
+    area: Area,
+    target: &mut T,
+) {
     let mut storage = [Point::default(); MAX_POLYGON_VERTICES];
-    let len = prepare(vertices, &mut storage);
+    let len = prepare(vertices, area.scale, &mut storage);
     let points = &storage[..len];
     let mut drawn = false;
     for (i, a) in points.iter().enumerate() {
         let b = &points[(i + 1) % len];
         let steps = (b.x - a.x).abs().max((b.y - a.y).abs());
         for step in 0..steps {
-            line_point(a, b, step, steps, w_buffer, target);
+            line_point(a, b, (step, steps), w_buffer, area, target);
         }
         drawn |= steps > 0;
     }
     if let (false, Some(dot)) = (drawn, points.first()) {
-        line_point(dot, dot, 0, 1, w_buffer, target);
+        line_point(dot, dot, (0, 1), w_buffer, area, target);
     }
 }
 
@@ -451,6 +527,7 @@ mod tests {
         fill(
             &[vertex(0, 0), vertex(0, 8), vertex(8, 0)],
             false,
+            Area::NATIVE,
             &mut coverage,
         );
         // Row y holds x < 7 - y: 7 + 6 + ... + 1.
@@ -462,10 +539,20 @@ mod tests {
     fn shared_edges_neither_overlap_nor_gap() {
         let mut halves = Hits::new();
         let quad = [vertex(3, 2), vertex(1, 40), vertex(70, 33), vertex(60, 5)];
-        fill(&[quad[0], quad[1], quad[2]], false, &mut halves);
-        fill(&[quad[0], quad[2], quad[3]], false, &mut halves);
+        fill(
+            &[quad[0], quad[1], quad[2]],
+            false,
+            Area::NATIVE,
+            &mut halves,
+        );
+        fill(
+            &[quad[0], quad[2], quad[3]],
+            false,
+            Area::NATIVE,
+            &mut halves,
+        );
         let mut whole = Hits::new();
-        fill(&quad, false, &mut whole);
+        fill(&quad, false, Area::NATIVE, &mut whole);
         assert_eq!(halves.0, whole.0);
         assert!(halves.0.iter().all(|&times| times <= 1));
     }
@@ -479,7 +566,7 @@ mod tests {
             vertex(256, 192),
             vertex(256, 0),
         ];
-        fill(&corners, false, &mut coverage);
+        fill(&corners, false, Area::NATIVE, &mut coverage);
         assert_eq!(coverage.pixels(), WIDTH * HEIGHT);
     }
 
@@ -489,13 +576,119 @@ mod tests {
         outline(
             &[vertex(2, 2), vertex(2, 2), vertex(6, 4)],
             false,
+            Area::NATIVE,
             &mut line,
         );
         assert_eq!(line.pixels(), 5);
         assert!(line.drawn(2, 2) && line.drawn(6, 4));
         let mut dot = Hits::new();
-        outline(&[vertex(9, 9); 3], false, &mut dot);
+        outline(&[vertex(9, 9); 3], false, Area::NATIVE, &mut dot);
         assert!(dot.drawn(9, 9) && dot.pixels() == 1);
+    }
+
+    /// Records which cells of `area` were drawn.
+    struct Cells {
+        area: Area,
+        drawn: Vec<bool>,
+    }
+
+    impl Cells {
+        fn new(area: Area) -> Self {
+            Self {
+                area,
+                drawn: vec![false; area.cells()],
+            }
+        }
+
+        /// Drawn cells as (column, row) on the whole grid.
+        fn list(&self) -> Vec<(usize, usize)> {
+            let width = self.area.width();
+            (0..self.drawn.len())
+                .filter(|&index| self.drawn[index])
+                .map(|index| (index % width, self.area.top + index / width))
+                .collect()
+        }
+    }
+
+    impl Target for Cells {
+        fn test(&mut self, index: usize, _: u32) -> Option<usize> {
+            Some(index)
+        }
+
+        fn shade(&mut self, index: usize, _: u32, _: [u8; 3], _: [i32; 2], _: Coverage) {
+            self.drawn[index] = true;
+        }
+    }
+
+    fn doubled(top: usize, rows: usize) -> Area {
+        Area {
+            scale: 2,
+            top,
+            rows,
+        }
+    }
+
+    #[test]
+    fn a_finer_grid_covers_the_same_shape_in_more_cells() {
+        let mut cells = Cells::new(doubled(0, 2 * HEIGHT));
+        fill(
+            &[vertex(0, 0), vertex(0, 8), vertex(8, 0)],
+            false,
+            cells.area,
+            &mut cells,
+        );
+        // Row y of 16 holds x < 15 - y: 15 + 14 + ... + 0.
+        assert_eq!(cells.list().len(), 120);
+    }
+
+    #[test]
+    fn fine_positions_place_vertices_between_pixels() {
+        let half = |x: i32, y: i32| ScreenVertex {
+            fine: Some([(x << 8) + 128, (y << 8) + 128]),
+            ..vertex(x, y)
+        };
+        let mut cells = Cells::new(doubled(0, 2 * HEIGHT));
+        // A 4×4-pixel square from (10.5, 20.5): cells 21 to 28 across.
+        let square = [half(10, 20), half(10, 24), half(14, 24), half(14, 20)];
+        fill(&square, false, cells.area, &mut cells);
+        let drawn = cells.list();
+        assert_eq!(drawn.len(), 64);
+        assert_eq!(drawn.first(), Some(&(21, 41)));
+        assert_eq!(drawn.last(), Some(&(28, 48)));
+    }
+
+    #[test]
+    fn bands_draw_their_own_rows_of_the_frame() {
+        let quad = [vertex(3, 2), vertex(1, 40), vertex(70, 33), vertex(60, 5)];
+        let mut whole = Cells::new(doubled(0, 2 * HEIGHT));
+        fill_antialiased(&quad, false, whole.area, &mut whole);
+        outline(&quad, false, whole.area, &mut whole);
+        let mut joined = Vec::new();
+        for (top, rows) in [(0, 30), (30, 7), (37, 2 * HEIGHT - 37)] {
+            let mut band = Cells::new(doubled(top, rows));
+            fill_antialiased(&quad, false, band.area, &mut band);
+            outline(&quad, false, band.area, &mut band);
+            joined.extend(band.list());
+        }
+        assert_eq!(joined, whole.list());
+    }
+
+    #[test]
+    fn lines_and_dots_keep_their_on_screen_thickness() {
+        let mut cells = Cells::new(doubled(0, 2 * HEIGHT));
+        outline(&[vertex(9, 9); 3], false, cells.area, &mut cells);
+        assert_eq!(cells.list(), [(18, 18), (19, 18), (18, 19), (19, 19)]);
+        let mut line = Cells::new(doubled(0, 2 * HEIGHT));
+        // Pixels 0 to 100 of row 5: 2 rows of 2 × 101 cells.
+        outline(
+            &[vertex(0, 5), vertex(0, 5), vertex(100, 5)],
+            false,
+            line.area,
+            &mut line,
+        );
+        let drawn = line.list();
+        assert_eq!(drawn.len(), 2 * 2 * 101);
+        assert!(drawn.iter().all(|&(_, row)| row == 10 || row == 11));
     }
 
     /// Records the interpolated colour of each pixel.
@@ -533,6 +726,7 @@ mod tests {
                 far,
             ],
             false,
+            Area::NATIVE,
             &mut colors,
         );
         let middle = colors.0[WIDTH + 32][0];
@@ -569,6 +763,7 @@ mod tests {
         fill(
             &[vertex(10, 10), vertex(20, 40), vertex(100, 20)],
             false,
+            Area::NATIVE,
             &mut drawn,
         );
         let inside = |x: usize, y: usize| drawn.at(x, y).is_some();
@@ -593,9 +788,9 @@ mod tests {
         // The right edge moves half a pixel left per row.
         let corners = [vertex(0, 0), vertex(0, 64), vertex(32, 0)];
         let mut sharp = Coverages::new();
-        fill(&corners, false, &mut sharp);
+        fill(&corners, false, Area::NATIVE, &mut sharp);
         let mut smooth = Coverages::new();
-        fill_antialiased(&corners, false, &mut smooth);
+        fill_antialiased(&corners, false, Area::NATIVE, &mut smooth);
         let partial = |x, y| smooth.at(x, y).map(|c| (c.edge, c.amount));
         // Row 0 crosses at 31.75: pixel 31 is three quarters covered.
         assert_eq!(partial(31, 0), Some((true, 23)));
@@ -618,9 +813,19 @@ mod tests {
     fn neighbours_share_their_common_edge_exactly() {
         let quad = [vertex(3, 2), vertex(1, 40), vertex(70, 33), vertex(60, 5)];
         let mut first = Coverages::new();
-        fill_antialiased(&[quad[0], quad[1], quad[2]], false, &mut first);
+        fill_antialiased(
+            &[quad[0], quad[1], quad[2]],
+            false,
+            Area::NATIVE,
+            &mut first,
+        );
         let mut second = Coverages::new();
-        fill_antialiased(&[quad[0], quad[2], quad[3]], false, &mut second);
+        fill_antialiased(
+            &[quad[0], quad[2], quad[3]],
+            false,
+            Area::NATIVE,
+            &mut second,
+        );
         let share = |c: Option<Coverage>| c.map_or(0, |c| u32::from(c.amount) + 1);
         // Away from the outer edges, every pixel is covered exactly once,
         // whether by one triangle or split along the diagonal.

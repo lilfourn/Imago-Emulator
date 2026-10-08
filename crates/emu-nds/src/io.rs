@@ -28,10 +28,10 @@ impl Hardware {
         }
     }
 
-    fn raw_16(&self, side: Side, offset: u32) -> u16 {
+    pub(crate) fn raw_16(&self, side: Side, offset: u32) -> u16 {
         let index = (offset & IO_PAGE & !1) as usize;
-        let raw = self.raw(side);
-        u16::from_le_bytes([raw[index], raw[index + 1]])
+        let bytes = &self.raw(side)[index..index + 2];
+        u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
     fn set_raw_16(&mut self, side: Side, offset: u32, value: u16) {
@@ -77,7 +77,7 @@ impl Hardware {
     }
 
     /// Reads one of the registers both CPUs have at the same offset.
-    fn read_common_16(&mut self, side: Side, offset: u32) -> Option<u16> {
+    fn read_common_16(&self, side: Side, offset: u32) -> Option<u16> {
         Some(match offset {
             0x004 => self.dispstat(side),
             0x006 => self.vcount,
@@ -274,6 +274,12 @@ impl Hardware {
             let word = self.read_wide(Side::Arm9, address & !3).unwrap_or(0);
             return (word >> ((address & 2) * 8)) as u16;
         }
+        self.io9_page_16(address)
+    }
+
+    /// Reads a register halfword in the ARM9's 0x04000000 page, where no
+    /// read has side effects.
+    fn io9_page_16(&self, address: u32) -> u16 {
         let offset = address & IO_PAGE;
         if let Some(value) = self.read_common_16(Side::Arm9, offset) {
             return value;
@@ -286,7 +292,7 @@ impl Hardware {
             0x1000..=0x106F => self.engine_b.read_register(offset - 0x1000),
             0x204 => self.exmemcnt,
             0x240..=0x249 => {
-                u16::from(self.io9_read_8(address)) | u16::from(self.io9_read_8(address + 1)) << 8
+                u16::from(self.io9_page_8(address)) | u16::from(self.io9_page_8(address + 1)) << 8
             }
             0x280..=0x2BF => (self.math.read((offset - 0x280) & !3) >> ((offset & 2) * 8)) as u16,
             0x300 => u16::from(self.arm9.postflg),
@@ -296,6 +302,14 @@ impl Hardware {
     }
 
     pub(crate) fn io9_read_8(&mut self, address: u32) -> u8 {
+        if address >= 0x0400_2000 {
+            return (self.io9_read_16(address & !1) >> ((address & 1) * 8)) as u8;
+        }
+        self.io9_page_8(address)
+    }
+
+    /// Reads a register byte in the ARM9's 0x04000000 page.
+    fn io9_page_8(&self, address: u32) -> u8 {
         let offset = address & IO_PAGE;
         match offset {
             0x240..=0x246 | 0x248 | 0x249 => {
@@ -307,7 +321,7 @@ impl Hardware {
                 self.vram.control(bank as usize)
             }
             0x247 => self.wramcnt,
-            _ => (self.io9_read_16(address & !1) >> ((address & 1) * 8)) as u8,
+            _ => (self.io9_page_16(address & !1) >> ((address & 1) * 8)) as u8,
         }
     }
 
@@ -391,6 +405,12 @@ impl Hardware {
             let word = self.read_wide(Side::Arm7, address & !3).unwrap_or(0);
             return (word >> ((address & 2) * 8)) as u16;
         }
+        self.io7_page_16(address)
+    }
+
+    /// Reads a register halfword in the ARM7's 0x04000000 page, where no
+    /// read has side effects.
+    fn io7_page_16(&self, address: u32) -> u16 {
         let offset = address & IO_PAGE;
         if let Some(value) = self.read_common_16(Side::Arm7, offset) {
             return value;
@@ -438,14 +458,20 @@ impl Hardware {
             return;
         }
         match offset {
-            0x304 => self.powcnt2 = value & 3,
+            0x304 => {
+                self.powcnt2 = value & 3;
+                let now = self.now(Side::Arm7);
+                self.wifi.set_enabled(value & 2 != 0, now);
+                self.sync_wifi();
+            }
             0x138 => {
                 let now = self.now(Side::Arm7);
                 self.rtc.write(value, now);
             }
             0x1C0 => self.spi.write_control(value),
             0x1C2 => {
-                if let Some(cycles) = self.spi.write_data(value as u8) {
+                let now = self.now(Side::Arm7);
+                if let Some(cycles) = self.spi.write_data(value as u8, now) {
                     self.schedule_after(Side::Arm7, cycles, Event::SpiDone);
                 }
             }
@@ -491,6 +517,20 @@ impl Hardware {
                 self.io7_write_16(address & !1, u16::from_le_bytes(bytes));
             }
         }
+    }
+
+    /// The register byte at `address` as `side` reads it, without side
+    /// effects, for debuggers: anything in the 0x04000000 page, but not
+    /// the IPC FIFO or game card data ports at 0x04100000, whose reads
+    /// take a word out.
+    pub(crate) fn peek_io(&self, side: Side, address: u32) -> Option<u8> {
+        if address >= 0x0400_2000 {
+            return None;
+        }
+        Some(match side {
+            Side::Arm9 => self.io9_page_8(address),
+            Side::Arm7 => (self.io7_page_16(address & !1) >> ((address & 1) * 8)) as u8,
+        })
     }
 
     /// Starts DMA channels on both CPUs waiting for `timing`.

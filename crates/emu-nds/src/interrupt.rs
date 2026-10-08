@@ -23,6 +23,8 @@ pub(crate) mod irq {
     pub(crate) const GEOMETRY_FIFO: u32 = 1 << 21;
     /// ARM7 only.
     pub(crate) const SPI: u32 = 1 << 23;
+    /// ARM7 only: W_IF & W_IE became non-zero.
+    pub(crate) const WIFI: u32 = 1 << 24;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

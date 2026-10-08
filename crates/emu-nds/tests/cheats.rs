@@ -41,7 +41,7 @@ fn word(nds: &Nds, address: u32) -> u32 {
 fn holding(buttons: &[Button]) -> Input {
     Input {
         buttons: buttons.iter().copied().collect(),
-        touch: None,
+        ..Input::default()
     }
 }
 

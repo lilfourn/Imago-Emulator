@@ -21,6 +21,9 @@ pub struct Media<'a> {
     /// A cartridge in a second slot (the DS GBA slot), if one is inserted.
     /// Systems without a second slot reject media that carry one.
     pub second_slot: Option<Cartridge<'a>>,
+    /// How a Game Boy shows games made for the original, monochrome Game
+    /// Boy. Other systems ignore it.
+    pub dmg_colors: DmgColors,
 }
 
 impl<'a> Media<'a> {
@@ -34,6 +37,7 @@ impl<'a> Media<'a> {
             system_files: &[],
             start_time: 0,
             second_slot: None,
+            dmg_colors: DmgColors::Grey,
         }
     }
 
@@ -45,6 +49,22 @@ impl<'a> Media<'a> {
             .find(|file| file.kind == kind)
             .map(|file| file.data)
     }
+}
+
+/// How games made for the original Game Boy, before the Game Boy Color,
+/// are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DmgColors {
+    /// On an original Game Boy, in four shades of grey.
+    #[default]
+    Grey,
+    /// On a Game Boy Color, which colours a game with the palettes its
+    /// boot ROM picks by the game's title.
+    ByTitle,
+    /// On a Game Boy Color, with the palettes its boot ROM gives when a
+    /// button combination is held as it starts: 0 to 11 for Right, Left,
+    /// Up, Down, the same with A, then the same with B.
+    Buttons(u8),
 }
 
 /// A cartridge's contents: its image and its battery save.

@@ -8,7 +8,9 @@
 //! draws that list with the rendering registers, and [`Gpu3d::line`] reads
 //! the result for engine A's BG0: per pixel, 6-bit red, green and blue in
 //! bits 0–17 and a 5-bit alpha in bits 18–22 (0 where there is no 3D
-//! pixel).
+//! pixel). With [`Gpu3d::set_render_scale`], it also draws each frame
+//! larger for the screen ([`Gpu3d::scaled_row`]); the game only ever sees
+//! the native frame.
 //!
 //! Commands execute instantly, so the FIFO only fills while a swap waits
 //! for VBlank, and the test and matrix busy flags never read as busy.
@@ -19,6 +21,8 @@ mod geometry;
 mod polygon;
 mod registers;
 mod render;
+
+pub(crate) use self::render::MAX_SCALE;
 
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +37,7 @@ use crate::vram::Vram;
 /// always holds its maximum.
 const RDLINES_COUNT: u32 = 46;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Gpu3d {
     registers: RenderRegisters,
     fifo: Fifo,
@@ -46,7 +50,8 @@ pub(crate) struct Gpu3d {
     fifo_irq: u8,
     /// The polygon list the rendering engine draws.
     rendering: PolygonList,
-    /// Frame buffers; redrawn by the next `render_frame`.
+    /// Frame buffers; redrawn by the next `render_frame`. The scale they
+    /// draw at is a display setting, so it is not saved either.
     #[serde(skip)]
     renderer: Renderer,
 }
@@ -204,15 +209,39 @@ impl Gpu3d {
 
     /// Draws the current polygon list with the rendering registers as they
     /// are now. Call once per frame, when the hardware starts rendering
-    /// (line 214), and before reading [`Self::line`].
+    /// (line 214), and before reading [`Self::line`]. VRAM is read now; the
+    /// drawing may finish on a worker thread, which [`Self::line`] waits
+    /// for.
     pub(crate) fn render_frame(&mut self, vram: &Vram) {
         let config = self.registers.config();
         self.renderer.render(&self.rendering, &config, vram);
     }
 
-    /// Row `y` (0–191) of the last frame drawn.
-    pub(crate) fn line(&self, y: u16) -> &[u32; 256] {
+    /// Row `y` (0–191) of the last frame drawn, waiting for the frame if
+    /// it is still drawing.
+    pub(crate) fn line(&mut self, y: u16) -> &[u32; 256] {
         self.renderer.line(usize::from(y))
+    }
+
+    /// Also draws every frame `scale` times larger in each direction, for
+    /// the screen, from the next [`Gpu3d::render_frame`] on; 1 stops.
+    /// `scale` is clamped to 1–[`MAX_SCALE`].
+    pub(crate) fn set_render_scale(&mut self, scale: usize) {
+        self.renderer.set_scale(scale);
+    }
+
+    /// Moves `other`'s renderer, with its buffers and scale, into this
+    /// engine, which replaces it. The next [`Gpu3d::render_frame`]
+    /// redraws them.
+    pub(crate) fn take_renderer_from(&mut self, other: &mut Self) {
+        self.renderer = std::mem::take(&mut other.renderer);
+    }
+
+    /// Row `row` (0 to `192 * scale - 1`) of the last larger frame drawn:
+    /// `256 * scale` pixels, as [`Gpu3d::line`]'s. `None` at the native
+    /// scale.
+    pub(crate) fn scaled_row(&self, row: usize) -> Option<&[u32]> {
+        self.renderer.scaled_row(row)
     }
 }
 
@@ -278,7 +307,7 @@ mod tests {
         gpu.render_frame(vram);
     }
 
-    fn pixel(gpu: &Gpu3d, x: usize, y: u16) -> u32 {
+    fn pixel(gpu: &mut Gpu3d, x: usize, y: u16) -> u32 {
         gpu.line(y)[x]
     }
 
@@ -301,12 +330,12 @@ mod tests {
         vertex(&mut gpu, -ONE, -ONE, 0);
         vertex(&mut gpu, ONE, -ONE, 0);
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 10, 100), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 0, 191), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 200, 10), 0, "no 3D pixel");
+        assert_eq!(pixel(&mut gpu, 10, 100), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 0, 191), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 200, 10), 0, "no 3D pixel");
         // Row 96 is covered up to the diagonal at x = 128.
-        assert_eq!(pixel(&gpu, 127, 96), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 129, 96), 0);
+        assert_eq!(pixel(&mut gpu, 127, 96), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 129, 96), 0);
     }
 
     #[test]
@@ -320,9 +349,13 @@ mod tests {
         send(&mut gpu, COLOR, &[0x7C00]);
         quad(&mut gpu, [-ONE, -ONE, ONE, ONE], ONE / 2);
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 128, 96), opaque([63, 0, 0]), "near red stays");
         assert_eq!(
-            pixel(&gpu, 10, 10),
+            pixel(&mut gpu, 128, 96),
+            opaque([63, 0, 0]),
+            "near red stays"
+        );
+        assert_eq!(
+            pixel(&mut gpu, 10, 10),
             opaque([0, 0, 63]),
             "far blue elsewhere"
         );
@@ -352,11 +385,11 @@ mod tests {
             vertex(&mut gpu, x * ONE, y * ONE, 0);
         }
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 16, 50), opaque([0, 0, 0]));
-        assert_eq!(pixel(&gpu, 48, 50), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 80, 50), opaque([0, 63, 0]));
-        assert_eq!(pixel(&gpu, 112, 50), opaque([0, 0, 63]));
-        assert_eq!(pixel(&gpu, 176, 150), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 16, 50), opaque([0, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 48, 50), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 80, 50), opaque([0, 63, 0]));
+        assert_eq!(pixel(&mut gpu, 112, 50), opaque([0, 0, 63]));
+        assert_eq!(pixel(&mut gpu, 176, 150), opaque([63, 0, 0]));
     }
 
     #[test]
@@ -372,8 +405,8 @@ mod tests {
         quad(&mut gpu, [-ONE, -ONE, ONE, ONE], -ONE / 2);
         finish(&mut gpu, &vram);
         // (63 * 16 + 0 * 16) / 32 = 31 red, (0 + 63 * 16) / 32 = 31 blue.
-        assert_eq!(pixel(&gpu, 64, 96), opaque([31, 0, 31]));
-        assert_eq!(pixel(&gpu, 192, 96), opaque([31, 0, 31]));
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([31, 0, 31]));
+        assert_eq!(pixel(&mut gpu, 192, 96), opaque([31, 0, 31]));
     }
 
     #[test]
@@ -391,8 +424,8 @@ mod tests {
         send(&mut gpu, POLYGON_ATTR, &[SOLID]);
         quad(&mut gpu, [0, -ONE, ONE, ONE], 0);
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 64, 96), opaque([0, 63, 0]));
-        assert_eq!(pixel(&gpu, 192, 96), opaque([63, 0, 0]), "fog disabled");
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([0, 63, 0]));
+        assert_eq!(pixel(&mut gpu, 192, 96), opaque([63, 0, 0]), "fog disabled");
     }
 
     #[test]
@@ -406,9 +439,9 @@ mod tests {
         quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
         finish(&mut gpu, &vram);
         // The quad spans x 64..192, y 48..144.
-        assert_eq!(pixel(&gpu, 64, 96), opaque([63, 63, 63]), "left edge");
-        assert_eq!(pixel(&gpu, 100, 48), opaque([63, 63, 63]), "top edge");
-        assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([63, 63, 63]), "left edge");
+        assert_eq!(pixel(&mut gpu, 100, 48), opaque([63, 63, 63]), "top edge");
+        assert_eq!(pixel(&mut gpu, 100, 96), opaque([63, 0, 0]), "interior");
     }
 
     /// The lower-left half of the screen in red over a blue rear plane,
@@ -428,14 +461,14 @@ mod tests {
 
     #[test]
     fn anti_aliasing_softens_edges_against_the_rear_plane() {
-        let sharp = red_half_over_blue(0);
-        let smooth = red_half_over_blue(1 << 4);
+        let mut sharp = red_half_over_blue(0);
+        let mut smooth = red_half_over_blue(1 << 4);
         for y in 0..192 {
             // The diagonal crosses the middle of row y at (y + 0.5) * 4 / 3.
             let crossing = (f64::from(y) + 0.5) * 4.0 / 3.0;
             let mut blended = 0;
             for x in 0..256 {
-                let (before, after) = (pixel(&sharp, x, y), pixel(&smooth, x, y));
+                let (before, after) = (pixel(&mut sharp, x, y), pixel(&mut smooth, x, y));
                 assert!(before == opaque([63, 0, 0]) || before == opaque([0, 0, 63]));
                 let [red, _, blue] = color::unpack(after);
                 if red > 0 && blue > 0 {
@@ -464,7 +497,7 @@ mod tests {
         finish(&mut gpu, &Vram::default());
         for y in 48..144 {
             for x in 64..192 {
-                assert_eq!(pixel(&gpu, x, y), opaque([63, 0, 0]), "({x}, {y})");
+                assert_eq!(pixel(&mut gpu, x, y), opaque([63, 0, 0]), "({x}, {y})");
             }
         }
     }
@@ -480,9 +513,159 @@ mod tests {
         quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
         finish(&mut gpu, &vram);
         // White at 17/32 over the blue rear plane.
-        assert_eq!(pixel(&gpu, 64, 96), opaque([33, 33, 63]), "left edge");
-        assert_eq!(pixel(&gpu, 100, 48), opaque([33, 33, 63]), "top edge");
-        assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([33, 33, 63]), "left edge");
+        assert_eq!(pixel(&mut gpu, 100, 48), opaque([33, 33, 63]), "top edge");
+        assert_eq!(pixel(&mut gpu, 100, 96), opaque([63, 0, 0]), "interior");
+    }
+
+    /// Two quads with different polygon IDs, one fogged and one with a
+    /// slanted edge, under a translucent strip: everything the renderer
+    /// post-processes, with DISP3DCNT `control`.
+    fn busy_scene(gpu: &mut Gpu3d, control: u32) {
+        configure(gpu, control, 0x7C00 | 31 << 16 | 1 << 15);
+        gpu.write_register(0x330, 0x7FFF << 16 | 0x001F); // Edge colours.
+        gpu.write_register(0x358, 0x03E0 | 31 << 16); // Green fog.
+        for offset in (0x360..0x380).step_by(4) {
+            gpu.write_register(offset, 0x4040_4040); // Half density.
+        }
+        send(gpu, POLYGON_ATTR, &[SOLID | 1 << 15 | 8 << 24]);
+        send(gpu, COLOR, &[0x001F]);
+        quad(gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
+        send(gpu, POLYGON_ATTR, &[SOLID | 16 << 24]);
+        send(gpu, COLOR, &[0x03FF]);
+        send(gpu, BEGIN_VTXS, &[0]);
+        vertex(gpu, -ONE / 4, ONE, -ONE / 4);
+        vertex(gpu, -ONE, -ONE / 3, -ONE / 4);
+        vertex(gpu, ONE / 3, -ONE, -ONE / 4);
+        send(gpu, POLYGON_ATTR, &[15 << 16 | 0xC0 | 24 << 24]);
+        send(gpu, COLOR, &[0x7FFF]);
+        quad(gpu, [-ONE, -ONE / 8, ONE, ONE / 8], -ONE / 2);
+    }
+
+    /// Every row of `gpu`'s larger frame.
+    fn scaled_frame(gpu: &Gpu3d, scale: usize) -> Vec<u32> {
+        (0..192 * scale)
+            .flat_map(|row| gpu.scaled_row(row).expect("drawn larger").to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn the_native_frame_is_the_same_at_any_scale() {
+        let vram = Vram::default();
+        let everything = 1 << 4 | 1 << 5 | 1 << 7 | 1 << 3;
+        let mut native = Gpu3d::new();
+        busy_scene(&mut native, everything);
+        finish(&mut native, &vram);
+        assert!(native.scaled_row(0).is_none());
+        for scale in [2, 3] {
+            let mut gpu = Gpu3d::new();
+            gpu.set_render_scale(scale);
+            busy_scene(&mut gpu, everything);
+            finish(&mut gpu, &vram);
+            for y in 0..192 {
+                assert_eq!(gpu.line(y), native.line(y), "row {y} at {scale}x");
+            }
+        }
+    }
+
+    #[test]
+    fn the_larger_frame_matches_the_native_one_away_from_edges() {
+        let vram = Vram::default();
+        // No anti-aliasing or edge marking: only edges may differ.
+        let mut native = Gpu3d::new();
+        busy_scene(&mut native, 1 << 7 | 1 << 3);
+        finish(&mut native, &vram);
+        let mut gpu = Gpu3d::new();
+        gpu.set_render_scale(2);
+        busy_scene(&mut gpu, 1 << 7 | 1 << 3);
+        finish(&mut gpu, &vram);
+        let larger = scaled_frame(&gpu, 2);
+        let mut compared = 0;
+        for y in 1..191 {
+            for x in 1..255 {
+                let here = pixel(&mut native, x, y);
+                let flat = (y - 1..=y + 1)
+                    .all(|y| (x - 1..=x + 1).all(|x| pixel(&mut native, x, y) == here));
+                if !flat {
+                    continue;
+                }
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let cell = larger[(2 * usize::from(y) + dy) * 512 + 2 * x + dx];
+                    assert_eq!(cell, here, "({x}, {y})");
+                }
+                compared += 1;
+            }
+        }
+        assert!(compared > 40_000, "{compared} flat pixels");
+    }
+
+    #[test]
+    fn bands_draw_the_frame_as_one_band_would() {
+        let vram = Vram::default();
+        let everything = 1 << 4 | 1 << 5 | 1 << 7 | 1 << 3;
+        for scale in [2, 3] {
+            let mut whole = Gpu3d::new();
+            whole.renderer.split(scale, 1);
+            busy_scene(&mut whole, everything);
+            finish(&mut whole, &vram);
+            let mut banded = Gpu3d::new();
+            banded.renderer.split(scale, 13);
+            busy_scene(&mut banded, everything);
+            finish(&mut banded, &vram);
+            assert!(
+                scaled_frame(&whole, scale) == scaled_frame(&banded, scale),
+                "at {scale}x"
+            );
+        }
+    }
+
+    #[test]
+    fn the_native_frame_is_the_same_in_any_number_of_bands() {
+        let vram = Vram::default();
+        let everything = 1 << 4 | 1 << 5 | 1 << 7 | 1 << 3;
+        let frame = |bands: usize| {
+            let mut gpu = Gpu3d::new();
+            gpu.renderer.split_native(bands);
+            busy_scene(&mut gpu, everything);
+            finish(&mut gpu, &vram);
+            (0..192).flat_map(|y| *gpu.line(y)).collect::<Vec<u32>>()
+        };
+        let whole = frame(1);
+        for bands in [2, 4, 7, 192] {
+            assert!(frame(bands) == whole, "in {bands} bands");
+        }
+    }
+
+    #[test]
+    fn edge_marking_keeps_its_on_screen_thickness() {
+        let mut gpu = Gpu3d::new();
+        gpu.set_render_scale(2);
+        configure(&mut gpu, 1 << 5, 0);
+        gpu.write_register(0x330, 0x7FFF << 16); // Edge colour 1: white.
+        send(&mut gpu, POLYGON_ATTR, &[SOLID | 8 << 24]);
+        send(&mut gpu, COLOR, &[0x001F]);
+        quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
+        finish(&mut gpu, &Vram::default());
+        // The quad spans x 128..384, y 96..288: edges two cells thick.
+        let cell = |x: usize, y: usize| gpu.scaled_row(y).expect("drawn larger")[x];
+        let white = opaque([63, 63, 63]);
+        let red = opaque([63, 0, 0]);
+        assert_eq!(
+            [cell(128, 192), cell(129, 192), cell(130, 192)],
+            [white, white, red]
+        );
+        assert_eq!(
+            [cell(382, 192), cell(383, 192), cell(381, 192)],
+            [white, white, red]
+        );
+        assert_eq!(
+            [cell(200, 96), cell(200, 97), cell(200, 98)],
+            [white, white, red]
+        );
+        assert_eq!(
+            [cell(200, 287), cell(200, 286), cell(200, 285)],
+            [white, white, red]
+        );
     }
 
     #[test]
@@ -569,6 +752,6 @@ mod tests {
         let mut restored: Gpu3d = postcard::from_bytes(&bytes).expect("deserializes");
         restored.vblank();
         restored.render_frame(&vram);
-        assert_eq!(pixel(&restored, 100, 100), opaque([0, 63, 0]));
+        assert_eq!(pixel(&mut restored, 100, 100), opaque([0, 63, 0]));
     }
 }

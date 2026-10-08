@@ -23,6 +23,7 @@ blargg/cpu_instrs/individual/08-misc instrs.gb
 blargg/cpu_instrs/individual/09-op r,r.gb
 blargg/cpu_instrs/individual/10-bit ops.gb
 blargg/cpu_instrs/individual/11-op a,(hl).gb
+blargg/dmg_sound/dmg_sound.gb
 blargg/dmg_sound/rom_singles/01-registers.gb
 blargg/dmg_sound/rom_singles/02-len ctr.gb
 blargg/dmg_sound/rom_singles/03-trigger.gb
@@ -31,7 +32,10 @@ blargg/dmg_sound/rom_singles/05-sweep details.gb
 blargg/dmg_sound/rom_singles/06-overflow on trigger.gb
 blargg/dmg_sound/rom_singles/07-len sweep period sync.gb
 blargg/dmg_sound/rom_singles/08-len ctr during power.gb
+blargg/dmg_sound/rom_singles/09-wave read while on.gb
+blargg/dmg_sound/rom_singles/10-wave trigger while on.gb
 blargg/dmg_sound/rom_singles/11-regs after power.gb
+blargg/dmg_sound/rom_singles/12-wave write while on.gb
 blargg/halt_bug.gb
 blargg/instr_timing/instr_timing.gb
 blargg/mem_timing-2/mem_timing.gb
@@ -42,15 +46,18 @@ blargg/mem_timing/individual/01-read_timing.gb
 blargg/mem_timing/individual/02-write_timing.gb
 blargg/mem_timing/individual/03-modify_timing.gb
 blargg/mem_timing/mem_timing.gb
+blargg/oam_bug/rom_singles/1-lcd_sync.gb
 blargg/oam_bug/rom_singles/3-non_causes.gb
 blargg/oam_bug/rom_singles/6-timing_no_bug.gb
 cgb-acid2/cgb-acid2.gbc
 dmg-acid2/dmg-acid2.gb
+dmg-acid2/dmg-acid2.gb (CGB in DMG mode)
 mbc3-tester/mbc3-tester.gb
 mooneye-test-suite/acceptance/add_sp_e_timing.gb
 mooneye-test-suite/acceptance/bits/mem_oam.gb
 mooneye-test-suite/acceptance/bits/reg_f.gb
 mooneye-test-suite/acceptance/bits/unused_hwio-GS.gb
+mooneye-test-suite/acceptance/boot_div-dmgABCmgb.gb
 mooneye-test-suite/acceptance/boot_hwio-dmgABCmgb.gb
 mooneye-test-suite/acceptance/boot_regs-dmgABC.gb
 mooneye-test-suite/acceptance/call_cc_timing.gb
@@ -82,7 +89,14 @@ mooneye-test-suite/acceptance/pop_timing.gb
 mooneye-test-suite/acceptance/ppu/hblank_ly_scx_timing-GS.gb
 mooneye-test-suite/acceptance/ppu/intr_1_2_timing-GS.gb
 mooneye-test-suite/acceptance/ppu/intr_2_0_timing.gb
+mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing.gb
+mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing_sprites.gb
+mooneye-test-suite/acceptance/ppu/intr_2_mode3_timing.gb
+mooneye-test-suite/acceptance/ppu/intr_2_oam_ok_timing.gb
+mooneye-test-suite/acceptance/ppu/lcdon_timing-GS.gb
+mooneye-test-suite/acceptance/ppu/lcdon_write_timing-GS.gb
 mooneye-test-suite/acceptance/ppu/stat_irq_blocking.gb
+mooneye-test-suite/acceptance/ppu/stat_lyc_onoff.gb
 mooneye-test-suite/acceptance/ppu/vblank_stat_intr-GS.gb
 mooneye-test-suite/acceptance/push_timing.gb
 mooneye-test-suite/acceptance/rapid_di_ei.gb
@@ -91,7 +105,9 @@ mooneye-test-suite/acceptance/ret_timing.gb
 mooneye-test-suite/acceptance/reti_intr_timing.gb
 mooneye-test-suite/acceptance/reti_timing.gb
 mooneye-test-suite/acceptance/rst_timing.gb
+mooneye-test-suite/acceptance/serial/boot_sclk_align-dmgABCmgb.gb
 mooneye-test-suite/acceptance/timer/div_write.gb
+mooneye-test-suite/acceptance/timer/rapid_toggle.gb
 mooneye-test-suite/acceptance/timer/tim00.gb
 mooneye-test-suite/acceptance/timer/tim00_div_trigger.gb
 mooneye-test-suite/acceptance/timer/tim01.gb
@@ -107,6 +123,7 @@ mooneye-test-suite/emulator-only/mbc1/bits_bank1.gb
 mooneye-test-suite/emulator-only/mbc1/bits_bank2.gb
 mooneye-test-suite/emulator-only/mbc1/bits_mode.gb
 mooneye-test-suite/emulator-only/mbc1/bits_ramg.gb
+mooneye-test-suite/emulator-only/mbc1/multicart_rom_8Mb.gb
 mooneye-test-suite/emulator-only/mbc1/ram_256kb.gb
 mooneye-test-suite/emulator-only/mbc1/ram_64kb.gb
 mooneye-test-suite/emulator-only/mbc1/rom_16Mb.gb

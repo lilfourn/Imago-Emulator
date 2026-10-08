@@ -80,7 +80,7 @@ impl Bus {
             wram: vec![0; 0x8000].into_boxed_slice(),
             wram_bank: 1,
             hram: vec![0; 0x7F].into_boxed_slice(),
-            timer: Timer::after_boot(),
+            timer: Timer::after_boot(model),
             ppu: Ppu::after_boot(model),
             apu: Apu::after_boot(model),
             joypad: Joypad::default(),
@@ -287,6 +287,18 @@ impl Bus {
         true
     }
 
+    /// Writes memory without side effects, for debuggers: cartridge RAM,
+    /// WRAM and HRAM, VRAM (the selected bank) and OAM. Returns whether
+    /// `address` is memory; ROM and I/O registers refuse.
+    pub(crate) fn poke_memory(&mut self, address: u16, value: u8) -> bool {
+        match address {
+            0x8000..=0x9FFF => self.ppu.write_vram(address, value),
+            0xFE00..=0xFE9F => self.ppu.write_oam(address, value),
+            _ => return self.poke_ram(address, value),
+        }
+        true
+    }
+
     fn boot_rom_byte(&self, address: u16) -> u8 {
         self.boot_rom
             .as_ref()
@@ -306,10 +318,10 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.ppu.write_oam(address, value),
             0xFF00 => self.joypad.write(value),
-            0xFF01 | 0xFF02 => self.serial.write(address, value),
+            0xFF01 | 0xFF02 => self.serial.write(address, value, self.timer.counter()),
             0xFF04..=0xFF07 => {
                 let div_before = self.timer.counter();
-                self.timer.write(address, value);
+                self.timer.write(address, value, &mut self.interrupt_flag);
                 if self.div_bit_fell(div_before) {
                     self.apu.clock_frame_sequencer();
                 }
@@ -352,13 +364,18 @@ impl Bus {
 impl cpu::Bus for Bus {
     fn read(&mut self, address: u16) -> u8 {
         self.step_components();
-        self.dma_conflict(address)
-            .unwrap_or_else(|| self.peek(address))
+        if let Some(value) = self.dma_conflict(address) {
+            value
+        } else if self.ppu.blocks_read(address) {
+            0xFF
+        } else {
+            self.peek(address)
+        }
     }
 
     fn write(&mut self, address: u16, value: u8) {
         self.step_components();
-        if self.dma_conflict(address).is_none() {
+        if self.dma_conflict(address).is_none() && !self.ppu.blocks_write(address) {
             self.poke(address, value);
         }
     }
@@ -380,7 +397,7 @@ impl cpu::Bus for Bus {
         if self.cgb() && self.speed_switch_armed {
             self.speed_switch_armed = false;
             self.double_speed = !self.double_speed;
-            self.timer.write(0xFF04, 0);
+            self.timer.write(0xFF04, 0, &mut self.interrupt_flag);
         }
     }
 }

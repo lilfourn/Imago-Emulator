@@ -93,17 +93,32 @@ impl Apu {
         out.append(&mut self.samples);
     }
 
-    /// Reads the byte at `offset` from 0x04000060 (sound registers up to
-    /// wave RAM).
-    pub(crate) fn read_8(&self, offset: u32) -> u8 {
-        match offset {
-            0x22 => self.control as u8,
-            0x23 => (self.control >> 8) as u8,
-            0x28 => self.bias as u8,
-            0x29 => (self.bias >> 8) as u8,
-            0x30..=0x3F => self.psg.read_wave((offset - 0x30) as u8),
-            _ => psg_register(offset).map_or(0, |register| self.psg.read(register)),
-        }
+    /// Reads the halfword at `offset` (even) from 0x04000060, with the bits
+    /// the hardware does not read back as 0 (GBATEK, "GBA Sound
+    /// Controller"). `None` for the write-only FIFOs and the unused
+    /// registers after SOUNDBIAS, which read as open bus.
+    pub(crate) fn read_16(&self, offset: u32) -> Option<u16> {
+        let psg = |byte: u32| psg_register(byte).map_or(0, |register| self.psg.read(register));
+        let wave = |byte: u32| self.psg.read_wave((byte - 0x30) as u8);
+        let pair = |read: &dyn Fn(u32) -> u8| u16::from_le_bytes([read(offset), read(offset + 1)]);
+        let readable = match offset {
+            0x00 => 0x007F,               // SOUND1CNT_L: sweep
+            0x02 | 0x08 => 0xFFC0,        // SOUND1CNT_H, SOUND2CNT_L: duty and envelope
+            0x04 | 0x0C | 0x14 => 0x4000, // frequency registers: length enable
+            0x10 => 0x00E0,               // SOUND3CNT_L: banks and enable
+            0x12 => 0xE000,               // SOUND3CNT_H: volume
+            0x18 => 0xFF00,               // SOUND4CNT_L: envelope
+            0x1C => 0x40FF,               // SOUND4CNT_H: frequency and length enable
+            0x20 => 0xFF77,               // SOUNDCNT_L: PSG volume and panning
+            0x24 => 0x008F,               // SOUNDCNT_X: master enable and channel status
+            0x22 => return Some(self.control & 0x770F),
+            0x28 => return Some(self.bias),
+            // The upper halves of 32-bit registers.
+            0x06 | 0x0A | 0x0E | 0x16 | 0x1A | 0x1E | 0x26 | 0x2A => return Some(0),
+            0x30..=0x3F => return Some(pair(&wave)),
+            _ => return None,
+        };
+        Some(pair(&psg) & readable)
     }
 
     /// Writes the byte at `offset` from 0x04000060. Returns which FIFOs
@@ -234,9 +249,37 @@ mod tests {
     fn psg_registers_map_to_the_game_boy_numbers() {
         let mut apu = Apu::new();
         apu.write_8(0x20, 0x77); // SOUNDCNT_L low byte = NR50
-        assert_eq!(apu.read_8(0x20), 0x77);
+        assert_eq!(apu.read_16(0x20), Some(0x0077));
         apu.write_8(0x24, 0x00); // SOUNDCNT_X = NR52: power off
-        assert_eq!(apu.read_8(0x24) & 0x80, 0);
+        assert_eq!(apu.read_16(0x24), Some(0));
+    }
+
+    /// Hardware values from the mGBA suite's I/O read tests, after writing
+    /// 0xFFFF with the sound circuit on.
+    #[test]
+    fn registers_read_back_only_their_readable_bits() {
+        let mut apu = Apu::new();
+        apu.write_8(0x24, 0x80);
+        let mut write_ones = |offset: u32| {
+            apu.write_8(offset, 0xFF);
+            apu.write_8(offset + 1, 0xFF);
+        };
+        for offset in [0x00, 0x02, 0x08, 0x10, 0x12, 0x18, 0x1C, 0x20, 0x22] {
+            write_ones(offset);
+        }
+        let read = |offset| apu.read_16(offset);
+        assert_eq!(read(0x00), Some(0x007F));
+        assert_eq!(read(0x02), Some(0xFFC0));
+        assert_eq!(read(0x08), Some(0xFFC0));
+        assert_eq!(read(0x10), Some(0x00E0));
+        assert_eq!(read(0x12), Some(0xE000));
+        assert_eq!(read(0x18), Some(0xFF00));
+        assert_eq!(read(0x1C), Some(0x40FF));
+        assert_eq!(read(0x20), Some(0xFF77));
+        assert_eq!(read(0x22), Some(0x770F));
+        assert_eq!(read(0x06), Some(0));
+        assert_eq!(read(0x40), None);
+        assert_eq!(read(0x2C), None);
     }
 
     #[test]

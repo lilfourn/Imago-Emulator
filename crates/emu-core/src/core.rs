@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{Frame, Input, ScreenSize, StereoSample, System};
+use crate::{Debugger, Frame, Input, RomPatch, ScreenSize, StereoSample, System};
 
 /// One emulated system with a game loaded.
 ///
@@ -31,7 +31,26 @@ pub trait Core: Send {
 
     /// The screens as of the last completed frame, in [`CoreInfo::screens`]
     /// order. For the DS, index 0 is the top screen.
+    ///
+    /// Each is the size [`CoreInfo::screens`] gives, or a whole multiple
+    /// of it after [`Core::set_render_scale`]. Touch points and layouts
+    /// stay in [`CoreInfo::screens`] pixels whatever the frames' size.
     fn screens(&self) -> &[Frame];
+
+    /// Draws 3D at `scale` times the native resolution in each direction,
+    /// for systems with a 3D engine (the DS): from the next frame,
+    /// [`Core::screens`] come out `scale` times wider and taller, 3D drawn
+    /// at that resolution and everything else enlarged around it. 1 is
+    /// the native resolution; cores clamp `scale` to what they support.
+    ///
+    /// This is a display setting, not machine state: emulation, audio and
+    /// save states are the same at every scale (the game still sees
+    /// native-resolution 3D wherever it reads it back), states load at
+    /// any scale, and the setting stays through [`Core::load_state`] and
+    /// [`Core::reset`]. Cores without 3D ignore it.
+    fn set_render_scale(&mut self, scale: u32) {
+        let _ = scale;
+    }
 
     /// Power-cycles the system. The loaded game and its backup memory stay.
     fn reset(&mut self);
@@ -106,10 +125,38 @@ pub trait Core: Send {
         false
     }
 
+    /// Writes the 16-bit I/O register at `address` (halfword-aligned) in
+    /// `player`'s address space as a CPU store would, without taking any
+    /// time, for cheats that write registers (GBA Pro Action Replay `C6`
+    /// and `C7` codes). Registers whose write would stop or disturb the
+    /// CPU outside its own program, such as the GBA's HALTCNT, refuse.
+    /// Returns whether the register was written. Cores without such cheats
+    /// write nothing.
+    fn poke_io_16(&mut self, player: usize, address: u32, value: u16) -> bool {
+        let _ = (player, address, value);
+        false
+    }
+
+    /// Replaces the ROM patches for `player`'s cartridge: from now on, ROM
+    /// reads return the patched bytes, as cheat devices on the cartridge
+    /// bus made them (see [`RomPatch`]). Patches are not machine state:
+    /// save states leave them out, and they stay through
+    /// [`Core::load_state`] and [`Core::reset`] until replaced. An empty
+    /// list removes them. Cores without ROM-patching cheats ignore it.
+    fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
+        let _ = (player, patches);
+    }
+
     /// A read-only view of a memory region, for debuggers, cheat search and
     /// game tools.
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]> {
         let _ = region;
+        None
+    }
+
+    /// The core's debugger, for stepping, breakpoints and looking inside
+    /// the machine, or `None` if it has none. See [`crate::debug`].
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
         None
     }
 }

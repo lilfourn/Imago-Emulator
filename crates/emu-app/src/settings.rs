@@ -1,8 +1,9 @@
-//! Settings kept between launches: the screen layout, and the speeds of
-//! fast-forward and slow motion.
+//! Settings kept between launches: the screen layout, the speeds of
+//! fast-forward and slow motion, the resolution of DS 3D and the video
+//! filter.
 //!
-//! The app writes them whenever the layout changes, as TOML next to the
-//! bindings file:
+//! The app writes them whenever one changes, as TOML next to the bindings
+//! file:
 //!
 //! ```toml
 //! [layout]
@@ -12,16 +13,30 @@
 //! gap = 90                # emulated pixels between the screens
 //!
 //! [speed]
-//! fast_forward = 4.0      # times normal speed; leave out for no limit
+//! fast_forward = 2.0      # times normal speed, or "unlimited"
 //! slow_motion = 0.5       # times normal speed
+//!
+//! [video]
+//! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
+//! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
+//! show_fps = true        # the frame rate and speed in the window's corner
+//!
+//! [game_boy]
+//! dmg_colors = "game-boy-color"  # games for the original Game Boy: "grey", or
+//!                               # on a Game Boy Color, by title or with a
+//!                               # button combination such as "left+b"
 //! ```
 //!
-//! Settings missing from the file keep their defaults.
+//! Settings missing from the file keep their defaults. Files saved before
+//! fast-forward ran at 2x by default left `fast_forward` out for no
+//! limit; they now get 2x, and the menu or `"unlimited"` brings it back.
 
 use std::path::{Path, PathBuf};
 
+use emu_core::DmgColors;
 use serde::{Deserialize, Serialize};
 
+use crate::filter::Filter;
 use crate::layout::{Arrangement, Layout, Rotation};
 use crate::persist;
 use crate::speed::{MIN_RATE, Rate, Speed, Speeds};
@@ -34,13 +49,40 @@ const ARRANGEMENTS: [(Arrangement, &str); 4] = [
     (Arrangement::Hybrid, "hybrid"),
 ];
 
+/// The highest DS 3D resolution, as a multiple of the native one: what the
+/// core draws at most.
+pub const MAX_RESOLUTION_3D: u32 = 8;
+
 /// Everything remembered between launches.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     /// How the screens are laid out.
     pub layout: Layout,
     /// How fast fast-forward and slow motion run.
     pub speed: Speeds,
+    /// How many times its own resolution DS 3D is drawn at, 1 to
+    /// [`MAX_RESOLUTION_3D`] (see `Core::set_render_scale`).
+    pub resolution_3d: u32,
+    /// How the screens are filtered on their way to the window.
+    pub filter: Filter,
+    /// Whether the speed readout shows in the window's corner.
+    pub show_fps: bool,
+    /// How games made for the original Game Boy are shown, from the next
+    /// game opened.
+    pub dmg_colors: DmgColors,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            layout: Layout::default(),
+            speed: Speeds::default(),
+            resolution_3d: 1,
+            filter: Filter::None,
+            show_fps: false,
+            dmg_colors: DmgColors::ByTitle,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -48,6 +90,74 @@ pub struct Settings {
 struct SettingsFile {
     layout: LayoutSection,
     speed: SpeedSection,
+    video: VideoSection,
+    game_boy: GameBoySection,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct GameBoySection {
+    dmg_colors: String,
+}
+
+impl Default for GameBoySection {
+    fn default() -> Self {
+        Self {
+            dmg_colors: dmg_colors_name(Settings::default().dmg_colors),
+        }
+    }
+}
+
+/// The button combinations a Game Boy Color takes as it starts, in the
+/// order of [`DmgColors::Buttons`], as the settings file names them.
+const BUTTON_COMBINATIONS: [&str; 12] = [
+    "right", "left", "up", "down", "right+a", "left+a", "up+a", "down+a", "right+b", "left+b",
+    "up+b", "down+b",
+];
+
+/// `colors` as the settings file names it.
+fn dmg_colors_name(colors: DmgColors) -> String {
+    let name = match colors {
+        DmgColors::Grey => "grey",
+        DmgColors::ByTitle => "game-boy-color",
+        DmgColors::Buttons(index) => BUTTON_COMBINATIONS
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or("game-boy-color"),
+    };
+    name.to_owned()
+}
+
+/// The colours a settings file's `name` stands for.
+fn dmg_colors_from_name(name: &str) -> Option<DmgColors> {
+    match name {
+        "grey" => Some(DmgColors::Grey),
+        "game-boy-color" => Some(DmgColors::ByTitle),
+        _ => BUTTON_COMBINATIONS
+            .iter()
+            .position(|combination| *combination == name)
+            .and_then(|index| u8::try_from(index).ok())
+            .map(DmgColors::Buttons),
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct VideoSection {
+    resolution_3d: u32,
+    filter: String,
+    show_fps: bool,
+}
+
+impl Default for VideoSection {
+    fn default() -> Self {
+        let settings = Settings::default();
+        Self {
+            resolution_3d: settings.resolution_3d,
+            filter: settings.filter.name().to_owned(),
+            show_fps: settings.show_fps,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -102,11 +212,21 @@ impl LayoutSection {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct SpeedSection {
-    /// Left out for no limit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fast_forward: Option<f64>,
+    fast_forward: FastForward,
     slow_motion: f64,
 }
+
+/// The fast-forward speed as the file gives it: a multiple of normal
+/// speed, or a word, of which [`UNLIMITED`] is the only one known.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+enum FastForward {
+    Times(f64),
+    Word(String),
+}
+
+/// The word in the file for fast-forward without a limit.
+const UNLIMITED: &str = "unlimited";
 
 impl Default for SpeedSection {
     fn default() -> Self {
@@ -118,8 +238,8 @@ impl From<&Speeds> for SpeedSection {
     fn from(speeds: &Speeds) -> Self {
         Self {
             fast_forward: match speeds.fast_forward {
-                Speed::Unlimited => None,
-                Speed::Times(rate) => Some(rate.get()),
+                Speed::Unlimited => FastForward::Word(UNLIMITED.to_owned()),
+                Speed::Times(rate) => FastForward::Times(rate.get()),
             },
             slow_motion: speeds.slow_motion.get(),
         }
@@ -131,9 +251,10 @@ impl SpeedSection {
         let rate =
             |key, value| Rate::new(value).ok_or(SettingsError::UnsupportedSpeed { key, value });
         Ok(Speeds {
-            fast_forward: match self.fast_forward {
-                Some(value) => Speed::Times(rate("fast_forward", value)?),
-                None => Speed::Unlimited,
+            fast_forward: match &self.fast_forward {
+                FastForward::Times(value) => Speed::Times(rate("fast_forward", *value)?),
+                FastForward::Word(word) if word == UNLIMITED => Speed::Unlimited,
+                FastForward::Word(word) => return Err(SettingsError::UnknownSpeed(word.clone())),
             },
             slow_motion: rate("slow_motion", self.slow_motion)?,
         })
@@ -150,9 +271,21 @@ impl Settings {
     pub fn from_toml(text: &str) -> Result<Self, SettingsError> {
         let file: SettingsFile =
             toml::from_str(text).map_err(|error| SettingsError::Syntax(error.to_string()))?;
+        let resolution_3d = file.video.resolution_3d;
+        if !(1..=MAX_RESOLUTION_3D).contains(&resolution_3d) {
+            return Err(SettingsError::UnsupportedResolution(resolution_3d));
+        }
+        let filter = Filter::from_name(&file.video.filter)
+            .ok_or_else(|| SettingsError::UnknownFilter(file.video.filter.clone()))?;
+        let dmg_colors = dmg_colors_from_name(&file.game_boy.dmg_colors)
+            .ok_or_else(|| SettingsError::UnknownDmgColors(file.game_boy.dmg_colors.clone()))?;
         Ok(Self {
             layout: file.layout.to_layout()?,
             speed: file.speed.to_speeds()?,
+            resolution_3d,
+            filter,
+            show_fps: file.video.show_fps,
+            dmg_colors,
         })
     }
 
@@ -161,6 +294,14 @@ impl Settings {
         let file = SettingsFile {
             layout: LayoutSection::from(&self.layout),
             speed: SpeedSection::from(&self.speed),
+            video: VideoSection {
+                resolution_3d: self.resolution_3d,
+                filter: self.filter.name().to_owned(),
+                show_fps: self.show_fps,
+            },
+            game_boy: GameBoySection {
+                dmg_colors: dmg_colors_name(self.dmg_colors),
+            },
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
         format!("# Saved by ds-emulator whenever a setting changes.\n\n{body}")
@@ -218,6 +359,18 @@ pub enum SettingsError {
     /// The rotation is not 0, 90, 180 or 270 degrees.
     #[error("unsupported rotation {0}° in settings")]
     UnsupportedRotation(u16),
+    /// The filter is not one of the five names.
+    #[error("unknown video filter {0:?} in settings")]
+    UnknownFilter(String),
+    /// The colours for original Game Boy games are not one of the names.
+    #[error("unknown Game Boy colours {0:?} in settings")]
+    UnknownDmgColors(String),
+    /// The 3D resolution is not 1 to [`MAX_RESOLUTION_3D`] times.
+    #[error("unsupported 3D resolution {0}x in settings; use 1 to {max}", max = MAX_RESOLUTION_3D)]
+    UnsupportedResolution(u32),
+    /// The fast-forward speed is a word other than "unlimited".
+    #[error("unknown fast-forward speed {0:?} in settings; use a number or \"unlimited\"")]
+    UnknownSpeed(String),
     /// A speed is not a finite number of at least [`MIN_RATE`].
     #[error("unsupported speed {key} = {value} in settings; use {min} or more", min = MIN_RATE)]
     UnsupportedSpeed {
@@ -245,20 +398,75 @@ mod tests {
                 fast_forward: Speed::Times(Rate::new(3.0).expect("valid rate")),
                 slow_motion: Rate::new(0.25).expect("valid rate"),
             },
+            resolution_3d: 4,
+            filter: Filter::Scanlines,
+            show_fps: true,
+            dmg_colors: DmgColors::Buttons(9),
         };
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
+        assert!(text.contains("resolution_3d = 4"), "{text}");
+        assert!(text.contains("filter = \"scanlines\""), "{text}");
+        assert!(text.contains("show_fps = true"), "{text}");
+        assert!(text.contains("dmg_colors = \"left+b\""), "{text}");
         assert!(text.contains("rotation = 270"), "{text}");
         assert!(text.contains("fast_forward = 3.0"), "{text}");
         assert_eq!(Settings::from_toml(&text), Ok(settings));
     }
 
     #[test]
-    fn unlimited_fast_forward_is_left_out() {
+    fn game_boy_colours_are_named_in_the_file() {
+        let grey = Settings::from_toml("[game_boy]\ndmg_colors = \"grey\"\n");
+        assert_eq!(
+            grey.map(|settings| settings.dmg_colors),
+            Ok(DmgColors::Grey)
+        );
+        let colour = Settings::from_toml("[game_boy]\ndmg_colors = \"game-boy-color\"\n");
+        assert_eq!(
+            colour.map(|settings| settings.dmg_colors),
+            Ok(DmgColors::ByTitle)
+        );
+        let buttons = Settings::from_toml("[game_boy]\ndmg_colors = \"down+b\"\n");
+        assert_eq!(
+            buttons.map(|settings| settings.dmg_colors),
+            Ok(DmgColors::Buttons(11))
+        );
+        assert_eq!(
+            Settings::from_toml("[game_boy]\ndmg_colors = \"sepia\"\n"),
+            Err(SettingsError::UnknownDmgColors("sepia".to_owned()))
+        );
+        assert_eq!(Settings::default().dmg_colors, DmgColors::ByTitle);
+    }
+
+    #[test]
+    fn fast_forward_is_a_multiple_or_unlimited() {
         let text = Settings::default().to_toml();
-        assert!(!text.contains("fast_forward"), "{text}");
+        assert!(text.contains("fast_forward = 2.0"), "{text}");
         assert!(text.contains("slow_motion = 0.5"), "{text}");
         assert_eq!(Settings::from_toml(&text), Ok(Settings::default()));
+
+        let unlimited = Settings {
+            speed: Speeds {
+                fast_forward: Speed::Unlimited,
+                ..Speeds::default()
+            },
+            ..Settings::default()
+        };
+        let text = unlimited.to_toml();
+        assert!(text.contains("fast_forward = \"unlimited\""), "{text}");
+        assert_eq!(Settings::from_toml(&text), Ok(unlimited));
+        assert_eq!(
+            Settings::from_toml("[speed]\nfast_forward = \"ludicrous\"\n"),
+            Err(SettingsError::UnknownSpeed("ludicrous".to_owned()))
+        );
+    }
+
+    #[test]
+    fn files_without_a_fast_forward_speed_get_2x() {
+        // Before 2x was the default, leaving the speed out meant no limit.
+        let settings = Settings::from_toml("[speed]\nslow_motion = 0.5\n").expect("valid file");
+        assert_eq!(settings.speed.fast_forward.label(), "2×");
+        assert_eq!(settings, Settings::default());
     }
 
     #[test]
@@ -302,6 +510,30 @@ mod tests {
             Settings::from_toml("[speed]\nturbo = 2\n"),
             Err(SettingsError::Syntax(_))
         ));
+    }
+
+    #[test]
+    fn the_3d_resolution_is_1_to_8_times() {
+        let settings = Settings::from_toml("[video]\nresolution_3d = 3\n").expect("valid file");
+        assert_eq!(settings.resolution_3d, 3);
+        assert_eq!(Settings::from_toml("").map(|s| s.resolution_3d), Ok(1));
+        for wrong in [0, 9] {
+            assert_eq!(
+                Settings::from_toml(&format!("[video]\nresolution_3d = {wrong}\n")),
+                Err(SettingsError::UnsupportedResolution(wrong))
+            );
+        }
+    }
+
+    #[test]
+    fn the_filter_is_one_of_five_names() {
+        let settings = Settings::from_toml("[video]\nfilter = \"lcd-grid\"\n").expect("valid file");
+        assert_eq!(settings.filter, Filter::LcdGrid);
+        assert_eq!(Settings::from_toml("").map(|s| s.filter), Ok(Filter::None));
+        assert_eq!(
+            Settings::from_toml("[video]\nfilter = \"xbrz\"\n"),
+            Err(SettingsError::UnknownFilter("xbrz".to_owned()))
+        );
     }
 
     #[test]

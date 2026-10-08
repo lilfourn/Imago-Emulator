@@ -20,6 +20,7 @@ emu-nds = { path = "crates/emu-nds" }
 emu-psg = { path = "crates/emu-psg" }
 emu-cores = { path = "crates/emu-cores" }
 emu-cheats = { path = "crates/emu-cheats" }
+emu-script = { path = "crates/emu-script" }
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -31,6 +32,10 @@ dirs = "7"
 gilrs = "0.11"
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 lz4_flex = "0.14"
+# Lua 5.4 for scripts, compiled from the bundled sources (MIT, like mlua
+# itself), so no system Lua is needed. `send` lets a script move to the
+# emulation thread with its core.
+mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }
 png = "0.18"
 rtrb = "0.4"
 postcard = { version = "1", features = ["use-std"] }
@@ -55,7 +60,23 @@ undocumented_unsafe_blocks = "warn"
 opt-level = 3
 
 # Interpreters are unusably slow at opt-level 0; keep the cores optimized
-# even in debug builds so the app runs at full speed while debugging.
+# even in debug builds so the app runs at full speed while debugging. The
+# frontend runs per-frame work too (rewind snapshots, video, audio,
+# cheats, scripts): unoptimized, rewind alone took 85% of a DS frame.
+[profile.dev.package.emu-app]
+opt-level = 2
+[profile.dev.package.emu-core]
+opt-level = 2
+[profile.dev.package.emu-state]
+opt-level = 2
+[profile.dev.package.emu-sched]
+opt-level = 2
+[profile.dev.package.emu-psg]
+opt-level = 2
+[profile.dev.package.emu-cheats]
+opt-level = 2
+[profile.dev.package.emu-script]
+opt-level = 2
 [profile.dev.package.emu-gb]
 opt-level = 2
 [profile.dev.package.emu-gba]

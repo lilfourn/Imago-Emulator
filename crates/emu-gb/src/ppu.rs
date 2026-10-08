@@ -6,13 +6,22 @@
 //! starts, using the registers as they are at that moment. That is enough
 //! for nearly every game; mid-line register effects would need a pixel FIFO.
 //!
+//! Interrupts follow the PPU's own mode, but STAT reports each mode one dot
+//! later, and for one dot after LY changes its LY=LYC bit reads 0. While
+//! the PPU scans OAM or draws, the CPU reads 0xFF from the memory in use
+//! and its writes are dropped. The line the LCD starts on skips OAM scan
+//! and is 4 dots short (Mooneye `ppu/intr_2_*`, `lcdon_*`, `stat_lyc_onoff`).
+//!
 //! In CGB mode the PPU has a second VRAM bank holding per-tile attributes
 //! (palette, bank, flips, priority), 8 background and 8 object palettes of
-//! four 15-bit colours, and draws objects in OAM order.
+//! four 15-bit colours, and draws objects in OAM order. In DMG mode a Game
+//! Boy Color draws as a DMG does, but BGP, OBP0 and OBP1 pick colours from
+//! background palette 0 and object palettes 0 and 1 instead of greys.
 
 use emu_core::rgb;
 use serde::{Deserialize, Serialize};
 
+use crate::compat_palettes::Palettes;
 use crate::interrupts;
 use crate::model::Model;
 
@@ -21,10 +30,14 @@ pub(crate) const HEIGHT: usize = 144;
 const DOTS_PER_LINE: u16 = 456;
 const LINES_PER_FRAME: u8 = 154;
 const OAM_SCAN_DOTS: u16 = 80;
+/// Where the line the LCD starts on begins: it is 4 dots short.
+const LCD_ON_DOT: u16 = 4;
+/// Where drawing starts on that line, 79 dots after the LCD is switched on.
+const LCD_ON_DRAWING_START: u16 = 83;
 
 /// The four DMG shades, lightest first. Neutral greys match the reference
 /// screenshots of the common test-ROM suites.
-const DMG_SHADES: [u32; 4] = [
+pub(crate) const DMG_SHADES: [u32; 4] = [
     rgb(0xFF, 0xFF, 0xFF),
     rgb(0xAA, 0xAA, 0xAA),
     rgb(0x55, 0x55, 0x55),
@@ -70,6 +83,13 @@ pub(crate) struct Ppu {
     /// than OAM order.
     priority_by_x: bool,
     mode: Mode,
+    /// The mode STAT reports: `mode` as it was a dot ago.
+    reported_mode: Mode,
+    /// LY matched LYC when last compared. The comparison holds while the
+    /// LCD is off.
+    lyc_match: bool,
+    /// The current line is the one the LCD started on.
+    first_line: bool,
     /// Dots elapsed in the current line.
     dot: u16,
     /// Length of mode 3 on this line.
@@ -112,8 +132,11 @@ impl Ppu {
             obj_palettes: vec![0xFF; 64].into_boxed_slice(),
             bg_palette_select: 0,
             obj_palette_select: 0,
-            priority_by_x: model == Model::Dmg,
+            priority_by_x: model != Model::Cgb,
             mode: Mode::OamScan,
+            reported_mode: Mode::OamScan,
+            lyc_match: true,
+            first_line: false,
             dot: 0,
             drawing_dots: 172,
             window_in_frame: false,
@@ -157,25 +180,65 @@ impl Ppu {
         &self.vram
     }
 
+    /// The hardware model, for the debugger's graphics viewers.
+    pub(crate) fn model(&self) -> Model {
+        self.model
+    }
+
+    /// CGB background palette RAM: 8 palettes of 4 little-endian BGR555
+    /// colours, as BCPD reads it.
+    pub(crate) fn bg_palette_ram(&self) -> &[u8] {
+        &self.bg_palettes
+    }
+
+    /// CGB object palette RAM, laid out as [`Ppu::bg_palette_ram`].
+    pub(crate) fn obj_palette_ram(&self) -> &[u8] {
+        &self.obj_palettes
+    }
+
     /// Advances `dots` dots: four per M-cycle, or two in CGB double speed.
     pub(crate) fn tick(&mut self, dots: u8, interrupt_flag: &mut u8) {
         if !self.lcd_enabled() {
             return;
         }
-        for _ in 0..dots {
-            self.advance_dot(interrupt_flag);
+        let dots = u16::from(dots);
+        if self.dot + dots < self.next_event_dot() {
+            // Most M-cycles change nothing but the dot counter.
+            self.dot += dots;
+            self.reported_mode = self.mode;
+        } else {
+            for _ in 0..dots {
+                self.advance_dot(interrupt_flag);
+            }
         }
         self.update_stat_line(interrupt_flag);
     }
 
+    /// The next dot at which [`Ppu::advance_dot`] changes the mode or line.
+    fn next_event_dot(&self) -> u16 {
+        if self.ly < HEIGHT as u8 {
+            let drawing_start = self.drawing_start();
+            if self.dot < drawing_start {
+                return drawing_start;
+            }
+            let drawing_end = drawing_start + self.drawing_dots;
+            if self.dot < drawing_end {
+                return drawing_end;
+            }
+        }
+        DOTS_PER_LINE
+    }
+
     fn advance_dot(&mut self, interrupt_flag: &mut u8) {
+        self.reported_mode = self.mode;
         self.dot += 1;
         if self.ly < HEIGHT as u8 {
-            if self.dot == OAM_SCAN_DOTS {
+            let drawing_start = self.drawing_start();
+            if self.dot == drawing_start {
                 self.mode = Mode::Drawing;
                 self.drawing_dots = self.drawing_length();
                 self.render_line();
-            } else if self.dot == OAM_SCAN_DOTS + self.drawing_dots {
+            } else if self.dot == drawing_start + self.drawing_dots {
                 self.mode = Mode::HBlank;
                 self.hblank_started = true;
             }
@@ -184,6 +247,7 @@ impl Ppu {
             return;
         }
         self.dot = 0;
+        self.first_line = false;
         self.ly += 1;
         if self.ly == HEIGHT as u8 {
             self.mode = Mode::VBlank;
@@ -202,18 +266,40 @@ impl Ppu {
         }
     }
 
+    /// The dot drawing starts at on this line.
+    fn drawing_start(&self) -> u16 {
+        if self.first_line {
+            LCD_ON_DRAWING_START
+        } else {
+            OAM_SCAN_DOTS
+        }
+    }
+
+    /// Whether LY is being compared with LYC: not in the dot LY changes,
+    /// except to 0.
+    fn comparing_ly(&self) -> bool {
+        self.ly == 0 || self.dot != 0
+    }
+
     fn update_stat_line(&mut self, interrupt_flag: &mut u8) {
+        if self.comparing_ly() {
+            self.lyc_match = self.ly == self.lyc;
+        }
         let mode_selected = match self.mode {
+            // The first line's wait before drawing raises no interrupt.
+            Mode::HBlank if self.first_line && self.dot < LCD_ON_DRAWING_START => false,
             Mode::HBlank => self.stat_select & 0x08 != 0,
             // On DMG the mode 2 condition also fires as VBlank begins.
-            Mode::VBlank if !self.cgb() && self.ly == HEIGHT as u8 && self.dot == 0 => {
+            Mode::VBlank
+                if self.model == Model::Dmg && self.ly == HEIGHT as u8 && self.dot == 0 =>
+            {
                 self.stat_select & 0x30 != 0
             }
             Mode::VBlank => self.stat_select & 0x10 != 0,
             Mode::OamScan => self.stat_select & 0x20 != 0,
             Mode::Drawing => false,
         };
-        let line = mode_selected || (self.stat_select & 0x40 != 0 && self.ly == self.lyc);
+        let line = mode_selected || (self.stat_select & 0x40 != 0 && self.lyc_match);
         if line && !self.stat_line {
             *interrupt_flag |= interrupts::STAT;
         }
@@ -223,17 +309,49 @@ impl Ppu {
     /// Mode 3 length: 172 dots, plus fine scroll, plus the window and each
     /// object on the line (Pan Docs, "Mode 3 length").
     fn drawing_length(&self) -> u16 {
-        let mut dots = 172 + u16::from(self.scx & 7);
-        if self.window_visible_on_line() {
+        let fine_scroll = self.scx & 7;
+        let mut dots = 172 + u16::from(fine_scroll);
+        let window = self.window_visible_on_line();
+        if window {
             dots += 6;
         }
         if self.lcdc & 0x02 != 0 {
-            for sprite in self.line_sprites() {
-                let offset = (u16::from(sprite.x) + u16::from(self.scx)) % 8;
-                dots += 6 + 5u16.saturating_sub(offset);
+            // Bit n: background tile n - 1 (tile -1 lies off the left edge)
+            // already waited for; bit 32 + n: window tile n. Objects are
+            // fetched left to right, whatever their order in OAM.
+            let mut waited: u64 = 0;
+            let mut sprites = self.line_sprites();
+            sprites.sort_by_key(|sprite| sprite.x);
+            for sprite in sprites {
+                // Objects off the right edge are never fetched.
+                if sprite.x >= 168 {
+                    continue;
+                }
+                let (tile_bit, offset) = self.tile_under(sprite.x, fine_scroll, window);
+                if waited & tile_bit == 0 {
+                    waited |= tile_bit;
+                    dots += 5u16.saturating_sub(offset);
+                }
+                dots += 6;
             }
         }
         dots
+    }
+
+    /// The background or window tile under the leftmost pixel of an object
+    /// at OAM X position `x`, as a bit for [`Ppu::drawing_length`], and the
+    /// pixel's column within it. Fetching an object waits for that tile's
+    /// fetch to finish, once per tile (Pan Docs, "OBJ penalty algorithm").
+    fn tile_under(&self, x: u8, fine_scroll: u8, window: bool) -> (u64, u16) {
+        let screen_x = i16::from(x) - 8;
+        let window_x = i16::from(self.wx) - 7;
+        let (column, base) = if window && screen_x >= window_x {
+            (screen_x - window_x, 32)
+        } else {
+            (screen_x + i16::from(fine_scroll) + 8, 0)
+        };
+        let tile = (column / 8) as u32;
+        (1 << (base + tile), (column % 8) as u16)
     }
 
     fn window_visible_on_line(&self) -> bool {
@@ -349,7 +467,7 @@ impl Ppu {
             *out = if self.cgb() {
                 cgb_color(&self.bg_palettes, pixel.palette, pixel.color)
             } else {
-                DMG_SHADES[usize::from(palette_shade(self.bgp, pixel.color))]
+                self.dmg_color(0, palette_shade(self.bgp, pixel.color))
             };
         }
         if self.lcdc & 0x02 != 0 {
@@ -413,16 +531,33 @@ impl Ppu {
                 }
                 row[x] = if self.cgb() {
                     cgb_color(&self.obj_palettes, sprite.attributes & 7, color)
+                } else if sprite.attributes & 0x10 != 0 {
+                    self.dmg_color(2, palette_shade(self.obp1, color))
                 } else {
-                    let palette = if sprite.attributes & 0x10 != 0 {
-                        self.obp1
-                    } else {
-                        self.obp0
-                    };
-                    DMG_SHADES[usize::from(palette_shade(palette, color))]
+                    self.dmg_color(1, palette_shade(self.obp0, color))
                 };
             }
         }
+    }
+
+    /// The colour of shade `shade` (0–3) through DMG palette `palette`: 0
+    /// for BGP, 1 for OBP0, 2 for OBP1. Grey on a DMG; on a Game Boy Color
+    /// in DMG mode, the colour the boot ROM loaded into background palette
+    /// 0 or object palette 0 or 1.
+    pub(crate) fn dmg_color(&self, palette: u8, shade: u8) -> u32 {
+        match (self.model, palette) {
+            (Model::CgbDmgMode, 0) => cgb_color(&self.bg_palettes, 0, shade),
+            (Model::CgbDmgMode, _) => cgb_color(&self.obj_palettes, palette - 1, shade),
+            _ => DMG_SHADES[usize::from(shade)],
+        }
+    }
+
+    /// Loads the palettes a Game Boy Color's boot ROM picks for a game made
+    /// for the original Game Boy.
+    pub(crate) fn load_compat_palettes(&mut self, palettes: &Palettes) {
+        write_colors(&mut self.bg_palettes[..8], &palettes.background);
+        write_colors(&mut self.obj_palettes[..8], &palettes.objects[0]);
+        write_colors(&mut self.obj_palettes[8..16], &palettes.objects[1]);
     }
 
     fn vram_index(&self, address: u16) -> usize {
@@ -436,6 +571,35 @@ impl Ppu {
     pub(crate) fn write_vram(&mut self, address: u16, value: u8) {
         let index = self.vram_index(address);
         self.vram[index] = value;
+    }
+
+    /// Whether a CPU read of `address` finds the PPU using that memory, so
+    /// reads 0xFF: VRAM while drawing, OAM from the start of a line's OAM
+    /// scan until STAT reports HBlank.
+    pub(crate) fn blocks_read(&self, address: u16) -> bool {
+        match address {
+            0x8000..=0x9FFF => self.mode == Mode::Drawing || self.reported_mode == Mode::Drawing,
+            0xFE00..=0xFEFF => {
+                self.mode == Mode::OamScan
+                    || matches!(self.reported_mode, Mode::OamScan | Mode::Drawing)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a CPU write to `address` is dropped because the PPU is
+    /// using that memory. Writes go through a dot later than reads stop
+    /// and stop a dot later, so OAM takes writes in the dot drawing starts.
+    pub(crate) fn blocks_write(&self, address: u16) -> bool {
+        match address {
+            0x8000..=0x9FFF => self.reported_mode == Mode::Drawing,
+            0xFE00..=0xFEFF => match self.reported_mode {
+                Mode::Drawing => true,
+                Mode::OamScan => self.mode == Mode::OamScan,
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     pub(crate) fn read_oam(&self, address: u16) -> u8 {
@@ -456,13 +620,8 @@ impl Ppu {
         match address {
             0xFF40 => self.lcdc,
             0xFF41 => {
-                let mode = if self.lcd_enabled() {
-                    self.mode as u8
-                } else {
-                    0
-                };
-                let coincidence = u8::from(self.ly == self.lyc) << 2;
-                0x80 | self.stat_select | coincidence | mode
+                let coincidence = u8::from(self.lyc_match && self.comparing_ly()) << 2;
+                0x80 | self.stat_select | coincidence | self.reported_mode as u8
             }
             0xFF42 => self.scy,
             0xFF43 => self.scx,
@@ -490,17 +649,22 @@ impl Ppu {
                 let was_on = self.lcd_enabled();
                 self.lcdc = value;
                 if was_on && !self.lcd_enabled() {
+                    // STAT's LY=LYC bit and interrupt line hold until the
+                    // LCD is back on.
+                    self.lyc_match &= self.comparing_ly();
                     self.ly = 0;
                     self.dot = 0;
                     self.mode = Mode::HBlank;
-                    self.stat_line = false;
+                    self.reported_mode = Mode::HBlank;
+                    self.first_line = false;
                     self.pixels.fill(WHITE);
                     self.frame_ready = true;
                 } else if !was_on && self.lcd_enabled() {
-                    // The first line after switching on skips OAM scan.
                     self.ly = 0;
-                    self.dot = 0;
+                    self.dot = LCD_ON_DOT;
                     self.mode = Mode::HBlank;
+                    self.reported_mode = Mode::HBlank;
+                    self.first_line = true;
                     self.window_line = 0;
                     self.window_in_frame = self.wy == 0;
                 }
@@ -568,6 +732,13 @@ fn cgb_color(palettes: &[u8], palette: u8, color: u8) -> u32 {
     rgb(channel(0), channel(5), channel(10))
 }
 
+/// Writes one palette's four colours into its 8 bytes of palette RAM.
+fn write_colors(ram: &mut [u8], colors: &[u16; 4]) {
+    for (bytes, color) in ram.chunks_exact_mut(2).zip(colors) {
+        bytes.copy_from_slice(&color.to_le_bytes());
+    }
+}
+
 /// Writes palette RAM at the index in `select`, auto-incrementing if bit 7
 /// is set.
 fn write_palette(palettes: &mut [u8], select: &mut u8, value: u8) {
@@ -595,5 +766,121 @@ mod tests {
         write_palette(&mut palettes, &mut select, 0x12);
         write_palette(&mut palettes, &mut select, 0x34);
         assert_eq!((palettes[63], palettes[0], select), (0x12, 0x34, 0x81));
+    }
+
+    /// Runs `m_cycles` M-cycles at normal speed.
+    fn run(ppu: &mut Ppu, m_cycles: u32, interrupt_flag: &mut u8) {
+        for _ in 0..m_cycles {
+            ppu.tick(4, interrupt_flag);
+        }
+    }
+
+    fn stat_mode(ppu: &Ppu) -> u8 {
+        ppu.read_register(0xFF41) & 3
+    }
+
+    #[test]
+    fn stat_reports_each_mode_a_dot_after_the_ppu_enters_it() {
+        let mut ppu = Ppu::after_boot(Model::Dmg);
+        let mut flags = 0;
+        ppu.write_register(0xFF41, 0x20, &mut flags);
+        // Line 0 ends on the last dot of M-cycle 114.
+        run(&mut ppu, 113, &mut flags);
+        flags = 0;
+        ppu.tick(4, &mut flags);
+        assert_eq!(flags, interrupts::STAT, "the mode 2 interrupt");
+        assert_eq!(ppu.read_register(0xFF44), 1);
+        assert_eq!(stat_mode(&ppu), 0);
+        assert!(ppu.blocks_read(0xFE00) && !ppu.blocks_write(0xFE00));
+        ppu.tick(4, &mut flags);
+        assert_eq!(stat_mode(&ppu), 2);
+        assert!(ppu.blocks_write(0xFE00));
+
+        // Drawing starts at dot 80: VRAM stops answering reads, but STAT
+        // and writes only see it a dot later.
+        run(&mut ppu, 19, &mut flags);
+        assert_eq!(stat_mode(&ppu), 2);
+        assert!(ppu.blocks_read(0x8000) && !ppu.blocks_write(0x8000));
+        assert!(!ppu.blocks_write(0xFE00));
+        ppu.tick(4, &mut flags);
+        assert_eq!(stat_mode(&ppu), 3);
+        assert!(ppu.blocks_write(0x8000) && ppu.blocks_write(0xFE00));
+
+        // HBlank at dot 252, reported from 253.
+        ppu.write_register(0xFF41, 0x08, &mut flags);
+        flags = 0;
+        run(&mut ppu, 42, &mut flags);
+        assert_eq!((flags, stat_mode(&ppu)), (interrupts::STAT, 3));
+        assert!(ppu.blocks_read(0x8000));
+        ppu.tick(4, &mut flags);
+        assert_eq!(stat_mode(&ppu), 0);
+        assert!(!ppu.blocks_read(0x8000) && !ppu.blocks_read(0xFE00));
+    }
+
+    #[test]
+    fn ly_lyc_reads_0_as_ly_changes_and_holds_while_the_lcd_is_off() {
+        let mut ppu = Ppu::after_boot(Model::Dmg);
+        let mut flags = 0;
+        ppu.write_register(0xFF41, 0x40, &mut flags);
+        ppu.write_register(0xFF45, 1, &mut flags);
+        run(&mut ppu, 114, &mut flags);
+        flags = 0;
+        assert_eq!(ppu.read_register(0xFF44), 1);
+        assert_eq!(ppu.read_register(0xFF41), 0xC0);
+        ppu.tick(4, &mut flags);
+        assert_eq!(ppu.read_register(0xFF41), 0xC6);
+        assert_eq!(flags, interrupts::STAT);
+
+        // Off, the bit keeps its value whatever LYC becomes.
+        ppu.write_register(0xFF40, 0x11, &mut flags);
+        ppu.write_register(0xFF45, 7, &mut flags);
+        assert_eq!(ppu.read_register(0xFF41), 0xC4);
+        // Back on, LY = 0 is compared at once; it matches LYC = 0, so the
+        // interrupt line, high since line 1, never falls and never fires.
+        ppu.write_register(0xFF45, 0, &mut flags);
+        flags = 0;
+        ppu.write_register(0xFF40, 0x91, &mut flags);
+        assert_eq!(ppu.read_register(0xFF41), 0xC4);
+        assert_eq!(flags, 0);
+    }
+
+    #[test]
+    fn the_first_line_after_switching_on_is_4_dots_short() {
+        let mut ppu = Ppu::after_boot(Model::Dmg);
+        let mut flags = 0;
+        ppu.write_register(0xFF40, 0x11, &mut flags);
+        ppu.write_register(0xFF40, 0x91, &mut flags);
+        // Mode 0 until drawing starts, 79 dots in.
+        run(&mut ppu, 19, &mut flags);
+        assert_eq!(stat_mode(&ppu), 0);
+        assert!(!ppu.blocks_read(0x8000) && !ppu.blocks_read(0xFE00));
+        ppu.tick(4, &mut flags);
+        assert_eq!(stat_mode(&ppu), 3);
+        run(&mut ppu, 93, &mut flags);
+        assert_eq!(ppu.read_register(0xFF44), 1);
+    }
+
+    #[test]
+    fn objects_cost_six_dots_plus_a_wait_once_per_background_tile() {
+        let mut ppu = Ppu::after_boot(Model::Dmg);
+        ppu.lcdc = 0x93;
+        let mut place = |xs: &[u8]| {
+            ppu.oam.fill(0);
+            for (entry, x) in ppu.oam.chunks_exact_mut(4).zip(xs) {
+                entry[0] = 16;
+                entry[1] = *x;
+            }
+            ppu.drawing_length() - 172
+        };
+        // X = 0 waits 5 dots for tile -1, once; X = 9 waits 4 for tile 0.
+        assert_eq!(place(&[0]), 11);
+        assert_eq!(place(&[0; 10]), 11 + 9 * 6);
+        assert_eq!(place(&[9, 0]), 10 + 11);
+        // The leftmost object waits, whichever comes first in OAM.
+        assert_eq!(place(&[14, 8]), 11 + 6);
+        // Past the 6th pixel of a tile there is nothing to wait for.
+        assert_eq!(place(&[14]), 6);
+        // Objects off the right edge are never fetched.
+        assert_eq!(place(&[168, 200]), 0);
     }
 }

@@ -1,0 +1,14 @@
+[package]
+name = "emu-script"
+description = "Lua scripts that read and write a core's memory, press its buttons and draw over its screens between frames."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+emu-core.workspace = true
+mlua.workspace = true
+
+[lints]
+workspace = true

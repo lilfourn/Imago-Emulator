@@ -108,6 +108,22 @@ impl GbaSlot {
             .map_or(0xFFFF, |cartridge| cartridge.read_16(address))
     }
 
+    /// The ROM's halfword at `address` in 0x08000000-0x09FFFFFF, without
+    /// side effects, for debuggers: the ROM itself, not the GPIO port or
+    /// an EEPROM. Past the end of the ROM the bus returns the halfword
+    /// address; an empty slot reads all ones.
+    pub(crate) fn peek_rom(&self, address: u32) -> u16 {
+        self.cartridge.as_ref().map_or(0xFFFF, |cartridge| {
+            let offset = (address & 0x01FF_FFFE) as usize;
+            cartridge
+                .rom()
+                .get(offset..offset + 2)
+                .map_or((address >> 1) as u16, |bytes| {
+                    u16::from_le_bytes([bytes[0], bytes[1]])
+                })
+        })
+    }
+
     /// Writes the halfword at `address` in 0x08000000-0x09FFFFFF at bus
     /// cycle `now`: only the GPIO port takes it.
     pub(crate) fn write_rom(&mut self, address: u32, value: u16, now: u64) {

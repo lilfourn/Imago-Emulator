@@ -8,7 +8,7 @@ use crate::hardware::Hardware;
 use crate::interrupt::irq;
 use crate::ipc::Side;
 use crate::machine::Arm9;
-use crate::memory::Width;
+use crate::memory::{self, Place, Width};
 
 /// The ARM9's bus. TCM accesses never reach it; the CPU serves them.
 pub(crate) struct Arm9Bus<'a>(pub(crate) &'a mut Hardware);
@@ -16,73 +16,215 @@ pub(crate) struct Arm9Bus<'a>(pub(crate) &'a mut Hardware);
 /// The ARM7's bus.
 pub(crate) struct Arm7Bus<'a>(pub(crate) &'a mut Hardware);
 
+/// The ARM9's bus tries main RAM through the caches first
+/// ([`Hardware::arm9_cache_hit`]), then the memory map in these.
+impl Arm9Bus<'_> {
+    #[inline(never)]
+    fn mapped_read_32(&mut self, address: u32, access: Access) -> u32 {
+        let hw = &mut *self.0;
+        let place = hw.arm9_place(address & !3);
+        hw.arm9.cycles += hw.arm9_wait(place, Width::Word, access);
+        hw.read_place_32(true, place, address)
+    }
+
+    #[inline(never)]
+    fn mapped_read_16(&mut self, address: u32, access: Access) -> u16 {
+        let hw = &mut *self.0;
+        let place = hw.arm9_place(address & !1);
+        hw.arm9.cycles += hw.arm9_wait(place, Width::Half, access);
+        hw.read_place_16(true, place, address)
+    }
+
+    #[inline(never)]
+    fn mapped_read_8(&mut self, address: u32, access: Access) -> u8 {
+        let hw = &mut *self.0;
+        let place = hw.arm9_place(address);
+        hw.arm9.cycles += hw.arm9_wait(place, Width::Byte, access);
+        hw.read_place_8(true, place, address)
+    }
+
+    #[inline(never)]
+    fn mapped_write_32(&mut self, address: u32, value: u32, access: Access) {
+        let hw = &mut *self.0;
+        let place = hw.arm9_place(address & !3);
+        hw.arm9.cycles += hw.arm9_wait(place, Width::Word, access);
+        hw.write_place_32(true, place, address, value);
+    }
+
+    #[inline(never)]
+    fn mapped_write_16(&mut self, address: u32, value: u16, access: Access) {
+        let hw = &mut *self.0;
+        let place = hw.arm9_place(address & !1);
+        hw.arm9.cycles += hw.arm9_wait(place, Width::Half, access);
+        hw.write_place_16(true, place, address, value);
+    }
+
+    #[inline(never)]
+    fn mapped_write_8(&mut self, address: u32, value: u8, access: Access) {
+        let hw = &mut *self.0;
+        let place = hw.arm9_place(address);
+        hw.arm9.cycles += hw.arm9_wait(place, Width::Byte, access);
+        hw.write_place_8(true, place, address, value);
+    }
+}
+
 impl Bus for Arm9Bus<'_> {
+    #[inline]
     fn read_32(&mut self, address: u32, access: Access) -> u32 {
-        self.0.arm9.cycles += self.0.arm9_wait(address, Width::Word, access);
-        self.0.arm9_read_32(address)
+        match self.0.arm9_cache_hit(address & !3, access) {
+            Some(index) => memory::word(&self.0.main_ram, index),
+            None => self.mapped_read_32(address, access),
+        }
     }
 
+    #[inline]
     fn read_16(&mut self, address: u32, access: Access) -> u16 {
-        self.0.arm9.cycles += self.0.arm9_wait(address, Width::Half, access);
-        self.0.arm9_read_16(address)
+        match self.0.arm9_cache_hit(address & !1, access) {
+            Some(index) => memory::half(&self.0.main_ram, index),
+            None => self.mapped_read_16(address, access),
+        }
     }
 
+    #[inline]
     fn read_8(&mut self, address: u32, access: Access) -> u8 {
-        self.0.arm9.cycles += self.0.arm9_wait(address, Width::Byte, access);
-        self.0.arm9_read_8(address)
+        match self.0.arm9_cache_hit(address, access) {
+            Some(index) => self.0.main_ram[index],
+            None => self.mapped_read_8(address, access),
+        }
     }
 
+    #[inline]
     fn write_32(&mut self, address: u32, value: u32, access: Access) {
-        self.0.arm9.cycles += self.0.arm9_wait(address, Width::Word, access);
-        self.0.arm9_write_32(address, value);
+        match self.0.arm9_cache_hit(address & !3, access) {
+            Some(index) => memory::put_word(&mut self.0.main_ram, index, value),
+            None => self.mapped_write_32(address, value, access),
+        }
     }
 
+    #[inline]
     fn write_16(&mut self, address: u32, value: u16, access: Access) {
-        self.0.arm9.cycles += self.0.arm9_wait(address, Width::Half, access);
-        self.0.arm9_write_16(address, value);
+        match self.0.arm9_cache_hit(address & !1, access) {
+            Some(index) => memory::put_half(&mut self.0.main_ram, index, value),
+            None => self.mapped_write_16(address, value, access),
+        }
     }
 
+    #[inline]
     fn write_8(&mut self, address: u32, value: u8, access: Access) {
-        self.0.arm9.cycles += self.0.arm9_wait(address, Width::Byte, access);
-        self.0.arm9_write_8(address, value);
+        match self.0.arm9_cache_hit(address, access) {
+            Some(index) => self.0.main_ram[index] = value,
+            None => self.mapped_write_8(address, value, access),
+        }
     }
 
+    #[inline]
     fn idle(&mut self) {
         self.0.arm9.cycles += 1;
     }
 }
 
+/// The ARM7's bus tries its working RAM first ([`Hardware::arm7_wram_hit`]),
+/// then the rest of the memory map in these.
+impl Arm7Bus<'_> {
+    #[inline(never)]
+    fn mapped_read_32(&mut self, place: Place, address: u32, access: Access) -> u32 {
+        let hw = &mut *self.0;
+        hw.arm7.cycles += hw.arm7_wait(place, address, Width::Word, access);
+        hw.read_place_32(false, place, address)
+    }
+
+    #[inline(never)]
+    fn mapped_read_16(&mut self, place: Place, address: u32, access: Access) -> u16 {
+        let hw = &mut *self.0;
+        hw.arm7.cycles += hw.arm7_wait(place, address, Width::Half, access);
+        hw.read_place_16(false, place, address)
+    }
+
+    #[inline(never)]
+    fn mapped_read_8(&mut self, place: Place, address: u32, access: Access) -> u8 {
+        let hw = &mut *self.0;
+        hw.arm7.cycles += hw.arm7_wait(place, address, Width::Byte, access);
+        hw.read_place_8(false, place, address)
+    }
+
+    #[inline(never)]
+    fn mapped_write_32(&mut self, place: Place, address: u32, value: u32, access: Access) {
+        let hw = &mut *self.0;
+        hw.arm7.cycles += hw.arm7_wait(place, address, Width::Word, access);
+        hw.write_place_32(false, place, address, value);
+    }
+
+    #[inline(never)]
+    fn mapped_write_16(&mut self, place: Place, address: u32, value: u16, access: Access) {
+        let hw = &mut *self.0;
+        hw.arm7.cycles += hw.arm7_wait(place, address, Width::Half, access);
+        hw.write_place_16(false, place, address, value);
+    }
+
+    #[inline(never)]
+    fn mapped_write_8(&mut self, place: Place, address: u32, value: u8, access: Access) {
+        let hw = &mut *self.0;
+        hw.arm7.cycles += hw.arm7_wait(place, address, Width::Byte, access);
+        hw.write_place_8(false, place, address, value);
+    }
+}
+
 impl Bus for Arm7Bus<'_> {
+    #[inline]
     fn read_32(&mut self, address: u32, access: Access) -> u32 {
-        self.0.arm7.cycles += self.0.arm7_wait(address, Width::Word, access);
-        self.0.arm7_read_32(address)
+        let place = self.0.arm7_place(address & !3);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::word(wram, index),
+            None => self.mapped_read_32(place, address, access),
+        }
     }
 
+    #[inline]
     fn read_16(&mut self, address: u32, access: Access) -> u16 {
-        self.0.arm7.cycles += self.0.arm7_wait(address, Width::Half, access);
-        self.0.arm7_read_16(address)
+        let place = self.0.arm7_place(address & !1);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::half(wram, index),
+            None => self.mapped_read_16(place, address, access),
+        }
     }
 
+    #[inline]
     fn read_8(&mut self, address: u32, access: Access) -> u8 {
-        self.0.arm7.cycles += self.0.arm7_wait(address, Width::Byte, access);
-        self.0.arm7_read_8(address)
+        let place = self.0.arm7_place(address);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => wram[index],
+            None => self.mapped_read_8(place, address, access),
+        }
     }
 
+    #[inline]
     fn write_32(&mut self, address: u32, value: u32, access: Access) {
-        self.0.arm7.cycles += self.0.arm7_wait(address, Width::Word, access);
-        self.0.arm7_write_32(address, value);
+        let place = self.0.arm7_place(address & !3);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::put_word(wram, index, value),
+            None => self.mapped_write_32(place, address, value, access),
+        }
     }
 
+    #[inline]
     fn write_16(&mut self, address: u32, value: u16, access: Access) {
-        self.0.arm7.cycles += self.0.arm7_wait(address, Width::Half, access);
-        self.0.arm7_write_16(address, value);
+        let place = self.0.arm7_place(address & !1);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::put_half(wram, index, value),
+            None => self.mapped_write_16(place, address, value, access),
+        }
     }
 
+    #[inline]
     fn write_8(&mut self, address: u32, value: u8, access: Access) {
-        self.0.arm7.cycles += self.0.arm7_wait(address, Width::Byte, access);
-        self.0.arm7_write_8(address, value);
+        let place = self.0.arm7_place(address);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => wram[index] = value,
+            None => self.mapped_write_8(place, address, value, access),
+        }
     }
 
+    #[inline]
     fn idle(&mut self) {
         self.0.arm7.cycles += 1;
     }
@@ -210,10 +352,21 @@ impl CpuBus for Arm9TcmBus<'_, '_> {
 impl Hardware {
     /// Runs `side`'s highest-priority pending DMA channel, if any, on that
     /// CPU's bus. Returns whether one ran.
+    ///
+    /// The machine asks before every instruction and the answer is nearly
+    /// always no, so the check is inlined and the copy is not.
+    #[inline]
     pub(crate) fn run_dma(&mut self, side: Side) -> bool {
         let Some(index) = self.cpu(side).dma.next_pending() else {
             return false;
         };
+        self.run_dma_channel(side, index);
+        true
+    }
+
+    /// Runs DMA channel `index` of `side`'s, which is pending.
+    #[inline(never)]
+    fn run_dma_channel(&mut self, side: Side, index: usize) {
         let transfer = self.cpu(side).dma.transfer(index);
         let (mut source, mut destination) = (transfer.source, transfer.destination);
         let access = |unit: u32| {
@@ -258,7 +411,6 @@ impl Hardware {
         if cpu.dma.finish(index, transfer.count, source, destination) {
             cpu.interrupts.request(irq::DMA0 << index);
         }
-        true
     }
 }
 

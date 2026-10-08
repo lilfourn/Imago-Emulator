@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
 
-use emu_core::{Button, Core, Input, Media};
+use emu_core::{Button, Core, DmgColors, Input, Media};
 use emu_gb::Gb;
 
 const CYCLES_PER_SECOND: u64 = 4_194_304;
@@ -46,6 +46,9 @@ struct Case {
     /// Buttons to tap one after another, starting one second in; for test
     /// ROMs with a menu.
     presses: &'static [Button],
+    /// How a ROM made for the original Game Boy is run: on a DMG, or on a
+    /// Game Boy Color in DMG mode.
+    dmg_colors: DmgColors,
 }
 
 /// When scripted presses start, and how long each press and gap lasts.
@@ -101,6 +104,7 @@ fn cases() -> Vec<Case> {
             check,
             timeout_seconds,
             presses: &[],
+            dmg_colors: DmgColors::Grey,
         }));
     };
     add(roms_in("blargg/cpu_instrs"), Check::Serial, 60);
@@ -141,6 +145,16 @@ fn cases() -> Vec<Case> {
         Check::Screenshot("mbc3-tester-dmg.png"),
         1,
     );
+    // On a Game Boy Color in DMG mode, with the palettes it gives games
+    // it does not know.
+    cases.push(Case {
+        label: "dmg-acid2/dmg-acid2.gb (CGB in DMG mode)".to_owned(),
+        path: "dmg-acid2/dmg-acid2.gb".to_owned(),
+        check: Check::Screenshot("dmg-acid2-cgb.png"),
+        timeout_seconds: 5,
+        presses: &[],
+        dmg_colors: DmgColors::ByTitle,
+    });
     // rtc3test picks a subtest from a menu, then runs it for a fixed time.
     for (subtest, presses, png, seconds) in [
         (
@@ -168,6 +182,7 @@ fn cases() -> Vec<Case> {
             check: Check::Screenshot(png),
             timeout_seconds: seconds + 3,
             presses,
+            dmg_colors: DmgColors::Grey,
         });
     }
     cases
@@ -192,7 +207,11 @@ fn scripted_input(presses: &[Button], cycle: u64) -> Input {
 fn run(case: &Case) -> Result<(), String> {
     let rom_path = bundle_root().join(&case.path);
     let rom = fs::read(&rom_path).map_err(|error| format!("cannot read: {error}"))?;
-    let mut gb = Gb::new(&Media::new(&rom)).map_err(|error| error.to_string())?;
+    let media = Media {
+        dmg_colors: case.dmg_colors,
+        ..Media::new(&rom)
+    };
+    let mut gb = Gb::new(&media).map_err(|error| error.to_string())?;
     let deadline = case.timeout_seconds * CYCLES_PER_SECOND;
     let mut next_poll = 0;
 

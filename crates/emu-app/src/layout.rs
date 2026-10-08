@@ -11,6 +11,9 @@ use emu_core::{ScreenSize, TouchPoint};
 /// emulated pixels.
 pub const HINGE_GAP: f32 = 90.0;
 
+/// Space between consoles shown side by side, in emulated pixels.
+pub const CONSOLE_GAP: f32 = 16.0;
+
 /// Gaps offered between screens, in emulated pixels.
 pub const GAPS: [f32; 4] = [0.0, 16.0, 48.0, HINGE_GAP];
 
@@ -252,8 +255,37 @@ pub fn fit(size: (f32, f32), area: (f32, f32)) -> (f32, f32) {
 impl Layout {
     /// Places `screens` in a `viewport` of logical pixels, turned, scaled
     /// uniformly to fit and centred.
+    #[cfg(test)]
     pub fn place(&self, screens: &[ScreenSize], viewport: (f32, f32)) -> Vec<Placement> {
-        let upright = self.arrange(screens);
+        self.place_consoles(screens, 1, viewport)
+    }
+
+    /// Places the screens of `consoles` consoles, which divide `screens`
+    /// evenly in order, as [`Layout::place`] does: each console's screens
+    /// arranged by this layout, and the consoles side by side, first on
+    /// the left, [`CONSOLE_GAP`] apart. Two linked DSes show each DS
+    /// stacked (by default) next to the other.
+    pub fn place_consoles(
+        &self,
+        screens: &[ScreenSize],
+        consoles: usize,
+        viewport: (f32, f32),
+    ) -> Vec<Placement> {
+        let per_console = screens.len().div_ceil(consoles.max(1)).max(1);
+        let mut upright = Vec::new();
+        let mut left = 0.0;
+        for (console, group) in screens.chunks(per_console).enumerate() {
+            let arranged = self.arrange(group);
+            let width = extent(&arranged).0;
+            upright.extend(arranged.into_iter().map(|(screen, rect)| {
+                let rect = Rect {
+                    x: rect.x + left,
+                    ..rect
+                };
+                (screen + console * per_console, rect)
+            }));
+            left += width + CONSOLE_GAP;
+        }
         let extent = extent(&upright);
         if extent.0 <= 0.0 || extent.1 <= 0.0 {
             return Vec::new();
@@ -540,6 +572,30 @@ mod tests {
                 (1, rect(736.0, 288.0, 256.0, 192.0))
             ]
         );
+    }
+
+    #[test]
+    fn linked_consoles_sit_side_by_side_each_stacked() {
+        let screens = [DS[0]; 4];
+        let width = 2.0 * 256.0 + CONSOLE_GAP;
+        let placed: Vec<(usize, Rect)> = Layout::default()
+            .place_consoles(&screens, 2, (width, 384.0))
+            .into_iter()
+            .map(|placement| (placement.screen, placement.rect))
+            .collect();
+        let right = 256.0 + CONSOLE_GAP;
+        assert_eq!(
+            placed,
+            [
+                (0, rect(0.0, 0.0, 256.0, 192.0)),
+                (1, rect(0.0, 192.0, 256.0, 192.0)),
+                (2, rect(right, 0.0, 256.0, 192.0)),
+                (3, rect(right, 192.0, 256.0, 192.0)),
+            ]
+        );
+        // One console's worth is the plain layout.
+        let one = Layout::default().place_consoles(&DS, 1, (256.0, 384.0));
+        assert_eq!(one, Layout::default().place(&DS, (256.0, 384.0)));
     }
 
     #[test]

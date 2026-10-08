@@ -1,9 +1,11 @@
 //! The picture processing unit (GBATEK, "LCD Video Controller").
 //!
-//! Each of the 228 lines takes 1,232 cycles: 1,006 of drawing, then HBlank.
+//! Each of the 228 lines takes 1,232 cycles: 1,007 of drawing, then HBlank.
 //! Lines 160–227 are VBlank. The bus schedules the two events per line and
 //! calls [`Ppu::start_hblank`] and [`Ppu::start_line`]; the PPU renders a
 //! visible line when its HBlank begins, using the registers at that moment.
+//! The interrupts trail the flags: HBlank's and VBlank's by a cycle,
+//! VCount's by two (NanoBoyAdvance's timings).
 //!
 //! Drawing itself is in [`render`].
 
@@ -15,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const WIDTH: usize = 240;
 pub(crate) const HEIGHT: usize = 160;
 /// Cycles from the start of a line to HBlank.
-pub(crate) const HDRAW_CYCLES: u64 = 1006;
+pub(crate) const HDRAW_CYCLES: u64 = 1007;
 /// Cycles in a whole line.
 pub(crate) const LINE_CYCLES: u64 = 1232;
 const LINES: u16 = 228;
@@ -104,6 +106,14 @@ impl Ppu {
         &self.vram
     }
 
+    /// The register halfword at `offset` (0x00–0x56) as last written,
+    /// write-only registers such as the scroll offsets included, without
+    /// side effects. The renderer reads them this way; so do the debugger's
+    /// graphics viewers.
+    pub(crate) fn raw_register(&self, offset: usize) -> u16 {
+        self.register16(offset)
+    }
+
     /// HBlank begins on the current line. Returns interrupt requests.
     pub(crate) fn start_hblank(&mut self) -> (u16, Signals) {
         self.in_hblank = true;
@@ -154,19 +164,26 @@ impl Ppu {
         (HEIGHT as u16..LINES - 1).contains(&self.vcount)
     }
 
-    pub(crate) fn read_register(&self, offset: usize) -> u16 {
-        match offset {
+    /// Reads the register at `offset` (0x00–0x5E), with unused bits as 0.
+    /// `None` for write-only and unused registers, which read as open bus.
+    pub(crate) fn read_register(&self, offset: usize) -> Option<u16> {
+        let readable = match offset {
             0x04 => {
                 let flags = u16::from(self.in_vblank())
                     | u16::from(self.in_hblank) << 1
                     | u16::from(self.vcount == self.dispstat() >> 8) << 2;
-                (self.dispstat() & 0xFF38) | flags
+                return Some((self.dispstat() & 0xFF38) | flags);
             }
-            0x06 => self.vcount,
-            // Readable registers; the rest are write-only.
-            0x00 | 0x02 | 0x08..=0x0E | 0x48 | 0x4A | 0x50 | 0x52 => self.register16(offset),
-            _ => 0,
-        }
+            0x06 => return Some(self.vcount),
+            0x00 | 0x02 | 0x0C | 0x0E => 0xFFFF,
+            // BG0 and BG1 have no display area overflow bit.
+            0x08 | 0x0A => 0xDFFF,
+            0x48 | 0x4A => 0x3F3F, // WININ, WINOUT
+            0x50 => 0x3FFF,        // BLDCNT
+            0x52 => 0x1F1F,        // BLDALPHA
+            _ => return None,
+        };
+        Some(self.register16(offset) & readable)
     }
 
     pub(crate) fn write_register(&mut self, offset: usize, value: u16) {

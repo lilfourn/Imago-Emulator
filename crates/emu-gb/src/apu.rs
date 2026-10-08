@@ -37,7 +37,7 @@ impl Apu {
     pub(crate) fn after_boot(model: Model) -> Self {
         let variant = match model {
             Model::Dmg => Variant::Dmg,
-            Model::Cgb => Variant::Cgb,
+            Model::Cgb | Model::CgbDmgMode => Variant::Cgb,
         };
         let mut psg = Psg::new(variant);
         for (register, value) in [
