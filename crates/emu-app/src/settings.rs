@@ -1,6 +1,7 @@
 //! Settings kept between launches: the screen layout, the speeds of
-//! fast-forward and slow motion, the resolution of DS 3D and the video
-//! filter.
+//! fast-forward and slow motion, the resolution of DS 3D, the video
+//! filter, what fills the window around the screens and whether the
+//! window shows its controls.
 //!
 //! The app writes them whenever one changes, as TOML next to the bindings
 //! file:
@@ -20,11 +21,16 @@
 //! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
 //! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
 //! show_fps = true        # the frame rate and speed in the window's corner
+//! backdrop = "ambient"    # around the screens: "ambient" (the game's colours, blurred) or "solid"
 //!
 //! [game_boy]
 //! dmg_colors = "game-boy-color"  # games for the original Game Boy: "grey", or
 //!                               # on a Game Boy Color, by title or with a
 //!                               # button combination such as "left+b"
+//!
+//! [window]
+//! controls = true         # the close, minimise and zoom buttons
+//! key_guide = true        # the keys that play the game, along the foot
 //! ```
 //!
 //! Settings missing from the file keep their defaults. Files saved before
@@ -36,6 +42,7 @@ use std::path::{Path, PathBuf};
 use emu_core::DmgColors;
 use serde::{Deserialize, Serialize};
 
+use crate::ambient::Backdrop;
 use crate::filter::Filter;
 use crate::layout::{Arrangement, Layout, Rotation};
 use crate::persist;
@@ -67,9 +74,17 @@ pub struct Settings {
     pub filter: Filter,
     /// Whether the speed readout shows in the window's corner.
     pub show_fps: bool,
+    /// What fills the window around the screens.
+    pub backdrop: Backdrop,
     /// How games made for the original Game Boy are shown, from the next
     /// game opened.
     pub dmg_colors: DmgColors,
+    /// Whether the main window shows its close, minimise and zoom buttons
+    /// and the bar they sit in.
+    pub window_controls: bool,
+    /// Whether the keys that play the game show along the foot of the
+    /// window.
+    pub key_guide: bool,
 }
 
 impl Default for Settings {
@@ -80,7 +95,10 @@ impl Default for Settings {
             resolution_3d: 1,
             filter: Filter::None,
             show_fps: false,
+            backdrop: Backdrop::Ambient,
             dmg_colors: DmgColors::ByTitle,
+            window_controls: true,
+            key_guide: true,
         }
     }
 }
@@ -92,6 +110,23 @@ struct SettingsFile {
     speed: SpeedSection,
     video: VideoSection,
     game_boy: GameBoySection,
+    window: WindowSection,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct WindowSection {
+    controls: bool,
+    key_guide: bool,
+}
+
+impl Default for WindowSection {
+    fn default() -> Self {
+        Self {
+            controls: Settings::default().window_controls,
+            key_guide: Settings::default().key_guide,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -147,6 +182,7 @@ struct VideoSection {
     resolution_3d: u32,
     filter: String,
     show_fps: bool,
+    backdrop: String,
 }
 
 impl Default for VideoSection {
@@ -156,6 +192,7 @@ impl Default for VideoSection {
             resolution_3d: settings.resolution_3d,
             filter: settings.filter.name().to_owned(),
             show_fps: settings.show_fps,
+            backdrop: settings.backdrop.name().to_owned(),
         }
     }
 }
@@ -277,6 +314,8 @@ impl Settings {
         }
         let filter = Filter::from_name(&file.video.filter)
             .ok_or_else(|| SettingsError::UnknownFilter(file.video.filter.clone()))?;
+        let backdrop = Backdrop::from_name(&file.video.backdrop)
+            .ok_or_else(|| SettingsError::UnknownBackdrop(file.video.backdrop.clone()))?;
         let dmg_colors = dmg_colors_from_name(&file.game_boy.dmg_colors)
             .ok_or_else(|| SettingsError::UnknownDmgColors(file.game_boy.dmg_colors.clone()))?;
         Ok(Self {
@@ -285,7 +324,10 @@ impl Settings {
             resolution_3d,
             filter,
             show_fps: file.video.show_fps,
+            backdrop,
             dmg_colors,
+            window_controls: file.window.controls,
+            key_guide: file.window.key_guide,
         })
     }
 
@@ -298,9 +340,14 @@ impl Settings {
                 resolution_3d: self.resolution_3d,
                 filter: self.filter.name().to_owned(),
                 show_fps: self.show_fps,
+                backdrop: self.backdrop.name().to_owned(),
             },
             game_boy: GameBoySection {
                 dmg_colors: dmg_colors_name(self.dmg_colors),
+            },
+            window: WindowSection {
+                controls: self.window_controls,
+                key_guide: self.key_guide,
             },
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
@@ -362,6 +409,9 @@ pub enum SettingsError {
     /// The filter is not one of the five names.
     #[error("unknown video filter {0:?} in settings")]
     UnknownFilter(String),
+    /// The backdrop is not "solid" or "ambient".
+    #[error("unknown backdrop {0:?} in settings")]
+    UnknownBackdrop(String),
     /// The colours for original Game Boy games are not one of the names.
     #[error("unknown Game Boy colours {0:?} in settings")]
     UnknownDmgColors(String),
@@ -401,16 +451,22 @@ mod tests {
             resolution_3d: 4,
             filter: Filter::Scanlines,
             show_fps: true,
+            backdrop: Backdrop::Solid,
             dmg_colors: DmgColors::Buttons(9),
+            window_controls: false,
+            key_guide: false,
         };
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
         assert!(text.contains("resolution_3d = 4"), "{text}");
         assert!(text.contains("filter = \"scanlines\""), "{text}");
         assert!(text.contains("show_fps = true"), "{text}");
+        assert!(text.contains("backdrop = \"solid\""), "{text}");
         assert!(text.contains("dmg_colors = \"left+b\""), "{text}");
         assert!(text.contains("rotation = 270"), "{text}");
         assert!(text.contains("fast_forward = 3.0"), "{text}");
+        assert!(text.contains("controls = false"), "{text}");
+        assert!(text.contains("key_guide = false"), "{text}");
         assert_eq!(Settings::from_toml(&text), Ok(settings));
     }
 
@@ -533,6 +589,20 @@ mod tests {
         assert_eq!(
             Settings::from_toml("[video]\nfilter = \"xbrz\"\n"),
             Err(SettingsError::UnknownFilter("xbrz".to_owned()))
+        );
+    }
+
+    #[test]
+    fn the_backdrop_is_ambient_unless_the_file_says_solid() {
+        assert_eq!(
+            Settings::from_toml("").map(|s| s.backdrop),
+            Ok(Backdrop::Ambient)
+        );
+        let solid = Settings::from_toml("[video]\nbackdrop = \"solid\"\n");
+        assert_eq!(solid.map(|s| s.backdrop), Ok(Backdrop::Solid));
+        assert_eq!(
+            Settings::from_toml("[video]\nbackdrop = \"boxart\"\n"),
+            Err(SettingsError::UnknownBackdrop("boxart".to_owned()))
         );
     }
 

@@ -35,5 +35,29 @@ serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 
+# AppKit, for what GPUI leaves out: hiding the window's close, minimise and
+# zoom buttons, the standard About panel and the Dock icon. The versions GPUI
+# already uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSDockTile",
+    "NSImage",
+    "NSImageView",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSData",
+] }
+raw-window-handle = "0.6"
+
 [lints]
 workspace = true

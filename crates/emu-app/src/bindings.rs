@@ -325,6 +325,18 @@ struct TurboSection {
 }
 
 impl Bindings {
+    /// The keyboard keys bound to `action`, in alphabetical order.
+    pub fn keys_for(&self, action: Held) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .keys
+            .iter()
+            .filter(|(_, bound)| **bound == action)
+            .map(|(key, _)| key.clone())
+            .collect();
+        keys.sort();
+        keys
+    }
+
     /// What keyboard key `key` does, if it is bound.
     pub fn key_action(&self, key: &str) -> Option<Held> {
         self.keys.get(key).copied()

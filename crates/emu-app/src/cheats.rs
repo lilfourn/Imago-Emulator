@@ -52,9 +52,81 @@ pub fn read(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
+/// `text` with cheat `index` of the `cheats` it parses to switched on or
+/// off, by adding or removing `off` on its `[name]` line; everything else
+/// is kept as written. `None` if that cheat has no `[name]` line: the
+/// codes before the first one.
+pub fn set_enabled(text: &str, cheats: usize, index: usize, enabled: bool) -> Option<String> {
+    let headers: Vec<usize> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with('['))
+        .map(|(number, _)| number)
+        .collect();
+    // Codes before the first header parse as a cheat of their own.
+    let unnamed = cheats.checked_sub(headers.len())?;
+    let target = *headers.get(index.checked_sub(unnamed)?)?;
+    let lines: Vec<String> = text
+        .lines()
+        .enumerate()
+        .map(|(number, line)| {
+            if number != target {
+                return line.to_owned();
+            }
+            let Some((name, flags)) = line.split_once(']') else {
+                return line.to_owned();
+            };
+            let mut words: Vec<&str> = flags
+                .split_whitespace()
+                .filter(|word| {
+                    !word.eq_ignore_ascii_case("on") && !word.eq_ignore_ascii_case("off")
+                })
+                .collect();
+            if !enabled {
+                words.push("off");
+            }
+            let flags = words.join(" ");
+            if flags.is_empty() {
+                format!("{name}]")
+            } else {
+                format!("{name}] {flags}")
+            }
+        })
+        .collect();
+    let mut toggled = lines.join("\n");
+    if text.ends_with('\n') {
+        toggled.push('\n');
+    }
+    Some(toggled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_enabled_rewrites_only_the_cheats_name_line() {
+        let text = "# mine\n[Money] ards\n94000130 FCFF0000\n[Walls] OFF gsa\n1234\n";
+        assert_eq!(
+            set_enabled(text, 2, 0, false).as_deref(),
+            Some("# mine\n[Money] ards off\n94000130 FCFF0000\n[Walls] OFF gsa\n1234\n")
+        );
+        assert_eq!(
+            set_enabled(text, 2, 1, true).as_deref(),
+            Some("# mine\n[Money] ards\n94000130 FCFF0000\n[Walls] gsa\n1234\n")
+        );
+        assert_eq!(set_enabled(text, 2, 2, true), None);
+    }
+
+    #[test]
+    fn codes_before_the_first_name_cannot_be_switched() {
+        let text = "02000000:01\n[Plain]\n02000001:02";
+        assert_eq!(set_enabled(text, 2, 0, false), None);
+        assert_eq!(
+            set_enabled(text, 2, 1, false).as_deref(),
+            Some("02000000:01\n[Plain] off\n02000001:02")
+        );
+    }
 
     #[test]
     fn the_template_parses_to_no_cheats() {
