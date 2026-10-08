@@ -382,6 +382,7 @@ impl Emulator {
             recorder: None,
             script: None,
             overlay: Arc::default(),
+            mid_frame: false,
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
@@ -477,6 +478,8 @@ struct Runner {
     script: Option<Running>,
     /// What the script drew after the last frame.
     overlay: Arc<[Draw]>,
+    /// A debugger stopped the frame under way part-way.
+    mid_frame: bool,
     paused: bool,
     /// How fast frames run; rewinding always steps at normal speed.
     speed: Speed,
@@ -539,6 +542,11 @@ impl Runner {
                     self.publish();
                 }
             } else {
+                if !self.mid_frame
+                    && let Some(script) = &mut self.script
+                {
+                    script.begin_frame();
+                }
                 inputs.clear();
                 for (player, (latch, turbo)) in self.latches.iter().zip(&self.turbos).enumerate() {
                     let input = turbo.apply(latch.input());
@@ -548,6 +556,7 @@ impl Runner {
                     });
                 }
                 let outcome = self.run_frame(&inputs, &mut audio);
+                self.mid_frame = !outcome.frame_done;
                 if !outcome.frame_done {
                     // A debugger stopped the frame part-way.
                     self.settle(outcome);
@@ -555,7 +564,6 @@ impl Runner {
                     continue;
                 }
                 self.apply_cheats();
-                self.script_frame(&inputs);
                 for latch in &mut self.latches {
                     latch.advance();
                 }
@@ -572,6 +580,9 @@ impl Runner {
                 self.record(&audio);
                 audio.clear();
                 self.settle(outcome);
+                // Last, once the frame is played and recorded: a state the
+                // script loads replaces it.
+                self.script_frame(&inputs);
                 self.publish();
                 state.clear();
                 self.loaded.core.save_state(&mut state);
@@ -820,8 +831,9 @@ impl Runner {
     /// Drops releases still waiting out a press's minimum hold, and turbo
     /// presses being finished, and starts held turbo buttons again with a
     /// press: after the game jumps to another moment, a press from before
-    /// would land out of place.
+    /// would land out of place. Any frame under way is gone too.
     fn clear_latches(&mut self) {
+        self.mid_frame = false;
         for latch in &mut self.latches {
             latch.clear();
         }

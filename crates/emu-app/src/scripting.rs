@@ -16,9 +16,11 @@ pub struct Running {
     /// The script's file name, for notices.
     pub name: String,
     pub script: Script,
-    /// Per player: what the script pressed and released for the next
-    /// frame.
-    joypad: Vec<Joypad>,
+    /// Per player: what the script pressed and released for the frame
+    /// under way.
+    held: Vec<Joypad>,
+    /// The same, asked for since, for the next frame.
+    next: Vec<Joypad>,
     /// When its log last changed the notice.
     noticed: Option<Instant>,
     /// Its latest log line, not yet shown.
@@ -30,26 +32,34 @@ impl Running {
         Self {
             name,
             script,
-            joypad: Vec::new(),
+            held: Vec::new(),
+            next: Vec::new(),
             noticed: None,
             unseen: None,
         }
     }
 
+    /// Starts a new frame with the buttons the script asked for last.
+    /// A script started while a debugger holds a frame part-way presses
+    /// nothing until the next.
+    pub fn begin_frame(&mut self) {
+        self.held.clone_from(&self.next);
+    }
+
     /// `input`, what `player` holds, with the script's buttons for this
     /// frame laid over it.
     pub fn input(&self, player: usize, input: Input) -> Input {
-        let pad = self.joypad.get(player).copied().unwrap_or_default();
+        let pad = self.held.get(player).copied().unwrap_or_default();
         Input {
             buttons: pad.apply(input.buttons),
             ..input
         }
     }
 
-    /// Takes on `output`'s buttons for the next frame, and prints its log
+    /// Keeps `output`'s buttons for the next frame, and prints its log
     /// lines to stdout. Returns the latest line as a notice, if one is due.
     pub fn take(&mut self, output: &Output) -> Option<String> {
-        self.joypad.clone_from(&output.joypad);
+        self.next.clone_from(&output.joypad);
         for line in &output.log {
             println!("{}: {line}", self.name);
         }
@@ -110,6 +120,31 @@ mod tests {
             running.take(&Output::default()),
             Some("test.lua: three".to_owned()),
             "shown later, though nothing new came"
+        );
+    }
+
+    #[test]
+    fn buttons_wait_for_the_next_frame() {
+        let mut running = running();
+        let a: emu_core::Buttons = [emu_core::Button::A].into_iter().collect();
+        running.take(&Output {
+            joypad: vec![Joypad {
+                press: a,
+                ..Joypad::default()
+            }],
+            ..Output::default()
+        });
+        assert_eq!(
+            running.input(0, Input::default()).buttons,
+            emu_core::Buttons::NONE
+        );
+        running.begin_frame();
+        assert_eq!(running.input(0, Input::default()).buttons, a);
+        running.take(&Output::default());
+        running.begin_frame();
+        assert_eq!(
+            running.input(0, Input::default()).buttons,
+            emu_core::Buttons::NONE
         );
     }
 
