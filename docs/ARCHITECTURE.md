@@ -9,7 +9,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 ```
                  emu-app (GPUI, binary: ds-emulator)     emu-headless (binary)
                     │        │                                 │
-                    │  emu-state, emu-cheats                   │
+                    │  emu-state, emu-cheats, emu-script ◄─────┤
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
                      ┌───────┼────────┐
@@ -34,6 +34,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
+| `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
@@ -167,6 +168,7 @@ pub trait Debugger {
  key/mouse events ──► Command (mpsc) ─────► apply between frames
                                             run_frame()
                                             apply cheats (Core::peek/poke)
+                                            run the Lua script, if any
                                             record frame and sound ───────► JPEG, QuickTime
  render(): copy latest frames ◄── Mutex ─── publish screens                 (bounded queue)
            correct, turn, filter             │
@@ -212,6 +214,18 @@ pub trait Debugger {
   directly and read KEYINPUT, EXTKEYIN and the ARM7's timers. melonDS
   instead runs them on the ARM7's bus at its VBlank interrupt, as the
   real Action Replay does; that reaches the same main RAM and registers.
+- A Lua script (`scripting.rs`, the `emu-script` crate) runs here too.
+  The view reads the file and sends its text; the thread runs its main
+  body at once, then after each frame's cheats, lending it the core for
+  that call only. What it draws is published with the frame
+  (`Latest::overlay`) and painted by the view as GPUI elements over each
+  place its screen is shown, clipped to it. The buttons it presses join
+  the next frame's input after the latch and turbo, and its state and
+  pause requests go through the same paths as the menu's. Its
+  `emu.on_exec` callbacks run mid-frame through `Debugger::run_until`
+  with the debugger window's stops, and only the window's pause. A
+  script error drops the script with a notice. In `emu-headless` the
+  same script runs frame by frame, with state slots in memory.
 - The debugger window (`debugger_window.rs`) sends plain
   `Command::Debug` requests: what to show, the breakpoint and watchpoint
   lists, pause, continue, step, step over, next frame, and memory writes.
@@ -327,6 +341,7 @@ order). A core's main loop:
 |---|---|---|
 | Unit tests | `#[cfg(test)]` in each module | `cargo test --workspace` |
 | Determinism | headless runner, run twice and diff | M1 test-ROM script |
+| Scripts | `emu-script` unit tests against a test core; `emu-headless/tests/script.rs` runs a script twice on a ROM it builds and diffs the output | `cargo test` |
 | Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |
 | Trace diffing | trace logger vs. mGBA/SameBoy/melonDS (TOOL-3) | by hand while debugging |
 | Pokémon checkpoints | your own dumps, by hand | at each milestone |

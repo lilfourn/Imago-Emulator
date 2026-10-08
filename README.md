@@ -41,6 +41,8 @@ own dumps. The app has:
 - filters: LCD grid, scanlines, Scale2x and Scale3x;
 - screenshots, and video recording to QuickTime movies;
 - cheats;
+- Lua scripts that read and write memory, press buttons and draw over the
+  screens;
 - a debugger: breakpoints and watchpoints on every CPU, disassembly,
   registers, a memory editor, graphics viewers, I/O registers and the
   scheduler's queue.
@@ -52,6 +54,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [PRD](docs/PRD.md): goals, requirements, legal policy, risks, open questions
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
+- [Scripting](docs/scripting.md): the Lua functions scripts can call
 - [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot
 
 ## Build and run
@@ -65,6 +68,7 @@ cargo run --release -p emu-app -- red.gb blue.gb     # two Game Boys, linked
 cargo run --release -p emu-app -- fr.gba em.gba      # two GBAs, linked
 cargo run --release -p emu-app -- w.nds w2.nds       # two DSes in wireless range
 cargo run --release -p emu-app -- pt.nds em.gba      # a GBA game in the DS's GBA slot
+cargo run --release -p emu-app -- --script scripts/lua/frame-counter.lua game.gba
 cargo test --workspace
 ```
 
@@ -73,6 +77,9 @@ Run a core without a window, for tests and scripting:
 ```sh
 cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 # system=gba frames=600 screen=0 width=240 height=160 crc32=…
+cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua game.gb
+# macro=done frame=92
+# system=gb frames=600 screen=0 width=160 height=144 crc32=…
 ```
 
 ## Controls
@@ -93,6 +100,7 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Save screenshot | ⌘⇧S |
 | | | | | Start / stop recording | ⌘⇧R |
+| | | | | Run / stop a Lua script | ⌘⇧L / ⌘⌥L |
 | | | | | Colour correction on/off | ⌘⇧C |
 | | | | | Filter: none, LCD grid, scanlines, Scale2x, Scale3x | View > Filter |
 | | | | | Debugger | ⌘⇧D |
@@ -378,6 +386,27 @@ debugger. Closing the window removes them.
 For instruction traces to diff against other emulators, use the `trace`
 examples under Testing against test ROMs.
 
+## Scripting
+
+File > Run Script… (⌘⇧L) runs a Lua 5.4 script alongside the game, and
+Stop Script (⌘⌥L) stops it; `--script file.lua` runs one from the command
+line, in the app or in `emu-headless`. Scripts read and write memory,
+press buttons for the next frame, save and load states, pause, log, and
+draw text and boxes over the screens, after every frame or in a loop
+around `emu.frameadvance()`:
+
+```lua
+emu.on_frame(function()
+    gui.text(2, 2, "frame " .. emu.frame())
+    if memory.read_u8(0xC000) == 0 then joypad.set({a = true}) end
+end)
+```
+
+They run sandboxed: no files, programs or clock, limited memory and time,
+and the same way on every run. An error stops the script with a notice
+naming its line; the game runs on. [docs/scripting.md](docs/scripting.md)
+lists every function, and [`scripts/lua/`](scripts/lua/) has examples.
+
 ## Testing against test ROMs
 
 ```sh
@@ -421,6 +450,7 @@ commit's build.
 | `emu-gba` | Game Boy Advance core |
 | `emu-nds` | Nintendo DS core |
 | `emu-cheats` | Cheat list parsing and application |
+| `emu-script` | Lua scripts, sandboxed, run between frames |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-headless` | Windowless runner for test ROMs |
 | `emu-app` | The GPUI app (`ds-emulator` binary) |

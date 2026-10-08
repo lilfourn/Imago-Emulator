@@ -109,3 +109,31 @@ fn a_script_error_fails_the_run_after_its_output() {
         "emu-headless: broken.lua:3: boom\n"
     );
 }
+
+#[test]
+fn the_example_scripts_run() {
+    let (_dir, rom, _) = setup("examples", "unused.lua", "");
+    let example = |name: &str| format!("{}/../../scripts/lua/{name}", env!("CARGO_MANIFEST_DIR"));
+    let counter = stdout(&headless(&[
+        "--frames",
+        "10",
+        "--script",
+        &example("frame-counter.lua"),
+        &rom,
+    ]));
+    assert!(
+        counter.starts_with("frame=1 address=0000C000 value=00\n"),
+        "{counter}"
+    );
+    let macro_run = stdout(&headless(&[
+        "--frames",
+        "100",
+        "--script",
+        &example("input-macro.lua"),
+        &rom,
+    ]));
+    assert!(
+        macro_run.starts_with("macro=done frame=92\n"),
+        "{macro_run}"
+    );
+}

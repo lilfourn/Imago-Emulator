@@ -363,4 +363,5 @@ are done.
 | Blow key, computer microphone | NDS-10 | M16 ✅ |
 | Two DSes in wireless range, side by side | NDS-10 | M16 ✅ |
 | Filters (LCD grid, scanlines, Scale2x/3x), screenshots, video recording | UI-4, UI-14 | Phase 4 ✅ |
-| xBRZ, slang presets, achievements, scripting | UI-4, UI-14 | Later |
+| Lua scripting: File > Run Script…, `--script`, headless | UI-14 | Phase 4 ✅ |
+| xBRZ, slang presets, achievements | UI-4, UI-14 | Later |
