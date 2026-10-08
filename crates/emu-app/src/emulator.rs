@@ -7,6 +7,10 @@
 //! Screenshots and recordings take the core's own frames here, every one
 //! of them for a recording, rather than the coalesced ones the UI shows.
 //!
+//! A Lua script runs here too, after each frame (see `scripting.rs`): what
+//! it draws is published with the frame, and the buttons it presses go
+//! into the next.
+//!
 //! Pacing is a sleep to the next frame deadline, which fast-forward and
 //! slow motion move closer or further apart (see `speed.rs`). Sound stays
 //! in sync because the audio sink adjusts its resampling ratio to the
@@ -25,6 +29,7 @@ use anyhow::{Context as _, bail, ensure};
 use emu_cheats::Cheat;
 use emu_core::debug::{Breakpoint, RunOutcome, StopReason};
 use emu_core::{Buttons, Cartridge, Core, CoreInfo, Frame, Input, Media, System};
+use emu_script::{Draw, Script, ScriptError, StateRequest};
 
 use crate::audio::AudioSink;
 use crate::capture;
@@ -33,6 +38,7 @@ use crate::latch::Latch;
 use crate::persist;
 use crate::recorder::Recorder;
 use crate::rewind::Rewind;
+use crate::scripting::{self, Running};
 use crate::speed::{self, Speed};
 use crate::turbo::Turbo;
 use crate::video;
@@ -282,6 +288,16 @@ pub enum Command {
     /// Starts recording every frame and its sound to a movie next to the
     /// first player's ROM, or finishes the recording under way.
     ToggleRecording,
+    /// Starts a Lua script, replacing any running: its main body runs at
+    /// once, and its callbacks after every frame.
+    RunScript {
+        /// The script's file name, for messages.
+        name: String,
+        /// Its source text.
+        source: String,
+    },
+    /// Stops the script running, and clears what it drew.
+    StopScript,
 }
 
 /// A notification from the emulation thread to the UI.
@@ -327,6 +343,8 @@ impl emu_cheats::Memory for PlayerMemory<'_> {
 #[derive(Default)]
 struct Latest {
     frames: Mutex<(u64, Vec<Frame>)>,
+    /// What the script drew after that frame, to show over the screens.
+    overlay: Mutex<Arc<[Draw]>>,
     /// What the debugger window shows, as of that frame, while it is open.
     debug: Mutex<Option<Arc<Snapshot>>>,
     unseen: AtomicBool,
@@ -362,6 +380,8 @@ impl Emulator {
             cheats: vec![Vec::new(); players],
             debug: Debugging::default(),
             recorder: None,
+            script: None,
+            overlay: Arc::default(),
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
@@ -406,6 +426,17 @@ impl Emulator {
         Some(*sequence)
     }
 
+    /// What the script drew after the latest frame, in screen pixels.
+    pub fn overlay(&self) -> Arc<[Draw]> {
+        Arc::clone(
+            &self
+                .latest
+                .overlay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
     /// What the debugger window shows, as of the latest frame or debugger
     /// command, while it is open and the core has a debugger.
     pub fn debug_snapshot(&self) -> Option<Arc<Snapshot>> {
@@ -442,6 +473,10 @@ struct Runner {
     debug: Debugging,
     /// The recording under way, if any.
     recorder: Option<Recorder>,
+    /// The Lua script running alongside the game, if any.
+    script: Option<Running>,
+    /// What the script drew after the last frame.
+    overlay: Arc<[Draw]>,
     paused: bool,
     /// How fast frames run; rewinding always steps at normal speed.
     speed: Speed,
@@ -505,8 +540,12 @@ impl Runner {
                 }
             } else {
                 inputs.clear();
-                for (latch, turbo) in self.latches.iter().zip(&self.turbos) {
-                    inputs.push(turbo.apply(latch.input()));
+                for (player, (latch, turbo)) in self.latches.iter().zip(&self.turbos).enumerate() {
+                    let input = turbo.apply(latch.input());
+                    inputs.push(match &self.script {
+                        Some(script) => script.input(player, input),
+                        None => input,
+                    });
                 }
                 let outcome = self.run_frame(&inputs, &mut audio);
                 if !outcome.frame_done {
@@ -516,6 +555,7 @@ impl Runner {
                     continue;
                 }
                 self.apply_cheats();
+                self.script_frame(&inputs);
                 for latch in &mut self.latches {
                     latch.advance();
                 }
@@ -628,6 +668,77 @@ impl Runner {
                 Some(recorder) => self.finish_recording(recorder),
                 None => self.start_recording(),
             },
+            Command::RunScript { name, source } => self.start_script(name, &source),
+            Command::StopScript => match self.script.take() {
+                Some(running) => {
+                    self.overlay = Arc::default();
+                    self.publish();
+                    self.notice(format!("Stopped {}", running.name));
+                }
+                None => self.notice("No script is running"),
+            },
+        }
+    }
+
+    /// Compiles and starts a script, replacing any running, and shows
+    /// what its main body drew at once, even while paused.
+    fn start_script(&mut self, name: String, source: &str) {
+        self.script = None;
+        self.overlay = Arc::default();
+        match Script::new(&name, source) {
+            Ok(script) => {
+                self.notice(format!("Running {name}"));
+                let mut running = Running::new(name, script);
+                let started = running.script.start(&mut *self.loaded.core);
+                self.script = Some(running);
+                self.obey_script(started);
+            }
+            Err(error) => self.notice(scripting::failure(&name, &error)),
+        }
+        self.publish();
+    }
+
+    /// Tells the script the frame that ran with `inputs` has finished.
+    fn script_frame(&mut self, inputs: &[Input]) {
+        if let Some(running) = &mut self.script {
+            let result = running.script.after_frame(&mut *self.loaded.core, inputs);
+            self.obey_script(result);
+        }
+    }
+
+    /// Acts on what the script asked for since it was last asked, then
+    /// stops it if `result` says it failed or it has nothing left to do.
+    fn obey_script(&mut self, result: Result<(), ScriptError>) {
+        let Some(running) = &mut self.script else {
+            return;
+        };
+        let output = running.script.take_output();
+        let log = running.take(&output);
+        let name = running.name.clone();
+        let finished = running.script.finished();
+        self.overlay = output.draws.into();
+        if let Some(line) = log {
+            self.notice(line);
+        }
+        for request in output.states {
+            self.apply(match request {
+                StateRequest::Save(slot) => Command::SaveState(slot),
+                StateRequest::Load(slot) => Command::LoadState(slot),
+            });
+        }
+        if output.pause && !self.paused {
+            self.paused = true;
+            self.debug.pending = None;
+            self.notice(format!("Paused by {name}"));
+        }
+        if let Err(error) = result {
+            self.script = None;
+            self.overlay = Arc::default();
+            self.notice(scripting::failure(&name, &error));
+        } else if finished {
+            self.script = None;
+            self.overlay = Arc::default();
+            self.notice(format!("{name} finished"));
         }
     }
 
@@ -742,6 +853,18 @@ impl Runner {
         let mut stops = self.debug.stops.clone();
         if let Some(pending) = self.debug.pending {
             pending.add_to(&mut stops);
+        }
+        if let Some(running) = &mut self.script {
+            // The script's emu.on_exec stops are its own; only the
+            // debugger's come back.
+            let (outcome, called) =
+                running
+                    .script
+                    .run_frame(&mut *self.loaded.core, inputs, audio, &stops);
+            if called.is_err() {
+                self.obey_script(called);
+            }
+            return outcome;
         }
         match self.loaded.core.debugger() {
             Some(debugger) if !stops.is_empty() => debugger.run_until(inputs, audio, &stops),
@@ -861,6 +984,11 @@ impl Runner {
                 *frames = screens.to_vec();
             }
         }
+        *self
+            .latest
+            .overlay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::clone(&self.overlay);
         let state = self.run_state();
         let snapshot = match (self.debug.view, self.loaded.core.debugger()) {
             (Some(view), Some(debugger)) => {
@@ -1721,6 +1849,114 @@ mod tests {
         let notices: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(notices.contains(&Event::Notice("Saved state 2".to_owned())));
         assert!(notices.contains(&Event::Notice("Loaded state 2".to_owned())));
+        drop(emulator);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    fn run_script(emulator: &Emulator, source: &str) {
+        emulator.send(Command::RunScript {
+            name: "hud.lua".to_owned(),
+            source: source.to_owned(),
+        });
+    }
+
+    /// Waits for the script's drawing to pass `test`.
+    fn wait_for_overlay(emulator: &Emulator, test: impl Fn(&[Draw]) -> bool) -> Arc<[Draw]> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let overlay = emulator.overlay();
+            if test(&overlay) {
+                return overlay;
+            }
+            assert!(Instant::now() < deadline, "the script never drew it");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn scripts_read_write_and_draw_after_every_frame() {
+        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        run_script(
+            &emulator,
+            r#"
+            emu.on_frame(function()
+                gui.text(0, 0, "count " .. memory.read_u8(0))
+                memory.write_u8(1, 1)
+            end)
+            "#,
+        );
+        wait_for_notice(&events, "Running hud.lua");
+        let overlay = wait_for_overlay(&emulator, |drawn| !drawn.is_empty());
+        assert!(
+            matches!(&overlay[0], Draw::Text { text, .. } if text.starts_with("count ")),
+            "{overlay:?}"
+        );
+        // Byte 1 of the counter, which the script keeps at 1.
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(latest_count(&emulator) >> 8 & 0xFF, 1);
+
+        emulator.send(Command::StopScript);
+        wait_for_notice(&events, "Stopped hud.lua");
+        assert!(emulator.overlay().is_empty(), "stopping clears its drawing");
+        emulator.send(Command::StopScript);
+        wait_for_notice(&events, "No script is running");
+    }
+
+    #[test]
+    fn a_script_error_is_a_notice_and_stops_the_script() {
+        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        run_script(
+            &emulator,
+            r#"
+            emu.on_frame(function()
+                gui.box(0, 0, 0, 0)
+                if emu.frame() == 3 then error("boom") end
+            end)
+            "#,
+        );
+        wait_for_notice(&events, "hud.lua:4: boom · script stopped");
+        assert!(emulator.overlay().is_empty());
+        run_script(&emulator, "x = = 1");
+        wait_for_notice(&events, "hud.lua:1: unexpected symbol");
+        // The game runs on.
+        let before = latest_count(&emulator);
+        thread::sleep(Duration::from_millis(20));
+        assert!(latest_count(&emulator) > before);
+    }
+
+    #[test]
+    fn scripts_press_buttons_on_the_next_frame() {
+        let (emulator, seen) = start_recorder();
+        run_script(
+            &emulator,
+            "emu.on_frame(function() joypad.set({a = true}, 2) end)",
+        );
+        run_frames(&seen, 10);
+        let a = |input: &Input| input.buttons.contains(Button::A);
+        assert!(frames_where(&seen, 1, a) >= 5, "player 2 pressed A");
+        assert_eq!(frames_where(&seen, 0, a), 0, "player 1 did not");
+    }
+
+    #[test]
+    fn scripts_save_states_and_pause() {
+        let dir = std::env::temp_dir().join(format!("emu-app-script-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let (emulator, events) = start(dir.join("counter.gb"));
+        run_script(
+            &emulator,
+            r#"
+            emu.save_state(3)
+            emu.on_frame(function()
+                if emu.frame() == 5 then emu.pause() end
+            end)
+            "#,
+        );
+        wait_for_notice(&events, "Saved state 3");
+        wait_for_notice(&events, "Paused by hud.lua");
+        assert!(persist::state_path(&[dir.join("counter.gb")], 3).exists());
+        let paused = latest_count(&emulator);
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(latest_count(&emulator), paused);
         drop(emulator);
         fs::remove_dir_all(&dir).expect("clean up");
     }

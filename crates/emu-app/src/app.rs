@@ -17,6 +17,8 @@ actions!(
         ConnectLinkCable,
         InsertGbaCartridge,
         EditCheats,
+        RunScript,
+        StopScript,
         SaveScreenshot,
         ToggleRecording,
         SwitchPlayer,
@@ -73,8 +75,9 @@ const TITLE_BAR: f32 = 33.0;
 
 /// Runs the app until the user quits, opening `roms` at launch: one game,
 /// a DS game with a GBA game in its GBA slot, or two linked Game Boy or
-/// Game Boy Advance games.
-pub fn run(roms: Vec<PathBuf>) {
+/// Game Boy Advance games. `script`, a Lua script, runs alongside the
+/// first game to start.
+pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
@@ -86,6 +89,8 @@ pub fn run(roms: Vec<PathBuf>) {
             KeyBinding::new("cmd-l", LoadState, None),
             KeyBinding::new("cmd-shift-s", SaveScreenshot, None),
             KeyBinding::new("cmd-shift-r", ToggleRecording, None),
+            KeyBinding::new("cmd-shift-l", RunScript, None),
+            KeyBinding::new("cmd-alt-l", StopScript, None),
             KeyBinding::new("cmd-]", NextStateSlot, None),
             KeyBinding::new("cmd-[", PreviousStateSlot, None),
             KeyBinding::new("cmd-f", ToggleFastForward, None),
@@ -133,7 +138,7 @@ pub fn run(roms: Vec<PathBuf>) {
             ..WindowOptions::default()
         };
         cx.open_window(options, |window, cx| {
-            cx.new(|cx| EmulatorView::new(roms, window, cx))
+            cx.new(|cx| EmulatorView::new(roms, script, window, cx))
         })
         .expect("opening the main window");
         cx.activate(true);
@@ -170,6 +175,9 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Start / Stop Recording", ToggleRecording),
                 MenuItem::separator(),
                 MenuItem::action("Edit Cheats…", EditCheats),
+                MenuItem::separator(),
+                MenuItem::action("Run Script…", RunScript),
+                MenuItem::action("Stop Script", StopScript),
             ],
         },
         Menu {

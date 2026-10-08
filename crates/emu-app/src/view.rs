@@ -1,15 +1,18 @@
 //! The main window: draws the running game's screens and turns keyboard,
 //! gamepad, mouse and file events into emulator commands.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use emu_core::{Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
+use emu_script::Draw;
 use gpui::{
-    Context, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, RenderImage,
-    SharedString, Subscription, Task, Window, WindowHandle, div, img, prelude::*, px, rgb, rgba,
+    Context, Div, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point,
+    RenderImage, SharedString, Subscription, Task, Window, WindowHandle, div, img, prelude::*, px,
+    rgb, rgba,
 };
 
 use crate::app::{
@@ -17,9 +20,10 @@ use crate::app::{
     FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, InsertGbaCartridge,
     LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState, NextScreenGap,
     NextStateSlot, OpenRom, PreviousStateSlot, Reset, Resolution3d1x, Resolution3d2x,
-    Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, SaveScreenshot,
-    SaveState, ShowDebugger, SwapScreens, SwitchPlayer, ToggleColorCorrection, ToggleFastForward,
-    ToggleFullScreen, ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion,
+    Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, RunScript,
+    SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
+    ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause,
+    ToggleRecording, ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Shortcut};
@@ -75,6 +79,8 @@ pub struct EmulatorView {
     /// Games started so far, which numbers each for the debugger.
     sessions: u64,
     session: Option<Session>,
+    /// A script from the command line, to run with the first game.
+    startup_script: Option<PathBuf>,
     loading: Option<Task<()>>,
     placements: Vec<Placement>,
     controls: Controls,
@@ -149,7 +155,13 @@ struct ImageKey {
 
 impl EmulatorView {
     /// Creates the view, loading `roms` straight away if there are any.
-    pub fn new(roms: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `script` runs alongside the first game to start.
+    pub fn new(
+        roms: Vec<PathBuf>,
+        script: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
 
@@ -208,6 +220,7 @@ impl EmulatorView {
             debugger: None,
             sessions: 0,
             session: None,
+            startup_script: script,
             loading: None,
             placements: Vec::new(),
             controls: Controls::default(),
@@ -342,6 +355,43 @@ impl EmulatorView {
         let notes = [Some(running), bindings, self.reload_cheats()];
         let notice: Vec<String> = notes.into_iter().flatten().collect();
         self.show_notice(notice.join(" · "), cx);
+        if let Some(script) = self.startup_script.take() {
+            self.run_script_file(script, cx);
+        }
+    }
+
+    /// Asks for a Lua script, then runs it alongside the game.
+    fn run_script(&mut self, _: &RunScript, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.show_notice("Open a game first, then run a script", cx);
+            return;
+        }
+        self.prompt_for_file("Run", window, cx, |this, path, _, cx| {
+            this.run_script_file(path, cx);
+        });
+    }
+
+    /// Reads the script at `path` off the UI thread and hands it to the
+    /// emulation thread, which runs it.
+    fn run_script_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let read = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { fs::read_to_string(path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let source = read.await;
+            this.update(cx, |this, cx| match source {
+                Ok(source) => this.send(Command::RunScript {
+                    name: file_name(&path),
+                    source,
+                }),
+                Err(error) => {
+                    this.show_notice(format!("Cannot read {}: {error}", path.display()), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Re-reads the user's bindings file and lays each player's game
@@ -796,8 +846,8 @@ impl EmulatorView {
         self.sync_held();
     }
 
-    /// Asks for a ROM file, then calls `then` with it.
-    fn prompt_for_rom(
+    /// Asks for a file, then calls `then` with it.
+    fn prompt_for_file(
         &mut self,
         prompt: &'static str,
         window: &mut Window,
@@ -824,7 +874,7 @@ impl EmulatorView {
     }
 
     fn open_rom(&mut self, _: &OpenRom, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt_for_rom("Open", window, cx, |this, path, window, cx| {
+        self.prompt_for_file("Open", window, cx, |this, path, window, cx| {
             this.open(vec![path], window, cx);
         });
     }
@@ -846,7 +896,7 @@ impl EmulatorView {
             self.show_notice("Open a game first, then connect a second console", cx);
             return;
         };
-        self.prompt_for_rom("Connect", window, cx, move |this, second, window, cx| {
+        self.prompt_for_file("Connect", window, cx, move |this, second, window, cx| {
             this.open(vec![first, second], window, cx);
         });
     }
@@ -868,7 +918,7 @@ impl EmulatorView {
             self.show_notice("Open a DS game first, then insert a GBA cartridge", cx);
             return;
         };
-        self.prompt_for_rom("Insert", window, cx, move |this, cartridge, window, cx| {
+        self.prompt_for_file("Insert", window, cx, move |this, cartridge, window, cx| {
             this.open(vec![game, cartridge], window, cx);
         });
     }
@@ -1189,6 +1239,8 @@ impl Render for EmulatorView {
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::connect_link_cable))
             .on_action(cx.listener(Self::edit_cheats))
+            .on_action(cx.listener(Self::run_script))
+            .on_action(cx.listener(|this, _: &StopScript, _, _| this.send(Command::StopScript)))
             .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
                 let players = this.session.as_ref().map_or(1, |s| s.info.players);
                 this.switch_player((this.active_player + 1) % players.max(1), cx);
@@ -1327,6 +1379,12 @@ impl Render for EmulatorView {
                         .object_fit(ObjectFit::Fill),
                 );
             }
+            let overlay = session.emulator.overlay();
+            root = root.children(overlay_layers(
+                &overlay,
+                &self.placements,
+                session.info.screens,
+            ));
         } else {
             self.placements.clear();
             root = root.child(welcome());
@@ -1388,6 +1446,102 @@ fn welcome() -> impl IntoElement {
                 .text_color(rgb(0x0088_8888))
                 .child("Open a ROM with ⌘O, or drop a .gb, .gbc, .gba or .nds file here."),
         )
+}
+
+/// What a script drew, over every placement of the screens it drew on,
+/// each clipped to its screen.
+fn overlay_layers(draws: &[Draw], placements: &[Placement], screens: &[ScreenSize]) -> Vec<Div> {
+    if draws.is_empty() {
+        return Vec::new();
+    }
+    placements
+        .iter()
+        .filter_map(|placement| {
+            let size = *screens.get(placement.screen)?;
+            let mut shapes = draws
+                .iter()
+                .filter(|draw| draw.screen() == placement.screen)
+                .peekable();
+            shapes.peek()?;
+            let rect = placement.rect;
+            let layer = div()
+                .absolute()
+                .left(px(rect.x))
+                .top(px(rect.y))
+                .w(px(rect.width))
+                .h(px(rect.height))
+                .overflow_hidden();
+            Some(layer.children(shapes.flat_map(|draw| shape(draw, placement, size))))
+        })
+        .collect()
+}
+
+/// One drawn shape as elements placed inside `placement`'s layer. Text
+/// stays upright on turned screens, starting from where its corner lands.
+fn shape(draw: &Draw, placement: &Placement, size: ScreenSize) -> Vec<Div> {
+    let rect = placement.rect;
+    // Window pixels per screen pixel.
+    let scale = rect.width / f32::from(placement.rotation.turn_size(size).width.max(1));
+    let at = |x: f32, y: f32| {
+        let (left, top) = placement.window_point(size, (x, y));
+        (left - rect.x, top - rect.y)
+    };
+    match draw {
+        Draw::Rect {
+            x,
+            y,
+            width,
+            height,
+            fill,
+            outline,
+            ..
+        } => {
+            let (x, y) = (*x as f32, *y as f32);
+            let a = at(x, y);
+            let b = at(x + *width as f32, y + *height as f32);
+            let mut element = div()
+                .absolute()
+                .left(px(a.0.min(b.0)))
+                .top(px(a.1.min(b.1)))
+                .w(px((a.0 - b.0).abs()))
+                .h(px((a.1 - b.1).abs()));
+            if fill.is_visible() {
+                element = element.bg(rgba(fill.rgba()));
+            }
+            if outline.is_visible() {
+                element = element
+                    .border(px(scale.max(1.0)))
+                    .border_color(rgba(outline.rgba()));
+            }
+            vec![element]
+        }
+        Draw::Text {
+            x, y, text, color, ..
+        } => {
+            if !color.is_visible() {
+                return Vec::new();
+            }
+            let (left, top) = at(*x as f32, *y as f32);
+            let height = Draw::TEXT_HEIGHT as f32 * scale;
+            // A dark copy underneath keeps light text readable on light
+            // screens, as emulators' script text has been.
+            let shadow = (scale / 2.0).max(1.0);
+            let shadow_alpha = u32::from(color.alpha()) * 3 / 4;
+            let line = |offset: f32, color: u32| {
+                div()
+                    .absolute()
+                    .left(px(left + offset))
+                    .top(px(top + offset))
+                    .whitespace_nowrap()
+                    .font_family("Menlo")
+                    .text_size(px(height * 0.9))
+                    .line_height(px(height))
+                    .text_color(rgba(color))
+                    .child(SharedString::from(text.clone()))
+            };
+            vec![line(shadow, shadow_alpha), line(0.0, color.rgba())]
+        }
+    }
 }
 
 /// A red dot and "REC" in the window's corner while a recording is under

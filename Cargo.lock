@@ -1613,6 +1613,7 @@ dependencies = [
  "emu-cheats",
  "emu-core",
  "emu-cores",
+ "emu-script",
  "emu-state",
  "gilrs",
  "gpui",
