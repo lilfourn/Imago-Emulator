@@ -16,6 +16,7 @@ use crate::bios;
 use crate::dma::{Dma, Timing};
 use crate::interrupts::{self, Interrupts};
 use crate::ppu::{self, Ppu};
+use crate::prefetch::{Lookup, Prefetch};
 use crate::sio::{self, Sio};
 use crate::timer::{Staged, Timers};
 use crate::timing::{WaitStates, Width};
@@ -92,6 +93,15 @@ pub(crate) struct Bus {
     executing_bios: bool,
     /// The last instruction fetched, which unmapped reads return.
     last_fetch: u32,
+    /// The Game Pak prefetch unit.
+    prefetch: Prefetch,
+    /// Whether the last instruction fetch was from the cartridge.
+    code_in_cartridge: bool,
+    /// Whether the last memory access was a DMA's.
+    last_access_dma: bool,
+    /// WAITCNT's prefetch bit was cleared since the last code fetch from
+    /// the cartridge, which then starts a new burst.
+    prefetch_switched_off: bool,
     scheduler: Scheduler<Event>,
     cycles: u64,
 }
@@ -126,6 +136,10 @@ impl Bus {
             bios_open_bus: bios::OPEN_BUS_AFTER_BOOT,
             executing_bios: false,
             last_fetch: 0,
+            prefetch: Prefetch::default(),
+            code_in_cartridge: false,
+            last_access_dma: false,
+            prefetch_switched_off: false,
             scheduler,
             cycles: 0,
         };
@@ -306,6 +320,7 @@ impl Bus {
 
     /// Advances time by `cycles` and runs every event that came due.
     fn tick(&mut self, cycles: u32) {
+        self.prefetch.run(cycles, self.prefetch_enabled());
         self.cycles += u64::from(cycles);
         self.scheduler.advance(u64::from(cycles));
         while let Some(due) = self.scheduler.pop_due() {
@@ -455,8 +470,7 @@ impl Bus {
     fn dma_read(&mut self, source: u32, words: bool, access: Access) -> Option<u32> {
         let width = if words { Width::Word } else { Width::Half };
         if source < 0x0200_0000 {
-            let sequential = access.contains(Access::SEQUENTIAL);
-            self.tick(self.waits.cycles(source, width, sequential));
+            self.wait_for_access(source, width, access);
             return None;
         }
         Some(if words {
@@ -532,8 +546,12 @@ impl Bus {
                 self.sync_interrupts_after(self.cycles);
             }
             0x204 => {
+                let was_prefetching = self.prefetch_enabled();
                 self.waitcnt = value & 0x5FFF;
                 self.waits = WaitStates::new(self.waitcnt);
+                if was_prefetching && !self.prefetch_enabled() {
+                    self.prefetch_switched_off = true;
+                }
             }
             _ => {}
         }
@@ -760,6 +778,80 @@ impl Bus {
         self.halted
     }
 
+    /// Whether WAITCNT turns the Game Pak prefetch unit on.
+    fn prefetch_enabled(&self) -> bool {
+        self.waitcnt & 0x4000 != 0
+    }
+
+    /// Spends the cycles an access of `width` to `address` takes: the
+    /// region's wait states, with the prefetch unit's help for code from
+    /// the cartridge.
+    fn wait_for_access(&mut self, address: u32, width: Width, access: Access) {
+        let region = address >> 24;
+        let code = access.contains(Access::CODE);
+        let dma = access.contains(Access::DMA);
+        let after_dma = std::mem::replace(&mut self.last_access_dma, dma) && !dma;
+        if code {
+            self.code_in_cartridge = (0x08..0x0E).contains(&region);
+        }
+        match region {
+            0x08..=0x0D => {
+                // A new 128 KiB page, or the CPU's first access after a
+                // DMA, starts a new burst.
+                let sequential =
+                    access.contains(Access::SEQUENTIAL) && address & 0x1_FFFF != 0 && !after_dma;
+                if code {
+                    self.fetch_from_cartridge(address, width, sequential);
+                } else {
+                    self.stop_prefetch();
+                    self.tick(self.waits.cycles(address, width, sequential));
+                }
+            }
+            0x0E | 0x0F => {
+                self.stop_prefetch();
+                self.tick(self.waits.cycles(address, width, false));
+            }
+            _ => {
+                let sequential = access.contains(Access::SEQUENTIAL);
+                self.tick(self.waits.cycles(address, width, sequential));
+            }
+        }
+    }
+
+    /// The cycles of a code fetch from the cartridge, which the prefetch
+    /// unit may already have read.
+    fn fetch_from_cartridge(&mut self, address: u32, width: Width, sequential: bool) {
+        let enabled = self.prefetch_enabled();
+        match self.prefetch.look_up(address) {
+            Lookup::Buffered => {
+                self.prefetch.take(address, enabled);
+                self.tick(1);
+            }
+            Lookup::InFlight(cycles) => {
+                self.tick(cycles);
+                self.prefetch.take(address, enabled);
+            }
+            Lookup::Miss => {
+                self.stop_prefetch();
+                let sequential = sequential && !std::mem::take(&mut self.prefetch_switched_off);
+                self.tick(self.waits.cycles(address, width, sequential));
+                if enabled {
+                    let opcode = if width == Width::Word { 4 } else { 2 };
+                    let duty = self.waits.cycles(address, width, true);
+                    self.prefetch.start(address, opcode, duty);
+                }
+            }
+        }
+    }
+
+    /// Stops the prefetch unit for a data access to the cartridge, waiting
+    /// a cycle if its read cannot be cut short.
+    fn stop_prefetch(&mut self) {
+        if self.prefetch.stop(self.code_in_cartridge) {
+            self.tick(1);
+        }
+    }
+
     /// Records an instruction fetch's value: the BIOS's last opcode for
     /// read protection, and the bus's open-bus value.
     fn note_fetch(&mut self, value: u32) {
@@ -779,14 +871,11 @@ fn is_save_region(address: u32) -> bool {
 impl CpuBus for Bus {
     fn read_32(&mut self, address: u32, access: Access) -> u32 {
         if is_save_region(address) {
-            self.tick(self.waits.cycles(address, Width::Word, false));
+            self.wait_for_access(address, Width::Word, access);
             return u32::from(self.cartridge.read_backup(address)) * 0x0101_0101;
         }
         let address = address & !3;
-        self.tick(
-            self.waits
-                .cycles(address, Width::Word, access.contains(Access::SEQUENTIAL)),
-        );
+        self.wait_for_access(address, Width::Word, access);
         let code = access.contains(Access::CODE);
         if code {
             // Fetching from the BIOS is what unlocks reading it.
@@ -805,14 +894,11 @@ impl CpuBus for Bus {
 
     fn read_16(&mut self, address: u32, access: Access) -> u16 {
         if is_save_region(address) {
-            self.tick(self.waits.cycles(address, Width::Half, false));
+            self.wait_for_access(address, Width::Half, access);
             return u16::from(self.cartridge.read_backup(address)) * 0x0101;
         }
         let address = address & !1;
-        self.tick(
-            self.waits
-                .cycles(address, Width::Half, access.contains(Access::SEQUENTIAL)),
-        );
+        self.wait_for_access(address, Width::Half, access);
         let code = access.contains(Access::CODE);
         if code {
             self.executing_bios = address < 0x4000;
@@ -826,50 +912,38 @@ impl CpuBus for Bus {
     }
 
     fn read_8(&mut self, address: u32, access: Access) -> u8 {
-        self.tick(
-            self.waits
-                .cycles(address, Width::Byte, access.contains(Access::SEQUENTIAL)),
-        );
+        self.wait_for_access(address, Width::Byte, access);
         self.read_8_raw(address)
     }
 
     fn write_32(&mut self, address: u32, value: u32, access: Access) {
         if is_save_region(address) {
             // The byte lane at the (unaligned) address reaches the 8-bit bus.
-            self.tick(self.waits.cycles(address, Width::Word, false));
+            self.wait_for_access(address, Width::Word, access);
             let byte = value.rotate_right((address & 3) * 8) as u8;
             self.cartridge.write_backup(address, byte);
             return;
         }
         let address = address & !3;
-        self.tick(
-            self.waits
-                .cycles(address, Width::Word, access.contains(Access::SEQUENTIAL)),
-        );
+        self.wait_for_access(address, Width::Word, access);
         self.write_16_raw(address, value as u16);
         self.write_16_raw(address | 2, (value >> 16) as u16);
     }
 
     fn write_16(&mut self, address: u32, value: u16, access: Access) {
         if is_save_region(address) {
-            self.tick(self.waits.cycles(address, Width::Half, false));
+            self.wait_for_access(address, Width::Half, access);
             let byte = (value >> ((address & 1) * 8)) as u8;
             self.cartridge.write_backup(address, byte);
             return;
         }
         let address = address & !1;
-        self.tick(
-            self.waits
-                .cycles(address, Width::Half, access.contains(Access::SEQUENTIAL)),
-        );
+        self.wait_for_access(address, Width::Half, access);
         self.write_16_raw(address, value);
     }
 
     fn write_8(&mut self, address: u32, value: u8, access: Access) {
-        self.tick(
-            self.waits
-                .cycles(address, Width::Byte, access.contains(Access::SEQUENTIAL)),
-        );
+        self.wait_for_access(address, Width::Byte, access);
         self.write_8_raw(address, value);
     }
 
@@ -1048,6 +1122,36 @@ mod tests {
         assert_eq!(bus.read_16(0x0400_0008, n), 0xDFFF);
         // Debuggers see what was written.
         assert_eq!(bus.peek(0x0400_0010), Some(0x34));
+    }
+
+    #[test]
+    fn prefetched_opcodes_take_a_cycle_and_data_reads_stop_the_unit() {
+        let mut bus = blank_bus();
+        let (code, sequential) = (Access::CODE, Access::CODE | Access::SEQUENTIAL);
+        let elapsed = |bus: &mut Bus, read: &dyn Fn(&mut Bus)| {
+            let start = bus.cycles();
+            read(bus);
+            bus.cycles() - start
+        };
+        // Prefetch on, cartridge at 4 and 2 wait states.
+        bus.write_io_16(0x204, 0x4000);
+        assert_eq!(
+            elapsed(&mut bus, &|bus| _ = bus.read_16(0x0800_0000, code)),
+            5
+        );
+        // Six free cycles read the next two halfwords.
+        for _ in 0..6 {
+            bus.idle();
+        }
+        let fetch = |address| move |bus: &mut Bus| _ = bus.read_16(address, sequential);
+        assert_eq!(elapsed(&mut bus, &fetch(0x0800_0002)), 1);
+        assert_eq!(elapsed(&mut bus, &fetch(0x0800_0004)), 1);
+        // Those two cycles brought the third's read within a cycle of done.
+        assert_eq!(elapsed(&mut bus, &fetch(0x0800_0006)), 1);
+        // A data read from the cartridge stops the unit.
+        bus.read_16(0x0800_0100, Access::NONSEQUENTIAL);
+        bus.idle();
+        assert_eq!(elapsed(&mut bus, &fetch(0x0800_0008)), 3);
     }
 
     #[test]

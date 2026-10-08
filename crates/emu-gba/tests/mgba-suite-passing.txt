@@ -1,6 +1,6 @@
 Memory tests: 1552/1552
 I/O read tests: 130/130
-Timing tests: 1112/2020
+Timing tests: 1680/2020
 Timer count-up tests: 720/936
 Timer IRQ tests: 90/90
 Shifter tests: 140/140
