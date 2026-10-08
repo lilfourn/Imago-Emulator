@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use crate::apu::{self, Apu};
 use crate::bios;
 use crate::dma::{Dma, Timing};
+use crate::interrupts::{self, Interrupts};
 use crate::ppu::{self, Ppu};
 use crate::sio::{self, Sio};
-use crate::timer::Timers;
+use crate::timer::{Staged, Timers};
 use crate::timing::{WaitStates, Width};
 
 /// Scheduled events.
@@ -28,6 +29,16 @@ pub(crate) enum Event {
     LineStart,
     /// A timer counts past 0xFFFF.
     TimerOverflow(u8),
+    /// A value written to a timer's reload register lands.
+    TimerReload(u8),
+    /// A value written to a timer's control register lands.
+    TimerControl(u8),
+    /// Interrupt requests and writes to IE, IF and IME land.
+    InterruptSync,
+    /// HALT learns whether an enabled interrupt is requested.
+    InterruptRequested(bool),
+    /// The CPU's IRQ input changes.
+    InterruptLine(bool),
     /// Time for the next audio output sample.
     AudioSample,
     /// The serial transfer in progress ends.
@@ -65,9 +76,7 @@ pub(crate) struct Bus {
     /// Raw values written to I/O registers, for byte merges and reading back
     /// registers without side effects.
     io: Box<[u8]>,
-    interrupt_enable: u16,
-    interrupt_flag: u16,
-    master_enable: bool,
+    interrupts: Interrupts,
     waitcnt: u16,
     #[serde(skip, default = "default_waits")]
     waits: WaitStates,
@@ -108,9 +117,7 @@ impl Bus {
             apu: Apu::new(),
             sio: Sio::default(),
             io: vec![0; 0x400].into_boxed_slice(),
-            interrupt_enable: 0,
-            interrupt_flag: 0,
-            master_enable: false,
+            interrupts: Interrupts::default(),
             waitcnt: 0,
             waits: WaitStates::new(0),
             keys: 0x03FF,
@@ -216,16 +223,18 @@ impl Bus {
     }
 
     /// Whether the CPU's IRQ input is high: an enabled interrupt is
-    /// requested and IME is set.
+    /// requested and IME is set, as of a few cycles ago (see
+    /// [`crate::interrupts`]).
     pub(crate) fn irq_line(&self) -> bool {
-        self.master_enable && self.interrupt_enable & self.interrupt_flag != 0
+        self.interrupts.line()
     }
 
     /// Wakes from HALT when any enabled interrupt is requested, whatever
-    /// IME says. Returns whether the CPU is running.
+    /// IME says; waking takes a cycle. Returns whether the CPU is running.
     pub(crate) fn wake_if_requested(&mut self) -> bool {
-        if self.halted && self.interrupt_enable & self.interrupt_flag != 0 {
+        if self.halted && self.interrupts.requested() {
             self.halted = false;
+            self.tick(1);
         }
         !self.halted
     }
@@ -236,8 +245,39 @@ impl Bus {
         self.tick(u32::try_from(wait).unwrap_or(u32::MAX));
     }
 
+    /// Requests the interrupts in `bits` now.
     pub(crate) fn request_interrupt(&mut self, bits: u16) {
-        self.interrupt_flag |= bits;
+        self.request_interrupt_at(bits, self.cycles);
+    }
+
+    /// Requests the interrupts in `bits` at cycle `time`, which an event
+    /// handler passes as the cycle its event was due.
+    fn request_interrupt_at(&mut self, bits: u16, time: u64) {
+        if bits != 0 {
+            self.interrupts.request(bits);
+            self.sync_interrupts_after(time);
+        }
+    }
+
+    /// Lands the interrupt controller's pending changes a cycle after
+    /// `time`.
+    fn sync_interrupts_after(&mut self, time: u64) {
+        self.scheduler
+            .schedule_at(time + interrupts::SYNC_DELAY, Event::InterruptSync);
+    }
+
+    fn sync_interrupts(&mut self, time: u64) {
+        let changes = self.interrupts.sync();
+        if let Some(requested) = changes.requested {
+            self.scheduler.schedule_at(
+                time + interrupts::HALT_DELAY,
+                Event::InterruptRequested(requested),
+            );
+        }
+        if let Some(line) = changes.line {
+            self.scheduler
+                .schedule_at(time + interrupts::LINE_DELAY, Event::InterruptLine(line));
+        }
     }
 
     /// Sets the held buttons (KEYINPUT bit order) and raises the keypad
@@ -272,7 +312,7 @@ impl Bus {
             match due.event {
                 Event::HBlank => {
                     let (request, signals) = self.ppu.start_hblank();
-                    self.request_interrupt(request);
+                    self.request_interrupt_at(request, due.time + 1);
                     if signals.hblank {
                         self.dma.trigger(Timing::HBlank);
                     }
@@ -283,14 +323,30 @@ impl Bus {
                 }
                 Event::LineStart => {
                     let (request, signals) = self.ppu.start_line();
-                    self.request_interrupt(request);
+                    self.request_interrupt_at(request & ppu::irq::VBLANK, due.time + 1);
+                    self.request_interrupt_at(request & ppu::irq::VCOUNT, due.time + 2);
                     if signals.vblank {
                         self.dma.trigger(Timing::VBlank);
                     }
                     self.scheduler
                         .schedule_at(due.time + ppu::HDRAW_CYCLES, Event::HBlank);
                 }
-                Event::TimerOverflow(index) => self.timer_overflow(usize::from(index), due.time),
+                Event::TimerOverflow(index) => {
+                    let index = usize::from(index);
+                    let overflowed = self.timers.overflow(index, due.time);
+                    self.timers_overflowed(overflowed, due.time);
+                    self.schedule_timer(index);
+                }
+                Event::TimerReload(index) => self.timers.apply_reload(usize::from(index)),
+                Event::TimerControl(index) => {
+                    let index = usize::from(index);
+                    let overflowed = self.timers.apply_control(index, due.time);
+                    self.timers_overflowed(overflowed, due.time);
+                    self.schedule_timer(index);
+                }
+                Event::InterruptSync => self.sync_interrupts(due.time),
+                Event::InterruptRequested(requested) => self.interrupts.set_requested(requested),
+                Event::InterruptLine(line) => self.interrupts.set_line(line),
                 Event::AudioSample => {
                     self.apu.sample();
                     self.scheduler
@@ -298,18 +354,19 @@ impl Bus {
                 }
                 Event::SerialDone => {
                     if self.sio.finish() {
-                        self.request_interrupt(irq::SERIAL);
+                        self.request_interrupt_at(irq::SERIAL, due.time);
                     }
                 }
             }
         }
     }
 
-    fn timer_overflow(&mut self, index: usize, time: u64) {
-        let overflowed = self.timers.overflow(index, time);
+    /// Requests the interrupts and refills the sound FIFOs of the timers
+    /// in `overflowed` (bit `n` for timer `n`), which overflowed at `time`.
+    fn timers_overflowed(&mut self, overflowed: u8, time: u64) {
         for timer in (0..4).filter(|timer| overflowed & (1 << timer) != 0) {
             if self.timers.interrupt_enabled(timer) {
-                self.request_interrupt(irq::TIMER0 << timer);
+                self.request_interrupt_at(irq::TIMER0 << timer, time);
             }
             // Timers 0 and 1 clock the DMA sound FIFOs.
             if timer < 2 {
@@ -319,7 +376,6 @@ impl Bus {
                 }
             }
         }
-        self.schedule_timer(index);
     }
 
     /// Ends the serial transfer just started (by this console or, through
@@ -404,10 +460,10 @@ impl Bus {
             0x100..=0x10E => self.timers.read(offset as u32 - 0x100, self.cycles),
             0x120..=0x12A | 0x134 => self.sio.read(offset as u32 - 0x120),
             0x130 => self.keys,
-            0x200 => self.interrupt_enable,
-            0x202 => self.interrupt_flag,
+            0x200 => self.interrupts.enable(),
+            0x202 => self.interrupts.flag(),
             0x204 => self.waitcnt,
-            0x208 => u16::from(self.master_enable),
+            0x208 => u16::from(self.interrupts.master()),
             0x300 => self.io_16(0x300) & 0x00FF,
             // Not yet emulated (sound, DMA, timers, serial): read back.
             _ => self.io_16(offset),
@@ -428,22 +484,30 @@ impl Bus {
             }
             0x0B0..=0x0DE => self.dma.write(offset as u32 - 0xB0, value),
             0x100..=0x10E => {
-                if let Some(timer) = self.timers.write(offset as u32 - 0x100, value, self.cycles) {
-                    self.schedule_timer(timer);
-                }
+                // The write lands a cycle later.
+                let event = match self.timers.stage(offset as u32 - 0x100, value) {
+                    Staged::Reload(index) => Event::TimerReload(index as u8),
+                    Staged::Control(index) => Event::TimerControl(index as u8),
+                };
+                self.scheduler.schedule_at(self.cycles + 1, event);
             }
             0x120..=0x12A | 0x134 => {
                 let action = self.sio.write(offset as u32 - 0x120, value);
                 self.serial_action(action);
             }
             0x132 => self.check_keypad_interrupt(),
-            0x200 => self.interrupt_enable = value & 0x3FFF,
-            0x202 => self.interrupt_flag &= !value,
+            0x200 | 0x202 | 0x208 => {
+                match offset {
+                    0x200 => self.interrupts.write_enable(value),
+                    0x202 => self.interrupts.acknowledge(value),
+                    _ => self.interrupts.write_master(value & 1 != 0),
+                }
+                self.sync_interrupts_after(self.cycles);
+            }
             0x204 => {
                 self.waitcnt = value & 0x5FFF;
                 self.waits = WaitStates::new(self.waitcnt);
             }
-            0x208 => self.master_enable = value & 1 != 0,
             _ => {}
         }
     }
@@ -451,9 +515,17 @@ impl Bus {
     fn write_io_8(&mut self, offset: u32, value: u8) {
         let offset = offset & 0x3FF;
         match offset {
-            // IF: writing 1 clears; touch only this byte.
-            0x202 => self.interrupt_flag &= !u16::from(value),
-            0x203 => self.interrupt_flag &= !(u16::from(value) << 8),
+            // IE merges with what it is about to hold; IF clears the 1s in
+            // this byte alone.
+            0x200 | 0x201 => {
+                let shift = (offset & 1) * 8;
+                let merged =
+                    (self.interrupts.next_enable() & !(0xFF << shift)) | u16::from(value) << shift;
+                self.write_io_16(0x200, merged);
+            }
+            0x202 | 0x203 => self.write_io_16(0x202, u16::from(value) << ((offset & 1) * 8)),
+            // IME's and the timer controls' upper bytes hold nothing.
+            0x209 | 0x103 | 0x107 | 0x10B | 0x10F => {}
             0x300 => self.io[0x300] = value,
             // Sound registers take single bytes without touching neighbours.
             0x060..=0x0A7 => self.apu.write_8(offset - 0x60, value),
@@ -891,12 +963,82 @@ mod tests {
         // IF: writing 1 clears the bit.
         bus.request_interrupt(0x0009);
         assert!(bus.poke_io_16(0x0400_0202, 0x0001));
-        assert_eq!(bus.interrupt_flag, 0x0008);
         // POSTFLG and HALTCNT, and anything outside the I/O registers.
         for address in [0x0400_0300, 0x0400_0301, 0x0400_0400, 0x0200_0000] {
             assert!(!bus.poke_io_16(address, 0), "{address:08X}");
         }
         assert!(!bus.halted);
         assert_eq!(bus.cycles(), cycles);
+        // Like a store's, the IF write lands a cycle later.
+        bus.tick(1);
+        assert_eq!(bus.read_io_16(0x202), 0x0008);
+    }
+
+    /// A bus with an empty cartridge.
+    fn blank_bus() -> Bus {
+        Bus::new(
+            Cartridge::new(vec![0; 0x400].into(), None, 0),
+            Box::default(),
+        )
+    }
+
+    #[test]
+    fn interrupts_reach_the_cpu_three_cycles_after_the_request() {
+        let mut bus = blank_bus();
+        bus.write_io_16(0x200, 0x0008);
+        bus.write_io_16(0x208, 1);
+        bus.tick(1);
+        bus.request_interrupt(0x0008);
+        assert_eq!(bus.read_io_16(0x202), 0);
+        bus.tick(1);
+        assert_eq!(bus.read_io_16(0x202), 0x0008);
+        assert!(!bus.irq_line());
+        bus.tick(1);
+        assert!(!bus.irq_line());
+        bus.tick(1);
+        assert!(bus.irq_line());
+        // Acknowledging lowers the line just as late.
+        bus.write_io_16(0x202, 0x0008);
+        bus.tick(2);
+        assert!(bus.irq_line());
+        bus.tick(1);
+        assert!(!bus.irq_line());
+    }
+
+    #[test]
+    fn halt_wakes_two_cycles_after_the_request_and_a_cycle_later_runs() {
+        let mut bus = blank_bus();
+        bus.write_io_16(0x200, 0x0001);
+        bus.halt();
+        let start = bus.cycles();
+        bus.request_interrupt(0x0001);
+        while !bus.wake_if_requested() {
+            bus.idle_to_next_event();
+        }
+        assert_eq!(bus.cycles() - start, 3);
+    }
+
+    #[test]
+    fn a_timer_write_lands_a_cycle_later_and_counts_a_cycle_after_that() {
+        let mut bus = blank_bus();
+        let start = bus.cycles();
+        // Reload 0xFFFE, enabled, divide by 1, with its interrupt.
+        bus.write_32(0x0400_0100, 0x00C0_FFFE, Access::NONSEQUENTIAL);
+        let written = bus.cycles();
+        assert_eq!(written - start, 1);
+        bus.write_io_16(0x200, 0x0008);
+        bus.tick(1);
+        assert_eq!(bus.read_io_16(0x102), 0x00C0);
+        assert_eq!(bus.read_io_16(0x100), 0xFFFE);
+        bus.tick(1);
+        assert_eq!(bus.read_io_16(0x100), 0xFFFE);
+        bus.tick(1);
+        assert_eq!(bus.read_io_16(0x100), 0xFFFF);
+        // It overflows at written + 4, and IF shows it a cycle later.
+        bus.tick(1);
+        assert_eq!(bus.read_io_16(0x100), 0xFFFE);
+        assert_eq!(bus.read_io_16(0x202), 0);
+        bus.tick(1);
+        assert_eq!(bus.read_io_16(0x202), 0x0008);
     }
 }

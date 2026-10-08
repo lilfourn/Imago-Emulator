@@ -11,6 +11,7 @@ mod bus;
 mod debug;
 mod dma;
 mod graphics;
+mod interrupts;
 mod io_names;
 mod link;
 mod ppu;
@@ -45,7 +46,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(16_777_216, 280_896),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 7,
+    state_version: 8,
 };
 
 /// A Game Boy Advance with a cartridge inserted.

@@ -1,9 +1,11 @@
 //! The picture processing unit (GBATEK, "LCD Video Controller").
 //!
-//! Each of the 228 lines takes 1,232 cycles: 1,006 of drawing, then HBlank.
+//! Each of the 228 lines takes 1,232 cycles: 1,007 of drawing, then HBlank.
 //! Lines 160–227 are VBlank. The bus schedules the two events per line and
 //! calls [`Ppu::start_hblank`] and [`Ppu::start_line`]; the PPU renders a
 //! visible line when its HBlank begins, using the registers at that moment.
+//! The interrupts trail the flags: HBlank's and VBlank's by a cycle,
+//! VCount's by two (NanoBoyAdvance's timings).
 //!
 //! Drawing itself is in [`render`].
 
@@ -15,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const WIDTH: usize = 240;
 pub(crate) const HEIGHT: usize = 160;
 /// Cycles from the start of a line to HBlank.
-pub(crate) const HDRAW_CYCLES: u64 = 1006;
+pub(crate) const HDRAW_CYCLES: u64 = 1007;
 /// Cycles in a whole line.
 pub(crate) const LINE_CYCLES: u64 = 1232;
 const LINES: u16 = 228;
