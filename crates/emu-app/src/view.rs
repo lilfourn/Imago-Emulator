@@ -6,30 +6,33 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use emu_core::{Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
+use emu_core::{
+    Button, Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb,
+};
 use emu_script::Draw;
 use gpui::{
-    Context, Div, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point,
-    RenderImage, SharedString, Subscription, Task, Window, WindowHandle, div, img, prelude::*, px,
-    rgb, rgba,
+    Context, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseUpEvent, ObjectFit, PathPromptOptions, RenderImage, SharedString,
+    Subscription, Task, Window, WindowHandle, div, img, linear_color_stop, linear_gradient,
+    prelude::*, px, rgb, rgba,
 };
 
+use crate::ambient::{self, Backdrop};
 use crate::app::{
-    ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver, EditCheats, FilterLcdGrid,
-    FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, InsertGbaCartridge,
-    LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState, NextScreenGap,
-    NextStateSlot, OpenRom, PreviousStateSlot, Reset, Resolution3d1x, Resolution3d2x,
-    Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, RunScript,
-    SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
-    ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause,
-    ToggleRecording, ToggleSlowMotion,
+    AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
+    EditCheats, FilterLcdGrid, FilterNone, FilterScale2x, FilterScale3x, FilterScanlines,
+    InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState,
+    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, PreviousStateSlot, Reset, Resolution3d1x,
+    Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise,
+    RunScript, SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
+    TOP_BAR, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleKeyGuide,
+    ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion, ToggleWindowControls,
 };
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
 };
 use crate::audio::{self, AudioOutput};
-use crate::bindings::{self, Bindings, Shortcut};
+use crate::bindings::{self, Bindings, Held, Shortcut};
 use crate::cheats;
 use crate::chords::{Chords, Effect};
 use crate::color::Correction;
@@ -39,23 +42,41 @@ use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::filter::Filter;
+use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
+use crate::key_guide;
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
+use crate::library::{self, Library};
+use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist;
 use crate::settings::{self, Settings};
+use crate::settings_window::SettingsWindow;
 use crate::slots::{self, SlotPreview};
 use crate::speed::{self, Pace, Speed, Speeds};
+use crate::theme::BACKGROUND;
 use crate::video;
+use crate::window_chrome;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
 /// How often the speed readout measures.
 const READOUT_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Where the top bar's shade starts, at the window's top edge: dark enough
+/// for the close, minimise and zoom buttons to show on a white screen.
+const TOP_BAR_SHADE: u32 = 0x0000_0066;
+
+/// The source name under which a held mouse button presses A.
+const MOUSE: &str = "mouse:left";
+
 /// Save-state slots, numbered from 1.
 const STATE_SLOTS: u8 = 4;
+
+/// The save-state slot that holds each game's checkpoint: where the
+/// player left it, picked up when the game next starts.
+const CHECKPOINT: u8 = 0;
 
 /// The root view of the main window.
 pub struct EmulatorView {
@@ -81,6 +102,8 @@ pub struct EmulatorView {
     color_correction: bool,
     /// How the screens are filtered on their way to the window.
     filter: Filter,
+    /// What fills the window around the screens.
+    backdrop: Backdrop,
     /// Whether the speed readout shows in the window's corner.
     show_fps: bool,
     /// What the speed readout says, once it has measured.
@@ -93,8 +116,22 @@ pub struct EmulatorView {
     /// How games made for the original Game Boy are shown, from the next
     /// game opened.
     dmg_colors: emu_core::DmgColors,
+    /// Whether the window shows its close, minimise and zoom buttons and
+    /// the bar they sit in.
+    window_controls: bool,
+    /// Whether the keys that play the game show along the foot of the
+    /// window.
+    key_guide: bool,
+    /// Whether the buttons were last shown or hidden, once they have been.
+    shown_controls: Option<bool>,
     /// The debugger window, once opened.
     debugger: Option<WindowHandle<DebuggerWindow>>,
+    /// The settings window, once opened.
+    settings_window: Option<WindowHandle<SettingsWindow>>,
+    /// The games, shown while none runs.
+    library: Entity<LibraryView>,
+    /// The game menu, while it is open over the paused game.
+    menu: Option<(Entity<GameMenu>, Subscription)>,
     /// Games started so far, which numbers each for the debugger.
     sessions: u64,
     session: Option<Session>,
@@ -105,8 +142,6 @@ pub struct EmulatorView {
     controls: Controls,
     /// Gamepad hotkey chords in progress.
     chords: Chords,
-    /// Where the mouse touches the touchscreen, while its button is down.
-    mouse_touch: Option<TouchPoint>,
     /// The gamepad's touchscreen cursor, once a gamepad has used it.
     cursor: Option<Cursor>,
     /// What the emulation thread was last told is held.
@@ -159,6 +194,8 @@ struct Session {
     recording: bool,
     /// Per placement: the image drawn there and what it shows.
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
+    /// The ambient backdrop and the placements it was sampled from.
+    ambient: Option<(Vec<Placement>, Arc<RenderImage>)>,
     _events: Task<()>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
@@ -187,19 +224,33 @@ impl EmulatorView {
         let loaded_bindings = bindings::default_path().map(|path| Bindings::load(&path));
         let settings_path = settings::default_path();
         let loaded_settings = settings_path.as_deref().map(Settings::load);
+        let library_path = library::default_path();
+        let (games, library_error) = match library_path.as_deref().map(Library::load) {
+            Some(Ok(games)) => (games, None),
+            Some(Err(error)) => (Library::default(), Some(error)),
+            None => (Library::default(), None),
+        };
+        // A library that cannot be read is left alone, not overwritten.
+        let library_path = library_path.filter(|_| library_error.is_none());
+        let library = cx.new(|cx| LibraryView::new(games, library_path, cx));
         let subscriptions = vec![
+            cx.subscribe_in(&library, window, Self::library_event),
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     // Keys released while another window has focus never
                     // send key-up.
                     this.release_all();
-                } else if let Some(message) = this.reload_cheats() {
+                } else {
                     // Back from editing a cheat file, perhaps.
-                    this.show_notice(message, cx);
+                    if let Some(message) = this.reload_cheats() {
+                        this.show_notice(message, cx);
+                    }
+                    this.refresh_menu_cheats(cx);
                 }
             }),
             // Stop the emulation thread on quit so the battery save is flushed.
             cx.on_app_quit(|this, _| {
+                this.save_checkpoint();
                 this.session = None;
                 async {}
             }),
@@ -236,12 +287,19 @@ impl EmulatorView {
             heard: 0,
             color_correction: true,
             filter: Filter::default(),
+            backdrop: Backdrop::default(),
             show_fps: false,
             speed_readout: None,
             fps_meter: None,
             readout_task: None,
             dmg_colors: Settings::default().dmg_colors,
+            window_controls: Settings::default().window_controls,
+            key_guide: Settings::default().key_guide,
+            shown_controls: None,
             debugger: None,
+            settings_window: None,
+            library,
+            menu: None,
             sessions: 0,
             session: None,
             startup_script: script,
@@ -249,7 +307,6 @@ impl EmulatorView {
             placements: Vec::new(),
             controls: Controls::default(),
             chords: Chords::default(),
-            mouse_touch: None,
             cursor: None,
             sent: HeldState::default(),
             sent_touch: None,
@@ -274,11 +331,17 @@ impl EmulatorView {
                 view.speeds = settings.speed;
                 view.resolution_3d = settings.resolution_3d;
                 view.filter = settings.filter;
+                view.backdrop = settings.backdrop;
                 view.show_fps = settings.show_fps;
                 view.dmg_colors = settings.dmg_colors;
+                view.window_controls = settings.window_controls;
+                view.key_guide = settings.key_guide;
             }
             Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
+        }
+        if let Some(error) = library_error {
+            view.show_notice(format!("{error}; the library is not saved"), cx);
         }
         view.refresh_menus(cx);
         if view.show_fps {
@@ -303,6 +366,7 @@ impl EmulatorView {
             roms.any(|rom| saves.contains(&persist::backup_key(rom)))
         });
         if reopening {
+            self.save_checkpoint();
             self.stop(window);
         }
         let name = paths
@@ -327,6 +391,7 @@ impl EmulatorView {
 
     fn start(&mut self, loaded: Loaded, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         // Stop the previous game first so its battery save is flushed.
+        self.save_checkpoint();
         self.stop(window);
         let info = loaded.info();
         let (audio_output, audio_sink) = match audio::open(info.audio_sample_rate) {
@@ -338,9 +403,16 @@ impl EmulatorView {
         };
         let (events, receiver) = async_channel::unbounded();
         let rom_paths = loaded.rom_paths().to_vec();
+        let played = rom_paths.clone();
+        self.library
+            .update(cx, |library, cx| library.add(played, cx));
         let player_rom_paths = loaded.player_rom_paths().to_vec();
         let emulator = Emulator::start(loaded, events, audio_sink);
         emulator.send(Command::SetRenderScale(self.resolution_3d));
+        // Pick up where the player left off.
+        if persist::state_path(&player_rom_paths, CHECKPOINT).exists() {
+            emulator.send(Command::LoadState(CHECKPOINT));
+        }
         let task = cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
@@ -360,13 +432,13 @@ impl EmulatorView {
             correction: Correction::for_system(info.system),
             recording: false,
             images: Vec::new(),
+            ambient: None,
             _events: task,
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
         self.sent = HeldState::default();
         self.sent_touch = None;
-        self.mouse_touch = None;
         self.cursor = None;
         self.active_player = 0;
         let bindings = self.reload_bindings();
@@ -516,7 +588,9 @@ impl EmulatorView {
 
     fn stop(&mut self, window: &mut Window) {
         if let Some(session) = self.session.take() {
-            for (_, image) in session.images.into_iter().flatten() {
+            let images = session.images.into_iter().flatten();
+            let ambient = session.ambient.map(|(_, image)| image);
+            for image in images.map(|(_, image)| image).chain(ambient) {
                 window.drop_image(image).ok();
             }
         }
@@ -530,7 +604,11 @@ impl EmulatorView {
             }
             // Wakes the debugger window, which redraws with this view.
             Event::Debug => cx.notify(),
-            Event::Notice(text) => self.show_notice(text, cx),
+            Event::Notice(text) => {
+                if let Some(text) = checkpoint_notice(text) {
+                    self.show_notice(text, cx);
+                }
+            }
             Event::Recording(on) => {
                 if let Some(session) = &mut self.session {
                     session.recording = on;
@@ -616,14 +694,10 @@ impl EmulatorView {
     }
 
     /// Tells the emulation thread about any change in held inputs or in
-    /// where the screen is touched. The mouse and the gamepad cursor touch
-    /// independently; the mouse wins while both do.
+    /// where the gamepad cursor touches the screen.
     fn sync_held(&mut self) {
         let state = self.controls.state();
-        let touch = match self.mouse_touch {
-            Some(point) => Some(point),
-            None => self.cursor_touch(state.touch),
-        };
+        let touch = self.cursor_touch(state.touch);
         if state.buttons != self.sent.buttons
             || touch != self.sent_touch
             || state.blow != self.sent.blow
@@ -673,12 +747,27 @@ impl EmulatorView {
     fn release_all(&mut self) {
         self.controls.release_all();
         self.chords.clear();
-        self.mouse_touch = None;
         self.sync_held();
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Without a game, keys search and choose in the library.
+        if self.session.is_none() {
+            self.library
+                .update(cx, |library, cx| library.key_down(event, cx));
+            return;
+        }
+        // While the game menu is open, keys are the menu's.
+        if let Some((menu, _)) = &self.menu {
+            menu.clone().update(cx, |menu, cx| menu.key_down(event, cx));
+            return;
+        }
         let modifiers = event.keystroke.modifiers;
+        let plain = !modifiers.platform && !modifiers.control && !modifiers.alt;
+        if event.keystroke.key == "escape" && plain && !event.is_held {
+            self.open_menu(window, cx);
+            return;
+        }
         // Command and Control chords are menu shortcuts, not game input.
         if !modifiers.platform && !modifiers.control {
             let key = &event.keystroke.key;
@@ -698,6 +787,10 @@ impl EmulatorView {
     }
 
     fn pad_event(&mut self, event: &PadEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The game is paused under the menu; its controls wait.
+        if self.menu.is_some() {
+            return;
+        }
         match event {
             PadEvent::Control {
                 controller,
@@ -790,11 +883,7 @@ impl EmulatorView {
     }
 
     fn change_state_slot(&mut self, forward: bool, cx: &mut Context<Self>) {
-        self.state_slot = if forward {
-            self.state_slot % STATE_SLOTS + 1
-        } else {
-            (self.state_slot + STATE_SLOTS - 2) % STATE_SLOTS + 1
-        };
+        self.state_slot = next_slot(self.state_slot, forward);
         let slot = self.state_slot;
         self.show_notice(format!("State slot {slot}"), cx);
         let Some(rom_paths) = self.session.as_ref().map(|s| s.player_rom_paths.clone()) else {
@@ -826,28 +915,13 @@ impl EmulatorView {
             cx,
         );
         if let Some((width, height, rgb)) = preview.thumbnail {
-            let mut frame = Frame::new(ScreenSize::new(width, height));
-            for (pixel, color) in frame.pixels_mut().iter_mut().zip(rgb.chunks_exact(3)) {
-                *pixel = pack_rgb(color[0], color[1], color[2]);
-            }
-            let image = video::render_image(&frame, 2);
+            let image = slot_image(width, height, &rgb);
             self.stale_images.extend(self.slot_image.replace(image));
         }
     }
 
     /// Points the mouse's stylus at `position`, or lifts it if that is off
     /// every copy of the touchscreen.
-    fn touch_at(&mut self, position: Point<Pixels>) {
-        let point = (f32::from(position.x), f32::from(position.y));
-        self.mouse_touch = self.touchscreen().and_then(|(screen, size)| {
-            self.placements
-                .iter()
-                .filter(|placement| placement.screen == screen)
-                .find_map(|placement| placement.pixel_at(size, point))
-        });
-        self.sync_held();
-    }
-
     fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         // In a multi-player session, clicking a screen takes control of it.
         let point = (f32::from(event.position.x), f32::from(event.position.y));
@@ -862,18 +936,17 @@ impl EmulatorView {
         if !self.sent.touch {
             self.cursor = None;
         }
-        self.touch_at(event.position);
+        // A click presses A, in every game, for as long as it is held.
+        self.controls
+            .set(MOUSE.to_owned(), Some(Held::Button(Button::A)), true);
+        self.sync_held();
         cx.notify();
     }
 
-    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
-        if event.pressed_button == Some(MouseButton::Left) {
-            self.touch_at(event.position);
-        }
-    }
-
+    /// Releases A when the mouse button comes up, in the window or out of
+    /// it.
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.mouse_touch = None;
+        self.controls.set(MOUSE.to_owned(), None, false);
         self.sync_held();
     }
 
@@ -902,6 +975,204 @@ impl EmulatorView {
                 .ok();
         })
         .detach();
+    }
+
+    /// Asks for games, then adds them to the library without playing them.
+    fn add_to_library(&mut self, _: &AddToLibrary, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add".into()),
+        });
+        let library = self.library.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            library
+                .update(cx, |library, cx| library.add(paths, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Pauses the game and opens the game menu over it.
+    fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if self.menu.is_some() {
+            return;
+        }
+        let rom = session.player_rom_paths[0].clone();
+        let title = self
+            .library
+            .read(cx)
+            .title_of(&rom)
+            .unwrap_or_else(|| file_name(&rom));
+        self.release_all();
+        self.send_debug(debugger::Command::Pause);
+        let cheats = self.menu_cheats();
+        let menu = cx.new(|_| GameMenu::new(title, cheats));
+        let subscription = cx.subscribe_in(&menu, window, Self::menu_event);
+        self.menu = Some((menu, subscription));
+        // The menu says progress is saved; make it so.
+        self.save_checkpoint();
+        cx.notify();
+    }
+
+    /// Closes the game menu, playing on if `resume`.
+    fn close_menu(&mut self, resume: bool, cx: &mut Context<Self>) {
+        if self.menu.take().is_none() {
+            return;
+        }
+        if resume {
+            self.send_debug(debugger::Command::Continue);
+        }
+        cx.notify();
+    }
+
+    fn menu_event(
+        &mut self,
+        _: &Entity<GameMenu>,
+        event: &MenuEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match *event {
+            MenuEvent::Resume => self.close_menu(true, cx),
+            MenuEvent::ToggleCheat(index) => self.toggle_cheat(index, cx),
+            MenuEvent::EditCheats => self.edit_cheats(&EditCheats, window, cx),
+            MenuEvent::StartOver => self.start_over(window, cx),
+            MenuEvent::ExitToLibrary => self.close_game(window, cx),
+        }
+    }
+
+    /// Saves where the game is as its checkpoint, to pick up from when it
+    /// next starts. The emulation thread finishes this before it stops.
+    fn save_checkpoint(&self) {
+        self.send(Command::SaveState(CHECKPOINT));
+    }
+
+    /// Erases the running game's progress, its checkpoint and battery
+    /// saves, and starts it again. Each battery save is kept as
+    /// `game.sav.bak` in case it was a mistake.
+    fn start_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let roms = session.rom_paths.clone();
+        let checkpoint = persist::state_path(&session.player_rom_paths, CHECKPOINT);
+        self.close_menu(false, cx);
+        // Stopping writes the battery saves, so they are set aside after.
+        self.stop(window);
+        let erased = remove_if_present(&checkpoint).and_then(|()| {
+            roms.iter().try_for_each(|rom| {
+                let save = persist::backup_path(rom);
+                match fs::rename(&save, save.with_extension("sav.bak")) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                    _ => Ok(()),
+                }
+            })
+        });
+        if let Err(error) = erased {
+            self.show_notice(format!("Cannot erase progress: {error}"), cx);
+        }
+        self.open(roms, window, cx);
+    }
+
+    /// The active player's cheat file, while a game runs.
+    fn cheat_file(&self) -> Option<PathBuf> {
+        let session = self.session.as_ref()?;
+        let player = self.active_player.min(session.player_rom_paths.len() - 1);
+        Some(persist::cheats_path(session.player_rom_paths.get(player)?))
+    }
+
+    /// The active player's cheats, as the game menu lists them.
+    fn menu_cheats(&self) -> Vec<CheatRow> {
+        let (Some(session), Some(path)) = (&self.session, self.cheat_file()) else {
+            return Vec::new();
+        };
+        let text = cheats::read(&path).unwrap_or_default();
+        emu_cheats::parse(session.info.system, &text)
+            .map(|list| {
+                list.iter()
+                    .map(|cheat| CheatRow {
+                        name: cheat.name.clone(),
+                        enabled: cheat.enabled,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Shows the cheat file's cheats in the game menu, if it is open.
+    fn refresh_menu_cheats(&mut self, cx: &mut Context<Self>) {
+        let Some((menu, _)) = &self.menu else {
+            return;
+        };
+        let cheats = self.menu_cheats();
+        menu.clone()
+            .update(cx, |menu, cx| menu.set_cheats(cheats, cx));
+    }
+
+    /// Switches the active player's cheat `index` on or off, in its file,
+    /// and applies the file.
+    fn toggle_cheat(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.cheat_file() else {
+            return;
+        };
+        let listed = self.menu_cheats();
+        let Some(cheat) = listed.get(index) else {
+            return;
+        };
+        let text = cheats::read(&path).unwrap_or_default();
+        match cheats::set_enabled(&text, listed.len(), index, !cheat.enabled) {
+            Some(toggled) => {
+                if let Err(error) = persist::write_atomic(&path, toggled.as_bytes()) {
+                    self.show_notice(format!("Cannot save {}: {error}", path.display()), cx);
+                    return;
+                }
+            }
+            None => {
+                let message = "Give these codes a [name] line to switch them here";
+                self.show_notice(message, cx);
+                return;
+            }
+        }
+        if let Some(message) = self.reload_cheats() {
+            self.show_notice(message, cx);
+        }
+        self.refresh_menu_cheats(cx);
+    }
+
+    /// Stops the game, keeping its progress as its checkpoint, and goes
+    /// back to the library.
+    fn close_game(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        self.close_menu(false, cx);
+        self.save_checkpoint();
+        self.stop(window);
+        window.set_window_title("ds-emulator");
+        cx.notify();
+    }
+
+    fn library_event(
+        &mut self,
+        _: &Entity<LibraryView>,
+        event: &LibraryEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            LibraryEvent::Play(path) => self.open(vec![path.clone()], window, cx),
+            LibraryEvent::AddGames => self.add_to_library(&AddToLibrary, window, cx),
+            LibraryEvent::OpenSettings => self.show_settings(cx),
+            LibraryEvent::Notice(text) => self.show_notice(text.clone(), cx),
+        }
     }
 
     fn open_rom(&mut self, _: &OpenRom, window: &mut Window, cx: &mut Context<Self>) {
@@ -1061,19 +1332,79 @@ impl EmulatorView {
         }
     }
 
+    /// The settings in force.
+    pub fn settings(&self) -> Settings {
+        Settings {
+            layout: self.layout,
+            speed: self.speeds,
+            resolution_3d: self.resolution_3d,
+            filter: self.filter,
+            backdrop: self.backdrop,
+            show_fps: self.show_fps,
+            dmg_colors: self.dmg_colors,
+            window_controls: self.window_controls,
+            key_guide: self.key_guide,
+        }
+    }
+
+    /// Switches to `settings`, as the menu items for each would, and saves
+    /// them for next launch. The speeds, which only the settings file sets,
+    /// stay as they are.
+    pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        if settings.layout != self.layout {
+            self.set_layout(settings.layout, cx);
+        }
+        if settings.resolution_3d != self.resolution_3d {
+            self.set_resolution_3d(settings.resolution_3d, cx);
+        }
+        if settings.filter != self.filter {
+            self.set_filter(settings.filter, cx);
+        }
+        if settings.backdrop != self.backdrop {
+            self.set_backdrop(settings.backdrop, cx);
+        }
+        if settings.window_controls != self.window_controls {
+            self.set_window_controls(settings.window_controls, cx);
+        }
+        if settings.key_guide != self.key_guide {
+            self.set_key_guide(settings.key_guide, cx);
+        }
+    }
+
+    /// Fills the window around the screens with `backdrop` from now on,
+    /// and saves that for next launch.
+    fn set_backdrop(&mut self, backdrop: Backdrop, cx: &mut Context<Self>) {
+        self.backdrop = backdrop;
+        if let Some(session) = &mut self.session {
+            self.stale_images
+                .extend(session.ambient.take().map(|(_, image)| image));
+        }
+        cx.notify();
+        self.save_settings(cx);
+    }
+
+    /// Shows or hides the window's close, minimise and zoom buttons and the
+    /// bar they sit in, and saves that for next launch.
+    fn set_window_controls(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.window_controls = shown;
+        cx.notify();
+        self.save_settings(cx);
+    }
+
+    /// Shows or hides the key guide, and saves that for next launch.
+    fn set_key_guide(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.key_guide = shown;
+        self.refresh_menus(cx);
+        cx.notify();
+        self.save_settings(cx);
+    }
+
     /// Writes the settings for next launch, noting any failure.
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.settings_path else {
             return;
         };
-        let settings = Settings {
-            layout: self.layout,
-            speed: self.speeds,
-            resolution_3d: self.resolution_3d,
-            filter: self.filter,
-            show_fps: self.show_fps,
-            dmg_colors: self.dmg_colors,
-        };
+        let settings = self.settings();
         if let Err(error) = settings.save(path) {
             let message = format!("Cannot save settings to {}: {error}", path.display());
             self.show_notice(message, cx);
@@ -1147,6 +1478,7 @@ impl EmulatorView {
         cx.set_menus(crate::app::menus(MenuChecks {
             fast_forward: self.speeds.fast_forward,
             show_fps: self.show_fps,
+            key_guide: self.key_guide,
         }));
     }
 
@@ -1167,6 +1499,27 @@ impl EmulatorView {
             main.update(cx, |this, cx| match opened {
                 Ok(handle) => this.debugger = Some(handle),
                 Err(error) => this.show_notice(format!("Cannot open the debugger: {error:#}"), cx),
+            });
+        });
+    }
+
+    /// Opens the settings window, or brings it to the front.
+    fn show_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.settings_window
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
+        // The new window draws at once and reads this view, so open it
+        // once this update is over.
+        let main = cx.entity();
+        cx.defer(move |cx| {
+            let opened = SettingsWindow::open(main.clone(), cx);
+            main.update(cx, |this, cx| match opened {
+                Ok(handle) => this.settings_window = Some(handle),
+                Err(error) => this.show_notice(format!("Cannot open settings: {error:#}"), cx),
             });
         });
     }
@@ -1208,7 +1561,7 @@ impl EmulatorView {
         // Centre the mark on the pixel it touches.
         let pixel = cursor.pixel();
         let centre = (f32::from(pixel.x) + 0.5, f32::from(pixel.y) + 0.5);
-        let touching = self.sent.touch && self.mouse_touch.is_none();
+        let touching = self.sent.touch;
         self.placements
             .iter()
             .filter(|placement| placement.screen == screen)
@@ -1237,6 +1590,8 @@ impl EmulatorView {
         if let Some(session) = &mut self.session {
             let images = session.images.iter_mut().filter_map(Option::take);
             self.stale_images.extend(images.map(|(_, image)| image));
+            self.stale_images
+                .extend(session.ambient.take().map(|(_, image)| image));
         }
     }
 
@@ -1280,9 +1635,23 @@ impl EmulatorView {
 }
 
 impl Session {
-    /// Brings the images up to date with the latest frame and with how
-    /// each placement draws its screen. Each frame is colour corrected,
-    /// turned and filtered, then enlarged by the whole factor left.
+    /// Takes the emulation thread's latest frames, if they are new,
+    /// retiring every image drawn from the last ones.
+    fn take_frames(&mut self, window: &mut Window) {
+        let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) else {
+            return;
+        };
+        self.sequence = sequence;
+        let images = self.images.iter_mut().filter_map(Option::take);
+        let ambient = self.ambient.take().map(|(_, image)| image);
+        for image in images.map(|(_, image)| image).chain(ambient) {
+            window.drop_image(image).ok();
+        }
+    }
+
+    /// Brings the images up to date with how each placement draws its
+    /// screen. Each frame is colour corrected, turned and filtered, then
+    /// enlarged by the whole factor left.
     fn refresh_images(
         &mut self,
         placements: &[Placement],
@@ -1291,12 +1660,6 @@ impl Session {
         filter: Filter,
         window: &mut Window,
     ) {
-        if let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) {
-            self.sequence = sequence;
-            for (_, image) in self.images.iter_mut().filter_map(Option::take) {
-                window.drop_image(image).ok();
-            }
-        }
         // One image per placement, so the layout decides how many.
         if self.images.len() > placements.len() {
             for (_, image) in self.images.drain(placements.len()..).flatten() {
@@ -1335,12 +1698,55 @@ impl Session {
             *slot = Some((key, video::render_image(&filtered, factor)));
         }
     }
+
+    /// Brings the ambient backdrop up to date with the screens as
+    /// `placements` show them.
+    fn refresh_ambient(
+        &mut self,
+        placements: &[Placement],
+        color_correction: bool,
+        window: &mut Window,
+    ) {
+        if self
+            .ambient
+            .as_ref()
+            .is_some_and(|(sampled, _)| sampled == placements)
+        {
+            return;
+        }
+        if let Some((_, stale)) = self.ambient.take() {
+            window.drop_image(stale).ok();
+        }
+        let correction = self.correction.as_ref().filter(|_| color_correction);
+        self.ambient = ambient::picture(&self.frames, placements, correction)
+            .map(|picture| (placements.to_vec(), video::render_image(&picture, 1)));
+    }
 }
 
 impl Render for EmulatorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Full screen shows its own bar on hover, buttons and all.
+        let fullscreen = window.is_fullscreen();
+        let show_controls = self.window_controls || fullscreen;
+        if self.shown_controls != Some(show_controls) {
+            window_chrome::set_controls_visible(window, show_controls);
+            self.shown_controls = Some(show_controls);
+        }
+        // The key guide takes a strip at the foot, and the screens fit
+        // above it.
+        let guide = self
+            .session
+            .as_ref()
+            .filter(|_| self.key_guide && !fullscreen)
+            .map(|session| key_guide::groups(session.info.system, &self.bindings));
         let viewport = window.viewport_size();
-        let viewport = (f32::from(viewport.width), f32::from(viewport.height));
+        let footer = guide.as_ref().map_or(0.0, |guide| {
+            key_guide::height(guide, f32::from(viewport.width))
+        });
+        let viewport = (
+            f32::from(viewport.width),
+            (f32::from(viewport.height) - footer).max(0.0),
+        );
         let scale_factor = window.scale_factor();
 
         let mut root = div()
@@ -1348,14 +1754,10 @@ impl Render for EmulatorView {
             .key_context("Emulator")
             .size_full()
             .relative()
-            // Nothing but the screens on black in full screen.
-            .bg(rgb(if window.is_fullscreen() {
-                0x0000_0000
-            } else {
-                0x0011_1111
-            }))
             .text_color(rgb(0x00DD_DDDD))
             .on_action(cx.listener(Self::open_rom))
+            .on_action(cx.listener(Self::add_to_library))
+            .on_action(cx.listener(|this, _: &CloseGame, window, cx| this.close_game(window, cx)))
             .on_action(cx.listener(Self::connect_link_cable))
             .on_action(cx.listener(Self::edit_cheats))
             .on_action(cx.listener(Self::run_script))
@@ -1419,6 +1821,13 @@ impl Render for EmulatorView {
                 this.set_fast_forward(speed::FAST_FORWARD_CHOICES[3], cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFps, _, cx| this.toggle_fps(cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
+            .on_action(cx.listener(|this, _: &ToggleWindowControls, _, cx| {
+                this.set_window_controls(!this.window_controls, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleKeyGuide, _, cx| {
+                this.set_key_guide(!this.key_guide, cx);
+            }))
             .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
                 this.set_resolution_3d(1, cx);
             }))
@@ -1469,8 +1878,8 @@ impl Render for EmulatorView {
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-            .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_drop(cx.listener(Self::drop_files));
         // Listening only while a DS runs leaves the menu item disabled
         // otherwise.
@@ -1492,11 +1901,14 @@ impl Render for EmulatorView {
                 }));
         }
 
+        // Nothing but the screens on black in full screen.
+        root = root.bg(rgb(if fullscreen { 0x0000_0000 } else { BACKGROUND }));
         if let Some(session) = self.session.as_mut() {
             let consoles = consoles(&session.info);
             self.placements = self
                 .layout
                 .place_consoles(session.info.screens, consoles, viewport);
+            session.take_frames(window);
             session.refresh_images(
                 &self.placements,
                 scale_factor,
@@ -1504,6 +1916,21 @@ impl Render for EmulatorView {
                 self.filter,
                 window,
             );
+            if self.backdrop == Backdrop::Ambient {
+                session.refresh_ambient(&self.placements, self.color_correction, window);
+                if let Some((_, image)) = &session.ambient {
+                    // Stretched over the whole window, behind everything.
+                    root = root.child(
+                        img(Arc::clone(image))
+                            .absolute()
+                            .left(px(0.0))
+                            .top(px(0.0))
+                            .w(px(viewport.0))
+                            .h(px(viewport.1))
+                            .object_fit(ObjectFit::Fill),
+                    );
+                }
+            }
             for (placement, image) in self.placements.iter().zip(&session.images) {
                 let Some((_, image)) = image else {
                     continue;
@@ -1527,9 +1954,12 @@ impl Render for EmulatorView {
             ));
         } else {
             self.placements.clear();
-            root = root.child(welcome());
+            root = root.child(self.library.clone());
         }
         root = root.children(self.cursor_marks());
+        if self.window_controls && !fullscreen {
+            root = root.child(top_bar_shade());
+        }
         if self
             .session
             .as_ref()
@@ -1543,6 +1973,13 @@ impl Render for EmulatorView {
             root = root.child(speed_readout(readout.clone()));
         }
 
+        if let Some(guide) = &guide {
+            root = root.child(key_guide::guide(guide, footer));
+        }
+        if let Some((menu, _)) = &self.menu {
+            root = root.child(menu.clone());
+        }
+
         // A preview only lives as long as its notice.
         if self.notice.is_none() {
             self.stale_images.extend(self.slot_image.take());
@@ -1551,10 +1988,14 @@ impl Render for EmulatorView {
             window.drop_image(image).ok();
         }
         if let Some(notice) = &self.notice {
-            let mut card = div()
-                .absolute()
-                .bottom(px(12.0))
-                .left(px(12.0))
+            let card = div().absolute().left(px(12.0));
+            // Over the game menu, notices go to the top, clear of it.
+            let card = if self.menu.is_some() {
+                card.top(px(TOP_BAR + 4.0))
+            } else {
+                card.bottom(px(12.0 + footer))
+            };
+            let mut card = card
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -1574,23 +2015,6 @@ impl Render for EmulatorView {
         }
         root
     }
-}
-
-fn welcome() -> impl IntoElement {
-    div()
-        .size_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .child(div().text_xl().child("ds-emulator"))
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(0x0088_8888))
-                .child("Open a ROM with ⌘O, or drop a .gb, .gbc, .gba or .nds file here."),
-        )
 }
 
 /// What a script drew, over every placement of the screens it drew on,
@@ -1689,6 +2113,23 @@ fn shape(draw: &Draw, placement: &Placement, size: ScreenSize) -> Vec<Div> {
     }
 }
 
+/// The top bar: a shade over the top of the screens, darkest at the
+/// window's edge and gone at the bar's foot, so the game shows through
+/// behind the close, minimise and zoom buttons.
+fn top_bar_shade() -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(TOP_BAR))
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(rgba(TOP_BAR_SHADE), 0.0),
+            linear_color_stop(rgba(TOP_BAR_SHADE & 0xFFFF_FF00), 1.0),
+        ))
+}
+
 /// A red dot and "REC" in the window's corner while a recording is under
 /// way. The recording is of the core's frames, so it never shows this.
 fn recording_mark() -> impl IntoElement {
@@ -1705,6 +2146,47 @@ fn recording_mark() -> impl IntoElement {
         .text_xs()
         .child(div().size(px(8.0)).rounded_full().bg(rgb(0x00E5_3935)))
         .child("REC")
+}
+
+/// What to tell the player of the emulation thread's notice `text`:
+/// nothing of the checkpoint being saved, which happens unasked, and
+/// loading it in words of its own.
+fn checkpoint_notice(text: String) -> Option<String> {
+    if text == format!("Saved state {CHECKPOINT}") {
+        None
+    } else if text == format!("Loaded state {CHECKPOINT}") {
+        Some("Picked up where you left off".to_owned())
+    } else {
+        Some(text)
+    }
+}
+
+/// Removes the file at `path`, if there is one.
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// The save-state slot after `slot`, or before it unless `forward`,
+/// wrapping round.
+fn next_slot(slot: u8, forward: bool) -> u8 {
+    if forward {
+        slot % STATE_SLOTS + 1
+    } else {
+        (slot + STATE_SLOTS - 2) % STATE_SLOTS + 1
+    }
+}
+
+/// A save state's `width`×`height` RGB screenshot as an image, twice its
+/// size.
+fn slot_image(width: u16, height: u16, rgb: &[u8]) -> Arc<RenderImage> {
+    let mut frame = Frame::new(ScreenSize::new(width, height));
+    for (pixel, color) in frame.pixels_mut().iter_mut().zip(rgb.chunks_exact(3)) {
+        *pixel = pack_rgb(color[0], color[1], color[2]);
+    }
+    video::render_image(&frame, 2)
 }
 
 /// The speed readout, small in the window's bottom right corner.

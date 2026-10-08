@@ -3,18 +3,28 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
-    WindowOptions, actions, prelude::*, px, size,
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
+    WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
 };
 
 use crate::layout;
 use crate::speed::{self, Speed, Speeds};
 use crate::view::EmulatorView;
+use crate::window_chrome;
 
 actions!(
     ds_emulator,
     [
+        About,
+        OpenSettings,
+        HideApp,
+        HideOtherApps,
+        ShowAllApps,
+        ToggleWindowControls,
+        ToggleKeyGuide,
         OpenRom,
+        AddToLibrary,
+        CloseGame,
         ConnectLinkCable,
         InsertGbaCartridge,
         EditCheats,
@@ -78,8 +88,18 @@ const DISPLAY_SHARE: f32 = 0.9;
 /// this is a generous guess.
 const SYSTEM_BARS: f32 = 100.0;
 
-/// Room for the window's title bar, in logical pixels.
-const TITLE_BAR: f32 = 33.0;
+/// The app's icon, made from `assets/app-icon.svg` with
+/// `resvg -w 1024 -h 1024 assets/app-icon.svg assets/app-icon.png`.
+const APP_ICON: &[u8] = include_bytes!("../../../assets/app-icon.png");
+
+/// The bar across the top of the window that the close, minimise and
+/// zoom buttons sit in, in logical pixels. The window draws under it, so
+/// the game shows through it.
+pub const TOP_BAR: f32 = 40.0;
+
+/// Where the close button's top-left corner sits in [`TOP_BAR`], centring
+/// the buttons in it.
+const TRAFFIC_LIGHTS: (f32, f32) = (16.0, 13.0);
 
 /// Runs the app until the user quits, opening `roms` at launch: one game,
 /// a DS game with a GBA game in its GBA slot, or two linked Game Boy or
@@ -88,8 +108,17 @@ const TITLE_BAR: f32 = 33.0;
 pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &About, _| window_chrome::show_about_panel());
+        cx.on_action(|_: &HideApp, cx| cx.hide());
+        cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
         cx.bind_keys([
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-h", HideApp, None),
+            KeyBinding::new("cmd-alt-h", HideOtherApps, None),
             KeyBinding::new("cmd-o", OpenRom, None),
+            KeyBinding::new("cmd-shift-a", AddToLibrary, None),
+            KeyBinding::new("cmd-w", CloseGame, None),
             KeyBinding::new("cmd-t", SwitchPlayer, None),
             KeyBinding::new("cmd-p", TogglePause, None),
             KeyBinding::new("cmd-r", Reset, None),
@@ -138,10 +167,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("ds-emulator".into()),
-                ..TitlebarOptions::default()
-            }),
+            titlebar: Some(top_bar("ds-emulator")),
             window_min_size: Some(size(px(256.0), px(192.0))),
             app_id: Some("ds-emulator".to_owned()),
             ..WindowOptions::default()
@@ -150,19 +176,30 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             cx.new(|cx| EmulatorView::new(roms, script, window, cx))
         })
         .expect("opening the main window");
+        window_chrome::set_dock_icon(APP_ICON);
         cx.activate(true);
     });
 }
 
-/// The window's content size at launch, in logical pixels: stacked DS
-/// screens as large as fit most of a `display` of that size, or at 2x if
-/// there is none.
+/// A title bar drawn by the window itself as its [`TOP_BAR`], with the
+/// close, minimise and zoom buttons centred in it and `title` hidden.
+pub fn top_bar(title: &'static str) -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some(title.into()),
+        appears_transparent: true,
+        traffic_light_position: Some(point(px(TRAFFIC_LIGHTS.0), px(TRAFFIC_LIGHTS.1))),
+    }
+}
+
+/// The window's size at launch, in logical pixels: stacked DS screens as
+/// large as fit most of a `display` of that size, or at 2x if there is
+/// none. The top bar lies over the screens, so takes no room.
 fn initial_size(display: Option<(f32, f32)>) -> (f32, f32) {
     let Some((width, height)) = display else {
         return (STACKED_DS.0 * 2.0, STACKED_DS.1 * 2.0);
     };
     let free = (width, height - SYSTEM_BARS);
-    let area = (free.0 * DISPLAY_SHARE, free.1 * DISPLAY_SHARE - TITLE_BAR);
+    let area = (free.0 * DISPLAY_SHARE, free.1 * DISPLAY_SHARE);
     let (width, height) = layout::fit(STACKED_DS, area);
     (width.floor(), height.floor())
 }
@@ -175,6 +212,8 @@ pub struct MenuChecks {
     pub fast_forward: Speed,
     /// Whether the speed readout shows.
     pub show_fps: bool,
+    /// Whether the key guide shows.
+    pub key_guide: bool,
 }
 
 impl Default for MenuChecks {
@@ -182,6 +221,7 @@ impl Default for MenuChecks {
         Self {
             fast_forward: Speeds::default().fast_forward,
             show_fps: false,
+            key_guide: crate::settings::Settings::default().key_guide,
         }
     }
 }
@@ -193,15 +233,34 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
     } else {
         "Show FPS"
     };
+    let key_guide = if checks.key_guide {
+        "Hide Key Guide"
+    } else {
+        "Show Key Guide"
+    };
     vec![
         Menu {
             name: "ds-emulator".into(),
-            items: vec![MenuItem::action("Quit ds-emulator", Quit)],
+            items: vec![
+                MenuItem::action("About ds-emulator", About),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Hide ds-emulator", HideApp),
+                MenuItem::action("Hide Others", HideOtherApps),
+                MenuItem::action("Show All", ShowAllApps),
+                MenuItem::separator(),
+                MenuItem::action("Quit ds-emulator", Quit),
+            ],
         },
         Menu {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open ROM…", OpenRom),
+                MenuItem::action("Add Games to Library…", AddToLibrary),
+                MenuItem::action("Close Game", CloseGame),
                 MenuItem::action("Connect Second Console…", ConnectLinkCable),
                 MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),
                 MenuItem::separator(),
@@ -279,6 +338,9 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                         ),
                     ],
                 }),
+                MenuItem::separator(),
+                MenuItem::action(key_guide, ToggleKeyGuide),
+                MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
                 MenuItem::action("Debugger", ShowDebugger),
             ],
         },
@@ -316,10 +378,10 @@ mod tests {
 
     #[test]
     fn window_opens_large_on_a_laptop_display() {
-        // A 14-inch MacBook Pro: 760 px is 1.98x, leaving room for the
-        // menu bar, Dock and title bar.
-        assert_eq!(initial_size(Some((1512.0, 982.0))), (507.0, 760.0));
-        assert_eq!(initial_size(Some((2560.0, 1440.0))), (782.0, 1173.0));
+        // A 14-inch MacBook Pro: 793 px is 2.07x, leaving room for the
+        // menu bar and Dock.
+        assert_eq!(initial_size(Some((1512.0, 982.0))), (529.0, 793.0));
+        assert_eq!(initial_size(Some((2560.0, 1440.0))), (804.0, 1206.0));
     }
 
     #[test]

@@ -6,9 +6,11 @@
 //! after a DS ROM goes in the DS's GBA slot. A Lua script runs alongside
 //! the first game to start.
 
+mod ambient;
 mod app;
 mod audio;
 mod bindings;
+mod boxart;
 mod capture;
 mod cheats;
 mod chords;
@@ -19,9 +21,14 @@ mod debugger;
 mod debugger_window;
 mod emulator;
 mod filter;
+mod game_db;
+mod game_menu;
 mod gamepad;
+mod key_guide;
 mod latch;
 mod layout;
+mod library;
+mod library_view;
 mod memory_viewer;
 mod meter;
 mod microphone;
@@ -31,13 +38,17 @@ mod recorder;
 mod resample;
 mod rewind;
 mod rewind_thread;
+mod rom_info;
 mod scripting;
 mod settings;
+mod settings_window;
 mod slots;
 mod speed;
+mod theme;
 mod turbo;
 mod video;
 mod view;
+mod window_chrome;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
