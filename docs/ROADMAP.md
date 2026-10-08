@@ -149,16 +149,17 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 
 ## Phase 3 — Game Boy Advance
 
-**Status (2026-10-07):** M7–M11 met on test ROMs and unit tests, except
-M8's mGBA timer tests:
-- the ARM7TDMI passes all 45 SingleStepTests files (2.25 million cases);
+**Status (2026-10-07):** M7–M11 met on test ROMs and unit tests:
+- the ARM7TDMI passes all 45 SingleStepTests files (2.25 million cases),
+  multiply carry flag included;
 - jsmolka's arm, thumb, memory, bios, nes and save tests all pass;
 - armwrestler passes all eight of its pages;
-- the mGBA test suite passes 4,547 of the 6,998 checks in its 13
+- the mGBA test suite passes 6,968 of the 6,998 checks in its 13
   self-checking groups (`crates/emu-gba/tests/mgba-suite-passing.txt`).
 What's missing:
-- most of the mGBA suite's timer, I/O read, BIOS math and SIO checks (see
-  M8).
+- 30 mGBA suite checks (see M8): CpuFastSet's timing, serial transfer
+  timing, a lone console's multi-player SIOCNT, and HBlank timings
+  measured around HALT.
 The Pokémon checkpoints (FireRed music, Emerald saves and clock, the
 FireRed–Emerald trade) need your own dumps.
 
@@ -175,18 +176,29 @@ FireRed–Emerald trade) need your own dumps.
   scheduler's queue.
 - **Exit:** jsmolka `arm.gba` and `thumb.gba` pass, plus armwrestler.
 
-### M8. Memory, DMA, timers, BIOS ✅ (jsmolka; not the mGBA timer tests)
+### M8. Memory, DMA, timers, BIOS ✅ (jsmolka, mGBA suite)
 
-- Memory map with wait states, DMA, timers, IRQs, HLE BIOS for SWI calls,
-  and the GBA's events moved onto `emu-sched`.
+- Memory map with wait states and the Game Pak prefetch buffer, DMA,
+  timers, IRQs, HLE BIOS for SWI calls, and the GBA's events moved onto
+  `emu-sched`.
 - **Exit:** jsmolka memory and BIOS tests pass, along with most of the mGBA
   suite's timer and DMA tests.
-- mGBA suite, per group: memory 1,385/1,552, I/O read 23/130, timing
-  1,100/2,020, timer count-up 365/936, timer IRQ 0/90, shifter 140/140,
-  carry 93/93, multiply long 52/72, BIOS math 322/615, DMA 1,056/1,244, SIO
-  registers 7/90, SIO timing 0/4, misc. edge cases 4/12. DMA meets the bar;
-  the timers do not. Running the suite found that VBlankIntrWait never
-  returned under the HLE BIOS; that is fixed.
+- mGBA suite, per group: memory 1,552/1,552, I/O read 130/130, timing
+  2,000/2,020, timer count-up 936/936, timer IRQ 90/90, shifter 140/140,
+  carry 93/93, multiply long 72/72, BIOS math 615/615, DMA 1,244/1,244, SIO
+  registers 89/90, SIO timing 0/4, misc. edge cases 7/12.
+- Getting there fixed, among others: interrupts, timer writes and timer
+  starts land with the hardware's few-cycle delays, and the prescalers
+  share one clock; DMA starts two cycles after its trigger, takes the bus
+  at the CPU's next access and keeps a per-channel latch; ROM opcodes
+  come through the prefetch buffer, which most games turn on; HLE BIOS
+  calls take the real BIOS's time; ArcTan2 takes 32-bit coordinates;
+  write-only registers read as open bus. Earlier, the suite found that
+  VBlankIntrWait never returned under the HLE BIOS.
+- Left: CpuFastSet's loop overhead (20 timing checks), serial transfer
+  timing (4), a lone console's multi-player SIOCNT (1), and five misc.
+  checks: HBlank flag timings measured around HALT and open bus while an
+  HBlank DMA repeats.
 
 ### M9. Video and sound ✅ (implemented; needs a dump to check)
 

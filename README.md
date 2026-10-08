@@ -28,10 +28,10 @@ Boy Advance core has:
 - the Pokémon real-time clock;
 - a link cable.
 It passes every jsmolka test ROM it runs, including the save tests, and
-every page of armwrestler. It passes 4,547 of the mGBA test suite's 6,998
-checks: all of the shifter and carry tests, few of the timer ones. Neither
-core has been checked against commercial games yet; that needs your own
-dumps. The app has:
+every page of armwrestler. It passes 6,968 of the mGBA test suite's 6,998
+checks, including every timer, DMA, memory, I/O read and BIOS math one.
+Neither core has been checked against commercial games yet; that needs your
+own dumps. The app has:
 - sound and gamepads;
 - save-state slots with thumbnails, rewind and fast-forward;
 - link play;
