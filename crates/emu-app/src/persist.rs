@@ -5,7 +5,9 @@
 //! `game.ss1`, `game.cht` and `game.bindings.toml`. A linked pair saves its
 //! states next to the first player's ROM as `game.ls1`. A GBA game in a
 //! DS's GBA slot keeps its own `.sav`; the session's states, cheats and
-//! bindings are the DS game's.
+//! bindings are the DS game's. Screenshots and recordings go there too,
+//! named after the game and the time, as macOS names its own:
+//! `game 2026-10-07 at 18.58.12.png`.
 
 use std::fs;
 use std::io;
@@ -53,6 +55,25 @@ pub fn state_path(roms: &[PathBuf], slot: u8) -> PathBuf {
     roms[0].with_extension(format!("{extension}{slot}"))
 }
 
+/// A new file next to `rom` for a screenshot or recording taken at
+/// `stamp` (such as `2026-10-07 at 18.58.12`): `game <stamp>.<extension>`,
+/// or `game <stamp> 2.<extension>` and so on if that name is taken.
+pub fn capture_path(rom: &Path, stamp: &str, extension: &str) -> PathBuf {
+    let game = rom
+        .file_stem()
+        .map_or_else(|| "capture".into(), |stem| stem.to_string_lossy());
+    (1u32..)
+        .map(|number| {
+            let name = match number {
+                1 => format!("{game} {stamp}.{extension}"),
+                _ => format!("{game} {stamp} {number}.{extension}"),
+            };
+            rom.with_file_name(name)
+        })
+        .find(|path| !path.exists())
+        .expect("some number is free")
+}
+
 /// Replaces `path` with `bytes` so that a crash mid-write never leaves a
 /// half-written file: the bytes go to a sibling temporary file first, which
 /// is then renamed over `path`.
@@ -85,6 +106,24 @@ mod tests {
             PathBuf::from("/games/blue.gb"),
         ];
         assert_eq!(state_path(&linked, 2), Path::new("/games/red.ls2"));
+    }
+
+    #[test]
+    fn captures_are_named_after_the_game_and_never_overwrite() {
+        let dir = std::env::temp_dir().join(format!("emu-app-captures-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let rom = dir.join("platinum.nds");
+        let stamp = "2026-10-07 at 18.58.12";
+        let first = capture_path(&rom, stamp, "png");
+        assert_eq!(first, dir.join("platinum 2026-10-07 at 18.58.12.png"));
+        fs::write(&first, b"taken").expect("write");
+        let second = capture_path(&rom, stamp, "png");
+        assert_eq!(second, dir.join("platinum 2026-10-07 at 18.58.12 2.png"));
+        assert_eq!(
+            capture_path(&rom, stamp, "mov"),
+            dir.join("platinum 2026-10-07 at 18.58.12.mov")
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]

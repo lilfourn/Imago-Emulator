@@ -24,7 +24,11 @@ emu-state.workspace = true
 gilrs.workspace = true
 gpui.workspace = true
 image = { version = "0.25", default-features = false }
+# Pure Rust; Photo-JPEG frames for recordings. Based in part on the work of
+# the Independent JPEG Group.
+jpeg-encoder = "0.7"
 lz4_flex.workspace = true
+png.workspace = true
 rtrb.workspace = true
 serde.workspace = true
 thiserror.workspace = true

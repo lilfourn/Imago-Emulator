@@ -8,6 +8,7 @@
 mod app;
 mod audio;
 mod bindings;
+mod capture;
 mod cheats;
 mod chords;
 mod color;
@@ -22,7 +23,9 @@ mod latch;
 mod layout;
 mod memory_viewer;
 mod microphone;
+mod mov;
 mod persist;
+mod recorder;
 mod resample;
 mod rewind;
 mod settings;

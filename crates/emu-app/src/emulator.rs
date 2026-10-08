@@ -4,6 +4,9 @@
 //! finished frame into a shared slot and sends an [`Event`] to wake the UI.
 //! Wake-ups are coalesced, so a slow UI never queues stale frames.
 //!
+//! Screenshots and recordings take the core's own frames here, every one
+//! of them for a recording, rather than the coalesced ones the UI shows.
+//!
 //! Pacing is a sleep to the next frame deadline, which fast-forward and
 //! slow motion move closer or further apart (see `speed.rs`). Sound stays
 //! in sync because the audio sink adjusts its resampling ratio to the
@@ -23,9 +26,11 @@ use emu_core::debug::{Breakpoint, RunOutcome, StopReason};
 use emu_core::{Buttons, Cartridge, Core, CoreInfo, Frame, Input, Media, System};
 
 use crate::audio::AudioSink;
+use crate::capture;
 use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
 use crate::persist;
+use crate::recorder::Recorder;
 use crate::rewind::Rewind;
 use crate::speed::{self, Speed};
 use crate::turbo::Turbo;
@@ -90,6 +95,14 @@ impl RomFile {
 /// since the emulated clocks have no time zone of their own.
 fn local_clock_seconds() -> i64 {
     chrono::Local::now().naive_local().and_utc().timestamp()
+}
+
+/// The local date and time now, for naming screenshots and recordings as
+/// macOS names its own: `2026-10-07 at 18.58.12`.
+fn capture_stamp() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%d at %H.%M.%S")
+        .to_string()
 }
 
 fn read_rom(rom_path: &Path) -> anyhow::Result<RomFile> {
@@ -197,6 +210,17 @@ fn ensure_separate_saves(core: &dyn Core, rom_paths: &[PathBuf]) -> anyhow::Resu
     Ok(())
 }
 
+/// `duration` as `m:ss`, or `h:mm:ss` from an hour.
+fn minutes_and_seconds(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -251,6 +275,12 @@ pub enum Command {
         /// The player's cheat list; disabled cheats are skipped.
         cheats: Vec<Cheat>,
     },
+    /// Saves the screens as they are now as a PNG next to the first
+    /// player's ROM.
+    SaveScreenshot,
+    /// Starts recording every frame and its sound to a movie next to the
+    /// first player's ROM, or finishes the recording under way.
+    ToggleRecording,
 }
 
 /// A notification from the emulation thread to the UI.
@@ -264,6 +294,8 @@ pub enum Event {
     Debug,
     /// Something the user should see briefly, such as "State saved".
     Notice(String),
+    /// A recording started (true) or finished (false).
+    Recording(bool),
 }
 
 /// One player's memory in a core, as cheats see it.
@@ -328,6 +360,7 @@ impl Emulator {
             turbos: vec![Turbo::default(); players],
             cheats: vec![Vec::new(); players],
             debug: Debugging::default(),
+            recorder: None,
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
@@ -406,6 +439,8 @@ struct Runner {
     cheats: Vec<Vec<Cheat>>,
     /// The debugger's stops, view and run state.
     debug: Debugging,
+    /// The recording under way, if any.
+    recorder: Option<Recorder>,
     paused: bool,
     /// How fast frames run; rewinding always steps at normal speed.
     speed: Speed,
@@ -493,6 +528,7 @@ impl Runner {
                 {
                     sink.push(&audio);
                 }
+                self.record(&audio);
                 audio.clear();
                 self.settle(outcome);
                 self.publish();
@@ -516,6 +552,9 @@ impl Runner {
             if deadline > now {
                 thread::sleep(deadline - now);
             }
+        }
+        if let Some(recorder) = self.recorder.take() {
+            self.finish_recording(recorder);
         }
         self.flush_backup();
     }
@@ -583,6 +622,79 @@ impl Runner {
                 }
                 Err(error) => self.notice(format!("Could not load state: {error:#}")),
             },
+            Command::SaveScreenshot => self.save_screenshot(),
+            Command::ToggleRecording => match self.recorder.take() {
+                Some(recorder) => self.finish_recording(recorder),
+                None => self.start_recording(),
+            },
+        }
+    }
+
+    /// Lays the screens out as one picture as they are now, and saves it
+    /// as a PNG on a thread of its own, which says where.
+    fn save_screenshot(&self) {
+        let Some(rom) = self.loaded.player_rom_paths().first().cloned() else {
+            return;
+        };
+        let players = self.loaded.core.info().players;
+        let picture = capture::compose(self.loaded.core.screens(), players);
+        let stamp = capture_stamp();
+        let events = self.events.clone();
+        let saving = thread::Builder::new()
+            .name("screenshot".to_owned())
+            .spawn(move || {
+                let path = persist::capture_path(&rom, &stamp, "png");
+                let text = match persist::write_atomic(&path, &capture::encode_png(&picture)) {
+                    Ok(()) => format!("Saved {}", file_name(&path)),
+                    Err(error) => format!("Could not save {}: {error}", path.display()),
+                };
+                events.try_send(Event::Notice(text)).ok();
+            });
+        if let Err(error) = saving {
+            self.notice(format!("Could not save a screenshot: {error}"));
+        }
+    }
+
+    /// Starts recording from the next frame on.
+    fn start_recording(&mut self) {
+        let Some(rom) = self.loaded.player_rom_paths().first() else {
+            return;
+        };
+        let path = persist::capture_path(rom, &capture_stamp(), "mov");
+        let info = self.loaded.core.info();
+        match Recorder::start(path, &info, self.loaded.core.screens()) {
+            Ok(recorder) => {
+                self.notice(format!("Recording to {}", file_name(recorder.path())));
+                self.recorder = Some(recorder);
+                self.events.try_send(Event::Recording(true)).ok();
+            }
+            Err(error) => self.notice(format!("Could not start recording: {error}")),
+        }
+    }
+
+    /// Hands the frame just run, with the `audio` it made, to the
+    /// recording, if one is under way.
+    fn record(&mut self, audio: &[emu_core::StereoSample]) {
+        let stopped = self
+            .recorder
+            .as_ref()
+            .is_some_and(|recorder| !recorder.push(self.loaded.core.screens(), audio));
+        if stopped && let Some(recorder) = self.recorder.take() {
+            // The writer stopped after an error, which finishing reports.
+            self.finish_recording(recorder);
+        }
+    }
+
+    /// Finishes `recorder`'s movie and says how it went.
+    fn finish_recording(&self, recorder: Recorder) {
+        let name = file_name(recorder.path());
+        self.events.try_send(Event::Recording(false)).ok();
+        match recorder.finish() {
+            Ok(recording) => self.notice(format!(
+                "Saved {name}: {} of video",
+                minutes_and_seconds(recording.duration)
+            )),
+            Err(error) => self.notice(format!("Recording {name} failed: {error}")),
         }
     }
 
@@ -1499,6 +1611,86 @@ mod tests {
             *log.lock().expect("unpoisoned"),
             [(0, vec![jump]), (0, Vec::new())]
         );
+    }
+
+    /// Waits for a notice starting with `start`, returning it.
+    fn wait_for_notice(events: &async_channel::Receiver<Event>, start: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match events.try_recv() {
+                Ok(Event::Notice(text)) if text.starts_with(start) => return text,
+                Ok(_) => {}
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "no notice {start:?}");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+    }
+
+    /// The files in `dir` with `extension`.
+    fn files_with(dir: &Path, extension: &str) -> Vec<PathBuf> {
+        let entries = fs::read_dir(dir).expect("read dir");
+        let paths = entries.map(|entry| entry.expect("entry").path());
+        paths
+            .filter(|path| path.extension().is_some_and(|found| found == extension))
+            .collect()
+    }
+
+    #[test]
+    fn screenshots_land_next_to_the_rom() {
+        let dir = std::env::temp_dir().join(format!("emu-app-shots-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let (emulator, events) = start(dir.join("counter.gb"));
+        emulator.send(Command::SaveScreenshot);
+        let saved = wait_for_notice(&events, "Saved counter ");
+        let pngs = files_with(&dir, "png");
+        assert_eq!(pngs.len(), 1, "{saved}");
+        let bytes = fs::read(&pngs[0]).expect("the screenshot");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        drop(emulator);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn recordings_hold_every_frame_run_and_none_while_paused() {
+        let dir = std::env::temp_dir().join(format!("emu-app-movie-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let (emulator, events) = start(dir.join("counter.gb"));
+        emulator.send(Command::TogglePause);
+        wait_for_notice(&events, "Paused");
+        let first = latest_count(&emulator);
+        emulator.send(Command::ToggleRecording);
+        wait_for_notice(&events, "Recording to counter ");
+        // As fast as it goes, which the writer must keep up with.
+        emulator.send(Command::SetSpeed(Speed::Unlimited));
+        emulator.send(Command::TogglePause);
+        thread::sleep(Duration::from_millis(50));
+        emulator.send(Command::TogglePause);
+        wait_for_notice(&events, "Paused");
+        let last = latest_count(&emulator);
+        thread::sleep(Duration::from_millis(20));
+        emulator.send(Command::ToggleRecording);
+        let saved = wait_for_notice(&events, "Saved counter ");
+        assert!(saved.ends_with(" of video"), "{saved}");
+
+        let movies = files_with(&dir, "mov");
+        assert_eq!(movies.len(), 1);
+        let bytes = fs::read(&movies[0]).expect("the movie");
+        let jpegs = bytes
+            .windows(4)
+            .filter(|window| *window == [0xFF, 0xD8, 0xFF, 0xE0])
+            .count();
+        assert!(last > first + 10, "frames ran: {first} to {last}");
+        assert_eq!(jpegs as u32, last - first, "one picture per frame run");
+        drop(emulator);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn durations_read_as_minutes_and_seconds() {
+        assert_eq!(minutes_and_seconds(Duration::from_millis(83_900)), "1:23");
+        assert_eq!(minutes_and_seconds(Duration::from_secs(3723)), "1:02:03");
     }
 
     #[test]

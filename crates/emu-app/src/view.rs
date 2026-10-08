@@ -17,9 +17,9 @@ use crate::app::{
     FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, InsertGbaCartridge,
     LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState, NextScreenGap,
     NextStateSlot, OpenRom, PreviousStateSlot, Reset, Resolution3d1x, Resolution3d2x,
-    Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, SaveState, ShowDebugger,
-    SwapScreens, SwitchPlayer, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen,
-    ToggleMicrophone, TogglePause, ToggleSlowMotion,
+    Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, SaveScreenshot,
+    SaveState, ShowDebugger, SwapScreens, SwitchPlayer, ToggleColorCorrection, ToggleFastForward,
+    ToggleFullScreen, ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion,
 };
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Shortcut};
@@ -130,6 +130,8 @@ struct Session {
     bindings: Vec<Bindings>,
     /// The system's colour correction, if it has one.
     correction: Option<Correction>,
+    /// Whether the emulation thread is recording a movie.
+    recording: bool,
     /// Per placement: the image drawn there and what it shows.
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     _events: Task<()>,
@@ -312,6 +314,7 @@ impl EmulatorView {
             cheat_texts: vec![None; info.players.max(1)],
             bindings: Vec::new(),
             correction: Correction::for_system(info.system),
+            recording: false,
             images: Vec::new(),
             _events: task,
             _audio: audio_output,
@@ -443,6 +446,12 @@ impl EmulatorView {
             // Wakes the debugger window, which redraws with this view.
             Event::Debug => cx.notify(),
             Event::Notice(text) => self.show_notice(text, cx),
+            Event::Recording(on) => {
+                if let Some(session) = &mut self.session {
+                    session.recording = on;
+                }
+                cx.notify();
+            }
         }
     }
 
@@ -1237,6 +1246,12 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleMicrophone, _, cx| {
                 this.toggle_microphone(cx);
             }))
+            .on_action(cx.listener(|this, _: &SaveScreenshot, _, _| {
+                this.send(Command::SaveScreenshot);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRecording, _, _| {
+                this.send(Command::ToggleRecording);
+            }))
             .on_action(cx.listener(|this, _: &FilterNone, _, cx| {
                 this.set_filter(Filter::None, cx);
             }))
@@ -1310,6 +1325,13 @@ impl Render for EmulatorView {
             root = root.child(welcome());
         }
         root = root.children(self.cursor_marks());
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.recording)
+        {
+            root = root.child(recording_mark());
+        }
 
         // A preview only lives as long as its notice.
         if self.notice.is_none() {
@@ -1359,6 +1381,24 @@ fn welcome() -> impl IntoElement {
                 .text_color(rgb(0x0088_8888))
                 .child("Open a ROM with ⌘O, or drop a .gb, .gbc, .gba or .nds file here."),
         )
+}
+
+/// A red dot and "REC" in the window's corner while a recording is under
+/// way. The recording is of the core's frames, so it never shows this.
+fn recording_mark() -> impl IntoElement {
+    div()
+        .absolute()
+        .top(px(10.0))
+        .right(px(10.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .rounded_md()
+        .bg(rgba(0x0000_00AA))
+        .text_xs()
+        .child(div().size(px(8.0)).rounded_full().bg(rgb(0x00E5_3935)))
+        .child("REC")
 }
 
 /// The menu action a gamepad hotkey runs.
