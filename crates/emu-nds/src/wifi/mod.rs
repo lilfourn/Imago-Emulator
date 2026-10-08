@@ -109,6 +109,7 @@ pub(crate) struct Wifi {
     /// The 0x000-0xFFF register page as halfwords, as written or as the
     /// hardware last set them.
     registers: Vec<u16>,
+    #[serde(with = "crate::bytes")]
     ram: Vec<u8>,
     baseband: Baseband,
     rf: Rf,

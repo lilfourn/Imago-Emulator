@@ -84,8 +84,11 @@ impl CpuIo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Hardware {
+    #[serde(with = "crate::bytes")]
     pub(crate) main_ram: Box<[u8]>,
+    #[serde(with = "crate::bytes")]
     pub(crate) shared_wram: Box<[u8]>,
+    #[serde(with = "crate::bytes")]
     pub(crate) arm7_wram: Box<[u8]>,
     pub(crate) vram: Vram,
     /// WRAMCNT: how the 32 KiB shared WRAM splits between the CPUs.
@@ -133,7 +136,9 @@ pub(crate) struct Hardware {
     pub(crate) capturing: bool,
     /// Raw values of I/O registers without side effects, for reading back:
     /// one 0x2000-byte page per CPU.
+    #[serde(with = "crate::bytes")]
     pub(crate) io9: Box<[u8]>,
+    #[serde(with = "crate::bytes")]
     pub(crate) io7: Box<[u8]>,
     pub(crate) scheduler: Scheduler<Event>,
 }

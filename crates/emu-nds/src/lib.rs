@@ -10,6 +10,7 @@
 mod bios;
 mod boot;
 mod bus;
+mod bytes;
 mod capture;
 mod cart;
 mod debug;

@@ -34,6 +34,7 @@ const IDLE: u8 = 0xFF;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Flash {
     /// A power-of-two size, so addresses wrap with a mask.
+    #[serde(with = "crate::bytes")]
     memory: Vec<u8>,
     /// JEDEC manufacturer, memory type and capacity.
     id: [u8; 3],

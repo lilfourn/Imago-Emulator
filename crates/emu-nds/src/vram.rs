@@ -114,6 +114,7 @@ pub(crate) trait EngineMemory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Vram {
+    #[serde(with = "crate::bytes::array")]
     banks: [Box<[u8]>; 9],
     /// VRAMCNT_A to VRAMCNT_I.
     control: [u8; 9],
