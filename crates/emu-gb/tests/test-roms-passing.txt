@@ -46,6 +46,7 @@ blargg/mem_timing/individual/01-read_timing.gb
 blargg/mem_timing/individual/02-write_timing.gb
 blargg/mem_timing/individual/03-modify_timing.gb
 blargg/mem_timing/mem_timing.gb
+blargg/oam_bug/rom_singles/1-lcd_sync.gb
 blargg/oam_bug/rom_singles/3-non_causes.gb
 blargg/oam_bug/rom_singles/6-timing_no_bug.gb
 cgb-acid2/cgb-acid2.gbc
@@ -87,7 +88,14 @@ mooneye-test-suite/acceptance/pop_timing.gb
 mooneye-test-suite/acceptance/ppu/hblank_ly_scx_timing-GS.gb
 mooneye-test-suite/acceptance/ppu/intr_1_2_timing-GS.gb
 mooneye-test-suite/acceptance/ppu/intr_2_0_timing.gb
+mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing.gb
+mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing_sprites.gb
+mooneye-test-suite/acceptance/ppu/intr_2_mode3_timing.gb
+mooneye-test-suite/acceptance/ppu/intr_2_oam_ok_timing.gb
+mooneye-test-suite/acceptance/ppu/lcdon_timing-GS.gb
+mooneye-test-suite/acceptance/ppu/lcdon_write_timing-GS.gb
 mooneye-test-suite/acceptance/ppu/stat_irq_blocking.gb
+mooneye-test-suite/acceptance/ppu/stat_lyc_onoff.gb
 mooneye-test-suite/acceptance/ppu/vblank_stat_intr-GS.gb
 mooneye-test-suite/acceptance/push_timing.gb
 mooneye-test-suite/acceptance/rapid_di_ei.gb

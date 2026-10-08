@@ -364,13 +364,18 @@ impl Bus {
 impl cpu::Bus for Bus {
     fn read(&mut self, address: u16) -> u8 {
         self.step_components();
-        self.dma_conflict(address)
-            .unwrap_or_else(|| self.peek(address))
+        if let Some(value) = self.dma_conflict(address) {
+            value
+        } else if self.ppu.blocks_read(address) {
+            0xFF
+        } else {
+            self.peek(address)
+        }
     }
 
     fn write(&mut self, address: u16, value: u8) {
         self.step_components();
-        if self.dma_conflict(address).is_none() {
+        if self.dma_conflict(address).is_none() && !self.ppu.blocks_write(address) {
             self.poke(address, value);
         }
     }
