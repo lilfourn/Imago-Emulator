@@ -32,10 +32,16 @@ struct Channel {
     destination: u32,
     count: u16,
     control: u16,
-    /// Addresses and count latched when the channel was enabled.
+    /// Addresses and count latched when the channel was enabled (the count
+    /// again at each repeat).
     current_source: u32,
     current_destination: u32,
+    current_count: u32,
     pending: bool,
+    /// The last value the channel moved, as a word (a halfword in both
+    /// halves). Reads from the BIOS region, where nothing answers a DMA,
+    /// copy it again.
+    latch: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -49,6 +55,21 @@ const FIFO_ADDRESSES: [u32; 2] = [0x0400_00A0, 0x0400_00A4];
 impl Channel {
     fn enabled(&self) -> bool {
         self.control & 0x8000 != 0
+    }
+
+    /// Bytes per unit: 4 for words, 2 for halfwords.
+    fn unit(&self) -> u32 {
+        if self.control & (1 << 10) != 0 { 4 } else { 2 }
+    }
+
+    /// Units to move, from the count register: zero means the maximum,
+    /// 0x4000 (0x10000 for channel 3).
+    fn count_for(&self, index: usize) -> u32 {
+        let max = if index == 3 { 0x1_0000 } else { 0x4000 };
+        match u32::from(self.count) & (max - 1) {
+            0 => max,
+            count => count,
+        }
     }
 
     fn timing(&self) -> Timing {
@@ -89,10 +110,13 @@ impl Dma {
                 // Channel 3 alone may use the Game Pak DRQ bit.
                 channel.control = if index == 3 { value } else { value & 0xF7FF };
                 if !was_enabled && channel.enabled() {
+                    // Addresses start aligned to the unit size.
+                    let align = !(channel.unit() - 1);
                     let source_mask = if index == 0 { 0x07FF_FFFF } else { 0x0FFF_FFFF };
                     let destination_mask = if index == 3 { 0x0FFF_FFFF } else { 0x07FF_FFFF };
-                    channel.current_source = channel.source & source_mask;
-                    channel.current_destination = channel.destination & destination_mask;
+                    channel.current_source = channel.source & source_mask & align;
+                    channel.current_destination = channel.destination & destination_mask & align;
+                    channel.current_count = channel.count_for(index);
                     channel.pending = channel.timing() == Timing::Immediate;
                 }
                 if !channel.enabled() {
@@ -156,20 +180,32 @@ impl Dma {
             };
         }
         let words = channel.control & (1 << 10) != 0;
-        let size = if words { 4 } else { 2 };
-        let max = if index == 3 { 0x1_0000 } else { 0x4000 };
-        let count = match u32::from(channel.count) & (max - 1) {
-            0 => max,
-            count => count,
+        let size = channel.unit() as i32;
+        // The Game Pak's ROM only streams forwards: a ROM source increments
+        // whatever the control says.
+        let in_rom = (0x0800_0000..0x0E00_0000).contains(&channel.current_source);
+        let source_step = if in_rom {
+            size
+        } else {
+            step(channel.control >> 7, size)
         };
         Transfer {
             source: channel.current_source,
             destination: channel.current_destination,
-            count,
+            count: channel.current_count,
             words,
-            source_step: step(channel.control >> 7, size),
+            source_step,
             destination_step: step(channel.control >> 5, size),
         }
+    }
+
+    /// Channel `index`'s latch: the last value it moved.
+    pub(crate) fn latch(&self, index: usize) -> u32 {
+        self.channels[index].latch
+    }
+
+    pub(crate) fn set_latch(&mut self, index: usize, value: u32) {
+        self.channels[index].latch = value;
     }
 
     /// Ends channel `index`'s transfer with the addresses it reached.
@@ -184,6 +220,7 @@ impl Dma {
         }
         let repeat = channel.control & (1 << 9) != 0 && channel.timing() != Timing::Immediate;
         if repeat {
+            channel.current_count = channel.count_for(index);
             if (channel.control >> 5) & 3 == 3 {
                 channel.current_destination = channel.destination;
             }
@@ -239,6 +276,30 @@ mod tests {
         assert_eq!(dma.next_pending(), Some(0));
         assert!(dma.finish(0, 0x0300_0002, 0x0400_0042));
         assert_eq!(dma.transfer(0).destination, 0x0400_0040);
+    }
+
+    #[test]
+    fn the_count_is_latched_at_enable_and_reloaded_at_each_repeat() {
+        let mut dma = Dma::default();
+        // VBlank, repeat, halfwords, count 2.
+        configure(&mut dma, 3, 0x0200_0000, 0x0300_0000, 2, 0x9200);
+        dma.write(3 * 12 + 8, 4);
+        assert_eq!(dma.transfer(3).count, 2);
+        dma.finish(3, 0x0200_0004, 0x0300_0004);
+        assert_eq!(dma.transfer(3).count, 4);
+    }
+
+    #[test]
+    fn addresses_start_aligned_and_rom_sources_always_increment() {
+        let mut dma = Dma::default();
+        // Words, source and destination fixed.
+        configure(&mut dma, 1, 0x0800_0003, 0x0300_0002, 1, 0x8540);
+        let transfer = dma.transfer(1);
+        assert_eq!(
+            (transfer.source, transfer.destination),
+            (0x0800_0000, 0x0300_0000)
+        );
+        assert_eq!((transfer.source_step, transfer.destination_step), (4, 0));
     }
 
     #[test]

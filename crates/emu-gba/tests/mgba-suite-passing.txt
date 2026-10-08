@@ -1,4 +1,4 @@
-Memory tests: 1385/1552
+Memory tests: 1552/1552
 I/O read tests: 130/130
 Timing tests: 1112/2020
 Timer count-up tests: 720/936
@@ -7,7 +7,7 @@ Shifter tests: 140/140
 Carry tests: 93/93
 Multiply long tests: 72/72
 BIOS math tests: 615/615
-DMA tests: 1056/1244
+DMA tests: 1244/1244
 SIO register R/W tests: 55/90
 SIO timing tests: 0/4
-Misc. edge case tests: 4/12
+Misc. edge case tests: 6/12

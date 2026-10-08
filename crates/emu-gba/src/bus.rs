@@ -421,6 +421,7 @@ impl Bus {
         }
         // Two internal cycles to start up.
         self.tick(2);
+        let mut latch = self.dma.latch(index);
         for unit in 0..transfer.count {
             let order = if unit == 0 {
                 Access::NONSEQUENTIAL
@@ -428,20 +429,41 @@ impl Bus {
                 Access::SEQUENTIAL
             };
             let access = order | Access::DMA;
+            latch = self
+                .dma_read(source, transfer.words, access)
+                .unwrap_or(latch);
             if transfer.words {
-                let value = self.read_32(source, access);
-                self.write_32(destination, value, access);
+                self.write_32(destination, latch, access);
             } else {
-                let value = self.read_16(source, access);
-                self.write_16(destination, value, access);
+                // A halfword goes out on its own lane of the latch.
+                let half = (latch >> ((destination & 2) * 8)) as u16;
+                self.write_16(destination, half, access);
             }
             source = source.wrapping_add_signed(transfer.source_step);
             destination = destination.wrapping_add_signed(transfer.destination_step);
         }
+        self.dma.set_latch(index, latch);
         if self.dma.finish(index, source, destination) {
             self.request_interrupt(irq::DMA0 << index);
         }
         true
+    }
+
+    /// One DMA read of a word, or of a halfword returned in both halves.
+    /// `None` below EWRAM, where nothing answers a DMA (the BIOS lets only
+    /// its own code read it): the channel then moves its last value again.
+    fn dma_read(&mut self, source: u32, words: bool, access: Access) -> Option<u32> {
+        let width = if words { Width::Word } else { Width::Half };
+        if source < 0x0200_0000 {
+            let sequential = access.contains(Access::SEQUENTIAL);
+            self.tick(self.waits.cycles(source, width, sequential));
+            return None;
+        }
+        Some(if words {
+            self.read_32(source, access)
+        } else {
+            u32::from(self.read_16(source, access)) * 0x0001_0001
+        })
     }
 
     fn io_16(&self, offset: usize) -> u16 {
@@ -912,6 +934,21 @@ mod tests {
             .map(|index| bus.read_16(0x0200_1000 + index * 2, Access::NONSEQUENTIAL) & 1)
             .collect();
         assert_eq!(received[4..], data[..]);
+    }
+
+    #[test]
+    fn dma_from_the_bios_region_moves_the_channels_last_value_again() {
+        let mut bus = eeprom_bus();
+        bus.write_32(0x0200_0000, 0xCAFE_BABE, Access::NONSEQUENTIAL);
+        // DMA 3, one word, from EWRAM.
+        bus.write_32(0x0400_00D4, 0x0200_0000, Access::NONSEQUENTIAL);
+        bus.write_32(0x0400_00D8, 0x0300_0000, Access::NONSEQUENTIAL);
+        bus.write_32(0x0400_00DC, 0x8400_0001, Access::NONSEQUENTIAL);
+        while bus.run_pending_dma() {}
+        // Two halfwords from the BIOS, which a DMA cannot read: each
+        // repeats the latched word's half on its own lane.
+        dma3(&mut bus, 0x0000_0000, 0x0300_0100, 2);
+        assert_eq!(bus.read_32(0x0300_0100, Access::NONSEQUENTIAL), 0xCAFE_BABE);
     }
 
     #[test]
