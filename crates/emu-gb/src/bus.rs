@@ -321,7 +321,7 @@ impl Bus {
             0xFF01 | 0xFF02 => self.serial.write(address, value),
             0xFF04..=0xFF07 => {
                 let div_before = self.timer.counter();
-                self.timer.write(address, value);
+                self.timer.write(address, value, &mut self.interrupt_flag);
                 if self.div_bit_fell(div_before) {
                     self.apu.clock_frame_sequencer();
                 }
@@ -392,7 +392,7 @@ impl cpu::Bus for Bus {
         if self.cgb() && self.speed_switch_armed {
             self.speed_switch_armed = false;
             self.double_speed = !self.double_speed;
-            self.timer.write(0xFF04, 0);
+            self.timer.write(0xFF04, 0, &mut self.interrupt_flag);
         }
     }
 }

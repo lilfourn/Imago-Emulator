@@ -92,6 +92,7 @@ mooneye-test-suite/acceptance/reti_intr_timing.gb
 mooneye-test-suite/acceptance/reti_timing.gb
 mooneye-test-suite/acceptance/rst_timing.gb
 mooneye-test-suite/acceptance/timer/div_write.gb
+mooneye-test-suite/acceptance/timer/rapid_toggle.gb
 mooneye-test-suite/acceptance/timer/tim00.gb
 mooneye-test-suite/acceptance/timer/tim00_div_trigger.gb
 mooneye-test-suite/acceptance/timer/tim01.gb
