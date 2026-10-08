@@ -260,8 +260,9 @@ struct Wave {
     timer: u32,
     position: u8,
     sample: u8,
-    /// The channel fetched from wave RAM during the current M-cycle; only
-    /// then can the CPU reach wave RAM while the channel plays.
+    /// The channel fetched from wave RAM in the last cycle of the latest
+    /// [`Psg::tick`]; only then can the DMG's CPU reach wave RAM while the
+    /// channel plays.
     just_read: bool,
 }
 
@@ -279,7 +280,8 @@ impl Wave {
         }
         let period = self.period();
         let samples = if two_banks { 64 } else { 32 };
-        for _ in 0..run_timer(&mut self.timer, period, cycles) {
+        let reads = run_timer(&mut self.timer, period, cycles);
+        for _ in 0..reads {
             self.position = (self.position + 1) % samples;
             let byte = wave_ram[(bank * 16 + usize::from(self.position / 2)) % 32];
             self.sample = if self.position.is_multiple_of(2) {
@@ -287,7 +289,30 @@ impl Wave {
             } else {
                 byte & 0x0F
             };
-            self.just_read = true;
+        }
+        // A countdown reloaded and not yet run down means the last read was
+        // in the very last cycle.
+        self.just_read = reads > 0 && self.timer == period;
+    }
+
+    /// Whether the channel reads wave RAM in the next 2 MHz sound cycle.
+    fn reads_next_cycle(&self) -> bool {
+        self.enabled && self.timer <= 2
+    }
+
+    /// The DMG's retrigger bug (gbdev wiki, "Game Boy Sound Hardware",
+    /// "Obscure Behavior"): triggering the playing channel just as it reads
+    /// wave RAM overwrites the start of wave RAM with the bytes about to be
+    /// read. The byte itself if it is in the first four, otherwise the
+    /// aligned four bytes holding it.
+    fn corrupt_on_retrigger(&self, wave_ram: &mut [u8]) {
+        let next_sample = (self.position + 1) % 32;
+        let next = usize::from(next_sample / 2);
+        if next < 4 {
+            wave_ram[0] = wave_ram[next];
+        } else {
+            let start = next & !3;
+            wave_ram.copy_within(start..start + 4, 0);
         }
     }
 
@@ -651,6 +676,10 @@ impl Psg {
             0x1C => self.wave.volume_code = (value >> 5) & 3,
             0x1D => self.wave.frequency = (self.wave.frequency & 0x700) | u16::from(value),
             0x1E => {
+                if value & 0x80 != 0 && self.variant == Variant::Dmg && self.wave.reads_next_cycle()
+                {
+                    self.wave.corrupt_on_retrigger(&mut self.wave_ram[..16]);
+                }
                 let wave = &mut self.wave;
                 wave.frequency = (wave.frequency & 0xFF) | u16::from(value & 7) << 8;
                 let mut enabled = wave.enabled;
@@ -731,5 +760,73 @@ impl Psg {
             self.noise.length.counter = lengths[3];
         }
         self.powered = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DMG with wave RAM holding 0x00, 0x11, ... 0xFF and channel 3
+    /// triggered at frequency 0x7FC: a sample every 8 clock cycles, the
+    /// first 14 cycles after the trigger.
+    fn playing_dmg() -> Psg {
+        let mut psg = Psg::new(Variant::Dmg);
+        for index in 0..16 {
+            psg.write_wave(index, index * 0x11);
+        }
+        psg.write(0x1A, 0x80);
+        psg.write(0x1D, 0xFC);
+        psg.write(0x1E, 0x87);
+        psg
+    }
+
+    #[test]
+    fn dmg_wave_ram_answers_only_in_the_cycle_the_channel_reads_it() {
+        let mut psg = playing_dmg();
+        let mut reads = Vec::new();
+        for _ in 0..8 {
+            // One M-cycle at a time, as the CPU sees it.
+            psg.tick(4);
+            reads.push(psg.read_wave(0x0F));
+        }
+        // Reads land 14, 22 and 30 cycles in, never in the last cycle of
+        // an M-cycle (4, 8, 12...), so the CPU never gets in.
+        assert_eq!(reads, [0xFF; 8]);
+
+        let mut psg = playing_dmg();
+        psg.tick(2);
+        let mut reads = Vec::new();
+        for _ in 0..8 {
+            psg.tick(4);
+            reads.push(psg.read_wave(0x0F));
+        }
+        // Shifted by two cycles, reads 14, 22 and 30 end M-cycles 3, 5
+        // and 7. The CPU sees the byte being played, not the one it asked
+        // for: byte 0 (sample 1), then byte 1 (samples 2 and 3).
+        assert_eq!(reads, [0xFF, 0xFF, 0x00, 0xFF, 0x11, 0xFF, 0x11, 0xFF]);
+    }
+
+    #[test]
+    fn retriggering_the_dmg_wave_channel_as_it_reads_corrupts_wave_ram() {
+        let mut psg = playing_dmg();
+        // Run up to two cycles before the fourth read (14 + 3 x 8 = 38),
+        // whose byte is index 2 (samples 4 and 5): one of the first four.
+        psg.tick(36);
+        psg.write(0x1E, 0x87);
+        assert_eq!(psg.wave_ram[..4], [0x22, 0x11, 0x22, 0x33]);
+
+        // Reading byte 5, the four bytes from 4 are copied over the first.
+        let mut psg = playing_dmg();
+        psg.tick(14 + 9 * 8 - 2);
+        psg.write(0x1E, 0x87);
+        assert_eq!(psg.wave_ram[..4], [0x44, 0x55, 0x66, 0x77]);
+
+        // The CGB has no such bug.
+        let mut psg = playing_dmg();
+        psg.variant = Variant::Cgb;
+        psg.tick(36);
+        psg.write(0x1E, 0x87);
+        assert_eq!(psg.wave_ram[..4], [0x00, 0x11, 0x22, 0x33]);
     }
 }

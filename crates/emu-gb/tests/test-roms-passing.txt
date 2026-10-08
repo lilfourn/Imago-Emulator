@@ -23,6 +23,7 @@ blargg/cpu_instrs/individual/08-misc instrs.gb
 blargg/cpu_instrs/individual/09-op r,r.gb
 blargg/cpu_instrs/individual/10-bit ops.gb
 blargg/cpu_instrs/individual/11-op a,(hl).gb
+blargg/dmg_sound/dmg_sound.gb
 blargg/dmg_sound/rom_singles/01-registers.gb
 blargg/dmg_sound/rom_singles/02-len ctr.gb
 blargg/dmg_sound/rom_singles/03-trigger.gb
@@ -31,7 +32,10 @@ blargg/dmg_sound/rom_singles/05-sweep details.gb
 blargg/dmg_sound/rom_singles/06-overflow on trigger.gb
 blargg/dmg_sound/rom_singles/07-len sweep period sync.gb
 blargg/dmg_sound/rom_singles/08-len ctr during power.gb
+blargg/dmg_sound/rom_singles/09-wave read while on.gb
+blargg/dmg_sound/rom_singles/10-wave trigger while on.gb
 blargg/dmg_sound/rom_singles/11-regs after power.gb
+blargg/dmg_sound/rom_singles/12-wave write while on.gb
 blargg/halt_bug.gb
 blargg/instr_timing/instr_timing.gb
 blargg/mem_timing-2/mem_timing.gb
