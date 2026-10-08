@@ -211,7 +211,7 @@ they are project policy, not legal advice.
 3. Default to HLE BIOS and direct boot. The app uses user-dumped system files
    only when the user points it at them.
 4. Read GPL code to understand it, but do not copy it unless the project
-   adopts a compatible license (see open question Q1). MIT, BSD and
+   adopts a compatible license (see open question Q1). MIT, BSD, zlib and
    MPL-2.0 code may be reused under its terms, with attribution.
 5. No decryption tooling, no 3DS or Switch keys, no builds tied to
    unreleased games, no paywalled builds.
