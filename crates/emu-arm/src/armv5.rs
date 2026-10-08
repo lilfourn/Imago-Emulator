@@ -10,6 +10,7 @@
 //! STM; MRC and MCR spend one internal cycle talking to CP15.
 
 use crate::alu;
+use crate::arm::Kind;
 use crate::{Access, Bus, Mode, Model, Processor, psr};
 
 /// The register number in the four bits at `shift`.
@@ -22,32 +23,30 @@ fn half(value: u32, top: bool) -> i32 {
     i32::from((if top { value >> 16 } else { value }) as u16 as i16)
 }
 
-impl<M: Model> Processor<M> {
-    /// Runs `instruction` if it is one of the ARMv5TE encodings that ARMv4
-    /// decodes as something else; returns whether it was.
-    pub(crate) fn execute_arm_v5<B: Bus>(&mut self, bus: &mut B, instruction: u32) -> bool {
-        let key = instruction & 0x0FF0_00F0;
-        if key & 0x0F90_0000 == 0x0100_0000 && key & 0x90 != 0x90 {
-            // The space ARMv4 gives to MRS, MSR and BX. (Bits 7 and 4 both
-            // set mean SWP or a halfword or doubleword transfer instead.)
-            match key & 0x0060_00F0 {
-                0x0060_0010 => self.count_leading_zeros(bus, instruction),
-                0x0020_0030 => self.branch_link_exchange_register(bus, instruction),
-                0x0020_0070 => self.breakpoint(bus),
-                _ if key & 0xF0 == 0x50 => self.saturating_arithmetic(bus, instruction),
-                _ if key & 0x90 == 0x80 => self.signed_halfword_multiply(bus, instruction),
-                _ => return false,
-            }
-        } else if key & 0x0E10_00D0 == 0x0000_00D0 {
-            self.doubleword_transfer(bus, instruction);
-        } else if key & 0x0F00_0010 == 0x0E00_0010 {
-            self.coprocessor_register_transfer(bus, instruction);
-        } else {
-            return false;
+/// The kind of instruction whose bits 27–20 and 7–4 are `key`, if it is
+/// one of the ARMv5TE encodings that ARMv4 decodes as something else.
+pub(crate) const fn decode(key: u32) -> Option<Kind> {
+    if key & 0x0F90_0000 == 0x0100_0000 && key & 0x90 != 0x90 {
+        // The space ARMv4 gives to MRS, MSR and BX. (Bits 7 and 4 both set
+        // mean SWP or a halfword or doubleword transfer instead.)
+        match key & 0x0060_00F0 {
+            0x0060_0010 => Some(Kind::CountLeadingZeros),
+            0x0020_0030 => Some(Kind::BranchLinkExchangeRegister),
+            0x0020_0070 => Some(Kind::Breakpoint),
+            _ if key & 0xF0 == 0x50 => Some(Kind::SaturatingArithmetic),
+            _ if key & 0x90 == 0x80 => Some(Kind::SignedHalfwordMultiply),
+            _ => None,
         }
-        true
+    } else if key & 0x0E10_00D0 == 0x0000_00D0 {
+        Some(Kind::DoublewordTransfer)
+    } else if key & 0x0F00_0010 == 0x0E00_0010 {
+        Some(Kind::CoprocessorRegisterTransfer)
+    } else {
+        None
     }
+}
 
+impl<M: Model> Processor<M> {
     /// Runs an instruction with condition 0b1111, which ARMv5 uses for BLX
     /// with an immediate, PLD, and the coprocessor "2" forms.
     pub(crate) fn execute_unconditional<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
@@ -76,13 +75,13 @@ impl<M: Model> Processor<M> {
     }
 
     /// CLZ: the number of leading zero bits in Rm.
-    fn count_leading_zeros<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
+    pub(crate) fn count_leading_zeros<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let count = self.r[reg(instruction, 0)].leading_zeros();
         self.finish_write(bus, reg(instruction, 12), count);
     }
 
     /// BLX Rm: calls Rm, in Thumb if its bit 0 is set.
-    fn branch_link_exchange_register<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
+    pub(crate) fn branch_link_exchange_register<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let target = self.r[reg(instruction, 0)];
         self.r[14] = self.r[15].wrapping_sub(4);
         self.set_flag(psr::T, target & 1 != 0);
@@ -102,7 +101,7 @@ impl<M: Model> Processor<M> {
     /// QADD, QSUB, QDADD, QDSUB: Rd = Rm ± Rn, where the D forms first
     /// double Rn; each step saturates, and any saturation sets the sticky
     /// Q flag.
-    fn saturating_arithmetic<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
+    pub(crate) fn saturating_arithmetic<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let rm = self.r[reg(instruction, 0)];
         let rn = self.r[reg(instruction, 16)];
         let (operand, doubling_saturated) = if instruction & (1 << 22) != 0 {
@@ -126,7 +125,7 @@ impl<M: Model> Processor<M> {
     /// forms use all of Rm and keep the product's top 32 of 48 bits). The
     /// 32-bit accumulations wrap and set Q on overflow; no other flags
     /// change.
-    fn signed_halfword_multiply<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
+    pub(crate) fn signed_halfword_multiply<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let rd = reg(instruction, 16);
         let rn = reg(instruction, 12);
         let rm = self.r[reg(instruction, 0)];
@@ -181,7 +180,7 @@ impl<M: Model> Processor<M> {
     /// LDRH. An odd Rd (unpredictable) is treated as undefined. The bus
     /// sees a two-register LDM or STM. Writeback to Rd or Rd+1
     /// (unpredictable) loses to the loaded value, as for LDR.
-    fn doubleword_transfer<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
+    pub(crate) fn doubleword_transfer<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let pre = instruction & (1 << 24) != 0;
         let add = instruction & (1 << 23) != 0;
         let immediate = instruction & (1 << 22) != 0;
@@ -242,7 +241,7 @@ impl<M: Model> Processor<M> {
     /// MRC and MCR. CP15, the only coprocessor, answers privileged code
     /// only; anything else is an undefined instruction. MRC to R15 sets N,
     /// Z, C and V from the value's top bits.
-    fn coprocessor_register_transfer<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
+    pub(crate) fn coprocessor_register_transfer<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         if self.mode() == Mode::User {
             self.undefined(bus);
             return;

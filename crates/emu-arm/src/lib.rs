@@ -225,6 +225,47 @@ mod vector {
     pub const IRQ: u32 = 0x18;
 }
 
+/// For each condition (0–15), whether it passes with each value of the
+/// flags NZCV (CPSR bits 31–28): bit `nzcv` of entry `condition`.
+const CONDITIONS: [u16; 16] = {
+    let mut table = [0; 16];
+    let mut condition = 0;
+    while condition < 16 {
+        let mut nzcv = 0;
+        while nzcv < 16 {
+            if passes(condition, nzcv) {
+                table[condition as usize] |= 1 << nzcv;
+            }
+            nzcv += 1;
+        }
+        condition += 1;
+    }
+    table
+};
+
+/// Whether `condition` passes with flags `nzcv` (N in bit 3, V in bit 0).
+const fn passes(condition: u32, nzcv: u32) -> bool {
+    let (n, z, c, v) = (nzcv & 8 != 0, nzcv & 4 != 0, nzcv & 2 != 0, nzcv & 1 != 0);
+    match condition {
+        0x0 => z,
+        0x1 => !z,
+        0x2 => c,
+        0x3 => !c,
+        0x4 => n,
+        0x5 => !n,
+        0x6 => v,
+        0x7 => !v,
+        0x8 => c && !z,
+        0x9 => !c || z,
+        0xA => n == v,
+        0xB => n != v,
+        0xC => !z && n == v,
+        0xD => z || n != v,
+        0xE => true,
+        _ => false,
+    }
+}
+
 /// CPSR after reset: Supervisor mode, ARM state, IRQs and FIQs off.
 const RESET_CPSR: u32 = Mode::Supervisor.bits() | psr::I | psr::F;
 
@@ -600,27 +641,9 @@ impl<M: Model> Processor<M> {
         refused
     }
 
+    /// Whether condition `condition` (0–15) passes with the current flags.
     fn condition_passed(&self, condition: u32) -> bool {
-        let flag = |bit: u32| self.cpsr & bit != 0;
-        let (n, z, c, v) = (flag(psr::N), flag(psr::Z), flag(psr::C), flag(psr::V));
-        match condition {
-            0x0 => z,
-            0x1 => !z,
-            0x2 => c,
-            0x3 => !c,
-            0x4 => n,
-            0x5 => !n,
-            0x6 => v,
-            0x7 => !v,
-            0x8 => c && !z,
-            0x9 => !c || z,
-            0xA => n == v,
-            0xB => n != v,
-            0xC => !z && n == v,
-            0xD => z || n != v,
-            0xE => true,
-            _ => false,
-        }
+        CONDITIONS[condition as usize] >> (self.cpsr >> 28) & 1 != 0
     }
 
     /// Saves R8–R14 of `mode` from the live registers into its banks.

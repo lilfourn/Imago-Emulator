@@ -276,7 +276,7 @@ pub fn disassemble_arm(address: u32, opcode: u32, architecture: Architecture) ->
 }
 
 /// The ARMv4 instruction set, decoded from bits 27–20 and 7–4 in the
-/// interpreter's order (`execute_arm`).
+/// interpreter's order (`arm::decode`).
 fn armv4(address: u32, opcode: u32, cond: &str) -> Disassembly {
     let key = opcode & 0x0FF0_00F0;
     let text = if key & 0x0FF0_00F0 == 0x0120_0010 {
@@ -314,7 +314,7 @@ fn armv4(address: u32, opcode: u32, cond: &str) -> Disassembly {
 }
 
 /// The ARMv5TE encodings that ARMv4 decodes as something else (the
-/// interpreter's `execute_arm_v5`), or `None`. MRC and MCR are ARMv4
+/// interpreter's `armv5::decode`), or `None`. MRC and MCR are ARMv4
 /// instructions too, so [`armv4`] decodes them.
 fn armv5(address: u32, opcode: u32, cond: &str) -> Option<Disassembly> {
     let key = opcode & 0x0FF0_00F0;
