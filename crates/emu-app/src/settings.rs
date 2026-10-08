@@ -19,12 +19,18 @@
 //! [video]
 //! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
 //! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
+//!
+//! [game_boy]
+//! dmg_colors = "game-boy-color"  # games for the original Game Boy: "grey", or
+//!                               # on a Game Boy Color, by title or with a
+//!                               # button combination such as "left+b"
 //! ```
 //!
 //! Settings missing from the file keep their defaults.
 
 use std::path::{Path, PathBuf};
 
+use emu_core::DmgColors;
 use serde::{Deserialize, Serialize};
 
 use crate::filter::Filter;
@@ -56,6 +62,9 @@ pub struct Settings {
     pub resolution_3d: u32,
     /// How the screens are filtered on their way to the window.
     pub filter: Filter,
+    /// How games made for the original Game Boy are shown, from the next
+    /// game opened.
+    pub dmg_colors: DmgColors,
 }
 
 impl Default for Settings {
@@ -65,6 +74,7 @@ impl Default for Settings {
             speed: Speeds::default(),
             resolution_3d: 1,
             filter: Filter::None,
+            dmg_colors: DmgColors::ByTitle,
         }
     }
 }
@@ -75,6 +85,54 @@ struct SettingsFile {
     layout: LayoutSection,
     speed: SpeedSection,
     video: VideoSection,
+    game_boy: GameBoySection,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct GameBoySection {
+    dmg_colors: String,
+}
+
+impl Default for GameBoySection {
+    fn default() -> Self {
+        Self {
+            dmg_colors: dmg_colors_name(Settings::default().dmg_colors),
+        }
+    }
+}
+
+/// The button combinations a Game Boy Color takes as it starts, in the
+/// order of [`DmgColors::Buttons`], as the settings file names them.
+const BUTTON_COMBINATIONS: [&str; 12] = [
+    "right", "left", "up", "down", "right+a", "left+a", "up+a", "down+a", "right+b", "left+b",
+    "up+b", "down+b",
+];
+
+/// `colors` as the settings file names it.
+fn dmg_colors_name(colors: DmgColors) -> String {
+    let name = match colors {
+        DmgColors::Grey => "grey",
+        DmgColors::ByTitle => "game-boy-color",
+        DmgColors::Buttons(index) => BUTTON_COMBINATIONS
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or("game-boy-color"),
+    };
+    name.to_owned()
+}
+
+/// The colours a settings file's `name` stands for.
+fn dmg_colors_from_name(name: &str) -> Option<DmgColors> {
+    match name {
+        "grey" => Some(DmgColors::Grey),
+        "game-boy-color" => Some(DmgColors::ByTitle),
+        _ => BUTTON_COMBINATIONS
+            .iter()
+            .position(|combination| *combination == name)
+            .and_then(|index| u8::try_from(index).ok())
+            .map(DmgColors::Buttons),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -200,11 +258,14 @@ impl Settings {
         }
         let filter = Filter::from_name(&file.video.filter)
             .ok_or_else(|| SettingsError::UnknownFilter(file.video.filter.clone()))?;
+        let dmg_colors = dmg_colors_from_name(&file.game_boy.dmg_colors)
+            .ok_or_else(|| SettingsError::UnknownDmgColors(file.game_boy.dmg_colors.clone()))?;
         Ok(Self {
             layout: file.layout.to_layout()?,
             speed: file.speed.to_speeds()?,
             resolution_3d,
             filter,
+            dmg_colors,
         })
     }
 
@@ -216,6 +277,9 @@ impl Settings {
             video: VideoSection {
                 resolution_3d: self.resolution_3d,
                 filter: self.filter.name().to_owned(),
+            },
+            game_boy: GameBoySection {
+                dmg_colors: dmg_colors_name(self.dmg_colors),
             },
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
@@ -277,6 +341,9 @@ pub enum SettingsError {
     /// The filter is not one of the five names.
     #[error("unknown video filter {0:?} in settings")]
     UnknownFilter(String),
+    /// The colours for original Game Boy games are not one of the names.
+    #[error("unknown Game Boy colours {0:?} in settings")]
+    UnknownDmgColors(String),
     /// The 3D resolution is not 1 to [`MAX_RESOLUTION_3D`] times.
     #[error("unsupported 3D resolution {0}x in settings; use 1 to {max}", max = MAX_RESOLUTION_3D)]
     UnsupportedResolution(u32),
@@ -309,14 +376,40 @@ mod tests {
             },
             resolution_3d: 4,
             filter: Filter::Scanlines,
+            dmg_colors: DmgColors::Buttons(9),
         };
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
         assert!(text.contains("resolution_3d = 4"), "{text}");
         assert!(text.contains("filter = \"scanlines\""), "{text}");
+        assert!(text.contains("dmg_colors = \"left+b\""), "{text}");
         assert!(text.contains("rotation = 270"), "{text}");
         assert!(text.contains("fast_forward = 3.0"), "{text}");
         assert_eq!(Settings::from_toml(&text), Ok(settings));
+    }
+
+    #[test]
+    fn game_boy_colours_are_named_in_the_file() {
+        let grey = Settings::from_toml("[game_boy]\ndmg_colors = \"grey\"\n");
+        assert_eq!(
+            grey.map(|settings| settings.dmg_colors),
+            Ok(DmgColors::Grey)
+        );
+        let colour = Settings::from_toml("[game_boy]\ndmg_colors = \"game-boy-color\"\n");
+        assert_eq!(
+            colour.map(|settings| settings.dmg_colors),
+            Ok(DmgColors::ByTitle)
+        );
+        let buttons = Settings::from_toml("[game_boy]\ndmg_colors = \"down+b\"\n");
+        assert_eq!(
+            buttons.map(|settings| settings.dmg_colors),
+            Ok(DmgColors::Buttons(11))
+        );
+        assert_eq!(
+            Settings::from_toml("[game_boy]\ndmg_colors = \"sepia\"\n"),
+            Err(SettingsError::UnknownDmgColors("sepia".to_owned()))
+        );
+        assert_eq!(Settings::default().dmg_colors, DmgColors::ByTitle);
     }
 
     #[test]

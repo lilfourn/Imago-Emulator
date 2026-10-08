@@ -39,6 +39,8 @@ actions!(
         RotateAnticlockwise,
         NextScreenGap,
         ToggleColorCorrection,
+        DmgColorsGrey,
+        DmgColorsGameBoyColor,
         FilterNone,
         FilterLcdGrid,
         FilterScanlines,
@@ -233,6 +235,16 @@ fn menus() -> Vec<Menu> {
                     ],
                 }),
                 MenuItem::action("Colour Correction", ToggleColorCorrection),
+                MenuItem::submenu(Menu {
+                    name: "Original Game Boy Games".into(),
+                    items: vec![
+                        MenuItem::action("In Grey, as on a Game Boy", DmgColorsGrey),
+                        MenuItem::action(
+                            "In Colour, as on a Game Boy Color",
+                            DmgColorsGameBoyColor,
+                        ),
+                    ],
+                }),
                 MenuItem::action("Debugger", ShowDebugger),
             ],
         },

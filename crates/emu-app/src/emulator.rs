@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail, ensure};
 use emu_cheats::Cheat;
 use emu_core::debug::{Breakpoint, RunOutcome, StopReason};
-use emu_core::{Buttons, Cartridge, Core, CoreInfo, Frame, Input, Media, System};
+use emu_core::{Buttons, Cartridge, Core, CoreInfo, DmgColors, Frame, Input, Media, System};
 use emu_script::{Draw, Script, ScriptError, StateRequest};
 
 use crate::audio::AudioSink;
@@ -87,11 +87,13 @@ struct RomFile {
 }
 
 impl RomFile {
-    /// The file as a core's media, its clock starting at `start_time`.
-    fn media(&self, start_time: i64) -> Media<'_> {
+    /// The file as a core's media, its clock starting at `start_time` and
+    /// a game for the original Game Boy shown with `dmg_colors`.
+    fn media(&self, start_time: i64, dmg_colors: DmgColors) -> Media<'_> {
         Media {
             backup: self.backup.as_deref(),
             start_time,
+            dmg_colors,
             ..Media::new(&self.rom)
         }
     }
@@ -146,7 +148,7 @@ fn read_rom(rom_path: &Path) -> anyhow::Result<RomFile> {
 /// Fails if a file cannot be read, its system cannot be identified, linked
 /// ROMs are for different systems, two games would share a battery save
 /// file, or the core rejects them.
-pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
+pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Loaded> {
     let files = rom_paths
         .iter()
         .map(|path| read_rom(path))
@@ -154,14 +156,14 @@ pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
     let start_time = local_clock_seconds();
     let core = match files.as_slice() {
         [] => bail!("no ROM given"),
-        [one] => emu_cores::create(one.system, &one.media(start_time))?,
+        [one] => emu_cores::create(one.system, &one.media(start_time, dmg_colors))?,
         [first, second] if emu_cores::second_slot(first.system) == Some(second.system) => {
             let slotted = Media {
                 second_slot: Some(Cartridge {
                     rom: &second.rom,
                     backup: second.backup.as_deref(),
                 }),
-                ..first.media(start_time)
+                ..first.media(start_time, dmg_colors)
             };
             emu_cores::create(first.system, &slotted)?
         }
@@ -171,7 +173,10 @@ pub fn load(rom_paths: &[PathBuf]) -> anyhow::Result<Loaded> {
                 files.iter().all(|file| file.system == system),
                 "linked games must be for the same system"
             );
-            let players: Vec<Media<'_>> = files.iter().map(|file| file.media(start_time)).collect();
+            let players: Vec<Media<'_>> = files
+                .iter()
+                .map(|file| file.media(start_time, dmg_colors))
+                .collect();
             emu_cores::create_linked(system, &players)?
         }
     };
@@ -2018,7 +2023,7 @@ mod tests {
             "slot",
             &[("platinum.nds", &nds_rom()), ("emerald.gba", &gba_rom())],
         );
-        let loaded = load(&paths).expect("loads");
+        let loaded = load(&paths, DmgColors::Grey).expect("loads");
         assert_eq!(
             (loaded.info().system, loaded.info().players),
             (System::Nds, 1)
@@ -2035,7 +2040,7 @@ mod tests {
             "link",
             &[("ruby.gba", &gba_rom()), ("sapphire.gba", &gba_rom())],
         );
-        let loaded = load(&paths).expect("loads");
+        let loaded = load(&paths, DmgColors::Grey).expect("loads");
         assert_eq!(
             (loaded.info().system, loaded.info().players),
             (System::Gba, 2)
@@ -2045,7 +2050,7 @@ mod tests {
             "mixed",
             &[("ruby.gba", &gba_rom()), ("platinum.nds", &nds_rom())],
         );
-        let error = load(&mixed)
+        let error = load(&mixed, DmgColors::Grey)
             .err()
             .expect("a GBA game cannot take a DS game");
         assert!(format!("{error:#}").contains("same system"), "{error:#}");
@@ -2059,7 +2064,7 @@ mod tests {
             "wireless",
             &[("white.nds", &nds_rom()), ("black.nds", &nds_rom())],
         );
-        let loaded = load(&paths).expect("loads");
+        let loaded = load(&paths, DmgColors::Grey).expect("loads");
         assert_eq!(
             (loaded.info().system, loaded.info().players),
             (System::Nds, 2)
@@ -2075,7 +2080,7 @@ mod tests {
             "shared-save",
             &[("pokemon.nds", &nds_rom()), ("pokemon.gba", &gba_rom())],
         );
-        let error = load(&paths).err().expect("refused");
+        let error = load(&paths, DmgColors::Grey).err().expect("refused");
         assert_eq!(
             format!("{error:#}"),
             "pokemon.nds and pokemon.gba would both save to pokemon.sav; rename one of them"

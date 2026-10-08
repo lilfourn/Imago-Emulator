@@ -74,6 +74,9 @@ pub struct EmulatorView {
     color_correction: bool,
     /// How the screens are filtered on their way to the window.
     filter: Filter,
+    /// How games made for the original Game Boy are shown, from the next
+    /// game opened.
+    dmg_colors: emu_core::DmgColors,
     /// The debugger window, once opened.
     debugger: Option<WindowHandle<DebuggerWindow>>,
     /// Games started so far, which numbers each for the debugger.
@@ -217,6 +220,7 @@ impl EmulatorView {
             heard: 0,
             color_correction: true,
             filter: Filter::default(),
+            dmg_colors: Settings::default().dmg_colors,
             debugger: None,
             sessions: 0,
             session: None,
@@ -250,6 +254,7 @@ impl EmulatorView {
                 view.speeds = settings.speed;
                 view.resolution_3d = settings.resolution_3d;
                 view.filter = settings.filter;
+                view.dmg_colors = settings.dmg_colors;
             }
             Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
@@ -281,9 +286,10 @@ impl EmulatorView {
             .collect::<Vec<_>>()
             .join(" + ");
         self.show_notice(format!("Loading {name}…"), cx);
+        let dmg_colors = self.dmg_colors;
         let load = cx
             .background_executor()
-            .spawn(async move { emulator::load(&paths) });
+            .spawn(async move { emulator::load(&paths, dmg_colors) });
         self.loading = Some(cx.spawn_in(window, async move |this, cx| {
             let loaded = load.await;
             this.update_in(cx, |this, window, cx| match loaded {
@@ -1040,6 +1046,7 @@ impl EmulatorView {
             speed: self.speeds,
             resolution_3d: self.resolution_3d,
             filter: self.filter,
+            dmg_colors: self.dmg_colors,
         };
         if let Err(error) = settings.save(path) {
             let message = format!("Cannot save settings to {}: {error}", path.display());
@@ -1135,6 +1142,22 @@ impl EmulatorView {
             let images = session.images.iter_mut().filter_map(Option::take);
             self.stale_images.extend(images.map(|(_, image)| image));
         }
+    }
+
+    /// Shows games made for the original Game Boy with `colors` from the
+    /// next one opened, and saves that for next launch. A game already
+    /// running keeps its console until it is opened again.
+    fn set_dmg_colors(&mut self, colors: emu_core::DmgColors, cx: &mut Context<Self>) {
+        self.dmg_colors = colors;
+        let shown = match colors {
+            emu_core::DmgColors::Grey => "in grey, as on a Game Boy",
+            _ => "in colour, as on a Game Boy Color",
+        };
+        self.show_notice(
+            format!("Original Game Boy games: {shown}, from the next game opened"),
+            cx,
+        );
+        self.save_settings(cx);
     }
 
     /// Filters the screens with `filter` from now on, and saves that for
@@ -1308,6 +1331,14 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleRecording, _, _| {
                 this.send(Command::ToggleRecording);
             }))
+            .on_action(cx.listener(|this, _: &crate::app::DmgColorsGrey, _, cx| {
+                this.set_dmg_colors(emu_core::DmgColors::Grey, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::app::DmgColorsGameBoyColor, _, cx| {
+                    this.set_dmg_colors(emu_core::DmgColors::ByTitle, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &FilterNone, _, cx| {
                 this.set_filter(Filter::None, cx);
             }))
