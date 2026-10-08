@@ -541,7 +541,8 @@ impl Runner {
             loop {
                 // Rewinding and debugger steps work while paused;
                 // everything else waits.
-                let next = if self.paused && !self.rewinding && self.debug.pending.is_none() {
+                let waiting = self.paused && !self.rewinding && self.debug.pending.is_none();
+                let next = if waiting {
                     commands.recv().map_err(|_| TryRecvError::Disconnected)
                 } else {
                     commands.try_recv()
@@ -551,8 +552,11 @@ impl Runner {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break 'running,
                 }
-                if !self.paused || self.rewinding {
-                    // Don't race to catch up on time spent paused.
+                if waiting && (!self.paused || self.rewinding) {
+                    // Don't race to catch up on time spent paused. Only
+                    // after a wait: input arriving mid-play must not move
+                    // the frame clock, or each key press would delay the
+                    // frames after it by however late the thread woke.
                     deadline = deadline.max(Instant::now());
                 }
             }
@@ -626,9 +630,7 @@ impl Runner {
             };
             let now = Instant::now();
             deadline = speed::next_deadline(deadline, now, speed.frame_step(frame_duration));
-            if deadline > now {
-                thread::sleep(deadline - now);
-            }
+            speed::sleep_until(deadline);
         }
         if let Some(recorder) = self.recorder.take() {
             self.finish_recording(recorder);

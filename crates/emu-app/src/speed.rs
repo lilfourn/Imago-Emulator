@@ -1,10 +1,11 @@
 //! Emulation speed: which speed the player asked for, how fast that is,
-//! and how far apart it puts frame deadlines.
+//! how far apart it puts frame deadlines, and sleeping to them.
 //!
 //! The emulation thread sleeps to each frame's deadline (see
 //! `docs/decisions/0003-frame-pacing.md`). A speed divides the gap between
 //! deadlines; an unlimited speed drops them and runs flat out.
 
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// The slowest rate allowed. One frame then waits at most ten frames'
@@ -114,6 +115,29 @@ impl Speeds {
     }
 }
 
+/// How near a deadline [`sleep_until`] stops sleeping.
+const CLOSE_ENOUGH: Duration = Duration::from_micros(100);
+
+/// Sleeps until `deadline`, waking within about a tenth of a millisecond
+/// of it.
+///
+/// macOS wakes a sleeping thread late by up to a quarter of the time it
+/// asked for, so a single sleep to a deadline 10 ms away ends 2 to 2.5 ms
+/// late: every frame, and the input it reads, would start that much after
+/// its time. Sleeping three quarters of what is left, again and again,
+/// lands on the deadline in two or three wake-ups instead.
+pub fn sleep_until(deadline: Instant) {
+    while let Some(nap) = nap(deadline.saturating_duration_since(Instant::now())) {
+        thread::sleep(nap);
+    }
+}
+
+/// How long to sleep with `left` to go: three quarters of it, or not at
+/// all once that is under [`CLOSE_ENOUGH`].
+fn nap(left: Duration) -> Option<Duration> {
+    (left >= CLOSE_ENOUGH).then(|| left * 3 / 4)
+}
+
 /// When the next frame is due, given that the last was due at `deadline`
 /// and finished at `now`: `step` later, or now if unlimited (`None`) or
 /// more than four steps behind, too far to catch up smoothly.
@@ -197,6 +221,33 @@ mod tests {
         let step = times(4.0).frame_step(FRAME);
         let behind = start + FRAME * 3 / 2;
         assert_eq!(next_deadline(start, behind, step), behind);
+    }
+
+    #[test]
+    fn naps_take_three_quarters_of_the_time_left() {
+        assert_eq!(
+            nap(Duration::from_millis(10)),
+            Some(Duration::from_micros(7500))
+        );
+        assert_eq!(
+            nap(Duration::from_micros(400)),
+            Some(Duration::from_micros(300))
+        );
+        assert_eq!(nap(Duration::from_micros(99)), None);
+        assert_eq!(nap(Duration::ZERO), None);
+    }
+
+    #[test]
+    fn sleeps_until_the_deadline_and_not_long_past_it() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(5);
+        sleep_until(deadline);
+        let woke = Instant::now();
+        assert!(woke + CLOSE_ENOUGH >= deadline, "woke early");
+        // Generous, for a busy machine: one plain sleep would be 1 ms late.
+        assert!(woke < deadline + Duration::from_millis(50), "woke late");
+        // A deadline already past returns at once.
+        sleep_until(start);
     }
 
     #[test]
