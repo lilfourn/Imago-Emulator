@@ -58,6 +58,15 @@ impl Speed {
     /// The system's own frame rate.
     pub const NORMAL: Self = Self::Times(Rate::NORMAL);
 
+    /// The speed as menus and notices show it: "2×", "0.5×" or
+    /// "Unlimited".
+    pub fn label(self) -> String {
+        match self {
+            Self::Unlimited => "Unlimited".to_owned(),
+            Self::Times(rate) => format!("{}×", rate.get()),
+        }
+    }
+
     /// How far apart frame deadlines are at this speed, for frames
     /// `frame` long at normal speed; `None` if unlimited.
     pub fn frame_step(self, frame: Duration) -> Option<Duration> {
@@ -68,10 +77,18 @@ impl Speed {
     }
 }
 
+/// The fast-forward speeds the Emulation menu offers, in its order.
+pub const FAST_FORWARD_CHOICES: [Speed; 4] = [
+    Speed::Times(Rate(2.0)),
+    Speed::Times(Rate(3.0)),
+    Speed::Times(Rate(4.0)),
+    Speed::Unlimited,
+];
+
 /// The speeds fast-forward and slow motion run at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Speeds {
-    /// Unlimited unless capped.
+    /// Twice normal speed unless set.
     pub fast_forward: Speed,
     /// Half speed unless set.
     pub slow_motion: Rate,
@@ -80,7 +97,7 @@ pub struct Speeds {
 impl Default for Speeds {
     fn default() -> Self {
         Self {
-            fast_forward: Speed::Unlimited,
+            fast_forward: Speed::Times(Rate(2.0)),
             slow_motion: Rate(0.5),
         }
     }
@@ -143,13 +160,21 @@ mod tests {
     fn each_pace_has_its_speed() {
         let speeds = Speeds::default();
         assert_eq!(speeds.speed(Pace::Normal), Speed::NORMAL);
-        assert_eq!(speeds.speed(Pace::FastForward), Speed::Unlimited);
+        assert_eq!(speeds.speed(Pace::FastForward), times(2.0));
         assert_eq!(speeds.speed(Pace::SlowMotion), times(0.5));
-        let capped = Speeds {
-            fast_forward: times(4.0),
+        let unlimited = Speeds {
+            fast_forward: Speed::Unlimited,
             ..speeds
         };
-        assert_eq!(capped.speed(Pace::FastForward), times(4.0));
+        assert_eq!(unlimited.speed(Pace::FastForward), Speed::Unlimited);
+    }
+
+    #[test]
+    fn speeds_are_labelled_as_multiples() {
+        let labels = FAST_FORWARD_CHOICES.map(Speed::label);
+        assert_eq!(labels, ["2×", "3×", "4×", "Unlimited"]);
+        assert_eq!(times(0.5).label(), "0.5×");
+        assert_eq!(FAST_FORWARD_CHOICES[0], Speeds::default().fast_forward);
     }
 
     #[test]

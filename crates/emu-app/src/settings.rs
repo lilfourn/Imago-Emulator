@@ -13,7 +13,7 @@
 //! gap = 90                # emulated pixels between the screens
 //!
 //! [speed]
-//! fast_forward = 4.0      # times normal speed; leave out for no limit
+//! fast_forward = 2.0      # times normal speed, or "unlimited"
 //! slow_motion = 0.5       # times normal speed
 //!
 //! [video]
@@ -26,7 +26,9 @@
 //!                               # button combination such as "left+b"
 //! ```
 //!
-//! Settings missing from the file keep their defaults.
+//! Settings missing from the file keep their defaults. Files saved before
+//! fast-forward ran at 2x by default left `fast_forward` out for no
+//! limit; they now get 2x, and the menu or `"unlimited"` brings it back.
 
 use std::path::{Path, PathBuf};
 
@@ -204,11 +206,21 @@ impl LayoutSection {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct SpeedSection {
-    /// Left out for no limit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fast_forward: Option<f64>,
+    fast_forward: FastForward,
     slow_motion: f64,
 }
+
+/// The fast-forward speed as the file gives it: a multiple of normal
+/// speed, or a word, of which [`UNLIMITED`] is the only one known.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+enum FastForward {
+    Times(f64),
+    Word(String),
+}
+
+/// The word in the file for fast-forward without a limit.
+const UNLIMITED: &str = "unlimited";
 
 impl Default for SpeedSection {
     fn default() -> Self {
@@ -220,8 +232,8 @@ impl From<&Speeds> for SpeedSection {
     fn from(speeds: &Speeds) -> Self {
         Self {
             fast_forward: match speeds.fast_forward {
-                Speed::Unlimited => None,
-                Speed::Times(rate) => Some(rate.get()),
+                Speed::Unlimited => FastForward::Word(UNLIMITED.to_owned()),
+                Speed::Times(rate) => FastForward::Times(rate.get()),
             },
             slow_motion: speeds.slow_motion.get(),
         }
@@ -233,9 +245,10 @@ impl SpeedSection {
         let rate =
             |key, value| Rate::new(value).ok_or(SettingsError::UnsupportedSpeed { key, value });
         Ok(Speeds {
-            fast_forward: match self.fast_forward {
-                Some(value) => Speed::Times(rate("fast_forward", value)?),
-                None => Speed::Unlimited,
+            fast_forward: match &self.fast_forward {
+                FastForward::Times(value) => Speed::Times(rate("fast_forward", *value)?),
+                FastForward::Word(word) if word == UNLIMITED => Speed::Unlimited,
+                FastForward::Word(word) => return Err(SettingsError::UnknownSpeed(word.clone())),
             },
             slow_motion: rate("slow_motion", self.slow_motion)?,
         })
@@ -347,6 +360,9 @@ pub enum SettingsError {
     /// The 3D resolution is not 1 to [`MAX_RESOLUTION_3D`] times.
     #[error("unsupported 3D resolution {0}x in settings; use 1 to {max}", max = MAX_RESOLUTION_3D)]
     UnsupportedResolution(u32),
+    /// The fast-forward speed is a word other than "unlimited".
+    #[error("unknown fast-forward speed {0:?} in settings; use a number or \"unlimited\"")]
+    UnknownSpeed(String),
     /// A speed is not a finite number of at least [`MIN_RATE`].
     #[error("unsupported speed {key} = {value} in settings; use {min} or more", min = MIN_RATE)]
     UnsupportedSpeed {
@@ -413,11 +429,34 @@ mod tests {
     }
 
     #[test]
-    fn unlimited_fast_forward_is_left_out() {
+    fn fast_forward_is_a_multiple_or_unlimited() {
         let text = Settings::default().to_toml();
-        assert!(!text.contains("fast_forward"), "{text}");
+        assert!(text.contains("fast_forward = 2.0"), "{text}");
         assert!(text.contains("slow_motion = 0.5"), "{text}");
         assert_eq!(Settings::from_toml(&text), Ok(Settings::default()));
+
+        let unlimited = Settings {
+            speed: Speeds {
+                fast_forward: Speed::Unlimited,
+                ..Speeds::default()
+            },
+            ..Settings::default()
+        };
+        let text = unlimited.to_toml();
+        assert!(text.contains("fast_forward = \"unlimited\""), "{text}");
+        assert_eq!(Settings::from_toml(&text), Ok(unlimited));
+        assert_eq!(
+            Settings::from_toml("[speed]\nfast_forward = \"ludicrous\"\n"),
+            Err(SettingsError::UnknownSpeed("ludicrous".to_owned()))
+        );
+    }
+
+    #[test]
+    fn files_without_a_fast_forward_speed_get_2x() {
+        // Before 2x was the default, leaving the speed out meant no limit.
+        let settings = Settings::from_toml("[speed]\nslow_motion = 0.5\n").expect("valid file");
+        assert_eq!(settings.speed.fast_forward.label(), "2×");
+        assert_eq!(settings, Settings::default());
     }
 
     #[test]

@@ -8,6 +8,7 @@ use gpui::{
 };
 
 use crate::layout;
+use crate::speed::{self, Speed, Speeds};
 use crate::view::EmulatorView;
 
 actions!(
@@ -30,6 +31,10 @@ actions!(
         PreviousStateSlot,
         ToggleFastForward,
         ToggleSlowMotion,
+        FastForward2x,
+        FastForward3x,
+        FastForward4x,
+        FastForwardUnlimited,
         LayoutVertical,
         LayoutHorizontal,
         LayoutSingle,
@@ -115,7 +120,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
-        cx.set_menus(menus());
+        cx.set_menus(menus(MenuChecks::default()));
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -160,7 +165,24 @@ fn initial_size(display: Option<(f32, f32)>) -> (f32, f32) {
     (width.floor(), height.floor())
 }
 
-fn menus() -> Vec<Menu> {
+/// What the menus show checked. GPUI menus have no check marks of their
+/// own, so the view rebuilds them when one of these changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuChecks {
+    /// The speed fast-forward runs at.
+    pub fast_forward: Speed,
+}
+
+impl Default for MenuChecks {
+    fn default() -> Self {
+        Self {
+            fast_forward: Speeds::default().fast_forward,
+        }
+    }
+}
+
+/// The menu bar, with `checks` checked.
+pub fn menus(checks: MenuChecks) -> Vec<Menu> {
     vec![
         Menu {
             name: "ds-emulator".into(),
@@ -189,6 +211,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Reset", Reset),
                 MenuItem::action("Fast-Forward", ToggleFastForward),
                 MenuItem::action("Slow Motion", ToggleSlowMotion),
+                MenuItem::submenu(fast_forward_menu(checks.fast_forward)),
                 MenuItem::action("Switch Player", SwitchPlayer),
                 MenuItem::action("Use Microphone", ToggleMicrophone),
                 MenuItem::separator(),
@@ -251,6 +274,31 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
+/// Emulation > Fast-Forward Speed, with `current` checked.
+fn fast_forward_menu(current: Speed) -> Menu {
+    let [twice, three_times, four_times, unlimited] = speed::FAST_FORWARD_CHOICES;
+    let item = |speed: Speed| checked(&speed.label(), speed == current);
+    Menu {
+        name: "Fast-Forward Speed".into(),
+        items: vec![
+            MenuItem::action(item(twice), FastForward2x),
+            MenuItem::action(item(three_times), FastForward3x),
+            MenuItem::action(item(four_times), FastForward4x),
+            MenuItem::action(item(unlimited), FastForwardUnlimited),
+        ],
+    }
+}
+
+/// `label` with a check mark before it if `on`, or an em space, about as
+/// wide, to keep the labels lined up.
+fn checked(label: &str, on: bool) -> String {
+    if on {
+        format!("✓ {label}")
+    } else {
+        format!("\u{2003}{label}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +309,23 @@ mod tests {
         // menu bar, Dock and title bar.
         assert_eq!(initial_size(Some((1512.0, 982.0))), (507.0, 760.0));
         assert_eq!(initial_size(Some((2560.0, 1440.0))), (782.0, 1173.0));
+    }
+
+    #[test]
+    fn the_fast_forward_menu_checks_the_current_speed() {
+        let menu = fast_forward_menu(speed::FAST_FORWARD_CHOICES[2]);
+        let names: Vec<String> = menu
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["\u{2003}2×", "\u{2003}3×", "✓ 4×", "\u{2003}Unlimited"]
+        );
     }
 
     #[test]

@@ -93,7 +93,7 @@ cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua g
 | L / R | Q / E | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
 | Start / Select | Return / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
 | Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward / slow motion on/off | ⌘F / ⌘⇧F |
-| Fast-forward | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
+| Fast-forward (2×) | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
 | Slow motion | Hold 1 | | | Swap screens / Quit | ⌘E / ⌘Q |
 | Rewind | Hold R | Left trigger | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
 | Blow into the microphone (DS) | Hold B | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
@@ -109,10 +109,21 @@ cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua g
 | | | | | 3D resolution (DS) | View > 3D Resolution |
 | | | | | Original Game Boy games in colour or grey | View > Original Game Boy Games |
 | | | | | Computer's microphone on/off (DS) | Emulation > Use Microphone |
+| | | | | Fast-forward speed: 2×, 3×, 4× or unlimited | Emulation > Fast-Forward Speed |
 
 The keys are laid out for playing on a keyboard: the left hand on W A S D
 with the shoulders on Q and E, the right hand on a square of four keys
 shaped like the DS face buttons, U and I (Y and X) above J and K (B and A).
+
+Fast-forward runs at twice normal speed. Emulation > Fast-Forward Speed
+picks 2×, 3×, 4× or Unlimited, as fast as the computer goes; it is kept
+as `fast_forward` under `[speed]` in settings.toml (`"unlimited"`, or a
+multiple such as 1.5), beside `slow_motion` (0.5). Settings files from
+before 2× was the default left `fast_forward` out for no limit, and now
+get 2×. Sound plays only at normal speed, so fast-forward and slow motion
+are silent. Rewind records every frame at normal speed and slower, and
+about 60 a second when faster, so it steps back through fast-forwarded
+play as quickly as it went by.
 
 The DS screens start stacked with no gap, in a window that opens as large
 as fits the display; full screen shows them at the display's full height,

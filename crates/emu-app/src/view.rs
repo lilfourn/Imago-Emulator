@@ -25,6 +25,7 @@ use crate::app::{
     ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause,
     ToggleRecording, ToggleSlowMotion,
 };
+use crate::app::{FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks};
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Shortcut};
 use crate::cheats;
@@ -42,7 +43,7 @@ use crate::microphone::{self, Loudness, Microphone};
 use crate::persist;
 use crate::settings::{self, Settings};
 use crate::slots::{self, SlotPreview};
-use crate::speed::Speeds;
+use crate::speed::{self, Pace, Speed, Speeds};
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -259,6 +260,7 @@ impl EmulatorView {
             Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
         }
+        view.refresh_menus(cx);
         if !roms.is_empty() {
             view.open(roms, window, cx);
         }
@@ -1054,6 +1056,25 @@ impl EmulatorView {
         }
     }
 
+    /// Runs fast-forward at `speed` from now on, at once if it is on,
+    /// and saves that for next launch.
+    fn set_fast_forward(&mut self, speed: Speed, cx: &mut Context<Self>) {
+        self.speeds.fast_forward = speed;
+        if self.sent.pace == Pace::FastForward {
+            self.send(Command::SetSpeed(speed));
+        }
+        self.refresh_menus(cx);
+        self.show_notice(format!("Fast-forward speed: {}", speed.label()), cx);
+        self.save_settings(cx);
+    }
+
+    /// Rebuilds the menus to check what is chosen now.
+    fn refresh_menus(&self, cx: &mut Context<Self>) {
+        cx.set_menus(crate::app::menus(MenuChecks {
+            fast_forward: self.speeds.fast_forward,
+        }));
+    }
+
     /// Opens the debugger window, or brings it to the front.
     fn show_debugger(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.debugger
@@ -1310,6 +1331,18 @@ impl Render for EmulatorView {
                 this.toggle_color_correction(cx);
             }))
             .on_action(cx.listener(|this, _: &ShowDebugger, _, cx| this.show_debugger(cx)))
+            .on_action(cx.listener(|this, _: &FastForward2x, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[0], cx);
+            }))
+            .on_action(cx.listener(|this, _: &FastForward3x, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[1], cx);
+            }))
+            .on_action(cx.listener(|this, _: &FastForward4x, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[2], cx);
+            }))
+            .on_action(cx.listener(|this, _: &FastForwardUnlimited, _, cx| {
+                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[3], cx);
+            }))
             .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
                 this.set_resolution_3d(1, cx);
             }))
