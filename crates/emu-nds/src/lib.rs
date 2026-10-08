@@ -62,7 +62,7 @@ pub const INFO: CoreInfo = CoreInfo {
     touch_screen: Some(1),
     players: 1,
     frame_rate: FrameRate::new(33_513_982, 560_190),
-    audio_sample_rate: 32_768,
+    audio_sample_rate: sound::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
     state_version: 7,
 };
@@ -619,6 +619,26 @@ mod tests {
         assert_eq!(larger.screens()[0].size(), SCREEN);
         larger.set_render_scale(100);
         assert_eq!(larger.screens()[0].size(), ScreenSize::new(2048, 1536));
+    }
+
+    #[test]
+    fn sound_comes_at_the_rate_the_core_reports() {
+        let rom = rom();
+        let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+        let mut audio = Vec::new();
+        // The first frame runs from power-on to the first VBlank.
+        nds.run_frame(&[], &mut audio);
+        audio.clear();
+        let start = nds.cycles();
+        for _ in 0..600 {
+            nds.run_frame(&[], &mut audio);
+        }
+        let seconds = (nds.cycles() - start) as f64 / 33_513_982.0;
+        let rate = audio.len() as f64 / seconds;
+        assert!(
+            (rate - f64::from(INFO.audio_sample_rate)).abs() < 1.0,
+            "{rate} Hz"
+        );
     }
 
     #[test]

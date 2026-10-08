@@ -4,16 +4,15 @@
 //! Every channel can play 8- or 16-bit PCM or IMA-ADPCM from memory;
 //! channels 8–13 can instead make a square wave and 14–15 noise. A channel's
 //! timer counts at half the bus clock and each overflow moves to the next
-//! sample (no interpolation, as on hardware). The mixer runs at 32,768 Hz:
-//! the bus calls [`Sound::sample`] every 1,024 bus cycles with the ARM7's
-//! view of [`Memory`], and collects stereo samples.
+//! sample (no interpolation, as on hardware). The mixer runs at about
+//! 32.7 kHz: the bus calls [`Sound::sample`] every 1,024 bus cycles with
+//! the ARM7's view of [`Memory`], and collects stereo samples.
 //!
 //! Capture 0 records the left mixer (or channel 0) into memory and capture 1
 //! the right mixer (or channel 2), at the rate of channel 1's or 3's timer.
 //! Those channels are meant to play the recording back, for effects such as
 //! reverb, so SOUNDCNT can send them straight to the speakers. Compared with
-//! hardware, a capture records the mix of the 32,768 Hz output sample it
-//! falls in (the real mixer runs at about 1 MHz), its timer counts from its
+//! hardware, a capture records the mix of the output sample it falls in (the real mixer runs at about 1 MHz), its timer counts from its
 //! own start rather than sharing channel 1's or 3's count, and it writes
 //! memory at once rather than through a 16-byte FIFO.
 
@@ -27,10 +26,14 @@ pub(crate) trait Memory {
     fn write_8(&mut self, address: u32, value: u8);
 }
 
-/// Output sample rate in Hz.
-pub(crate) const SAMPLE_RATE: u32 = 32_768;
+/// The bus clock, 33.513982 MHz (GBATEK, "DS Technical Data").
+const BUS_HZ: u32 = 33_513_982;
 /// Bus cycles per output sample.
 pub(crate) const CYCLES_PER_SAMPLE: u64 = 1024;
+/// Output sample rate in Hz: 33,513,982 / 1,024 = 32,728.498 Hz, rounded
+/// down to 32,728. The 0.0015% left over is far inside what a frontend's
+/// rate control absorbs; the nominal 32,768 Hz was 0.12% fast.
+pub(crate) const SAMPLE_RATE: u32 = BUS_HZ / CYCLES_PER_SAMPLE as u32;
 /// Channel timer ticks (half the bus clock) per output sample.
 const TICKS_PER_SAMPLE: u32 = 512;
 

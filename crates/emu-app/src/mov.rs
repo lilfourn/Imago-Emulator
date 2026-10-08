@@ -13,8 +13,9 @@
 //! Sound is timed against the video: its rate in the file is the sound
 //! frames written per second of video, so both end together even when the
 //! source's sound clock is slightly off its nominal rate. (The DS mixes at
-//! 33,513,982 / 1024 = 32,728.5 Hz and reports 32,768 Hz; played at that,
-//! sound would drift four seconds an hour.)
+//! 33,513,982 / 1024 = 32,728.5 Hz and reports the whole number 32,728 Hz;
+//! played at that, sound would drift about a twentieth of a second an
+//! hour.)
 
 use std::io::{self, Seek, SeekFrom, Write};
 use std::time::Duration;
