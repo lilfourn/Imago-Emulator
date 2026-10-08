@@ -19,6 +19,7 @@
 //! [video]
 //! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
 //! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
+//! show_fps = true        # the frame rate and speed in the window's corner
 //!
 //! [game_boy]
 //! dmg_colors = "game-boy-color"  # games for the original Game Boy: "grey", or
@@ -64,6 +65,8 @@ pub struct Settings {
     pub resolution_3d: u32,
     /// How the screens are filtered on their way to the window.
     pub filter: Filter,
+    /// Whether the speed readout shows in the window's corner.
+    pub show_fps: bool,
     /// How games made for the original Game Boy are shown, from the next
     /// game opened.
     pub dmg_colors: DmgColors,
@@ -76,6 +79,7 @@ impl Default for Settings {
             speed: Speeds::default(),
             resolution_3d: 1,
             filter: Filter::None,
+            show_fps: false,
             dmg_colors: DmgColors::ByTitle,
         }
     }
@@ -142,6 +146,7 @@ fn dmg_colors_from_name(name: &str) -> Option<DmgColors> {
 struct VideoSection {
     resolution_3d: u32,
     filter: String,
+    show_fps: bool,
 }
 
 impl Default for VideoSection {
@@ -150,6 +155,7 @@ impl Default for VideoSection {
         Self {
             resolution_3d: settings.resolution_3d,
             filter: settings.filter.name().to_owned(),
+            show_fps: settings.show_fps,
         }
     }
 }
@@ -278,6 +284,7 @@ impl Settings {
             speed: file.speed.to_speeds()?,
             resolution_3d,
             filter,
+            show_fps: file.video.show_fps,
             dmg_colors,
         })
     }
@@ -290,6 +297,7 @@ impl Settings {
             video: VideoSection {
                 resolution_3d: self.resolution_3d,
                 filter: self.filter.name().to_owned(),
+                show_fps: self.show_fps,
             },
             game_boy: GameBoySection {
                 dmg_colors: dmg_colors_name(self.dmg_colors),
@@ -392,12 +400,14 @@ mod tests {
             },
             resolution_3d: 4,
             filter: Filter::Scanlines,
+            show_fps: true,
             dmg_colors: DmgColors::Buttons(9),
         };
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
         assert!(text.contains("resolution_3d = 4"), "{text}");
         assert!(text.contains("filter = \"scanlines\""), "{text}");
+        assert!(text.contains("show_fps = true"), "{text}");
         assert!(text.contains("dmg_colors = \"left+b\""), "{text}");
         assert!(text.contains("rotation = 270"), "{text}");
         assert!(text.contains("fast_forward = 3.0"), "{text}");

@@ -24,7 +24,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -360,6 +360,9 @@ struct Latest {
     debug: Mutex<Option<Arc<Snapshot>>>,
     unseen: AtomicBool,
     debug_unseen: AtomicBool,
+    /// Frames run, or stepped back through while rewinding, so far: what
+    /// the speed readout counts.
+    frames_shown: AtomicU64,
 }
 
 /// A running emulation thread. Dropping it stops the thread and flushes the
@@ -448,6 +451,12 @@ impl Emulator {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         )
+    }
+
+    /// How many frames have run, or been stepped back through while
+    /// rewinding, since the emulator started.
+    pub fn frames_shown(&self) -> u64 {
+        self.latest.frames_shown.load(Ordering::Relaxed)
     }
 
     /// What the debugger window shows, as of the latest frame or debugger
@@ -556,6 +565,7 @@ impl Runner {
                 }) {
                     self.clear_latches();
                     self.publish();
+                    self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
                 }
             } else {
                 if !self.mid_frame
@@ -600,6 +610,7 @@ impl Runner {
                 // script loads replaces it.
                 self.script_frame(&inputs);
                 self.publish();
+                self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
                 self.record_for_rewind(frame_duration);
             }
 
@@ -1478,6 +1489,24 @@ mod tests {
         emulator.send(Command::TogglePause);
         run_frames(&seen, 10);
         assert_eq!(frames_where(&seen, 0, |input| input.touch.is_some()), 0);
+    }
+
+    #[test]
+    fn counts_the_frames_shown() {
+        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while emulator.frames_shown() < 10 {
+            assert!(Instant::now() < deadline, "frames stopped running");
+            thread::sleep(Duration::from_millis(1));
+        }
+        emulator.send(Command::TogglePause);
+        wait_for_notice(&events, "Paused");
+        // Paused: the count stands still, and matches the game's own,
+        // which counts up from opaque black.
+        let shown = emulator.frames_shown();
+        assert_eq!(u64::from(latest_count(&emulator) & 0x00FF_FFFF), shown);
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(emulator.frames_shown(), shown);
     }
 
     #[test]

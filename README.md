@@ -110,6 +110,7 @@ cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua g
 | | | | | Original Game Boy games in colour or grey | View > Original Game Boy Games |
 | | | | | Computer's microphone on/off (DS) | Emulation > Use Microphone |
 | | | | | Fast-forward speed: 2×, 3×, 4× or unlimited | Emulation > Fast-Forward Speed |
+| | | | | Show / hide frame rate and speed | ⌘⌥F |
 
 The keys are laid out for playing on a keyboard: the left hand on W A S D
 with the shoulders on Q and E, the right hand on a square of four keys
@@ -124,6 +125,13 @@ get 2×. Sound plays only at normal speed, so fast-forward and slow motion
 are silent. Rewind records every frame at normal speed and slower, and
 about 60 a second when faster, so it steps back through fast-forwarded
 play as quickly as it went by.
+
+View > Show FPS (⌘⌥F) puts a small readout in the window's bottom right
+corner: how many frames a second the game runs, or steps back through
+while rewinding, measured twice a second, and the speed that makes, where
+100% is the console's own (59.83 frames a second for the DS, 59.73 for the
+Game Boy and GBA) and 200% is fast-forward at 2×. It is kept as `show_fps`
+under `[video]` in settings.toml.
 
 The DS screens start stacked with no gap, in a window that opens as large
 as fits the display; full screen shows them at the display's full height,

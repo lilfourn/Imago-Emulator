@@ -23,6 +23,7 @@ mod gamepad;
 mod latch;
 mod layout;
 mod memory_viewer;
+mod meter;
 mod microphone;
 mod mov;
 mod persist;

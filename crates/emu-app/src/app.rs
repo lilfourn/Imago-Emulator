@@ -35,6 +35,7 @@ actions!(
         FastForward3x,
         FastForward4x,
         FastForwardUnlimited,
+        ToggleFps,
         LayoutVertical,
         LayoutHorizontal,
         LayoutSingle,
@@ -102,6 +103,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             KeyBinding::new("cmd-[", PreviousStateSlot, None),
             KeyBinding::new("cmd-f", ToggleFastForward, None),
             KeyBinding::new("cmd-shift-f", ToggleSlowMotion, None),
+            KeyBinding::new("cmd-alt-f", ToggleFps, None),
             KeyBinding::new("cmd-1", LayoutVertical, None),
             KeyBinding::new("cmd-2", LayoutHorizontal, None),
             KeyBinding::new("cmd-3", LayoutSingle, None),
@@ -171,18 +173,26 @@ fn initial_size(display: Option<(f32, f32)>) -> (f32, f32) {
 pub struct MenuChecks {
     /// The speed fast-forward runs at.
     pub fast_forward: Speed,
+    /// Whether the speed readout shows.
+    pub show_fps: bool,
 }
 
 impl Default for MenuChecks {
     fn default() -> Self {
         Self {
             fast_forward: Speeds::default().fast_forward,
+            show_fps: false,
         }
     }
 }
 
 /// The menu bar, with `checks` checked.
 pub fn menus(checks: MenuChecks) -> Vec<Menu> {
+    let fps = if checks.show_fps {
+        "Hide FPS"
+    } else {
+        "Show FPS"
+    };
     vec![
         Menu {
             name: "ds-emulator".into(),
@@ -258,6 +268,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                     ],
                 }),
                 MenuItem::action("Colour Correction", ToggleColorCorrection),
+                MenuItem::action(fps, ToggleFps),
                 MenuItem::submenu(Menu {
                     name: "Original Game Boy Games".into(),
                     items: vec![

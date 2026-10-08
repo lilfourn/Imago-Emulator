@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use emu_core::{Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
@@ -25,7 +25,9 @@ use crate::app::{
     ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause,
     ToggleRecording, ToggleSlowMotion,
 };
-use crate::app::{FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks};
+use crate::app::{
+    FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
+};
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Shortcut};
 use crate::cheats;
@@ -39,6 +41,7 @@ use crate::emulator::{self, Command, Emulator, Event, Loaded};
 use crate::filter::Filter;
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
+use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist;
 use crate::settings::{self, Settings};
@@ -47,6 +50,9 @@ use crate::speed::{self, Pace, Speed, Speeds};
 use crate::video;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
+
+/// How often the speed readout measures.
+const READOUT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Save-state slots, numbered from 1.
 const STATE_SLOTS: u8 = 4;
@@ -75,6 +81,15 @@ pub struct EmulatorView {
     color_correction: bool,
     /// How the screens are filtered on their way to the window.
     filter: Filter,
+    /// Whether the speed readout shows in the window's corner.
+    show_fps: bool,
+    /// What the speed readout says, once it has measured.
+    speed_readout: Option<SharedString>,
+    /// Measures the speed for the readout, with the number from
+    /// `sessions` of the game it counts.
+    fps_meter: Option<(u64, Meter)>,
+    /// Updates the readout while it shows.
+    readout_task: Option<Task<()>>,
     /// How games made for the original Game Boy are shown, from the next
     /// game opened.
     dmg_colors: emu_core::DmgColors,
@@ -221,6 +236,10 @@ impl EmulatorView {
             heard: 0,
             color_correction: true,
             filter: Filter::default(),
+            show_fps: false,
+            speed_readout: None,
+            fps_meter: None,
+            readout_task: None,
             dmg_colors: Settings::default().dmg_colors,
             debugger: None,
             sessions: 0,
@@ -255,12 +274,16 @@ impl EmulatorView {
                 view.speeds = settings.speed;
                 view.resolution_3d = settings.resolution_3d;
                 view.filter = settings.filter;
+                view.show_fps = settings.show_fps;
                 view.dmg_colors = settings.dmg_colors;
             }
             Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
         }
         view.refresh_menus(cx);
+        if view.show_fps {
+            view.start_readout(cx);
+        }
         if !roms.is_empty() {
             view.open(roms, window, cx);
         }
@@ -1048,6 +1071,7 @@ impl EmulatorView {
             speed: self.speeds,
             resolution_3d: self.resolution_3d,
             filter: self.filter,
+            show_fps: self.show_fps,
             dmg_colors: self.dmg_colors,
         };
         if let Err(error) = settings.save(path) {
@@ -1068,10 +1092,61 @@ impl EmulatorView {
         self.save_settings(cx);
     }
 
+    /// Shows or hides the speed readout, and saves that for next launch.
+    fn toggle_fps(&mut self, cx: &mut Context<Self>) {
+        self.show_fps = !self.show_fps;
+        if self.show_fps {
+            self.start_readout(cx);
+        } else {
+            self.readout_task = None;
+            self.speed_readout = None;
+            self.fps_meter = None;
+        }
+        self.refresh_menus(cx);
+        cx.notify();
+        self.save_settings(cx);
+    }
+
+    /// Measures the speed for the readout every [`READOUT_INTERVAL`], until
+    /// it is hidden.
+    fn start_readout(&mut self, cx: &mut Context<Self>) {
+        self.readout_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(READOUT_INTERVAL).await;
+                if this.update(cx, |this, cx| this.update_readout(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Measures the speed since the last time, for the readout.
+    fn update_readout(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            self.speed_readout = None;
+            return;
+        };
+        let now = Instant::now();
+        let frames = session.emulator.frames_shown();
+        self.speed_readout = match &mut self.fps_meter {
+            Some((game, meter)) if *game == self.sessions => {
+                let fps = meter.sample(now, frames);
+                Some(meter::readout(fps, session.info.frame_rate.hz()).into())
+            }
+            _ => {
+                // A new game: measure from here.
+                self.fps_meter = Some((self.sessions, Meter::new(now, frames)));
+                None
+            }
+        };
+        cx.notify();
+    }
+
     /// Rebuilds the menus to check what is chosen now.
     fn refresh_menus(&self, cx: &mut Context<Self>) {
         cx.set_menus(crate::app::menus(MenuChecks {
             fast_forward: self.speeds.fast_forward,
+            show_fps: self.show_fps,
         }));
     }
 
@@ -1343,6 +1418,7 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &FastForwardUnlimited, _, cx| {
                 this.set_fast_forward(speed::FAST_FORWARD_CHOICES[3], cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleFps, _, cx| this.toggle_fps(cx)))
             .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
                 this.set_resolution_3d(1, cx);
             }))
@@ -1460,6 +1536,11 @@ impl Render for EmulatorView {
             .is_some_and(|session| session.recording)
         {
             root = root.child(recording_mark());
+        }
+        if self.show_fps
+            && let Some(readout) = &self.speed_readout
+        {
+            root = root.child(speed_readout(readout.clone()));
         }
 
         // A preview only lives as long as its notice.
@@ -1624,6 +1705,20 @@ fn recording_mark() -> impl IntoElement {
         .text_xs()
         .child(div().size(px(8.0)).rounded_full().bg(rgb(0x00E5_3935)))
         .child("REC")
+}
+
+/// The speed readout, small in the window's bottom right corner.
+fn speed_readout(text: SharedString) -> impl IntoElement {
+    div()
+        .absolute()
+        .bottom(px(8.0))
+        .right(px(8.0))
+        .px_1()
+        .rounded_sm()
+        .bg(rgba(0x0000_0099))
+        .text_xs()
+        .font_family("Menlo")
+        .child(text)
 }
 
 /// The menu action a gamepad hotkey runs.
