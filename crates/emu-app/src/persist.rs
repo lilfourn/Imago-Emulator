@@ -9,7 +9,7 @@
 //! named after the game and the time, as macOS names its own:
 //! `game 2026-10-07 at 18.58.12.png`.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -55,23 +55,32 @@ pub fn state_path(roms: &[PathBuf], slot: u8) -> PathBuf {
     roms[0].with_extension(format!("{extension}{slot}"))
 }
 
-/// A new file next to `rom` for a screenshot or recording taken at
-/// `stamp` (such as `2026-10-07 at 18.58.12`): `game <stamp>.<extension>`,
-/// or `game <stamp> 2.<extension>` and so on if that name is taken.
-pub fn capture_path(rom: &Path, stamp: &str, extension: &str) -> PathBuf {
+/// Creates a new, empty file next to `rom` for a screenshot or recording
+/// taken at `stamp` (such as `2026-10-07 at 18.58.12`), and returns its
+/// path and the file: `game <stamp>.<extension>`, or `game <stamp>
+/// 2.<extension>` and so on if that name is taken, even by a capture being
+/// written at the same moment. Existing files are never replaced.
+///
+/// # Errors
+///
+/// Returns the error if the file cannot be created.
+pub fn create_capture(rom: &Path, stamp: &str, extension: &str) -> io::Result<(PathBuf, File)> {
     let game = rom
         .file_stem()
         .map_or_else(|| "capture".into(), |stem| stem.to_string_lossy());
-    (1u32..)
-        .map(|number| {
-            let name = match number {
-                1 => format!("{game} {stamp}.{extension}"),
-                _ => format!("{game} {stamp} {number}.{extension}"),
-            };
-            rom.with_file_name(name)
-        })
-        .find(|path| !path.exists())
-        .expect("some number is free")
+    let mut number = 1u32;
+    loop {
+        let name = match number {
+            1 => format!("{game} {stamp}.{extension}"),
+            _ => format!("{game} {stamp} {number}.{extension}"),
+        };
+        let path = rom.with_file_name(name);
+        match File::create_new(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => number += 1,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Replaces `path` with `bytes` so that a crash mid-write never leaves a
@@ -114,15 +123,22 @@ mod tests {
         fs::create_dir_all(&dir).expect("create temp dir");
         let rom = dir.join("platinum.nds");
         let stamp = "2026-10-07 at 18.58.12";
-        let first = capture_path(&rom, stamp, "png");
+        let created = |extension| {
+            let (path, _) = create_capture(&rom, stamp, extension).expect("create");
+            path
+        };
+        let first = created("png");
         assert_eq!(first, dir.join("platinum 2026-10-07 at 18.58.12.png"));
-        fs::write(&first, b"taken").expect("write");
-        let second = capture_path(&rom, stamp, "png");
-        assert_eq!(second, dir.join("platinum 2026-10-07 at 18.58.12 2.png"));
+        // The first is still empty, being written, and keeps its name.
         assert_eq!(
-            capture_path(&rom, stamp, "mov"),
+            created("png"),
+            dir.join("platinum 2026-10-07 at 18.58.12 2.png")
+        );
+        assert_eq!(
+            created("mov"),
             dir.join("platinum 2026-10-07 at 18.58.12.mov")
         );
+        assert!(create_capture(&dir.join("missing/rom.nds"), stamp, "png").is_err());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

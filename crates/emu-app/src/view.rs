@@ -1088,7 +1088,7 @@ impl EmulatorView {
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         self.filter = filter;
         self.rebuild_images();
-        self.show_notice(filter.label(), cx);
+        self.show_notice(format!("Filter: {}", filter.label()), cx);
         self.save_settings(cx);
     }
 

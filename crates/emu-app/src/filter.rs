@@ -84,7 +84,7 @@ impl Filter {
     /// The filter as the View menu names it.
     pub fn label(self) -> &'static str {
         match self {
-            Self::None => "No filter",
+            Self::None => "None",
             Self::LcdGrid => "LCD grid",
             Self::Scanlines => "Scanlines",
             Self::Scale2x => "Scale2x",

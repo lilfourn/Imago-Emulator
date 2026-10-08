@@ -13,6 +13,7 @@
 //! buffer level (see `resample.rs`).
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -643,10 +644,14 @@ impl Runner {
         let saving = thread::Builder::new()
             .name("screenshot".to_owned())
             .spawn(move || {
-                let path = persist::capture_path(&rom, &stamp, "png");
-                let text = match persist::write_atomic(&path, &capture::encode_png(&picture)) {
-                    Ok(()) => format!("Saved {}", file_name(&path)),
-                    Err(error) => format!("Could not save {}: {error}", path.display()),
+                let saved =
+                    persist::create_capture(&rom, &stamp, "png").and_then(|(path, mut file)| {
+                        file.write_all(&capture::encode_png(&picture))?;
+                        Ok(path)
+                    });
+                let text = match saved {
+                    Ok(path) => format!("Saved {}", file_name(&path)),
+                    Err(error) => format!("Could not save a screenshot: {error}"),
                 };
                 events.try_send(Event::Notice(text)).ok();
             });
@@ -660,9 +665,12 @@ impl Runner {
         let Some(rom) = self.loaded.player_rom_paths().first() else {
             return;
         };
-        let path = persist::capture_path(rom, &capture_stamp(), "mov");
         let info = self.loaded.core.info();
-        match Recorder::start(path, &info, self.loaded.core.screens()) {
+        let started =
+            persist::create_capture(rom, &capture_stamp(), "mov").and_then(|(path, file)| {
+                Recorder::start(path, file, &info, self.loaded.core.screens())
+            });
+        match started {
             Ok(recorder) => {
                 self.notice(format!("Recording to {}", file_name(recorder.path())));
                 self.recorder = Some(recorder);

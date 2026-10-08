@@ -58,12 +58,17 @@ struct Moment {
 
 impl Recorder {
     /// Starts recording a game on a core described by `info`, whose
-    /// screens are now `screens`, to a new movie at `path`.
+    /// screens are now `screens`, to a new movie in `file`, at `path`.
     ///
     /// # Errors
     ///
-    /// Fails if `path` exists or cannot be created.
-    pub fn start(path: PathBuf, info: &CoreInfo, screens: &[Frame]) -> io::Result<Self> {
+    /// Fails if the file cannot be written or the thread cannot start.
+    pub fn start(
+        path: PathBuf,
+        file: File,
+        info: &CoreInfo,
+        screens: &[Frame],
+    ) -> io::Result<Self> {
         let size = video_size(info, screens);
         let (timescale, frame_duration) = time_base(info.frame_rate);
         let video = mov::Video {
@@ -72,7 +77,6 @@ impl Recorder {
             timescale,
             frame_duration,
         };
-        let file = File::create_new(&path)?;
         let movie = MovWriter::new(BufWriter::new(file), video, info.audio_sample_rate)?;
         let players = info.players;
         let (moments, receiver) = mpsc::sync_channel(QUEUE_FRAMES);
@@ -255,11 +259,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("emu-app-recorder-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("game.mov");
-        let recorder = Recorder::start(path.clone(), &info(), &screens(1, 0)).expect("start");
-        assert!(
-            Recorder::start(path.clone(), &info(), &screens(1, 0)).is_err(),
-            "an existing movie is never overwritten"
-        );
+        let file = File::create(&path).expect("create");
+        let recorder = Recorder::start(path.clone(), file, &info(), &screens(1, 0)).expect("start");
         for frame in 0..30 {
             let colour = rgb(frame * 8, 0, 0);
             // The 3D resolution changes partway through.
