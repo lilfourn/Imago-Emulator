@@ -210,10 +210,21 @@ impl CpuBus for Arm9TcmBus<'_, '_> {
 impl Hardware {
     /// Runs `side`'s highest-priority pending DMA channel, if any, on that
     /// CPU's bus. Returns whether one ran.
+    ///
+    /// The machine asks before every instruction and the answer is nearly
+    /// always no, so the check is inlined and the copy is not.
+    #[inline]
     pub(crate) fn run_dma(&mut self, side: Side) -> bool {
         let Some(index) = self.cpu(side).dma.next_pending() else {
             return false;
         };
+        self.run_dma_channel(side, index);
+        true
+    }
+
+    /// Runs DMA channel `index` of `side`'s, which is pending.
+    #[inline(never)]
+    fn run_dma_channel(&mut self, side: Side, index: usize) {
         let transfer = self.cpu(side).dma.transfer(index);
         let (mut source, mut destination) = (transfer.source, transfer.destination);
         let access = |unit: u32| {
@@ -258,7 +269,6 @@ impl Hardware {
         if cpu.dma.finish(index, transfer.count, source, destination) {
             cpu.interrupts.request(irq::DMA0 << index);
         }
-        true
     }
 }
 
