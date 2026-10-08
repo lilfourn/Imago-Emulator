@@ -26,7 +26,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-core` | The contract between cores and frontends: the `Core` trait and plain-data types. No dependencies beyond `thiserror`. |
 | `emu-sched` | A priority queue of cycle-timestamped events. |
 | `emu-state` | The save-state container format. |
-| `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. |
+| `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. Also its disassembler and a bus wrapper for watchpoints. |
 | `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
 | `emu-gba-cart` | The GBA cartridge: ROM, SRAM, Flash and EEPROM saves, and the GPIO clock. Shared by the GBA core and the DS's GBA slot ([decision 0006](decisions/0006-gba-slot.md)); depends only on `serde`. |
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
@@ -67,6 +67,7 @@ pub trait Core: Send {
     fn poke_io_16(&mut self, player: usize, address: u32, value: u16) -> bool; // GBA registers
     fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]); // cheats' ROM patches
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
+    fn debugger(&mut self) -> Option<&mut dyn Debugger>; // see "Debugging" below
 }
 ```
 
@@ -96,6 +97,63 @@ pub trait Core: Send {
   a DS core's frames are n times wider and taller, 3D drawn at that
   resolution. Touch points and layouts stay in `CoreInfo::screens` pixels,
   and emulation, audio and state bytes are the same at every scale.
+
+## Debugging
+
+`emu_core::debug` is the debugger's half of the contract (PRD UI-12).
+Every core returns itself from `Core::debugger`:
+
+```rust
+pub trait Debugger {
+    fn cpus(&self) -> Vec<CpuInfo>;                   // GB: SM83; GBA: ARM7TDMI; DS: ARM9, ARM7
+    fn registers(&self, cpu: usize) -> Vec<Register>; // names and values
+    fn status(&self, cpu: usize) -> String;           // flags, mode, halted
+    fn pc(&self, cpu: usize) -> u32;                  // the next instruction
+    fn read(&self, cpu: usize, address: u32) -> Option<u8>;    // no side effects
+    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool; // memory, not ROM or I/O
+    fn disassemble(&self, cpu: usize, address: u32) -> Instruction;
+    fn io_registers(&self, cpu: usize) -> Vec<IoRegister>;
+    fn events(&self, cpu: usize) -> Vec<ScheduledEvent>;       // the scheduler's queue
+    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics>;
+    fn run_until(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>, stops: &Stops)
+        -> RunOutcome;                                // the frame, stopping mid-way
+}
+```
+
+- **CPUs are numbers**: the DS's ARM9 is 0 and its ARM7 1; in a linked
+  pair player 0's CPU is 0 and player 1's is 1. Each `CpuInfo` says whose
+  player it is, so the app debugs the player the keyboard controls.
+- **Two ways to run a frame.** The app calls `run_frame` while nothing
+  could stop it, so breakpoints cost nothing until one is set. With
+  breakpoints, watchpoints or a step pending it calls `run_until`, which
+  runs the same frame with `Stops` checked after every instruction, and
+  returns at the first that applies. The next call, or `run_frame`,
+  carries on mid-frame. Each core writes its frame loop once, over a step
+  closure (GB, GBA) or a `Stepper` type parameter (the DS's slice loop);
+  for plain runs these inline back to the old loop. Pokémon White's
+  headless speed and CPU trace were unchanged by it.
+- **Breakpoints** are tested after each instruction against the next
+  one's address, so a run that starts on one runs it instead of stopping
+  at once. A step is "stop after one instruction of this CPU"; stepping
+  over a call is a breakpoint after it.
+- **Watchpoints** see the data accesses the CPU makes itself: the SM83
+  runs on a watching bus (its opcode fetches go through `Bus::fetch`, so
+  they never count), and the ARM CPUs on `emu_arm::Watched`, which an
+  ARM9 also tells about TCM accesses that never reach the bus
+  (`Bus::tcm_data`, a no-op elsewhere). DMA, the Game Boy's OAM DMA and
+  HDMA, sound, display capture and the HLE BIOS's own accesses are not
+  seen.
+- **Stopping mid-frame keeps timing**: a linked pair remembers the
+  frame's and slice's end, and the DS the end of the slice it stopped in,
+  so a stopped frame finishes on the same slices as one that never
+  stopped. Tests compare the save states.
+- **Reads have no side effects**: each core peeks its whole map,
+  including ROM and the I/O registers whose reads change nothing (the
+  DS's IPC FIFO and game card data ports read as unreadable). The I/O
+  view reads a table of GBATEK and Pan Docs names per CPU
+  (`io_names.rs`); the graphics viewers (`graphics.rs`) decode tiles,
+  maps, sprites and palettes from the PPU's memory into `Frame`s with
+  notes.
 
 ## Threads in the app
 
@@ -148,8 +206,15 @@ pub trait Core: Send {
   directly and read KEYINPUT, EXTKEYIN and the ARM7's timers. melonDS
   instead runs them on the ARM7's bus at its VBlank interrupt, as the
   real Action Replay does; that reaches the same main RAM and registers.
-- The memory viewer asks the thread to copy a span of RAM (through
-  `Core::peek`) into the shared latest-frame slot after every frame.
+- The debugger window (`debugger_window.rs`) sends plain
+  `Command::Debug` requests: what to show, the breakpoint and watchpoint
+  lists, pause, continue, step, step over, next frame, and memory writes.
+  While it is open the thread copies a `Snapshot` out of the core's
+  `Debugger` after every frame and every debugger command (registers,
+  disassembly, 256 bytes of memory, and only the panel shown) and wakes
+  the window with its own coalesced event, so it updates even while the
+  game's window is hidden. A stop mid-frame pauses before cheats, input
+  latches, sound and rewind, which wait for the frame's end.
 - The emulation thread records a save state after every frame into the
   rewind history (`rewind.rs`): newest state whole, older ones as
   LZ4-compressed XOR deltas, within 64 MiB.

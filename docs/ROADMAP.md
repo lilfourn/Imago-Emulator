@@ -159,7 +159,6 @@ M8's mGBA timer tests:
 What's missing:
 - most of the mGBA suite's timer, I/O read, BIOS math and SIO checks (see
   M8);
-- the debugger has only the memory viewer (no disassembly or registers);
 - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) settles Q3
   but awaits review.
 The Pokémon checkpoints (FireRed music, Emerald saves and clock, the
@@ -171,7 +170,11 @@ FireRed–Emerald trade) need your own dumps.
   offsets. A `Bus` trait so the GBA and both DS CPUs can share the
   interpreter.
 - **Frontend:** first debugger panels (UI-12): disassembly, registers,
-  memory.
+  memory. ✅ View > Debugger, for every system: ARM/Thumb (ARMv4T and
+  ARMv5TE) and SM83 disassemblers, breakpoints and watchpoints that stop
+  mid-frame, step, step over and frame advance, registers, a memory
+  editor, tile/map/sprite/palette viewers, I/O registers and the
+  scheduler's queue.
 - **Exit:** jsmolka `arm.gba` and `thumb.gba` pass, plus armwrestler.
 
 ### M8. Memory, DMA, timers, BIOS ✅ (jsmolka; not the mGBA timer tests)
@@ -215,7 +218,7 @@ FireRed–Emerald trade) need your own dumps.
     Game Genie; ROM patches (Game Genie, GameShark Advance `6`, Pro Action
     Replay `18`–`1E`) and Pro Action Replay I/O writes (`C6`, `C7`); and
     Action Replay DS for Phase 4. Cheats run after each frame, at VBlank;
-  - a memory viewer (View > Memory Viewer);
+  - a memory viewer, since grown into the debugger (View > Debugger);
   - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3.
 - **Exit:** trade between FireRed and Emerald over the emulated link cable.
 
@@ -330,7 +333,7 @@ are done.
 | Link cable, per-player input | GB-6 | M6 ✅ |
 | Fast-forward speed cap, slow motion | UI-10 | Phase 4 ✅ |
 | Per-game bindings, turbo, gamepad hotkey chords | UI-6 | Phase 4 ✅ |
-| Debugger panels | UI-12 | M7 → M11 |
+| Debugger panels | UI-12 | M7 → M11 ✅ |
 | Colour correction, cheats, shader path decision | UI-3, UI-13 | M11 |
 | Hybrid layout, rotation, gap, gamepad touch | UI-2, UI-7 | M13 ✅ |
 | Keyboard-first defaults, large window, full screen | UI-2, UI-5 | Phase 4 ✅ |

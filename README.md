@@ -36,7 +36,10 @@ dumps. The app has:
 - save-state slots with thumbnails, rewind and fast-forward;
 - link play;
 - GBC/GBA colour correction, and DS 3D at 2×, 3× or 4× resolution;
-- cheats and a memory viewer.
+- cheats;
+- a debugger: breakpoints and watchpoints on every CPU, disassembly,
+  registers, a memory editor, graphics viewers, I/O registers and the
+  scheduler's queue.
 
 See the [roadmap](docs/ROADMAP.md).
 
@@ -84,7 +87,8 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 | | | | | Full screen | ⌃⌘F |
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Colour correction on/off | ⌘⇧C |
-| | | | | Memory viewer | ⌘⇧M |
+| | | | | Debugger | ⌘⇧D |
+| | | | | Step / step over / next frame (debugger) | ⌘⇧I / ⌘⇧O / ⌘⇧N |
 | | | | | 3D resolution (DS) | View > 3D Resolution |
 | | | | | Computer's microphone on/off (DS) | Emulation > Use Microphone |
 
@@ -279,6 +283,41 @@ every ROM read, through save states and resets, until the cheat is
 switched off or removed. Pro Action Replay `C6`/`C7` codes write GBA I/O
 registers, except HALTCNT. Not supported: codes that need the cheat
 device's own button, and Action Replay DS types `C4`–`C6`.
+
+## Debugger
+
+View > Debugger (⌘⇧D) opens a window on the running game:
+
+- **Toolbar:** pick the CPU (the DS's ARM9 or ARM7; in link play, the
+  player you control), then pause or continue (⌘P), step one instruction
+  (⌘⇧I), step over a call (⌘⇧O), or run to the end of the frame (⌘⇧N).
+  The steps also work from the game's window while the debugger is open.
+- **Disassembly** follows the PC; Go to… shows any address. Click the
+  gutter beside an instruction to set a breakpoint there: the emulation
+  stops before that instruction, mid-frame.
+- **Registers** show what the last step changed in yellow, with the flags
+  and mode below.
+- **Memory** shows anything the CPU can read without side effects, ROM
+  and I/O registers included. Jump to a region or Go to… an address.
+  Click a byte and type two hex digits to change it; arrow keys move.
+  Edits reach RAM, VRAM, palettes and OAM, never ROM or registers.
+- **Panel below:**
+  - breakpoints and watchpoints, which stop after an instruction reads or
+    writes an address or a range (`start-end`);
+  - graphics: tiles from any base address at 4 or 8 bits per pixel,
+    background maps, sprites with their attributes, palettes (either DS
+    engine);
+  - the I/O registers by name;
+  - the scheduler's queue.
+
+Watchpoints see the CPU's own loads and stores, the ARM9's TCM included.
+They do not see DMA, OAM DMA or HDMA, sound or display capture, or what
+the HLE BIOS reads and writes for a system call. Until a breakpoint,
+watchpoint or step is set, the game runs exactly as it does without the
+debugger. Closing the window removes them.
+
+For instruction traces to diff against other emulators, use the `trace`
+examples under Testing against test ROMs.
 
 ## Testing against test ROMs
 
