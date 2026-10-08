@@ -1,7 +1,8 @@
-//! Settings kept between launches: the screen layout, the speeds of
-//! fast-forward and slow motion, the resolution of DS 3D, the video
-//! filter, what fills the window around the screens and whether the
-//! window shows its controls.
+//! Settings kept between launches, so the app opens as it was left: the
+//! screen layout, fast-forward and slow motion and their speeds, the
+//! resolution of DS 3D, the video filter and colour correction, what
+//! fills the window around the screens, the save-state slot, and the
+//! window's place, size and controls.
 //!
 //! The app writes them whenever one changes, as TOML next to the bindings
 //! file:
@@ -16,21 +17,33 @@
 //! [speed]
 //! fast_forward = 2.0      # times normal speed, or "unlimited"
 //! slow_motion = 0.5       # times normal speed
+//! fast_forward_on = false # left on with ⌘F
+//! slow_motion_on = false  # left on with ⌘⇧F
 //!
 //! [video]
 //! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
 //! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
 //! show_fps = true        # the frame rate and speed in the window's corner
 //! backdrop = "ambient"    # around the screens: "ambient" (the game's colours, blurred) or "solid"
+//! color_correction = true # GBC and GBA colours as their screens showed them
 //!
 //! [game_boy]
 //! dmg_colors = "game-boy-color"  # games for the original Game Boy: "grey", or
 //!                               # on a Game Boy Color, by title or with a
 //!                               # button combination such as "left+b"
 //!
+//! [states]
+//! slot = 1                # the save-state slot ⌘S and ⌘L use, 1 to 4
+//!
 //! [window]
 //! controls = true         # the close, minimise and zoom buttons
 //! key_guide = true        # the keys that play the game, along the foot
+//! fullscreen = false
+//! display = "37d8832a…"   # the display it was on, by its UUID
+//! x = 320.0               # where the window was on it and its size outside
+//! y = 120.0               # full screen, in logical pixels; left out
+//! width = 640.0           # until the window has been moved or resized
+//! height = 960.0
 //! ```
 //!
 //! Settings missing from the file keep their defaults. Files saved before
@@ -46,6 +59,7 @@ use crate::ambient::Backdrop;
 use crate::filter::Filter;
 use crate::layout::{Arrangement, Layout, Rotation};
 use crate::persist;
+use crate::slots::STATE_SLOTS;
 use crate::speed::{MIN_RATE, Rate, Speed, Speeds};
 
 /// Each arrangement and its name in the file.
@@ -67,6 +81,10 @@ pub struct Settings {
     pub layout: Layout,
     /// How fast fast-forward and slow motion run.
     pub speed: Speeds,
+    /// Whether fast-forward was left on.
+    pub fast_forward_on: bool,
+    /// Whether slow motion was left on.
+    pub slow_motion_on: bool,
     /// How many times its own resolution DS 3D is drawn at, 1 to
     /// [`MAX_RESOLUTION_3D`] (see `Core::set_render_scale`).
     pub resolution_3d: u32,
@@ -76,6 +94,12 @@ pub struct Settings {
     pub show_fps: bool,
     /// What fills the window around the screens.
     pub backdrop: Backdrop,
+    /// Whether GBC and GBA colours are corrected to look as on their
+    /// screens.
+    pub color_correction: bool,
+    /// The save-state slot saving and loading use, from 1 to
+    /// [`STATE_SLOTS`].
+    pub state_slot: u8,
     /// How games made for the original Game Boy are shown, from the next
     /// game opened.
     pub dmg_colors: DmgColors,
@@ -85,6 +109,26 @@ pub struct Settings {
     /// Whether the keys that play the game show along the foot of the
     /// window.
     pub key_guide: bool,
+    /// Where the main window was left, if it has been placed.
+    pub window_place: Option<WindowPlace>,
+}
+
+/// Where the main window was and how large, to open it there again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowPlace {
+    /// Left edge, in logical pixels across the desktop.
+    pub x: f32,
+    /// Top edge, in logical pixels down the desktop.
+    pub y: f32,
+    /// Width outside full screen.
+    pub width: f32,
+    /// Height outside full screen.
+    pub height: f32,
+    /// Whether the window was in full screen.
+    pub fullscreen: bool,
+    /// The display it was on, which `x` and `y` are measured across, by
+    /// its UUID; `None` for the main display.
+    pub display: Option<u128>,
 }
 
 impl Default for Settings {
@@ -92,13 +136,18 @@ impl Default for Settings {
         Self {
             layout: Layout::default(),
             speed: Speeds::default(),
+            fast_forward_on: false,
+            slow_motion_on: false,
             resolution_3d: 1,
             filter: Filter::None,
             show_fps: false,
             backdrop: Backdrop::Ambient,
+            color_correction: true,
+            state_slot: 1,
             dmg_colors: DmgColors::ByTitle,
             window_controls: true,
             key_guide: true,
+            window_place: None,
         }
     }
 }
@@ -110,7 +159,22 @@ struct SettingsFile {
     speed: SpeedSection,
     video: VideoSection,
     game_boy: GameBoySection,
+    states: StatesSection,
     window: WindowSection,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StatesSection {
+    slot: u8,
+}
+
+impl Default for StatesSection {
+    fn default() -> Self {
+        Self {
+            slot: Settings::default().state_slot,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -118,14 +182,63 @@ struct SettingsFile {
 struct WindowSection {
     controls: bool,
     key_guide: bool,
+    fullscreen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    y: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
 }
 
 impl Default for WindowSection {
     fn default() -> Self {
+        WindowSection::from(&Settings::default())
+    }
+}
+
+impl From<&Settings> for WindowSection {
+    fn from(settings: &Settings) -> Self {
+        let place = settings.window_place;
         Self {
-            controls: Settings::default().window_controls,
-            key_guide: Settings::default().key_guide,
+            controls: settings.window_controls,
+            key_guide: settings.key_guide,
+            fullscreen: place.is_some_and(|place| place.fullscreen),
+            x: place.map(|place| place.x),
+            y: place.map(|place| place.y),
+            width: place.map(|place| place.width),
+            height: place.map(|place| place.height),
+            display: place
+                .and_then(|place| place.display)
+                .map(|uuid| format!("{uuid:032x}")),
         }
+    }
+}
+
+impl WindowSection {
+    /// The window's place, if the file gives all of it and its size is
+    /// one a window can have. Anything less opens the window afresh.
+    fn place(&self) -> Option<WindowPlace> {
+        let place = WindowPlace {
+            x: self.x?,
+            y: self.y?,
+            width: self.width?,
+            height: self.height?,
+            fullscreen: self.fullscreen,
+            // A display not named, or not readably, is the main one.
+            display: self
+                .display
+                .as_deref()
+                .and_then(|uuid| u128::from_str_radix(uuid, 16).ok()),
+        };
+        let finite = [place.x, place.y, place.width, place.height]
+            .iter()
+            .all(|value| value.is_finite());
+        (finite && place.width >= 1.0 && place.height >= 1.0).then_some(place)
     }
 }
 
@@ -183,16 +296,23 @@ struct VideoSection {
     filter: String,
     show_fps: bool,
     backdrop: String,
+    color_correction: bool,
 }
 
 impl Default for VideoSection {
     fn default() -> Self {
-        let settings = Settings::default();
+        VideoSection::from(&Settings::default())
+    }
+}
+
+impl From<&Settings> for VideoSection {
+    fn from(settings: &Settings) -> Self {
         Self {
             resolution_3d: settings.resolution_3d,
             filter: settings.filter.name().to_owned(),
             show_fps: settings.show_fps,
             backdrop: settings.backdrop.name().to_owned(),
+            color_correction: settings.color_correction,
         }
     }
 }
@@ -251,6 +371,8 @@ impl LayoutSection {
 struct SpeedSection {
     fast_forward: FastForward,
     slow_motion: f64,
+    fast_forward_on: bool,
+    slow_motion_on: bool,
 }
 
 /// The fast-forward speed as the file gives it: a multiple of normal
@@ -267,18 +389,21 @@ const UNLIMITED: &str = "unlimited";
 
 impl Default for SpeedSection {
     fn default() -> Self {
-        SpeedSection::from(&Speeds::default())
+        SpeedSection::from(&Settings::default())
     }
 }
 
-impl From<&Speeds> for SpeedSection {
-    fn from(speeds: &Speeds) -> Self {
+impl From<&Settings> for SpeedSection {
+    fn from(settings: &Settings) -> Self {
+        let speeds = settings.speed;
         Self {
             fast_forward: match speeds.fast_forward {
                 Speed::Unlimited => FastForward::Word(UNLIMITED.to_owned()),
                 Speed::Times(rate) => FastForward::Times(rate.get()),
             },
             slow_motion: speeds.slow_motion.get(),
+            fast_forward_on: settings.fast_forward_on,
+            slow_motion_on: settings.slow_motion_on,
         }
     }
 }
@@ -318,16 +443,25 @@ impl Settings {
             .ok_or_else(|| SettingsError::UnknownBackdrop(file.video.backdrop.clone()))?;
         let dmg_colors = dmg_colors_from_name(&file.game_boy.dmg_colors)
             .ok_or_else(|| SettingsError::UnknownDmgColors(file.game_boy.dmg_colors.clone()))?;
+        let state_slot = file.states.slot;
+        if !(1..=STATE_SLOTS).contains(&state_slot) {
+            return Err(SettingsError::UnknownStateSlot(state_slot));
+        }
         Ok(Self {
             layout: file.layout.to_layout()?,
             speed: file.speed.to_speeds()?,
+            fast_forward_on: file.speed.fast_forward_on,
+            slow_motion_on: file.speed.slow_motion_on,
             resolution_3d,
             filter,
             show_fps: file.video.show_fps,
             backdrop,
+            color_correction: file.video.color_correction,
+            state_slot,
             dmg_colors,
             window_controls: file.window.controls,
             key_guide: file.window.key_guide,
+            window_place: file.window.place(),
         })
     }
 
@@ -335,20 +469,15 @@ impl Settings {
     pub fn to_toml(self) -> String {
         let file = SettingsFile {
             layout: LayoutSection::from(&self.layout),
-            speed: SpeedSection::from(&self.speed),
-            video: VideoSection {
-                resolution_3d: self.resolution_3d,
-                filter: self.filter.name().to_owned(),
-                show_fps: self.show_fps,
-                backdrop: self.backdrop.name().to_owned(),
-            },
+            speed: SpeedSection::from(&self),
+            video: VideoSection::from(&self),
             game_boy: GameBoySection {
                 dmg_colors: dmg_colors_name(self.dmg_colors),
             },
-            window: WindowSection {
-                controls: self.window_controls,
-                key_guide: self.key_guide,
+            states: StatesSection {
+                slot: self.state_slot,
             },
+            window: WindowSection::from(&self),
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
         format!("# Saved by ds-emulator whenever a setting changes.\n\n{body}")
@@ -415,6 +544,9 @@ pub enum SettingsError {
     /// The colours for original Game Boy games are not one of the names.
     #[error("unknown Game Boy colours {0:?} in settings")]
     UnknownDmgColors(String),
+    /// The save-state slot is not 1 to [`STATE_SLOTS`].
+    #[error("unknown save-state slot {0} in settings; use 1 to {max}", max = STATE_SLOTS)]
+    UnknownStateSlot(u8),
     /// The 3D resolution is not 1 to [`MAX_RESOLUTION_3D`] times.
     #[error("unsupported 3D resolution {0}x in settings; use 1 to {max}", max = MAX_RESOLUTION_3D)]
     UnsupportedResolution(u32),
@@ -448,13 +580,25 @@ mod tests {
                 fast_forward: Speed::Times(Rate::new(3.0).expect("valid rate")),
                 slow_motion: Rate::new(0.25).expect("valid rate"),
             },
+            fast_forward_on: true,
+            slow_motion_on: true,
             resolution_3d: 4,
             filter: Filter::Scanlines,
             show_fps: true,
             backdrop: Backdrop::Solid,
+            color_correction: false,
+            state_slot: 3,
             dmg_colors: DmgColors::Buttons(9),
             window_controls: false,
             key_guide: false,
+            window_place: Some(WindowPlace {
+                x: -1200.0,
+                y: 40.5,
+                width: 640.0,
+                height: 980.0,
+                fullscreen: true,
+                display: Some(0x37d8_832a_2d66_02ca_b9f7_8f6a_8a6b_1fd0),
+            }),
         };
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
@@ -467,6 +611,15 @@ mod tests {
         assert!(text.contains("fast_forward = 3.0"), "{text}");
         assert!(text.contains("controls = false"), "{text}");
         assert!(text.contains("key_guide = false"), "{text}");
+        assert!(text.contains("fast_forward_on = true"), "{text}");
+        assert!(text.contains("color_correction = false"), "{text}");
+        assert!(text.contains("slot = 3"), "{text}");
+        assert!(text.contains("fullscreen = true"), "{text}");
+        assert!(text.contains("x = -1200.0"), "{text}");
+        assert!(
+            text.contains("display = \"37d8832a2d6602cab9f78f6a8a6b1fd0\""),
+            "{text}"
+        );
         assert_eq!(Settings::from_toml(&text), Ok(settings));
     }
 
@@ -622,6 +775,53 @@ mod tests {
                 "{text}: {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_window_never_placed_is_left_out_of_the_file() {
+        let text = Settings::default().to_toml();
+        assert!(!text.contains("width"), "{text}");
+        assert_eq!(Settings::from_toml(&text), Ok(Settings::default()));
+    }
+
+    #[test]
+    fn a_window_place_needs_all_of_it_and_a_real_size() {
+        let place = |text: &str| Settings::from_toml(text).map(|settings| settings.window_place);
+        assert_eq!(
+            place("[window]\nx = 10.0\ny = 20.0\nwidth = 300.0\n"),
+            Ok(None)
+        );
+        assert_eq!(
+            place("[window]\nx = 10.0\ny = 20.0\nwidth = 0.0\nheight = 300.0\n"),
+            Ok(None)
+        );
+        assert_eq!(
+            place("[window]\nx = 10.0\ny = 20.0\nwidth = 300.0\nheight = 400.0\n"),
+            Ok(Some(WindowPlace {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 400.0,
+                fullscreen: false,
+                display: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn state_slots_are_1_to_4() {
+        assert_eq!(
+            Settings::from_toml("[states]\nslot = 4\n").map(|settings| settings.state_slot),
+            Ok(4)
+        );
+        assert_eq!(
+            Settings::from_toml("[states]\nslot = 5\n"),
+            Err(SettingsError::UnknownStateSlot(5))
+        );
+        assert_eq!(
+            Settings::from_toml("[states]\nslot = 0\n"),
+            Err(SettingsError::UnknownStateSlot(0))
+        );
     }
 
     #[test]

@@ -69,8 +69,9 @@ pub struct LibraryView {
     /// Whether the search field has the caret: clicked or typed into,
     /// until Escape leaves it.
     searching: bool,
-    /// The chosen game, as an index into those shown.
-    selected: usize,
+    /// The chosen game, by its ROM's path, so it stays chosen as titles
+    /// are looked up and the games sort anew. The first shown if none is.
+    selected: Option<PathBuf>,
     /// How many games fit across, as last drawn.
     columns: usize,
     scroll: ScrollHandle,
@@ -95,7 +96,7 @@ impl LibraryView {
             covers: HashMap::new(),
             query: String::new(),
             searching: false,
-            selected: 0,
+            selected: None,
             columns: 1,
             scroll: ScrollHandle::new(),
             looking_up: None,
@@ -155,34 +156,38 @@ impl LibraryView {
     pub fn key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
-        let shown = self.shown_count();
         match keystroke.key.as_str() {
             "backspace" if modifiers.platform => self.remove_selected(cx),
             _ if modifiers.platform || modifiers.control => return false,
+            // A new search chooses its first match.
             "backspace" => {
                 self.query.pop();
-                self.selected = 0;
+                self.selected = None;
             }
             // The first Escape clears the search, the next leaves it.
             "escape" if self.query.is_empty() => self.searching = false,
             "escape" => {
                 self.query.clear();
-                self.selected = 0;
+                self.selected = None;
             }
             "enter" => {
-                if let Some(game) = self.shown().get(self.selected) {
+                let shown = self.shown();
+                if let Some(game) = shown.get(position(&shown, self.selected.as_deref())) {
                     cx.emit(LibraryEvent::Play(game.path.clone()));
                 }
             }
             key @ ("left" | "right" | "up" | "down") => {
-                self.selected = moved(self.selected, shown, self.columns, key);
-                self.scroll.scroll_to_item(self.selected);
+                let shown = self.shown();
+                let at = position(&shown, self.selected.as_deref());
+                let at = moved(at, shown.len(), self.columns, key);
+                self.selected = shown.get(at).map(|game| game.path.clone());
+                self.scroll.scroll_to_item(at);
             }
             _ => match &keystroke.key_char {
                 Some(text) if text.chars().all(|c| !c.is_control()) => {
                     self.query.push_str(text);
                     self.searching = true;
-                    self.selected = 0;
+                    self.selected = None;
                 }
                 _ => return false,
             },
@@ -196,20 +201,18 @@ impl LibraryView {
         self.library.find(&self.query, None)
     }
 
-    fn shown_count(&self) -> usize {
-        self.shown().len()
-    }
-
+    /// Takes the chosen game out of the library, choosing the game that
+    /// takes its place.
     fn remove_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .shown()
-            .get(self.selected)
-            .map(|game| game.path.clone())
-        else {
+        let shown = self.shown();
+        let at = position(&shown, self.selected.as_deref());
+        let Some(path) = shown.get(at).map(|game| game.path.clone()) else {
             return;
         };
         self.library.remove(&path);
-        self.selected = self.selected.min(self.shown_count().saturating_sub(1));
+        let shown = self.shown();
+        let at = at.min(shown.len().saturating_sub(1));
+        self.selected = shown.get(at).map(|game| game.path.clone());
         self.save(cx);
     }
 
@@ -416,7 +419,7 @@ impl LibraryView {
     }
 
     fn tile(&self, index: usize, game: &Game, width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let chosen = index == self.selected;
+        let chosen = self.selected.as_ref() == Some(&game.path);
         let path = game.path.clone();
         let art = match self.covers.get(&game.crc32) {
             Some(cover) => img(cover.clone())
@@ -446,7 +449,7 @@ impl LibraryView {
             .cursor_pointer()
             .when(chosen, |tile| tile.bg(rgba(CHOSEN)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected = index;
+                this.selected = Some(path.clone());
                 cx.emit(LibraryEvent::Play(path.clone()));
             }))
             .child(
@@ -500,8 +503,13 @@ impl gpui::Render for LibraryView {
         let width = f32::from(window.viewport_size().width);
         let (columns, tile) = grid(width - 2.0 * PADDING);
         self.columns = columns;
-        let count = self.shown_count();
-        self.selected = self.selected.min(count.saturating_sub(1));
+        let shown = self.shown();
+        let at = position(&shown, self.selected.as_deref());
+        let selected = shown.get(at).map(|game| game.path.clone());
+        let games: Vec<Game> = shown.into_iter().cloned().collect();
+        // The game drawn as chosen is the one chosen, wherever titles
+        // looked up later sort it.
+        self.selected = selected;
 
         let root = div()
             .size_full()
@@ -514,10 +522,9 @@ impl gpui::Render for LibraryView {
             ))
             .child(self.header(cx))
             .child(self.search_field(cx));
-        if count == 0 {
+        if games.is_empty() {
             return root.child(self.empty());
         }
-        let games: Vec<Game> = self.shown().into_iter().cloned().collect();
         let tiles: Vec<AnyElement> = games
             .iter()
             .enumerate()
@@ -591,6 +598,14 @@ fn grid(width: f32) -> (usize, f32) {
     (columns, tile.max(MIN_TILE / 2.0))
 }
 
+/// Where the game at `selected` is among `shown`, or the first if it is
+/// not shown or none is chosen.
+fn position(shown: &[&Game], selected: Option<&Path>) -> usize {
+    selected
+        .and_then(|selected| shown.iter().position(|game| game.path == selected))
+        .unwrap_or(0)
+}
+
 /// The game chosen after pressing `key` with `selected` of `count` chosen
 /// in a grid `columns` wide. Up and down stay put at the top and bottom.
 fn moved(selected: usize, count: usize, columns: usize, key: &str) -> usize {
@@ -631,5 +646,29 @@ mod tests {
         assert_eq!(moved(3, 7, 3, "down"), 6);
         assert_eq!(moved(4, 7, 3, "down"), 4);
         assert_eq!(moved(0, 0, 3, "right"), 0);
+    }
+
+    #[test]
+    fn the_chosen_game_stays_chosen_as_titles_sort_anew() {
+        let mut library = Library::default();
+        for name in ["Advance Wars.gba", "Golden Sun.gba", "Metroid Fusion.gba"] {
+            let info = rom_info::RomInfo {
+                platform: rom_info::Platform::Gba,
+                crc32: 1,
+                serial: None,
+                header_title: None,
+                banner_title: None,
+            };
+            library.add(Game::new(Path::new(name), &info));
+        }
+        let chosen = Path::new("Golden Sun.gba");
+        assert_eq!(position(&library.find("", None), Some(chosen)), 1);
+        // Looked up, Advance Wars turns out to sort last.
+        library.games[0].found(Some("Wars, The (USA)".to_owned()));
+        assert_eq!(position(&library.find("", None), Some(chosen)), 0);
+        assert_eq!(position(&library.find("", None), None), 0);
+        let gone = Path::new("Removed.gba");
+        assert_eq!(position(&library.find("", None), Some(gone)), 0);
+        assert_eq!(position(&[], Some(chosen)), 0);
     }
 }

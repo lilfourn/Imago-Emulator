@@ -6,6 +6,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::persist;
 
+/// Save-state slots, numbered from 1.
+pub const STATE_SLOTS: u8 = 4;
+
 /// A slot's screenshot and when it was saved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotPreview {

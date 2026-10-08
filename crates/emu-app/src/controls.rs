@@ -70,6 +70,16 @@ impl Controls {
         self.slow_motion_latched
     }
 
+    /// Whether fast-forward is latched on.
+    pub fn fast_forward_latched(&self) -> bool {
+        self.fast_forward_latched
+    }
+
+    /// Whether slow motion is latched on.
+    pub fn slow_motion_latched(&self) -> bool {
+        self.slow_motion_latched
+    }
+
     /// The combined state.
     pub fn state(&self) -> HeldState {
         let mut state = HeldState::default();
