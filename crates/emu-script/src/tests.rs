@@ -635,3 +635,36 @@ fn a_failed_callback_still_reports_the_frame() {
         "and nothing of the frontend's stopped it"
     );
 }
+
+#[test]
+fn finalizers_cannot_reenter_the_core_or_the_state() {
+    // Garbage whose finalizers call back in, collected while the script's
+    // own functions are busy allocating.
+    let source = r#"
+        local function litter()
+            for _ = 1, 200 do
+                setmetatable({}, {__gc = function()
+                    memory.read_u8(0)
+                    emu.on_frame(function() end)
+                    print("collected")
+                end})
+            end
+        end
+        emu.on_frame(function()
+            for _ = 1, 50 do
+                litter()
+                local registers = emu.registers()
+                joypad.get()
+                gui.text(0, 0, "x")
+            end
+            collectgarbage()
+        end)
+    "#;
+    let mut core = TestCore::new();
+    let mut script = started(source, &mut core);
+    let mut pending = script.take_output();
+    for _ in 0..5 {
+        pending = frame(&mut script, &mut core, &pending, Buttons::NONE);
+    }
+    drop(script);
+}

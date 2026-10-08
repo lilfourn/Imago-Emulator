@@ -90,14 +90,21 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// The script's state, or an error rather than a panic if it is in use:
+/// Lua can run a finalizer while the state is borrowed.
 pub fn state(lua: &Lua) -> mlua::Result<AppDataRef<'_, State>> {
-    lua.app_data_ref()
-        .ok_or_else(|| mlua::Error::runtime("the script's state is missing"))
+    lua.try_app_data_ref()
+        .ok()
+        .flatten()
+        .ok_or_else(|| mlua::Error::runtime("the script's state is busy"))
 }
 
+/// The script's state to change; see [`state`].
 pub fn state_mut(lua: &Lua) -> mlua::Result<AppDataRefMut<'_, State>> {
-    lua.app_data_mut()
-        .ok_or_else(|| mlua::Error::runtime("the script's state is missing"))
+    lua.try_app_data_mut()
+        .ok()
+        .flatten()
+        .ok_or_else(|| mlua::Error::runtime("the script's state is busy"))
 }
 
 fn emu(lua: &Lua) -> mlua::Result<Table> {

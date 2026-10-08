@@ -339,11 +339,16 @@ impl Script {
             host.raw_set(
                 "registers",
                 scope.create_function(|lua, cpu: usize| {
+                    // Let go of the core before building the table: Lua
+                    // may run a finalizer that reads memory as it
+                    // allocates.
+                    let registers = match core.borrow_mut().debugger() {
+                        Some(debugger) => debugger.registers(cpu),
+                        None => Vec::new(),
+                    };
                     let table = lua.create_table()?;
-                    if let Some(debugger) = core.borrow_mut().debugger() {
-                        for register in debugger.registers(cpu) {
-                            table.raw_set(register.name, register.value)?;
-                        }
+                    for register in registers {
+                        table.raw_set(register.name, register.value)?;
                     }
                     Ok(table)
                 })?,

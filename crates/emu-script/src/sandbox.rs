@@ -58,7 +58,7 @@ pub fn new() -> mlua::Result<Lua> {
     lua.set_app_data(Budget::default());
     let triggers = HookTriggers::new().every_nth_instruction(CHECK_EVERY);
     lua.set_global_hook(triggers, |lua, debug| {
-        let Some(mut budget) = lua.app_data_mut::<Budget>() else {
+        let Ok(Some(mut budget)) = lua.try_app_data_mut::<Budget>() else {
             return Ok(VmState::Continue);
         };
         budget.used += u64::from(CHECK_EVERY);
@@ -85,7 +85,7 @@ pub fn new() -> mlua::Result<Lua> {
 
 /// Starts a new call into the script with its whole instruction budget.
 pub fn refill(lua: &Lua) {
-    if let Some(mut budget) = lua.app_data_mut::<Budget>() {
+    if let Ok(Some(mut budget)) = lua.try_app_data_mut::<Budget>() {
         *budget = Budget::default();
     }
 }
@@ -93,7 +93,9 @@ pub fn refill(lua: &Lua) {
 /// Fails if the call under way ran out of instructions.
 pub fn check(lua: &Lua) -> mlua::Result<()> {
     match lua
-        .app_data_ref::<Budget>()
+        .try_app_data_ref::<Budget>()
+        .ok()
+        .flatten()
         .and_then(|budget| budget.spent.clone())
     {
         Some(message) => Err(mlua::Error::RuntimeError(message)),
