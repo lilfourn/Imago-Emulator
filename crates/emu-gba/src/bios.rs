@@ -291,28 +291,33 @@ fn arc_tan2(x: i32, y: i32) -> (u16, Option<i32>) {
 }
 
 /// CpuSet: copies or fills `control & 0x1FFFFF` halfwords or words.
-fn cpu_set(bus: &mut Bus, source: u32, destination: u32, control: u32) {
+///
+/// The BIOS moves words with LDMIA and STMIA and halfwords with LDRH and
+/// STRH, and never aligns the addresses it is given, so misaligned ones
+/// behave as those instructions do: word accesses ignore the low bits
+/// (except on SRAM's 8-bit bus, which sees the address as it is), and a
+/// halfword load from an odd address keeps only the high byte.
+fn cpu_set(bus: &mut Bus, mut source: u32, mut destination: u32, control: u32) {
+    if reads_protected_memory(source) {
+        return;
+    }
     let count = control & 0x1F_FFFF;
     let fill = control & (1 << 24) != 0;
     let words = control & (1 << 26) != 0;
     let step = if words { 4 } else { 2 };
-    let (mut source, mut destination) = if words {
-        (source & !3, destination & !3)
-    } else {
-        (source & !1, destination & !1)
+    let load = |bus: &mut Bus, address: u32, access: Access| {
+        if words {
+            bus.read_32(address, access)
+        } else {
+            u32::from(load_halfword(bus, address, access))
+        }
     };
-    let fill_value = if words {
-        bus.read_32(source, Access::NONSEQUENTIAL)
-    } else {
-        u32::from(bus.read_16(source, Access::NONSEQUENTIAL))
-    };
+    let fill_value = load(bus, source, Access::NONSEQUENTIAL);
     for _ in 0..count {
         let value = if fill {
             fill_value
-        } else if words {
-            bus.read_32(source, Access::SEQUENTIAL)
         } else {
-            u32::from(bus.read_16(source, Access::SEQUENTIAL))
+            load(bus, source, Access::SEQUENTIAL)
         };
         if words {
             bus.write_32(destination, value, Access::SEQUENTIAL);
@@ -324,11 +329,28 @@ fn cpu_set(bus: &mut Bus, source: u32, destination: u32, control: u32) {
     }
 }
 
-/// CpuFastSet: word copies or fills in blocks of eight words.
-fn cpu_fast_set(bus: &mut Bus, source: u32, destination: u32, control: u32) {
+/// Whether CpuSet and CpuFastSet refuse `source`: the BIOS will not copy
+/// from addresses whose bits 25–27 are clear, which keeps its own code
+/// (and the unmapped space after it) from being read out.
+fn reads_protected_memory(source: u32) -> bool {
+    source & 0x0E00_0000 == 0
+}
+
+/// Loads a halfword as LDRH does: from an odd address the ARM7TDMI
+/// rotates the aligned halfword right by 8, which leaves its high byte.
+fn load_halfword(bus: &mut Bus, address: u32, access: Access) -> u16 {
+    let value = bus.read_16(address, access);
+    if address & 1 == 0 { value } else { value >> 8 }
+}
+
+/// CpuFastSet: word copies or fills in blocks of eight words, moved with
+/// LDMIA and STMIA like CpuSet's words (addresses are not aligned).
+fn cpu_fast_set(bus: &mut Bus, mut source: u32, mut destination: u32, control: u32) {
+    if reads_protected_memory(source) {
+        return;
+    }
     let count = (control & 0x1F_FFFF).div_ceil(8) * 8;
     let fill = control & (1 << 24) != 0;
-    let (mut source, mut destination) = (source & !3, destination & !3);
     let fill_value = bus.read_32(source, Access::NONSEQUENTIAL);
     for _ in 0..count {
         let value = if fill {
@@ -635,6 +657,30 @@ fn midi_key_to_frequency(bus: &mut Bus, wave: u32, key: u8, fine: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ram_bus() -> Bus {
+        let cartridge = emu_gba_cart::Cartridge::new(vec![0; 0x400].into(), None, 0);
+        Bus::new(cartridge, image())
+    }
+
+    #[test]
+    fn cpu_set_moves_misaligned_halfwords_as_ldrh_does() {
+        let mut bus = ram_bus();
+        bus.write_32(0x0200_0000, 0xDEAD_BEEF, Access::NONSEQUENTIAL);
+        bus.write_32(0x0200_0004, 0x3333_3333, Access::NONSEQUENTIAL);
+        cpu_set(&mut bus, 0x0200_0001, 0x0300_0000, 2);
+        assert_eq!(bus.read_32(0x0300_0000, Access::NONSEQUENTIAL), 0x00DE_00BE);
+    }
+
+    #[test]
+    fn cpu_set_and_cpu_fast_set_will_not_read_the_bios() {
+        let mut bus = ram_bus();
+        cpu_set(&mut bus, 0, 0x0300_0000, 1 << 26 | 4);
+        cpu_fast_set(&mut bus, 0x10, 0x0300_0010, 8);
+        for address in [0x0300_0000, 0x0300_0010] {
+            assert_eq!(bus.read_32(address, Access::NONSEQUENTIAL), 0);
+        }
+    }
 
     #[test]
     fn integer_square_roots() {
