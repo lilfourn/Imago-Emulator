@@ -88,11 +88,11 @@ cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua g
 | Game | Key | Gamepad | | App | Shortcut |
 |---|---|---|---|---|---|
 | D-pad | W A S D or arrow keys | D-pad, left stick | | Open ROM | ⌘O |
-| A / B | K / J | East / South | | Pause / resume | ⌘P |
+| A / B | K, Return or left click / J | East / South | | Pause / resume | ⌘P |
 | X / Y (DS) | I / U | North / West | | Reset | ⌘R |
 | L / R | Q / E | Shoulder buttons | | Save / load state | ⌘S / ⌘L |
-| Start / Select | Return / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
-| Touchscreen | Click and drag | Right stick moves a cursor; click a stick to touch | | Fast-forward / slow motion on/off | ⌘F / ⌘⇧F |
+| Start / Select | Space / Delete | Start / Select | | Next / previous state slot | ⌘] / ⌘[ |
+| Touchscreen | | Right stick moves a cursor; click a stick to touch | | Fast-forward / slow motion on/off | ⌘F / ⌘⇧F |
 | Fast-forward (2×) | Hold Tab | Right trigger | | Stacked / side by side / one screen / hybrid | ⌘1 / ⌘2 / ⌘3 / ⌘4 |
 | Slow motion | Hold 1 | | | Swap screens / Quit | ⌘E / ⌘Q |
 | Rewind | Hold R | Left trigger | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
