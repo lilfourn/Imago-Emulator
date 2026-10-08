@@ -188,10 +188,18 @@ pub trait Debugger {
 - Dropping the `Emulator` handle closes its command channel. The thread
   finishes the frame, flushes the battery save, and is joined. The view
   drops it on app quit for the same reason.
-- Frame pacing is a sleep to the next deadline. Sound stays in sync through
+- Frame pacing is a sleep to the next deadline, taken in naps of three
+  quarters of the time left, because macOS wakes a thread up to a quarter
+  of its sleep late (`speed::sleep_until`). Fast-forward (2× unless the
+  Emulation menu or settings say otherwise) and slow motion move the
+  deadlines closer or further apart. Sound stays in sync through
   a ring buffer and a resampler that nudges its ratio by up to ±0.5%
   ([decision 0003](decisions/0003-frame-pacing.md)). The `cpal` stream lives
   on the UI thread; the emulation thread owns the producer end.
+- The emulation thread counts the frames it runs and rewind steps it
+  takes (`Latest::frames_shown`); while View > Show FPS is on, the view
+  samples the count twice a second (`meter.rs`) for the readout in the
+  window's corner.
 - A gamepad thread polls `gilrs` and sends plain `PadEvent`s ("South
   pressed") to the view, which maps them through the same bindings as the
   keyboard. `controls.rs` combines every held key and control, so releasing
