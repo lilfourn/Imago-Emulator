@@ -16,6 +16,10 @@ use crate::vram::{Region, Vram};
 /// hits.
 const ARM9_CACHE_HIT: u64 = 2;
 
+/// ARM7 cycles for an access to its working RAM, shared or its own, at
+/// any width.
+const ARM7_WRAM: u64 = 1;
+
 /// Access width, for wait states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Width {
@@ -529,6 +533,22 @@ impl Hardware {
         }
     }
 
+    /// The ARM7's working RAM, shared or its own, if that is where `place`
+    /// is, and the index there, after charging the access's cycle as
+    /// [`Hardware::arm7_wait`] does; `None` for every other place. The
+    /// ARM7's code and stacks live there, so its bus tries it before the
+    /// rest of the memory map.
+    #[inline]
+    pub(crate) fn arm7_wram_hit(&mut self, place: Place) -> Option<(&mut [u8], usize)> {
+        let (memory, index) = match place {
+            Place::SharedWram(index) => (&mut self.shared_wram, index),
+            Place::Arm7Wram(index) => (&mut self.arm7_wram, index),
+            _ => return None,
+        };
+        self.arm7.cycles += ARM7_WRAM;
+        Some((memory, index))
+    }
+
     /// ARM7 cycles (bus cycles) for an access to `address`, at `place`.
     pub(crate) fn arm7_wait(
         &self,
@@ -552,6 +572,7 @@ impl Hardware {
             }
             Place::GbaRam => gba_slot::ram_cycles(self.gba_slot_timing(Side::Arm7)),
             Place::Wifi => self.wifi_cycles(address, width, sequential),
+            Place::SharedWram(_) | Place::Arm7Wram(_) => ARM7_WRAM,
             _ => 1,
         }
     }

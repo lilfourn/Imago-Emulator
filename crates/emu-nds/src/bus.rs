@@ -8,7 +8,7 @@ use crate::hardware::Hardware;
 use crate::interrupt::irq;
 use crate::ipc::Side;
 use crate::machine::Arm9;
-use crate::memory::{self, Width};
+use crate::memory::{self, Place, Width};
 
 /// The ARM9's bus. TCM accesses never reach it; the CPU serves them.
 pub(crate) struct Arm9Bus<'a>(pub(crate) &'a mut Hardware);
@@ -123,49 +123,108 @@ impl Bus for Arm9Bus<'_> {
     }
 }
 
-impl Bus for Arm7Bus<'_> {
-    fn read_32(&mut self, address: u32, access: Access) -> u32 {
+/// The ARM7's bus tries its working RAM first ([`Hardware::arm7_wram_hit`]),
+/// then the rest of the memory map in these.
+impl Arm7Bus<'_> {
+    #[inline(never)]
+    fn mapped_read_32(&mut self, place: Place, address: u32, access: Access) -> u32 {
         let hw = &mut *self.0;
-        let place = hw.arm7_place(address & !3);
         hw.arm7.cycles += hw.arm7_wait(place, address, Width::Word, access);
         hw.read_place_32(false, place, address)
     }
 
-    fn read_16(&mut self, address: u32, access: Access) -> u16 {
+    #[inline(never)]
+    fn mapped_read_16(&mut self, place: Place, address: u32, access: Access) -> u16 {
         let hw = &mut *self.0;
-        let place = hw.arm7_place(address & !1);
         hw.arm7.cycles += hw.arm7_wait(place, address, Width::Half, access);
         hw.read_place_16(false, place, address)
     }
 
-    fn read_8(&mut self, address: u32, access: Access) -> u8 {
+    #[inline(never)]
+    fn mapped_read_8(&mut self, place: Place, address: u32, access: Access) -> u8 {
         let hw = &mut *self.0;
-        let place = hw.arm7_place(address);
         hw.arm7.cycles += hw.arm7_wait(place, address, Width::Byte, access);
         hw.read_place_8(false, place, address)
     }
 
-    fn write_32(&mut self, address: u32, value: u32, access: Access) {
+    #[inline(never)]
+    fn mapped_write_32(&mut self, place: Place, address: u32, value: u32, access: Access) {
         let hw = &mut *self.0;
-        let place = hw.arm7_place(address & !3);
         hw.arm7.cycles += hw.arm7_wait(place, address, Width::Word, access);
         hw.write_place_32(false, place, address, value);
     }
 
-    fn write_16(&mut self, address: u32, value: u16, access: Access) {
+    #[inline(never)]
+    fn mapped_write_16(&mut self, place: Place, address: u32, value: u16, access: Access) {
         let hw = &mut *self.0;
-        let place = hw.arm7_place(address & !1);
         hw.arm7.cycles += hw.arm7_wait(place, address, Width::Half, access);
         hw.write_place_16(false, place, address, value);
     }
 
-    fn write_8(&mut self, address: u32, value: u8, access: Access) {
+    #[inline(never)]
+    fn mapped_write_8(&mut self, place: Place, address: u32, value: u8, access: Access) {
         let hw = &mut *self.0;
-        let place = hw.arm7_place(address);
         hw.arm7.cycles += hw.arm7_wait(place, address, Width::Byte, access);
         hw.write_place_8(false, place, address, value);
     }
+}
 
+impl Bus for Arm7Bus<'_> {
+    #[inline]
+    fn read_32(&mut self, address: u32, access: Access) -> u32 {
+        let place = self.0.arm7_place(address & !3);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::word(wram, index),
+            None => self.mapped_read_32(place, address, access),
+        }
+    }
+
+    #[inline]
+    fn read_16(&mut self, address: u32, access: Access) -> u16 {
+        let place = self.0.arm7_place(address & !1);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::half(wram, index),
+            None => self.mapped_read_16(place, address, access),
+        }
+    }
+
+    #[inline]
+    fn read_8(&mut self, address: u32, access: Access) -> u8 {
+        let place = self.0.arm7_place(address);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => wram[index],
+            None => self.mapped_read_8(place, address, access),
+        }
+    }
+
+    #[inline]
+    fn write_32(&mut self, address: u32, value: u32, access: Access) {
+        let place = self.0.arm7_place(address & !3);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::put_word(wram, index, value),
+            None => self.mapped_write_32(place, address, value, access),
+        }
+    }
+
+    #[inline]
+    fn write_16(&mut self, address: u32, value: u16, access: Access) {
+        let place = self.0.arm7_place(address & !1);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => memory::put_half(wram, index, value),
+            None => self.mapped_write_16(place, address, value, access),
+        }
+    }
+
+    #[inline]
+    fn write_8(&mut self, address: u32, value: u8, access: Access) {
+        let place = self.0.arm7_place(address);
+        match self.0.arm7_wram_hit(place) {
+            Some((wram, index)) => wram[index] = value,
+            None => self.mapped_write_8(place, address, value, access),
+        }
+    }
+
+    #[inline]
     fn idle(&mut self) {
         self.0.arm7.cycles += 1;
     }
