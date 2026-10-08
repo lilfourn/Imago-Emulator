@@ -1,7 +1,9 @@
 //! Game Boy and Game Boy Color core.
 //!
 //! A cartridge whose header asks for CGB features runs on an emulated Game
-//! Boy Color in CGB mode; every other cartridge runs on a DMG.
+//! Boy Color in CGB mode. Every other cartridge runs on a DMG, or, if the
+//! player asks for colour ([`Media::dmg_colors`]), on a Game Boy Color in
+//! DMG mode with the palettes its boot ROM would pick.
 //!
 //! The CPU drives the machine: every memory access advances the timer,
 //! PPU, serial port, cartridge clock and OAM DMA by one M-cycle, so
@@ -11,6 +13,7 @@
 mod apu;
 mod bus;
 mod cartridge;
+mod compat_palettes;
 mod cpu;
 mod debug;
 mod disasm;
@@ -27,8 +30,8 @@ mod timer;
 
 use emu_core::debug::RunOutcome;
 use emu_core::{
-    Core, CoreInfo, Debugger, Frame, FrameRate, Input, LoadError, Media, MemoryRegion, RomPatch,
-    ScreenSize, StateError, StereoSample, System, SystemFileKind,
+    Core, CoreInfo, Debugger, DmgColors, Frame, FrameRate, Input, LoadError, Media, MemoryRegion,
+    RomPatch, ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +58,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(4_194_304, 70_224),
     audio_sample_rate: apu::SAMPLE_RATE,
     // Bump whenever any serialized struct changes shape.
-    state_version: 10,
+    state_version: 11,
 };
 
 /// A Game Boy with a cartridge inserted.
@@ -63,6 +66,9 @@ pub const INFO: CoreInfo = CoreInfo {
 pub struct Gb {
     machine: Machine,
     screens: [Frame; 1],
+    /// How the player chose to show games made for the original Game Boy,
+    /// for powering on again.
+    dmg_colors: DmgColors,
 }
 
 /// Everything a save state captures.
@@ -74,16 +80,31 @@ pub(crate) struct Machine {
 
 impl Machine {
     /// A machine at power-on: running the boot ROM if there is one,
-    /// otherwise in the state the boot ROM leaves.
-    fn power_on(model: Model, cartridge: Cartridge, boot_rom: Option<Box<[u8]>>) -> Self {
+    /// otherwise in the state the boot ROM leaves. On a Game Boy Color in
+    /// DMG mode that includes the palettes `dmg_colors` picks.
+    fn power_on(
+        model: Model,
+        dmg_colors: DmgColors,
+        cartridge: Cartridge,
+        boot_rom: Option<Box<[u8]>>,
+    ) -> Self {
+        let title_checksum = compat_palettes::nintendo_title_checksum(cartridge.rom());
+        let palettes = compat_palettes::palettes_for(cartridge.rom(), dmg_colors);
         let registers = match (boot_rom.is_some(), model) {
             (true, _) => Registers::default(),
             (false, Model::Dmg) => Registers::DMG_AFTER_BOOT,
             (false, Model::Cgb) => Registers::CGB_AFTER_BOOT,
+            (false, Model::CgbDmgMode) => {
+                Registers::cgb_dmg_mode_after_boot(title_checksum.unwrap_or(0))
+            }
         };
+        let mut bus = Bus::new(model, cartridge, boot_rom);
+        if let (Model::CgbDmgMode, Some(palettes)) = (model, palettes) {
+            bus.ppu.load_compat_palettes(&palettes);
+        }
         Self {
             cpu: Cpu::new(registers),
-            bus: Bus::new(model, cartridge, boot_rom),
+            bus,
         }
     }
 }
@@ -92,7 +113,9 @@ impl Gb {
     /// Powers on a Game Boy with `media`'s cartridge.
     ///
     /// Without a boot ROM in `media`, the machine starts in the state the
-    /// DMG boot ROM leaves, at 0x0100.
+    /// boot ROM leaves, at 0x0100. A game made for the original Game Boy
+    /// runs on a Game Boy Color in DMG mode unless [`Media::dmg_colors`] is
+    /// [`DmgColors::Grey`]; that never runs a boot ROM.
     ///
     /// # Errors
     ///
@@ -118,18 +141,25 @@ impl Gb {
             });
         }
 
-        let model = Model::for_rom(media.rom);
-        let cartridge = Cartridge::new(media.rom, media.backup, media.start_time)?;
-        let boot_rom_kind = match model {
-            Model::Dmg => SystemFileKind::GbBootRom,
-            Model::Cgb => SystemFileKind::GbcBootRom,
+        let model = match Model::for_rom(media.rom) {
+            Model::Dmg if media.dmg_colors != DmgColors::Grey => Model::CgbDmgMode,
+            model => model,
         };
-        let boot_rom = media
-            .system_file(boot_rom_kind)
+        let cartridge = Cartridge::new(media.rom, media.backup, media.start_time)?;
+        // The CGB boot ROM switches to DMG mode itself, which is not
+        // emulated, so DMG mode starts where it would leave off.
+        let boot_rom_kind = match model {
+            Model::Dmg => Some(SystemFileKind::GbBootRom),
+            Model::Cgb => Some(SystemFileKind::GbcBootRom),
+            Model::CgbDmgMode => None,
+        };
+        let boot_rom = boot_rom_kind
+            .and_then(|kind| media.system_file(kind))
             .map(|rom| rom.to_vec().into_boxed_slice());
         Ok(Self {
-            machine: Machine::power_on(model, cartridge, boot_rom),
+            machine: Machine::power_on(model, media.dmg_colors, cartridge, boot_rom),
             screens: [Frame::new(SCREENS[0])],
+            dmg_colors: media.dmg_colors,
         })
     }
 
@@ -256,7 +286,7 @@ impl Core for Gb {
         let model = self.model();
         let (mut cartridge, boot_rom) = self.machine.bus.take_media();
         cartridge.power_cycle();
-        self.machine = Machine::power_on(model, cartridge, boot_rom);
+        self.machine = Machine::power_on(model, self.dmg_colors, cartridge, boot_rom);
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
@@ -369,6 +399,41 @@ mod tests {
         let cgb = Gb::new(&Media::new(&rom_for(Model::Cgb, &[]))).expect("valid rom");
         assert_eq!((dmg.model(), cgb.model()), (Model::Dmg, Model::Cgb));
         assert_eq!(cgb.registers().a, 0x11);
+    }
+
+    #[test]
+    fn dmg_games_in_colour_run_on_a_cgb_in_dmg_mode() {
+        let mut rom = rom_for(Model::Dmg, &[]);
+        rom[0x134..0x13F].copy_from_slice(b"POKEMON RED");
+        rom[0x14B] = 0x01;
+        rom[0x14D] = rom[0x134..0x14D]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+        let in_colour = Media {
+            dmg_colors: DmgColors::ByTitle,
+            ..Media::new(&rom)
+        };
+        let mut gb = Gb::new(&in_colour).expect("valid rom");
+        assert_eq!(gb.model(), Model::CgbDmgMode);
+        // A = 0x11 tells games they are on a CGB; B holds the checksum.
+        let registers = gb.registers();
+        assert_eq!((registers.a, registers.b, registers.l), (0x11, 0x14, 0x7C));
+        // The palettes are the boot ROM's, out of the game's reach.
+        assert_eq!(gb.machine.bus.ppu.bg_palette_ram()[2..4], [0x1F, 0x42]);
+        assert_eq!(gb.peek(0xFF68), 0xFF);
+        assert_eq!(gb.peek(0xFF4F), 0xFF);
+        gb.reset();
+        assert_eq!(gb.machine.bus.ppu.bg_palette_ram()[2..4], [0x1F, 0x42]);
+
+        let grey = Gb::new(&Media::new(&rom)).expect("valid rom");
+        assert_eq!(grey.model(), Model::Dmg);
+        let cgb_rom = rom_for(Model::Cgb, &[]);
+        let cgb = Gb::new(&Media {
+            dmg_colors: DmgColors::ByTitle,
+            ..Media::new(&cgb_rom)
+        })
+        .expect("valid rom");
+        assert_eq!(cgb.model(), Model::Cgb);
     }
 
     #[test]

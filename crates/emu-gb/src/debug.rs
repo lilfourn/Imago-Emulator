@@ -151,8 +151,10 @@ impl Debugger for Gb {
         if cpu.halted() {
             status.push_str("  halted");
         }
-        if self.model() == Model::Cgb {
-            status.push_str("  CGB");
+        match self.model() {
+            Model::Dmg => {}
+            Model::Cgb => status.push_str("  CGB"),
+            Model::CgbDmgMode => status.push_str("  CGB in DMG mode"),
         }
         status
     }

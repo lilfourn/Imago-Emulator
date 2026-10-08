@@ -22,7 +22,7 @@ pub use audio::StereoSample;
 pub use core::{Core, CoreInfo, FrameRate, MemoryRegion, StateError};
 pub use debug::Debugger;
 pub use input::{Button, Buttons, Input, ParseButtonError, TouchPoint};
-pub use media::{Cartridge, LoadError, Media, SystemFile, SystemFileKind};
+pub use media::{Cartridge, DmgColors, LoadError, Media, SystemFile, SystemFileKind};
 pub use rom_patch::RomPatch;
 pub use system::{ParseSystemError, System};
 pub use video::{Frame, ScreenSize, rgb};

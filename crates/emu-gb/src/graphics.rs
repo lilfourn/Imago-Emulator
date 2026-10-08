@@ -11,7 +11,7 @@ use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
 use emu_core::{Frame, ScreenSize, rgb};
 
 use crate::model::Model;
-use crate::ppu::{DMG_SHADES, Ppu};
+use crate::ppu::Ppu;
 
 /// Fills the parts of a picture that show nothing, such as gaps between
 /// cells.
@@ -122,7 +122,7 @@ fn map(ppu: &Ppu, layer: u8) -> Graphics {
         let colors = if cgb {
             cgb_colors(ppu.bg_palette_ram(), attributes & 7)
         } else {
-            dmg_colors(lcd.bgp)
+            dmg_colors(ppu, 0, lcd.bgp)
         };
         let corner = (cell % MAP_TILES * 8, cell / MAP_TILES * 8);
         let flips = Flips::from_attributes(attributes);
@@ -181,7 +181,7 @@ fn palettes(ppu: &Ppu) -> Graphics {
         (
             "DMG palettes: rows BGP, OBP0, OBP1; colours 0–3 left to right \
              (shade 0 is the lightest)",
-            dmg_palette_rows(&Lcd::read(ppu)),
+            dmg_palette_rows(ppu, &Lcd::read(ppu)),
         )
     };
     let pitch = SWATCH + 1;
@@ -245,9 +245,10 @@ fn dmg_shades(register: u8) -> [u8; 4] {
     [0, 1, 2, 3].map(|index| (register >> (index * 2)) & 3)
 }
 
-/// The pixels a DMG palette register gives colour indices 0–3.
-fn dmg_colors(register: u8) -> [u32; 4] {
-    dmg_shades(register).map(|shade| DMG_SHADES[usize::from(shade)])
+/// The pixels DMG palette register `register` gives colour indices 0–3;
+/// `palette` is 0 for BGP, 1 for OBP0 and 2 for OBP1.
+fn dmg_colors(ppu: &Ppu, palette: u8, register: u8) -> [u32; 4] {
+    dmg_shades(register).map(|shade| ppu.dmg_color(palette, shade))
 }
 
 /// Colour `color` (0–3) of CGB palette `palette` (0–7) in palette RAM
@@ -296,18 +297,23 @@ fn palette_choice(ppu: &Ppu, selection: u8) -> ([u32; 4], String) {
         1 => ("OBP0", lcd.obp0),
         _ => ("OBP1", lcd.obp1),
     };
-    (dmg_colors(register), format!("{name} (0x{register:02X})"))
+    let palette = selection.min(2);
+    (
+        dmg_colors(ppu, palette, register),
+        format!("{name} (0x{register:02X})"),
+    )
 }
 
 /// The DMG palette picture's rows: each register's colours and a note
 /// with its value and the shade it gives each colour index.
-fn dmg_palette_rows(lcd: &Lcd) -> Vec<([u32; 4], String)> {
+fn dmg_palette_rows(ppu: &Ppu, lcd: &Lcd) -> Vec<([u32; 4], String)> {
     [("BGP", lcd.bgp), ("OBP0", lcd.obp0), ("OBP1", lcd.obp1)]
         .into_iter()
-        .map(|(name, register)| {
+        .zip(0..)
+        .map(|((name, register), palette)| {
             let [a, b, c, d] = dmg_shades(register);
             let note = format!("{name} 0x{register:02X}: shades {a}, {b}, {c}, {d}");
-            (dmg_colors(register), note)
+            (dmg_colors(ppu, palette, register), note)
         })
         .collect()
 }
@@ -468,9 +474,9 @@ fn draw_sprite(frame: &mut Frame, ppu: &Ppu, lcd: &Lcd, sprite: Sprite, corner: 
     let [_, one, two, three] = if cgb {
         cgb_colors(ppu.obj_palette_ram(), sprite.attributes & 7)
     } else if sprite.attributes & 0x10 != 0 {
-        dmg_colors(lcd.obp1)
+        dmg_colors(ppu, 2, lcd.obp1)
     } else {
-        dmg_colors(lcd.obp0)
+        dmg_colors(ppu, 1, lcd.obp0)
     };
     let colors = [None, Some(one), Some(two), Some(three)];
     let flips = Flips::from_attributes(sprite.attributes);
@@ -591,6 +597,7 @@ fn outline_wrapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ppu::DMG_SHADES;
 
     const RED: u16 = 0x001F;
     const GREEN: u16 = 0x03E0;

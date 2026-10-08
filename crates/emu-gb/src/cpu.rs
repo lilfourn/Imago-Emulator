@@ -77,6 +77,31 @@ impl Registers {
         pc: 0x0100,
     };
 
+    /// The registers as the CGB boot ROM leaves them for a game made for
+    /// the original Game Boy, whose title bytes of a game Nintendo published
+    /// sum to `title_checksum` (0 for other games). HL points into the logo's
+    /// tile map for the two titles that use it (Pan Docs, "Power Up
+    /// Sequence").
+    #[must_use]
+    pub const fn cgb_dmg_mode_after_boot(title_checksum: u8) -> Self {
+        let [h, l] = match title_checksum {
+            0x43 | 0x58 => [0x99, 0x1A],
+            _ => [0x00, 0x7C],
+        };
+        Self {
+            a: 0x11,
+            f: 0x80,
+            b: title_checksum,
+            c: 0x00,
+            d: 0x00,
+            e: 0x08,
+            h,
+            l,
+            sp: 0xFFFE,
+            pc: 0x0100,
+        }
+    }
+
     /// The registers as the DMG boot ROM leaves them (Pan Docs, "Power Up
     /// Sequence").
     pub const DMG_AFTER_BOOT: Self = Self {

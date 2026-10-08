@@ -40,7 +40,7 @@ impl Timer {
         Self {
             counter: match model {
                 Model::Dmg => 0xABC8,
-                Model::Cgb => 0xABCC,
+                Model::Cgb | Model::CgbDmgMode => 0xABCC,
             },
             tima: 0,
             tma: 0,

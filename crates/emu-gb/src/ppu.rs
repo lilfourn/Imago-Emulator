@@ -14,11 +14,14 @@
 //!
 //! In CGB mode the PPU has a second VRAM bank holding per-tile attributes
 //! (palette, bank, flips, priority), 8 background and 8 object palettes of
-//! four 15-bit colours, and draws objects in OAM order.
+//! four 15-bit colours, and draws objects in OAM order. In DMG mode a Game
+//! Boy Color draws as a DMG does, but BGP, OBP0 and OBP1 pick colours from
+//! background palette 0 and object palettes 0 and 1 instead of greys.
 
 use emu_core::rgb;
 use serde::{Deserialize, Serialize};
 
+use crate::compat_palettes::Palettes;
 use crate::interrupts;
 use crate::model::Model;
 
@@ -129,7 +132,7 @@ impl Ppu {
             obj_palettes: vec![0xFF; 64].into_boxed_slice(),
             bg_palette_select: 0,
             obj_palette_select: 0,
-            priority_by_x: model == Model::Dmg,
+            priority_by_x: model != Model::Cgb,
             mode: Mode::OamScan,
             reported_mode: Mode::OamScan,
             lyc_match: true,
@@ -287,7 +290,9 @@ impl Ppu {
             Mode::HBlank if self.first_line && self.dot < LCD_ON_DRAWING_START => false,
             Mode::HBlank => self.stat_select & 0x08 != 0,
             // On DMG the mode 2 condition also fires as VBlank begins.
-            Mode::VBlank if !self.cgb() && self.ly == HEIGHT as u8 && self.dot == 0 => {
+            Mode::VBlank
+                if self.model == Model::Dmg && self.ly == HEIGHT as u8 && self.dot == 0 =>
+            {
                 self.stat_select & 0x30 != 0
             }
             Mode::VBlank => self.stat_select & 0x10 != 0,
@@ -462,7 +467,7 @@ impl Ppu {
             *out = if self.cgb() {
                 cgb_color(&self.bg_palettes, pixel.palette, pixel.color)
             } else {
-                DMG_SHADES[usize::from(palette_shade(self.bgp, pixel.color))]
+                self.dmg_color(0, palette_shade(self.bgp, pixel.color))
             };
         }
         if self.lcdc & 0x02 != 0 {
@@ -526,16 +531,33 @@ impl Ppu {
                 }
                 row[x] = if self.cgb() {
                     cgb_color(&self.obj_palettes, sprite.attributes & 7, color)
+                } else if sprite.attributes & 0x10 != 0 {
+                    self.dmg_color(2, palette_shade(self.obp1, color))
                 } else {
-                    let palette = if sprite.attributes & 0x10 != 0 {
-                        self.obp1
-                    } else {
-                        self.obp0
-                    };
-                    DMG_SHADES[usize::from(palette_shade(palette, color))]
+                    self.dmg_color(1, palette_shade(self.obp0, color))
                 };
             }
         }
+    }
+
+    /// The colour of shade `shade` (0–3) through DMG palette `palette`: 0
+    /// for BGP, 1 for OBP0, 2 for OBP1. Grey on a DMG; on a Game Boy Color
+    /// in DMG mode, the colour the boot ROM loaded into background palette
+    /// 0 or object palette 0 or 1.
+    pub(crate) fn dmg_color(&self, palette: u8, shade: u8) -> u32 {
+        match (self.model, palette) {
+            (Model::CgbDmgMode, 0) => cgb_color(&self.bg_palettes, 0, shade),
+            (Model::CgbDmgMode, _) => cgb_color(&self.obj_palettes, palette - 1, shade),
+            _ => DMG_SHADES[usize::from(shade)],
+        }
+    }
+
+    /// Loads the palettes a Game Boy Color's boot ROM picks for a game made
+    /// for the original Game Boy.
+    pub(crate) fn load_compat_palettes(&mut self, palettes: &Palettes) {
+        write_colors(&mut self.bg_palettes[..8], &palettes.background);
+        write_colors(&mut self.obj_palettes[..8], &palettes.objects[0]);
+        write_colors(&mut self.obj_palettes[8..16], &palettes.objects[1]);
     }
 
     fn vram_index(&self, address: u16) -> usize {
@@ -708,6 +730,13 @@ fn cgb_color(palettes: &[u8], palette: u8, color: u8) -> u32 {
         x << 3 | x >> 2
     };
     rgb(channel(0), channel(5), channel(10))
+}
+
+/// Writes one palette's four colours into its 8 bytes of palette RAM.
+fn write_colors(ram: &mut [u8], colors: &[u16; 4]) {
+    for (bytes, color) in ram.chunks_exact_mut(2).zip(colors) {
+        bytes.copy_from_slice(&color.to_le_bytes());
+    }
 }
 
 /// Writes palette RAM at the index in `select`, auto-incrementing if bit 7

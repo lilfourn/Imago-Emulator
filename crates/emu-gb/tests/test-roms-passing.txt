@@ -51,6 +51,7 @@ blargg/oam_bug/rom_singles/3-non_causes.gb
 blargg/oam_bug/rom_singles/6-timing_no_bug.gb
 cgb-acid2/cgb-acid2.gbc
 dmg-acid2/dmg-acid2.gb
+dmg-acid2/dmg-acid2.gb (CGB in DMG mode)
 mbc3-tester/mbc3-tester.gb
 mooneye-test-suite/acceptance/add_sp_e_timing.gb
 mooneye-test-suite/acceptance/bits/mem_oam.gb

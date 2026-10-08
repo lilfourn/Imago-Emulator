@@ -206,6 +206,11 @@ impl Cartridge {
         }
     }
 
+    /// The ROM, padded to a power of two.
+    pub(crate) fn rom(&self) -> &[u8] {
+        &self.rom
+    }
+
     /// Battery-backed RAM, for test ROMs that report results there.
     pub(crate) fn ram(&self) -> &[u8] {
         &self.ram
