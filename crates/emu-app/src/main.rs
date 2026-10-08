@@ -29,6 +29,7 @@ mod persist;
 mod recorder;
 mod resample;
 mod rewind;
+mod rewind_thread;
 mod scripting;
 mod settings;
 mod slots;

@@ -177,7 +177,8 @@ pub trait Debugger {
            pre-scale to BGRA                 │
            img() per screen                  │
  cx.notify() ◄─── Event (async channel) ◄───┘ coalesced "frame ready", notices
-                                            flush battery save every 1 s
+                                            serialize for rewind ─────────► rewind thread:
+                                            flush battery save every 1 s    XOR, LZ4, history
                                             sleep to the next frame deadline
 ```
 
@@ -237,9 +238,18 @@ pub trait Debugger {
   the window with its own coalesced event, so it updates even while the
   game's window is hidden. A stop mid-frame pauses before cheats, input
   latches, sound and rewind, which wait for the frame's end.
-- The emulation thread records a save state after every frame into the
-  rewind history (`rewind.rs`): newest state whole, older ones as
-  LZ4-compressed XOR deltas, within 64 MiB.
+- The emulation thread serializes the core after every frame for the
+  rewind history (`rewind.rs`), and a rewind thread
+  (`rewind_thread.rs`) does the rest: the newest state whole, older ones
+  as LZ4-compressed XOR deltas, within 64 MiB. A DS state is about 6 MB,
+  and the XOR and compression took as long as serializing, so the
+  emulation thread only serializes, into a buffer the rewind thread
+  handed back; if that thread falls two states behind, frames are
+  skipped rather than queued. Faster than normal speed, a frame is
+  recorded only about once per normal frame's time, so fast-forward
+  pays for some 60 snapshots a second, not one per frame, and rewinding
+  goes back through it as fast as it went by. Stepping back asks the
+  rewind thread for each state and waits for it.
 - Screenshots and recordings take the core's own frames on the emulation
   thread, never the coalesced latest frame the view draws, which can skip
   frames. A screenshot copies the screens between frames and leaves the

@@ -15,6 +15,11 @@
 //! slow motion move closer or further apart (see `speed.rs`). Sound stays
 //! in sync because the audio sink adjusts its resampling ratio to the
 //! buffer level (see `resample.rs`).
+//!
+//! After each frame is published, the core is serialized for rewind; a
+//! worker thread turns that into a compressed delta (see
+//! `rewind_thread.rs`). Faster than normal speed, only about one frame per
+//! normal frame's time is recorded (see `rewind.rs`).
 
 use std::fs;
 use std::io::Write as _;
@@ -37,7 +42,8 @@ use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
 use crate::persist;
 use crate::recorder::Recorder;
-use crate::rewind::Rewind;
+use crate::rewind;
+use crate::rewind_thread::RewindThread;
 use crate::scripting::{self, Running};
 use crate::speed::{self, Speed};
 use crate::turbo::Turbo;
@@ -391,7 +397,8 @@ impl Emulator {
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
-            rewind: Rewind::new(REWIND_BUDGET_BYTES),
+            rewind: RewindThread::start(REWIND_BUDGET_BYTES),
+            recorded_at: None,
             events,
             latest: Arc::clone(&latest),
             audio,
@@ -489,7 +496,10 @@ struct Runner {
     /// How fast frames run; rewinding always steps at normal speed.
     speed: Speed,
     rewinding: bool,
-    rewind: Rewind,
+    rewind: RewindThread,
+    /// When rewind last recorded a frame, if it has since the history was
+    /// last cleared.
+    recorded_at: Option<Instant>,
     /// Per cartridge: the backup generation last written to disk.
     flushed_generations: Vec<u64>,
     events: async_channel::Sender<Event>,
@@ -515,7 +525,6 @@ impl Runner {
         let frame_duration = self.loaded.core.info().frame_rate.frame_duration();
         let mut inputs = Vec::new();
         let mut audio = Vec::new();
-        let mut state = Vec::new();
         let mut deadline = Instant::now();
         let mut last_flush = Instant::now();
 
@@ -540,9 +549,11 @@ impl Runner {
             }
 
             if self.rewinding {
-                if let Some(previous) = self.rewind.pop() {
-                    // States in the history came from this core.
-                    self.loaded.core.load_state(&previous).ok();
+                let core = &mut self.loaded.core;
+                // States in the history came from this core.
+                if self.rewind.pop_with(|previous| {
+                    core.load_state(previous).ok();
+                }) {
                     self.clear_latches();
                     self.publish();
                 }
@@ -589,9 +600,7 @@ impl Runner {
                 // script loads replaces it.
                 self.script_frame(&inputs);
                 self.publish();
-                state.clear();
-                self.loaded.core.save_state(&mut state);
-                self.rewind.push(&state);
+                self.record_for_rewind(frame_duration);
             }
 
             if last_flush.elapsed() >= BACKUP_FLUSH_INTERVAL {
@@ -646,7 +655,7 @@ impl Runner {
             }
             Command::Reset => {
                 self.loaded.core.reset();
-                self.rewind.clear();
+                self.clear_rewind();
                 self.clear_latches();
                 self.debug.stopped = None;
                 self.notice("Reset");
@@ -671,7 +680,7 @@ impl Runner {
             }
             Command::LoadState(slot) => match self.load_state(slot) {
                 Ok(()) => {
-                    self.rewind.clear();
+                    self.clear_rewind();
                     self.clear_latches();
                     self.debug.stopped = None;
                     self.publish();
@@ -831,6 +840,26 @@ impl Runner {
             )),
             Err(error) => self.notice(format!("Recording {name} failed: {error}")),
         }
+    }
+
+    /// Records the frame just run for rewind, if one is due at this speed
+    /// for a system whose frames last `frame_duration`, and the rewind
+    /// thread has caught up.
+    fn record_for_rewind(&mut self, frame_duration: Duration) {
+        let now = Instant::now();
+        let due = self.recorded_at.is_none_or(|at| {
+            rewind::capture_due(self.speed, frame_duration, now.duration_since(at))
+        });
+        let core = &self.loaded.core;
+        if due && self.rewind.push_with(|state| core.save_state(state)) {
+            self.recorded_at = Some(now);
+        }
+    }
+
+    /// Forgets the rewind history, after the game jumps to another moment.
+    fn clear_rewind(&mut self) {
+        self.rewind.clear();
+        self.recorded_at = None;
     }
 
     /// Drops releases still waiting out a press's minimum hold, and turbo
