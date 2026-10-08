@@ -50,23 +50,41 @@ pub(crate) const OPEN_BUS_AFTER_SWI: u32 = 0xE3A0_2004;
 /// The address the CPU's R15 holds once it has entered the SWI vector.
 pub(crate) const SWI_ENTERED_PC: u32 = 0x08 + 8;
 
+/// Cycles the real BIOS's SWI dispatcher (saving registers, finding the
+/// function, restoring and returning) takes beyond this HLE's own entry
+/// and return. The mGBA suite's BIOS timing tests measure 40 for Div,
+/// Sqrt and ArcTan alike once each function's own cycles are counted.
+const DISPATCH_CYCLES: u32 = 40;
+
+/// Cycles the real IntrWait spends between the interrupt handler's return
+/// and its own return, beyond this HLE's repeat of the call. The mGBA
+/// suite's timer count-up tests, all 936 of them, put it at 35.
+const INTR_WAIT_RETURN_CYCLES: u32 = 35;
+
 /// Runs the system call the CPU just entered, then returns from it as the
-/// BIOS's `MOVS PC, LR` would.
+/// BIOS's `MOVS PC, LR` would, taking as long as the real BIOS where that
+/// is known.
 pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
-    // The comment field of the SWI instruction picks the function.
+    // The comment field of the SWI instruction picks the function: in
+    // either state, the BIOS loads the byte two before the return address.
     let return_address = cpu.reg(14);
-    let thumb = cpu.saved_psr().is_some_and(|spsr| spsr & (1 << 5) != 0);
-    let number = if thumb {
-        bus.read_16(return_address.wrapping_sub(2), Access::NONSEQUENTIAL) as u8
-    } else {
-        (bus.read_32(return_address.wrapping_sub(4), Access::NONSEQUENTIAL) >> 16) as u8
-    };
+    let number = bus.read_8(return_address.wrapping_sub(2), Access::NONSEQUENTIAL);
     let r = |i| cpu.reg(i);
     let (r0, r1, r2, r3) = (r(0), r(1), r(2), r(3));
-    match number {
-        0x00 => soft_reset(cpu, bus),
-        0x01 => register_ram_reset(bus, r0),
-        0x02 | 0x03 => bus.halt(),
+    // The function's own cycles, where they are modelled.
+    let cycles = match number {
+        0x00 => {
+            soft_reset(cpu, bus);
+            0
+        }
+        0x01 => {
+            register_ram_reset(bus, r0);
+            0
+        }
+        0x02 | 0x03 => {
+            bus.halt();
+            0
+        }
         0x04 => {
             intr_wait(cpu, bus, r0 != 0, r1 as u16);
             return;
@@ -74,44 +92,87 @@ pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
         0x05 => return vblank_intr_wait(cpu, bus),
         0x06 => divide(cpu, r0 as i32, r1 as i32),
         0x07 => divide(cpu, r1 as i32, r0 as i32),
-        0x08 => cpu.set_reg(0, isqrt(r0)),
+        0x08 => {
+            cpu.set_reg(0, isqrt(r0));
+            sqrt_cycles(r0)
+        }
         0x09 => {
             let result = arc_tan(r0 as i32);
             cpu.set_reg(0, result.angle as i16 as u32);
             cpu.set_reg(1, result.a as u32);
             cpu.set_reg(3, result.b as u32);
+            result.cycles
         }
         0x0A => {
-            let (angle, a) = arc_tan2(r0 as i32, r1 as i32);
+            let (angle, a, cycles) = arc_tan2(r0 as i32, r1 as i32);
             cpu.set_reg(0, u32::from(angle));
             if let Some(a) = a {
                 cpu.set_reg(1, a as u32);
             }
             cpu.set_reg(3, ARC_TAN2_R3);
+            cycles
         }
-        0x0B => cpu_set(bus, r0, r1, r2),
-        0x0C => cpu_fast_set(bus, r0, r1, r2),
-        0x0D => cpu.set_reg(0, 0xBAAE_187F),
-        0x0E => bg_affine_set(bus, r0, r1, r2),
-        0x0F => obj_affine_set(bus, r0, r1, r2, r3),
-        0x10 => bit_unpack(bus, r0, r1, r2),
-        0x11 => lz77(bus, r0, r1, false),
-        0x12 => lz77(bus, r0, r1, true),
-        0x13 => huffman(bus, r0, r1),
-        0x14 => run_length(bus, r0, r1, false),
-        0x15 => run_length(bus, r0, r1, true),
-        0x16 => diff_unfilter(bus, r0, r1, false, false),
-        0x17 => diff_unfilter(bus, r0, r1, false, true),
-        0x18 => diff_unfilter(bus, r0, r1, true, true),
-        0x19 => bus.write_16(
-            0x0400_0088,
-            if r0 != 0 { 0x200 } else { 0 },
-            Access::NONSEQUENTIAL,
-        ),
-        0x1F => cpu.set_reg(0, midi_key_to_frequency(bus, r0, r1 as u8, r2 as u8)),
+        0x0B => {
+            cpu_set(bus, r0, r1, r2);
+            0
+        }
+        0x0C => {
+            cpu_fast_set(bus, r0, r1, r2);
+            0
+        }
+        0x0D => {
+            cpu.set_reg(0, 0xBAAE_187F);
+            0
+        }
+        0x0E => {
+            bg_affine_set(bus, r0, r1, r2);
+            0
+        }
+        0x0F => {
+            obj_affine_set(bus, r0, r1, r2, r3);
+            0
+        }
+        0x10 => {
+            bit_unpack(bus, r0, r1, r2);
+            0
+        }
+        0x11 | 0x12 => {
+            lz77(bus, r0, r1, number == 0x12);
+            0
+        }
+        0x13 => {
+            huffman(bus, r0, r1);
+            0
+        }
+        0x14 | 0x15 => {
+            run_length(bus, r0, r1, number == 0x15);
+            0
+        }
+        0x16 => {
+            diff_unfilter(bus, r0, r1, false, false);
+            0
+        }
+        0x17 => {
+            diff_unfilter(bus, r0, r1, false, true);
+            0
+        }
+        0x18 => {
+            diff_unfilter(bus, r0, r1, true, true);
+            0
+        }
+        0x19 => {
+            let bias = if r0 != 0 { 0x200 } else { 0 };
+            bus.write_16(0x0400_0088, bias, Access::NONSEQUENTIAL);
+            0
+        }
+        0x1F => {
+            cpu.set_reg(0, midi_key_to_frequency(bus, r0, r1 as u8, r2 as u8));
+            0
+        }
         // Sound driver, multiboot and the rest are not emulated.
-        _ => {}
-    }
+        _ => 0,
+    };
+    bus.spend(DISPATCH_CYCLES + cycles);
     bus.set_bios_open_bus(OPEN_BUS_AFTER_SWI);
     cpu.return_from_exception(bus);
 }
@@ -177,6 +238,7 @@ fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, discard: bool, flags: u16) -> bool {
         bus.halt();
     } else {
         bus.write_16(BIOS_FLAGS, current & !flags, Access::NONSEQUENTIAL);
+        bus.spend(INTR_WAIT_RETURN_CYCLES);
     }
     bus.set_bios_open_bus(OPEN_BUS_AFTER_SWI);
     cpu.return_from_exception(bus);
@@ -200,18 +262,97 @@ fn swi_address(cpu: &Cpu) -> u32 {
     cpu.reg(14).wrapping_sub(if thumb { 2 } else { 4 })
 }
 
-fn divide(cpu: &mut Cpu, numerator: i32, denominator: i32) {
+/// Div: R0 = quotient, R1 = remainder, R3 = |quotient|. Returns the
+/// cycles the BIOS's shift-and-subtract loop takes: 13 for each bit the
+/// numerator's magnitude is wider than the denominator's (at least one),
+/// plus 11 (mGBA's cycle model, which the mGBA suite's timing tests
+/// confirm).
+fn divide(cpu: &mut Cpu, numerator: i32, denominator: i32) -> u32 {
+    let loops = denominator
+        .unsigned_abs()
+        .leading_zeros()
+        .saturating_sub(numerator.unsigned_abs().leading_zeros())
+        .max(1);
     if denominator == 0 {
         // The real BIOS loops forever; return something harmless instead.
         cpu.set_reg(0, if numerator < 0 { u32::MAX } else { 1 });
         cpu.set_reg(1, numerator as u32);
         cpu.set_reg(3, 1);
-        return;
+    } else {
+        let quotient = numerator.wrapping_div(denominator);
+        cpu.set_reg(0, quotient as u32);
+        cpu.set_reg(1, numerator.wrapping_rem(denominator) as u32);
+        cpu.set_reg(3, quotient.unsigned_abs());
     }
-    let quotient = numerator.wrapping_div(denominator);
-    cpu.set_reg(0, quotient as u32);
-    cpu.set_reg(1, numerator.wrapping_rem(denominator) as u32);
-    cpu.set_reg(3, quotient.unsigned_abs());
+    11 + 13 * loops
+}
+
+/// The cycles the BIOS's Sqrt takes for `value`: it narrows a bound on
+/// the root by repeated long division, and each step of each loop costs a
+/// fixed number of cycles. This replays its loops (mGBA's cycle model,
+/// MPL-2.0, `src/gba/bios.c`; the mGBA suite's timing tests confirm it).
+fn sqrt_cycles(value: u32) -> u32 {
+    if value == 0 {
+        return 53;
+    }
+    let mut cycles = 15;
+    let (mut upper, mut bound) = (value, 1u32);
+    while bound < upper {
+        upper >>= 1;
+        bound <<= 1;
+        cycles += 6;
+    }
+    loop {
+        cycles += 6;
+        upper = value;
+        let mut accumulator = 0u32;
+        let mut lower = bound;
+        loop {
+            cycles += 5;
+            let old = lower;
+            if lower <= upper >> 1 {
+                lower <<= 1;
+            }
+            if old >= upper >> 1 {
+                break;
+            }
+        }
+        loop {
+            cycles += 8;
+            accumulator <<= 1;
+            if upper >= lower {
+                accumulator += 1;
+                upper -= lower;
+            }
+            if lower == bound {
+                break;
+            }
+            lower >>= 1;
+        }
+        let old = bound;
+        bound = (bound + accumulator) >> 1;
+        if bound >= old {
+            return cycles;
+        }
+    }
+}
+
+/// The cycles a MUL takes with `multiplier` as Rs, beyond its first:
+/// one per byte of significant multiplier bits.
+fn multiply_cycles(multiplier: i32) -> u32 {
+    let significant = |mask: u32| {
+        let top = multiplier as u32 & mask;
+        top == 0 || top == mask
+    };
+    if significant(0xFFFF_FF00) {
+        1
+    } else if significant(0xFFFF_0000) {
+        2
+    } else if significant(0xFF00_0000) {
+        3
+    } else {
+        4
+    }
 }
 
 fn isqrt(value: u32) -> u32 {
@@ -234,6 +375,9 @@ struct ArcTan {
     a: i32,
     /// The polynomial's last term, left in R3.
     b: i32,
+    /// The cycles the BIOS takes: 37 plus each multiply's (mGBA's cycle
+    /// model, which the mGBA suite's timing tests confirm).
+    cycles: u32,
 }
 
 /// ArcTan: the BIOS's polynomial approximation, with `tan` in 1.14 fixed
@@ -241,15 +385,21 @@ struct ArcTan {
 /// BIOS's 32-bit arithmetic, overflow included, so inputs outside
 /// −1.0..1.0 give the hardware's garbage too.
 fn arc_tan(tan: i32) -> ArcTan {
-    let a = (tan.wrapping_mul(tan) >> 14).wrapping_neg();
-    let mut b = (0xA9_i32.wrapping_mul(a) >> 14).wrapping_add(0x390);
+    let square = tan.wrapping_mul(tan);
+    let a = (square >> 14).wrapping_neg();
+    let mut product = 0xA9_i32.wrapping_mul(a);
+    let mut cycles = 37 + multiply_cycles(square) + multiply_cycles(product);
+    let mut b = (product >> 14).wrapping_add(0x390);
     for constant in [0x91C, 0xFB6, 0x16AA, 0x2081, 0x3651, 0xA2F9] {
-        b = (b.wrapping_mul(a) >> 14).wrapping_add(constant);
+        product = b.wrapping_mul(a);
+        cycles += multiply_cycles(product);
+        b = (product >> 14).wrapping_add(constant);
     }
     ArcTan {
         angle: tan.wrapping_mul(b) >> 16,
         a,
         b,
+        cycles,
     }
 }
 
@@ -258,13 +408,14 @@ const ARC_TAN2_R3: u32 = 0x170;
 
 /// ArcTan2: the angle of (x, y) in 0..0x10000, from 32-bit coordinates.
 /// Also returns ArcTan's R1 value when it calls ArcTan, which it does
-/// unless the point is on an axis.
-fn arc_tan2(x: i32, y: i32) -> (u16, Option<i32>) {
+/// unless the point is on an axis, and the cycles taken (11 on an axis,
+/// otherwise ArcTan's).
+fn arc_tan2(x: i32, y: i32) -> (u16, Option<i32>, u32) {
     let ratio = |numerator: i32, denominator: i32| (numerator << 14).wrapping_div(denominator);
-    let (angle, a) = if y == 0 {
-        (if x >= 0 { 0 } else { 0x8000 }, None)
+    let (angle, a, cycles) = if y == 0 {
+        (if x >= 0 { 0 } else { 0x8000 }, None, 11)
     } else if x == 0 {
-        (if y >= 0 { 0x4000 } else { 0xC000 }, None)
+        (if y >= 0 { 0x4000 } else { 0xC000 }, None, 11)
     } else {
         let (base, flip, tan) = if y >= 0 {
             if x >= 0 && x >= y {
@@ -285,9 +436,9 @@ fn arc_tan2(x: i32, y: i32) -> (u16, Option<i32>) {
         let result = arc_tan(tan);
         let angle = i32::from(result.angle as i16);
         let angle = if flip { base - angle } else { base + angle };
-        (angle, Some(result.a))
+        (angle, Some(result.a), result.cycles)
     };
-    (angle as u16, a)
+    (angle as u16, a, cycles)
 }
 
 /// CpuSet: copies or fills `control & 0x1FFFFF` halfwords or words.
@@ -682,6 +833,19 @@ mod tests {
         }
     }
 
+    /// Cycle counts the mGBA suite's BIOS timing tests imply, less the
+    /// dispatcher's.
+    #[test]
+    fn math_functions_take_the_bioss_time() {
+        let mut cpu = Cpu::default();
+        assert_eq!(divide(&mut cpu, 0x1234_5678, 0xFF), 284);
+        assert_eq!(divide(&mut cpu, 0xFF, 0x1234_5678), 24);
+        assert_eq!(sqrt_cycles(0), 53);
+        assert_eq!(sqrt_cycles(0xFF), 168);
+        assert_eq!(sqrt_cycles(0x1234_5678), 1084);
+        assert_eq!(arc_tan(0xFF).cycles, 53);
+    }
+
     #[test]
     fn integer_square_roots() {
         assert_eq!(isqrt(0), 0);
@@ -692,11 +856,11 @@ mod tests {
 
     #[test]
     fn arc_tan2_quadrants() {
-        assert_eq!(arc_tan2(1, 0), (0, None));
-        assert_eq!(arc_tan2(0, 1), (0x4000, None));
-        assert_eq!(arc_tan2(-1, 0), (0x8000, None));
-        assert_eq!(arc_tan2(0, -1), (0xC000, None));
-        let (diagonal, _) = arc_tan2(100, 100);
+        assert_eq!(arc_tan2(1, 0), (0, None, 11));
+        assert_eq!(arc_tan2(0, 1), (0x4000, None, 11));
+        assert_eq!(arc_tan2(-1, 0), (0x8000, None, 11));
+        assert_eq!(arc_tan2(0, -1), (0xC000, None, 11));
+        let (diagonal, _, _) = arc_tan2(100, 100);
         assert!((0x1FF0..=0x2010).contains(&diagonal), "{diagonal:x}");
     }
 
@@ -718,7 +882,7 @@ mod tests {
     #[test]
     fn arc_tan2_takes_32_bit_coordinates() {
         let call = |x: u32, y: u32| {
-            let (angle, a) = arc_tan2(x as i32, y as i32);
+            let (angle, a, _) = arc_tan2(x as i32, y as i32);
             (angle, a.map(|a| a as u32))
         };
         assert_eq!(call(0xFFFF_0000, 1), (0x8000, Some(0)));

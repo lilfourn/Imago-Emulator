@@ -455,6 +455,15 @@ impl Bus {
         }
     }
 
+    /// Lets `cycles` pass while the BIOS runs code from its own memory, a
+    /// started DMA taking the bus at any of them.
+    pub(crate) fn spend(&mut self, cycles: u32) {
+        for _ in 0..cycles {
+            self.yield_to_dma(Access::NONSEQUENTIAL);
+            self.tick(1);
+        }
+    }
+
     /// Runs every started DMA transfer, highest priority first, while the
     /// CPU waits. Returns the cycles that took (0 if none had started).
     pub(crate) fn run_dma(&mut self) -> u32 {
