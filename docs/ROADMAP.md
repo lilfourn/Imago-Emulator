@@ -158,9 +158,7 @@ M8's mGBA timer tests:
   self-checking groups (`crates/emu-gba/tests/mgba-suite-passing.txt`).
 What's missing:
 - most of the mGBA suite's timer, I/O read, BIOS math and SIO checks (see
-  M8);
-- [decision 0005](decisions/0005-video-filters-on-the-cpu.md) settles Q3
-  but awaits review.
+  M8).
 The Pokémon checkpoints (FireRed music, Emerald saves and clock, the
 FireRed–Emerald trade) need your own dumps.
 
@@ -219,7 +217,8 @@ FireRed–Emerald trade) need your own dumps.
     Replay `18`–`1E`) and Pro Action Replay I/O writes (`C6`, `C7`); and
     Action Replay DS for Phase 4. Cheats run after each frame, at VBlank;
   - a memory viewer, since grown into the debugger (View > Debugger);
-  - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3.
+  - [decision 0005](decisions/0005-video-filters-on-the-cpu.md) for Q3,
+    accepted once the filters were built on it in Phase 4.
 - **Exit:** trade between FireRed and Emerald over the emulated link cable.
 
 ---
@@ -339,4 +338,5 @@ are done.
 | Keyboard-first defaults, large window, full screen | UI-2, UI-5 | Phase 4 ✅ |
 | 3D upscaling (View > 3D Resolution) | NDS-9 | M16 ✅ |
 | Blow key, computer microphone | NDS-10 | M16 ✅ |
-| Shader chain, recording, achievements, scripting | UI-4, UI-14 | Later |
+| Filters (LCD grid, scanlines, Scale2x/3x), screenshots, video recording | UI-4, UI-14 | Phase 4 ✅ |
+| xBRZ, slang presets, achievements, scripting | UI-4, UI-14 | Later |

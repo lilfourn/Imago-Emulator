@@ -158,12 +158,14 @@ pub trait Debugger {
 ## Threads in the app
 
 ```
- main thread (GPUI)                         emulation thread
- ──────────────────                         ────────────────
+ main thread (GPUI)                         emulation thread                recording thread
+ ──────────────────                         ────────────────                ────────────────
  key/mouse events ──► Command (mpsc) ─────► apply between frames
                                             run_frame()
                                             apply cheats (Core::peek/poke)
- render(): copy latest frames ◄── Mutex ─── publish screens
+                                            record frame and sound ───────► JPEG, QuickTime
+ render(): copy latest frames ◄── Mutex ─── publish screens                 (bounded queue)
+           correct, turn, filter             │
            pre-scale to BGRA                 │
            img() per screen                  │
  cx.notify() ◄─── Event (async channel) ◄───┘ coalesced "frame ready", notices
@@ -218,6 +220,16 @@ pub trait Debugger {
 - The emulation thread records a save state after every frame into the
   rewind history (`rewind.rs`): newest state whole, older ones as
   LZ4-compressed XOR deltas, within 64 MiB.
+- Screenshots and recordings take the core's own frames on the emulation
+  thread, never the coalesced latest frame the view draws, which can skip
+  frames. A screenshot copies the screens between frames and leaves the
+  PNG encoding and writing to a short-lived thread. A recording
+  (`recorder.rs`) hands every frame that runs to its own thread, with
+  the sound the frame made, which the audio sink resamples and may drop
+  but the recording keeps whole. Its queue holds 16 frames; past that
+  the emulation waits for the writer, so no frame is lost even at
+  unlimited fast-forward. Frames that never run, while paused or
+  rewinding, are not in the movie.
 
 ## Video path
 
@@ -228,9 +240,19 @@ linear filter cover the remaining fraction. That is the "sharp bilinear"
 technique: crisp pixels without uneven pixel widths at non-integer sizes.
 
 Filters are CPU passes over frames before they become images
-([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). Today the
-only one is GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup
-table from each 15-bit console colour to its corrected pixel.
+([decision 0005](decisions/0005-video-filters-on-the-cpu.md)), in this
+order:
+1. GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup table
+   from each 15-bit console colour to its corrected pixel;
+2. rotation (`video::turn`, below);
+3. the filter chosen in View > Filter (`filter.rs`). LCD grid and
+   scanlines take over the integer pre-scale and darken part of each
+   console pixel's square of device pixels; Scale2x and Scale3x enlarge
+   two or three times, rounding diagonal edges, and leave the rest of the
+   pre-scale to `video.rs`. Their masks turn with the screen, and on DS
+   frames drawn at a higher 3D resolution they follow console pixels
+   (the scalers skip those frames). Each costs at most about 0.7 ms per
+   DS screen at 6×.
 
 DS 3D upscaling is the core's job, as that decision planned. At a render
 scale above 1, the DS draws each 3D frame twice: at the native
@@ -259,9 +281,12 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
 | One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
-| Layout, speeds, 3D resolution | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
+| Layout, speeds, 3D resolution, filter | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
+| Screenshot | next to the ROM, `game 2026-10-07 at 18.58.12.png` | 8-bit RGB PNG of the screens as the core drew them |
+| Recording | next to the ROM, `game 2026-10-07 at 18.58.12.mov` | QuickTime movie: Photo-JPEG video, 16-bit stereo PCM sound, see `emu-app/src/mov.rs` |
 
-Writes go to `name.tmp` first and are renamed over the target.
+Writes go to `name.tmp` first and are renamed over the target, except
+recordings, which are written as they go and indexed when they stop.
 
 ## Save-state container
 

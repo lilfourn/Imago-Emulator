@@ -143,7 +143,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-1 | Open a ROM from the File menu (⌘O), by drag and drop, or from the command line. ✅ | P0 · S |
 | UI-2 | DS screen layouts: stacked, side by side, single screen with swap. ✅ Hybrid (one large and one small screen), rotation and gap setting. ✅ Stacked with no gap by default, a launch window as large as the display allows, and full screen. ✅ | P0 · S / P1 · M13 |
 | UI-3 | Crisp scaling at any window size ("sharp bilinear"). ✅ Integer scaling, and GBA/GBC colour correction ✅. | P0 · S / P1 · M11 |
-| UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. | P2 |
+| UI-4 | Shader and filter chain (LCD grid, CRT, xBRZ), ideally reading slang presets. ✅ CPU filters (LCD grid, scanlines, Scale2x, Scale3x) after colour correction, chosen in View > Filter and saved in settings. Not done: xBRZ (its ports are GPL-3.0, see section 9) and slang presets (out of scope, [decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | P2 |
 | UI-5 | Input action layer: physical input → action → core buttons. Keyboard bindings in TOML with several keys per action. ✅ Keyboard-first defaults: WASD, face buttons on U I / J K. ✅ | P0 · S |
 | UI-6 | Gamepads with per-controller profiles keyed by GUID ✅, analog-to-D-pad ✅, per-game overrides (✅ `game.bindings.toml` next to the ROM), turbo (✅ counted in emulated frames) and hotkey chords (✅ Select + button by default). | P1 · M4 |
 | UI-7 | Touch: mouse or trackpad drives the DS touchscreen through the inverse layout transform. ✅ A "touch at cursor" binding for gamepads. ✅ | P0 · S / P1 · M13 |
@@ -153,7 +153,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-11 | Rewind: a ring buffer of states every N frames, XOR-delta compressed with zstd or LZ4. ✅ every frame, LZ4, 64 MiB | P1 · M4 |
 | UI-12 | Debugger panels ✅ (View > Debugger): disassembly with breakpoints and watchpoints, registers, memory editor, tile/map/OAM/palette viewers, I/O registers, scheduler queue; trace logging ✅ (TOOL-3). | P1 · M7 |
 | UI-13 | Cheats: GameShark (✅ GB, with 8x/9x bank codes), Game Genie (✅ GB), Action Replay (✅ DS; ✅ GBA GameShark Advance / Action Replay v1/v2 and Pro Action Replay v3, encrypted or not, with ROM patches and I/O writes), CodeBreaker (✅ GBA, with encryption) and raw patches ✅ | P2 · M11 |
-| UI-14 | Screenshots and video recording, RetroAchievements (rcheevos), Lua scripting hooks. | P2 |
+| UI-14 | Screenshots (✅ PNG of the native screens, ⌘⇧S) and video recording (✅ every emulated frame and its sound, to a QuickTime movie, ⌘⇧R), RetroAchievements (rcheevos), Lua scripting hooks. | P2 |
 
 ### 6.4 Tooling
 
@@ -236,7 +236,7 @@ they are project policy, not legal advice.
 |---|---|---|
 | Q1 | Which license? GPL-3.0-or-later would allow porting code from melonDS; MPL-2.0 matches mGBA; MIT or Apache-2.0 keeps reuse open. Choose before accepting outside contributions. | Before first public push |
 | Q2 | Stay on crates.io GPUI 0.2.2, or pin a newer Zed git revision? | M3 |
-| Q3 | ~~Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI?~~ Proposed: neither for now. Filters are CPU passes, and DS upscaling happens in the core ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | M11 |
+| Q3 | ~~Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI?~~ Decided: neither for now. Filters are CPU passes, and DS upscaling happens in the core ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | M11 |
 | Q4 | ~~Pace emulation from the audio clock or from display vsync?~~ Decided: a frame timer, with dynamic rate control on audio ([decision 0003](decisions/0003-frame-pacing.md)). | M3 |
 | Q5 | Bundle SameBoy's Expat-licensed open boot ROMs so the GB boots with an animation? | M2 |
 | Q6 | ~~Write the optional CHIP-8 warm-up (M0) or start straight on the SM83?~~ Decided: straight to the SM83. | — |

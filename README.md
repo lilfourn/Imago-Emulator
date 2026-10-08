@@ -36,6 +36,8 @@ dumps. The app has:
 - save-state slots with thumbnails, rewind and fast-forward;
 - link play;
 - GBC/GBA colour correction, and DS 3D at 2×, 3× or 4× resolution;
+- filters: LCD grid, scanlines, Scale2x and Scale3x;
+- screenshots, and video recording to QuickTime movies;
 - cheats;
 - a debugger: breakpoints and watchpoints on every CPU, disassembly,
   registers, a memory editor, graphics viewers, I/O registers and the
@@ -86,7 +88,10 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 | Blow into the microphone (DS) | Hold B | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
 | | | | | Full screen | ⌃⌘F |
 | | | | | Switch player (link play) | ⌘T or click a screen |
+| | | | | Save screenshot | ⌘⇧S |
+| | | | | Start / stop recording | ⌘⇧R |
 | | | | | Colour correction on/off | ⌘⇧C |
+| | | | | Filter: none, LCD grid, scanlines, Scale2x, Scale3x | View > Filter |
 | | | | | Debugger | ⌘⇧D |
 | | | | | Step / step over / next frame (debugger) | ⌘⇧I / ⌘⇧O / ⌘⇧N |
 | | | | | 3D resolution (DS) | View > 3D Resolution |
@@ -102,8 +107,18 @@ on black. Hybrid shows one screen large beside both screens small, as in
 melonDS; Swap Screens chooses the large one. Rotation turns the whole
 arrangement for games played with the DS held like a book, and touch
 follows it. A 90 px gap matches the DS hinge. The layout, swap, rotation,
-gap and 3D resolution are remembered in
+gap, 3D resolution and filter are remembered in
 `~/Library/Application Support/ds-emulator/settings.toml`.
+
+View > Filter changes how the screens look. LCD Grid draws a thin dark
+line between pixels, as on the handhelds' screens; Scanlines darkens the
+bottom of each row, as on a CRT. Both need at least two of your display's
+pixels to each console pixel, and show nothing in a smaller window. Scale2x
+and Scale3x round off the staircase edges of sprites and text. They skip
+DS frames drawn at a higher 3D resolution, whose 3D is smooth already.
+Filters apply after colour correction and turn with the screens. xBRZ is
+not offered: its code is GPL-3.0, which the project doesn't take (see the
+[legal policy](docs/PRD.md#9-legal-policy)).
 
 View > 3D Resolution draws DS 3D at 2×, 3× or 4× its own resolution
 (`resolution_3d` under `[video]` in settings.toml goes up to 8): polygon
@@ -221,6 +236,38 @@ cheats (`game.cht`) and the game's own bindings (`game.bindings.toml`) live
 next to the ROM. A linked pair keeps each game's `.sav`, `.cht` and
 bindings, and saves its states next to the first ROM as `game.ls1` to
 `game.ls4`. GBA `.sav` files hold the raw save memory, as in mGBA.
+
+## Screenshots and recordings
+
+File > Save Screenshot (⌘⇧S) saves the screens as a PNG next to the ROM,
+named like a macOS screenshot: `game 2026-10-07 at 18.58.12.png`. File >
+Start / Stop Recording (⌘⇧R) records a QuickTime movie beside it, `game
+2026-10-07 at 18.58.12.mov`, which QuickTime Player opens; a red REC in
+the window's corner shows while it runs.
+
+Both take the screens as the console drew them: no colour correction,
+filter or rotation, a DS's top screen above its touchscreen, and linked
+games side by side. They are at the console's resolution, or at the 3D
+resolution when DS 3D is upscaled (a screenshot at 2× is 512×768).
+
+A recording holds every frame the game runs and all of its sound,
+whatever the speed: fast-forwarded play comes out at normal speed. Time
+that doesn't run is cut: pausing, rewinding (the movie jumps from where
+rewinding started to where it stopped), and loading a state. The video
+is Photo-JPEG at high quality, twice the console's resolution so every
+pixel keeps its colour (DS 3D upscaled to 2× or more is recorded at its
+own size), with uncompressed 16-bit stereo sound: about 150 MB a minute
+for a DS game. The movie keeps the size it started at if you change the
+3D resolution while recording. It needs no ffmpeg; to make a smaller
+H.264 copy for sharing:
+
+```sh
+ffmpeg -i "game 2026-10-07 at 18.58.12.mov" -c:v libx264 -crf 18 \
+  -pix_fmt yuv420p -c:a aac game.mp4
+```
+
+Quitting or opening another game stops a recording too. A movie is
+indexed when it stops, so one cut short by a crash won't play.
 
 ## Link play
 
@@ -373,3 +420,6 @@ will. Dump your own cartridges and system files from hardware you own. Don't
 open issues or pull requests that link to ROMs or BIOS files. Games, BIOS
 dumps and saves are git-ignored, and CI fails if one is committed. See the
 [legal policy](docs/PRD.md#9-legal-policy).
+
+Recordings are encoded with the `jpeg-encoder` crate, which is based in
+part on the work of the Independent JPEG Group.
