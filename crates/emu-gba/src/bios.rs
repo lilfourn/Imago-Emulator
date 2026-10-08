@@ -75,8 +75,20 @@ pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
         0x06 => divide(cpu, r0 as i32, r1 as i32),
         0x07 => divide(cpu, r1 as i32, r0 as i32),
         0x08 => cpu.set_reg(0, isqrt(r0)),
-        0x09 => cpu.set_reg(0, arc_tan(r0 as i16 as i32) as u16 as u32),
-        0x0A => cpu.set_reg(0, u32::from(arc_tan2(r0 as i16 as i32, r1 as i16 as i32))),
+        0x09 => {
+            let result = arc_tan(r0 as i32);
+            cpu.set_reg(0, result.angle as i16 as u32);
+            cpu.set_reg(1, result.a as u32);
+            cpu.set_reg(3, result.b as u32);
+        }
+        0x0A => {
+            let (angle, a) = arc_tan2(r0 as i32, r1 as i32);
+            cpu.set_reg(0, u32::from(angle));
+            if let Some(a) = a {
+                cpu.set_reg(1, a as u32);
+            }
+            cpu.set_reg(3, ARC_TAN2_R3);
+        }
         0x0B => cpu_set(bus, r0, r1, r2),
         0x0C => cpu_fast_set(bus, r0, r1, r2),
         0x0D => cpu.set_reg(0, 0xBAAE_187F),
@@ -213,39 +225,69 @@ fn isqrt(value: u32) -> u32 {
     root
 }
 
-/// ArcTan: the BIOS's polynomial approximation, with `tan` in 1.14 fixed
-/// point, returning an angle where 0x4000 is 90 degrees.
-fn arc_tan(tan: i32) -> i32 {
-    let a = -((tan.wrapping_mul(tan)) >> 14);
-    let mut b = ((0xA9 * a) >> 14) + 0x390;
-    for constant in [0x91C, 0xFB6, 0x16AA, 0x2081, 0x3651, 0xA2F9] {
-        b = (b.wrapping_mul(a) >> 14) + constant;
-    }
-    tan.wrapping_mul(b) >> 16
+/// ArcTan's result and the intermediate values the BIOS leaves behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArcTan {
+    /// The angle, of which R0 gets the low 16 bits sign-extended.
+    angle: i32,
+    /// −tan² in 1.14 fixed point, left in R1.
+    a: i32,
+    /// The polynomial's last term, left in R3.
+    b: i32,
 }
 
-/// ArcTan2: the angle of (x, y) in 0..0x10000.
-fn arc_tan2(x: i32, y: i32) -> u16 {
-    let result = if y == 0 {
-        if x >= 0 { 0 } else { 0x8000 }
+/// ArcTan: the BIOS's polynomial approximation, with `tan` in 1.14 fixed
+/// point, returning an angle where 0x4000 is 90 degrees. Every step is the
+/// BIOS's 32-bit arithmetic, overflow included, so inputs outside
+/// −1.0..1.0 give the hardware's garbage too.
+fn arc_tan(tan: i32) -> ArcTan {
+    let a = (tan.wrapping_mul(tan) >> 14).wrapping_neg();
+    let mut b = (0xA9_i32.wrapping_mul(a) >> 14).wrapping_add(0x390);
+    for constant in [0x91C, 0xFB6, 0x16AA, 0x2081, 0x3651, 0xA2F9] {
+        b = (b.wrapping_mul(a) >> 14).wrapping_add(constant);
+    }
+    ArcTan {
+        angle: tan.wrapping_mul(b) >> 16,
+        a,
+        b,
+    }
+}
+
+/// What ArcTan2 leaves in R3.
+const ARC_TAN2_R3: u32 = 0x170;
+
+/// ArcTan2: the angle of (x, y) in 0..0x10000, from 32-bit coordinates.
+/// Also returns ArcTan's R1 value when it calls ArcTan, which it does
+/// unless the point is on an axis.
+fn arc_tan2(x: i32, y: i32) -> (u16, Option<i32>) {
+    let ratio = |numerator: i32, denominator: i32| (numerator << 14).wrapping_div(denominator);
+    let (angle, a) = if y == 0 {
+        (if x >= 0 { 0 } else { 0x8000 }, None)
     } else if x == 0 {
-        if y >= 0 { 0x4000 } else { 0xC000 }
-    } else if y >= 0 {
-        if x >= 0 && x >= y {
-            arc_tan((y << 14) / x)
-        } else if x < 0 && -x >= y {
-            arc_tan((y << 14) / x) + 0x8000
-        } else {
-            0x4000 - arc_tan((x << 14) / y)
-        }
-    } else if x <= 0 && -x > -y {
-        arc_tan((y << 14) / x) + 0x8000
-    } else if x > 0 && x >= -y {
-        arc_tan((y << 14) / x) + 0x1_0000
+        (if y >= 0 { 0x4000 } else { 0xC000 }, None)
     } else {
-        0xC000 - arc_tan((x << 14) / y)
+        let (base, flip, tan) = if y >= 0 {
+            if x >= 0 && x >= y {
+                (0, false, ratio(y, x))
+            } else if x < 0 && x.wrapping_neg() >= y {
+                (0x8000, false, ratio(y, x))
+            } else {
+                (0x4000, true, ratio(x, y))
+            }
+        } else if x <= 0 && x.wrapping_neg() > y.wrapping_neg() {
+            (0x8000, false, ratio(y, x))
+        } else if x > 0 && x >= y.wrapping_neg() {
+            (0x1_0000, false, ratio(y, x))
+        } else {
+            (0xC000, true, ratio(x, y))
+        };
+        // The BIOS keeps ArcTan's result to 16 bits before adding.
+        let result = arc_tan(tan);
+        let angle = i32::from(result.angle as i16);
+        let angle = if flip { base - angle } else { base + angle };
+        (angle, Some(result.a))
     };
-    result as u16
+    (angle as u16, a)
 }
 
 /// CpuSet: copies or fills `control & 0x1FFFFF` halfwords or words.
@@ -604,12 +646,40 @@ mod tests {
 
     #[test]
     fn arc_tan2_quadrants() {
-        assert_eq!(arc_tan2(1, 0), 0);
-        assert_eq!(arc_tan2(0, 1), 0x4000);
-        assert_eq!(arc_tan2(-1, 0), 0x8000);
-        assert_eq!(arc_tan2(0, -1), 0xC000);
-        let diagonal = arc_tan2(100, 100);
+        assert_eq!(arc_tan2(1, 0), (0, None));
+        assert_eq!(arc_tan2(0, 1), (0x4000, None));
+        assert_eq!(arc_tan2(-1, 0), (0x8000, None));
+        assert_eq!(arc_tan2(0, -1), (0xC000, None));
+        let (diagonal, _) = arc_tan2(100, 100);
         assert!((0x1FF0..=0x2010).contains(&diagonal), "{diagonal:x}");
+    }
+
+    /// Hardware results from the mGBA suite's BIOS math tests: R0, R1, R3.
+    #[test]
+    fn arc_tan_leaves_the_bioss_registers() {
+        let registers = |tan: u32| {
+            let result = arc_tan(tan as i32);
+            (result.angle as i16 as u32, result.a as u32, result.b as u32)
+        };
+        assert_eq!(registers(0x0000), (0, 0, 0xA2F9));
+        assert_eq!(registers(0x7FFF), (0x16D8, 0xFFFF_0004, 0x2_2DB6));
+        assert_eq!(registers(0xC001), (0xFFFF_D550, 0x1_BFFA, 0x2_71BD));
+        assert_eq!(registers(0xFFFF), (0xFFFF_A2FE, 8, 0xA2FF));
+        assert_eq!(registers(0xFFFF_0000), (0x5D07, 0, 0xA2F9));
+        assert_eq!(registers(0xFFFF_8001), (0xFFFF_E927, 0xFFFF_0004, 0x2_2DB6));
+    }
+
+    #[test]
+    fn arc_tan2_takes_32_bit_coordinates() {
+        let call = |x: u32, y: u32| {
+            let (angle, a) = arc_tan2(x as i32, y as i32);
+            (angle, a.map(|a| a as u32))
+        };
+        assert_eq!(call(0xFFFF_0000, 1), (0x8000, Some(0)));
+        assert_eq!(call(0xC000, 0x4000), (0x0D1B, Some(0xFFFF_F8E4)));
+        assert_eq!(call(0xFFFF_0001, 0xFFFF_0000), (0xA001, Some(0xFFFF_C002)));
+        assert_eq!(call(0xFFFF_8000, 0x1_0000), (0x52E4, Some(0xFFFF_F000)));
+        assert_eq!(call(0x4000, 0), (0, None));
     }
 
     #[test]
