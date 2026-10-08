@@ -24,6 +24,12 @@
 //! own thread. A band also draws `scale` rows beyond its own on either
 //! side, which is as far as edge marking looks, so every band's rows come
 //! out as if the frame were drawn whole.
+//!
+//! At the native resolution alone, the frame draws on a worker thread
+//! while the machine runs on: textures are copied and polygons sorted
+//! first, so the drawing reads nothing the machine can change, and the
+//! frame is waited for when its first line is needed, about 50 lines
+//! later. It comes out the same as if it were drawn at once.
 
 mod pixel;
 mod post;
@@ -32,6 +38,7 @@ mod shade;
 mod texture;
 
 use std::ops::Range;
+use std::thread::JoinHandle;
 
 use self::pixel::{Buffers, Kind, PixelAttr, PolygonTarget};
 use self::raster::{Area, HEIGHT, WIDTH};
@@ -72,17 +79,35 @@ struct Band {
     buffers: Buffers,
 }
 
-/// The frame buffers and scratch space for drawing.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Renderer {
-    /// The frame at the native resolution, which the game sees.
+/// The frame at the native resolution, which the game sees, and the
+/// scratch space for drawing it.
+#[derive(Debug, Default)]
+struct Canvas {
     buffers: Buffers,
-    /// The larger frame, for the screen only; none at the native
-    /// resolution.
-    bands: Vec<Band>,
     memory: TextureMemory,
     /// Polygon indices in drawing order.
     order: Vec<usize>,
+}
+
+/// A native frame drawing on a worker thread: everything it reads, owned.
+struct Job {
+    canvas: Box<Canvas>,
+    list: PolygonList,
+    config: RenderConfig,
+    toon: [[u8; 3]; 32],
+}
+
+/// The frame buffers and scratch space for drawing.
+#[derive(Debug, Default)]
+pub(crate) struct Renderer {
+    /// The native frame, or `None` while `drawing` draws it.
+    canvas: Option<Box<Canvas>>,
+    /// The worker thread drawing the native frame, which hands the canvas
+    /// back.
+    drawing: Option<JoinHandle<Box<Canvas>>>,
+    /// The larger frame, for the screen only; none at the native
+    /// resolution.
+    bands: Vec<Band>,
 }
 
 impl Renderer {
@@ -112,32 +137,58 @@ impl Renderer {
         self.bands.first().map_or(1, |band| band.buffers.area.scale)
     }
 
+    /// The native frame, waiting for the worker thread drawing it if
+    /// there is one.
+    fn canvas(&mut self) -> &mut Canvas {
+        if let Some(drawing) = self.drawing.take() {
+            let canvas = drawing
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            self.canvas = Some(canvas);
+        }
+        self.canvas.get_or_insert_default()
+    }
+
     /// Draws `list` with the rendering registers in `config`, reading
-    /// textures from `vram`.
+    /// textures from `vram`. At the native resolution alone the drawing
+    /// finishes on a worker thread; [`Renderer::line`] waits for it.
     pub(crate) fn render(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) {
         let toon = config.toon.map(|entry| color::rgb6(u32::from(entry)));
-        self.load_textures(list, config, &toon, vram);
-        self.sort(list);
+        let canvas = self.canvas();
+        canvas.load_textures(list, config, &toon, vram);
+        canvas.sort(list);
+        if self.bands.is_empty() {
+            let job = Job {
+                canvas: self.canvas.take().expect("the canvas is back"),
+                list: list.clone(),
+                config: config.clone(),
+                toon,
+            };
+            self.drawing = Some(std::thread::spawn(move || job.draw()));
+            return;
+        }
+        let canvas = self.canvas.as_deref_mut().expect("the canvas is back");
         let frame = Frame {
             list,
             config,
-            memory: &self.memory,
+            memory: &canvas.memory,
             toon,
-            order: &self.order,
+            order: &canvas.order,
         };
         let frame = &frame;
         std::thread::scope(|scope| {
             for band in &mut self.bands {
                 scope.spawn(move || draw_frame(&mut band.buffers, frame));
             }
-            draw_frame(&mut self.buffers, frame);
+            draw_frame(&mut canvas.buffers, frame);
         });
     }
 
-    /// Row `y` of the last frame drawn.
-    pub(crate) fn line(&self, y: usize) -> &[u32; WIDTH] {
+    /// Row `y` of the last frame drawn, once it is drawn.
+    pub(crate) fn line(&mut self, y: usize) -> &[u32; WIDTH] {
         static BLANK: [u32; WIDTH] = [0; WIDTH];
-        self.buffers.color[..self.buffers.layer]
+        let buffers = &self.canvas().buffers;
+        buffers.color[..buffers.layer]
             .get(y * WIDTH..(y + 1) * WIDTH)
             .and_then(|row| row.try_into().ok())
             .unwrap_or(&BLANK)
@@ -151,7 +202,25 @@ impl Renderer {
         let start = area.index(0, row);
         band.buffers.color.get(start..start + area.width())
     }
+}
 
+impl Job {
+    /// Draws the frame and hands the canvas back.
+    fn draw(mut self) -> Box<Canvas> {
+        let canvas = &mut *self.canvas;
+        let frame = Frame {
+            list: &self.list,
+            config: &self.config,
+            memory: &canvas.memory,
+            toon: self.toon,
+            order: &canvas.order,
+        };
+        draw_frame(&mut canvas.buffers, &frame);
+        self.canvas
+    }
+}
+
+impl Canvas {
     /// Copies every texture the frame reads from VRAM: the rear-plane
     /// bitmap and each polygon's texture and palette.
     fn load_textures(

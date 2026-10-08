@@ -25,7 +25,7 @@ const SLICE_CYCLES: u64 = 64;
 /// The ARM9's processor, an ARM946E-S.
 pub(crate) type Arm9 = emu_arm::Arm9;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Machine {
     pub(crate) arm9: Arm9,
     pub(crate) arm7: Cpu,

@@ -82,7 +82,7 @@ impl CpuIo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Hardware {
     pub(crate) main_ram: Box<[u8]>,
     pub(crate) shared_wram: Box<[u8]>,

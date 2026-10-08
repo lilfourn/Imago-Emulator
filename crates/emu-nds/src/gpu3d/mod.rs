@@ -37,7 +37,7 @@ use crate::vram::Vram;
 /// always holds its maximum.
 const RDLINES_COUNT: u32 = 46;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Gpu3d {
     registers: RenderRegisters,
     fifo: Fifo,
@@ -209,14 +209,17 @@ impl Gpu3d {
 
     /// Draws the current polygon list with the rendering registers as they
     /// are now. Call once per frame, when the hardware starts rendering
-    /// (line 214), and before reading [`Self::line`].
+    /// (line 214), and before reading [`Self::line`]. VRAM is read now; the
+    /// drawing may finish on a worker thread, which [`Self::line`] waits
+    /// for.
     pub(crate) fn render_frame(&mut self, vram: &Vram) {
         let config = self.registers.config();
         self.renderer.render(&self.rendering, &config, vram);
     }
 
-    /// Row `y` (0–191) of the last frame drawn.
-    pub(crate) fn line(&self, y: u16) -> &[u32; 256] {
+    /// Row `y` (0–191) of the last frame drawn, waiting for the frame if
+    /// it is still drawing.
+    pub(crate) fn line(&mut self, y: u16) -> &[u32; 256] {
         self.renderer.line(usize::from(y))
     }
 
@@ -304,7 +307,7 @@ mod tests {
         gpu.render_frame(vram);
     }
 
-    fn pixel(gpu: &Gpu3d, x: usize, y: u16) -> u32 {
+    fn pixel(gpu: &mut Gpu3d, x: usize, y: u16) -> u32 {
         gpu.line(y)[x]
     }
 
@@ -327,12 +330,12 @@ mod tests {
         vertex(&mut gpu, -ONE, -ONE, 0);
         vertex(&mut gpu, ONE, -ONE, 0);
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 10, 100), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 0, 191), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 200, 10), 0, "no 3D pixel");
+        assert_eq!(pixel(&mut gpu, 10, 100), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 0, 191), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 200, 10), 0, "no 3D pixel");
         // Row 96 is covered up to the diagonal at x = 128.
-        assert_eq!(pixel(&gpu, 127, 96), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 129, 96), 0);
+        assert_eq!(pixel(&mut gpu, 127, 96), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 129, 96), 0);
     }
 
     #[test]
@@ -346,9 +349,13 @@ mod tests {
         send(&mut gpu, COLOR, &[0x7C00]);
         quad(&mut gpu, [-ONE, -ONE, ONE, ONE], ONE / 2);
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 128, 96), opaque([63, 0, 0]), "near red stays");
         assert_eq!(
-            pixel(&gpu, 10, 10),
+            pixel(&mut gpu, 128, 96),
+            opaque([63, 0, 0]),
+            "near red stays"
+        );
+        assert_eq!(
+            pixel(&mut gpu, 10, 10),
             opaque([0, 0, 63]),
             "far blue elsewhere"
         );
@@ -378,11 +385,11 @@ mod tests {
             vertex(&mut gpu, x * ONE, y * ONE, 0);
         }
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 16, 50), opaque([0, 0, 0]));
-        assert_eq!(pixel(&gpu, 48, 50), opaque([63, 0, 0]));
-        assert_eq!(pixel(&gpu, 80, 50), opaque([0, 63, 0]));
-        assert_eq!(pixel(&gpu, 112, 50), opaque([0, 0, 63]));
-        assert_eq!(pixel(&gpu, 176, 150), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 16, 50), opaque([0, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 48, 50), opaque([63, 0, 0]));
+        assert_eq!(pixel(&mut gpu, 80, 50), opaque([0, 63, 0]));
+        assert_eq!(pixel(&mut gpu, 112, 50), opaque([0, 0, 63]));
+        assert_eq!(pixel(&mut gpu, 176, 150), opaque([63, 0, 0]));
     }
 
     #[test]
@@ -398,8 +405,8 @@ mod tests {
         quad(&mut gpu, [-ONE, -ONE, ONE, ONE], -ONE / 2);
         finish(&mut gpu, &vram);
         // (63 * 16 + 0 * 16) / 32 = 31 red, (0 + 63 * 16) / 32 = 31 blue.
-        assert_eq!(pixel(&gpu, 64, 96), opaque([31, 0, 31]));
-        assert_eq!(pixel(&gpu, 192, 96), opaque([31, 0, 31]));
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([31, 0, 31]));
+        assert_eq!(pixel(&mut gpu, 192, 96), opaque([31, 0, 31]));
     }
 
     #[test]
@@ -417,8 +424,8 @@ mod tests {
         send(&mut gpu, POLYGON_ATTR, &[SOLID]);
         quad(&mut gpu, [0, -ONE, ONE, ONE], 0);
         finish(&mut gpu, &vram);
-        assert_eq!(pixel(&gpu, 64, 96), opaque([0, 63, 0]));
-        assert_eq!(pixel(&gpu, 192, 96), opaque([63, 0, 0]), "fog disabled");
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([0, 63, 0]));
+        assert_eq!(pixel(&mut gpu, 192, 96), opaque([63, 0, 0]), "fog disabled");
     }
 
     #[test]
@@ -432,9 +439,9 @@ mod tests {
         quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
         finish(&mut gpu, &vram);
         // The quad spans x 64..192, y 48..144.
-        assert_eq!(pixel(&gpu, 64, 96), opaque([63, 63, 63]), "left edge");
-        assert_eq!(pixel(&gpu, 100, 48), opaque([63, 63, 63]), "top edge");
-        assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([63, 63, 63]), "left edge");
+        assert_eq!(pixel(&mut gpu, 100, 48), opaque([63, 63, 63]), "top edge");
+        assert_eq!(pixel(&mut gpu, 100, 96), opaque([63, 0, 0]), "interior");
     }
 
     /// The lower-left half of the screen in red over a blue rear plane,
@@ -454,14 +461,14 @@ mod tests {
 
     #[test]
     fn anti_aliasing_softens_edges_against_the_rear_plane() {
-        let sharp = red_half_over_blue(0);
-        let smooth = red_half_over_blue(1 << 4);
+        let mut sharp = red_half_over_blue(0);
+        let mut smooth = red_half_over_blue(1 << 4);
         for y in 0..192 {
             // The diagonal crosses the middle of row y at (y + 0.5) * 4 / 3.
             let crossing = (f64::from(y) + 0.5) * 4.0 / 3.0;
             let mut blended = 0;
             for x in 0..256 {
-                let (before, after) = (pixel(&sharp, x, y), pixel(&smooth, x, y));
+                let (before, after) = (pixel(&mut sharp, x, y), pixel(&mut smooth, x, y));
                 assert!(before == opaque([63, 0, 0]) || before == opaque([0, 0, 63]));
                 let [red, _, blue] = color::unpack(after);
                 if red > 0 && blue > 0 {
@@ -490,7 +497,7 @@ mod tests {
         finish(&mut gpu, &Vram::default());
         for y in 48..144 {
             for x in 64..192 {
-                assert_eq!(pixel(&gpu, x, y), opaque([63, 0, 0]), "({x}, {y})");
+                assert_eq!(pixel(&mut gpu, x, y), opaque([63, 0, 0]), "({x}, {y})");
             }
         }
     }
@@ -506,9 +513,9 @@ mod tests {
         quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
         finish(&mut gpu, &vram);
         // White at 17/32 over the blue rear plane.
-        assert_eq!(pixel(&gpu, 64, 96), opaque([33, 33, 63]), "left edge");
-        assert_eq!(pixel(&gpu, 100, 48), opaque([33, 33, 63]), "top edge");
-        assert_eq!(pixel(&gpu, 100, 96), opaque([63, 0, 0]), "interior");
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([33, 33, 63]), "left edge");
+        assert_eq!(pixel(&mut gpu, 100, 48), opaque([33, 33, 63]), "top edge");
+        assert_eq!(pixel(&mut gpu, 100, 96), opaque([63, 0, 0]), "interior");
     }
 
     /// Two quads with different polygon IDs, one fogged and one with a
@@ -576,9 +583,9 @@ mod tests {
         let mut compared = 0;
         for y in 1..191 {
             for x in 1..255 {
-                let here = pixel(&native, x, y);
-                let flat =
-                    (y - 1..=y + 1).all(|y| (x - 1..=x + 1).all(|x| pixel(&native, x, y) == here));
+                let here = pixel(&mut native, x, y);
+                let flat = (y - 1..=y + 1)
+                    .all(|y| (x - 1..=x + 1).all(|x| pixel(&mut native, x, y) == here));
                 if !flat {
                     continue;
                 }
@@ -728,6 +735,6 @@ mod tests {
         let mut restored: Gpu3d = postcard::from_bytes(&bytes).expect("deserializes");
         restored.vblank();
         restored.render_frame(&vram);
-        assert_eq!(pixel(&restored, 100, 100), opaque([0, 63, 0]));
+        assert_eq!(pixel(&mut restored, 100, 100), opaque([0, 63, 0]));
     }
 }
