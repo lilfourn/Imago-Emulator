@@ -60,7 +60,23 @@ undocumented_unsafe_blocks = "warn"
 opt-level = 3
 
 # Interpreters are unusably slow at opt-level 0; keep the cores optimized
-# even in debug builds so the app runs at full speed while debugging.
+# even in debug builds so the app runs at full speed while debugging. The
+# frontend runs per-frame work too (rewind snapshots, video, audio,
+# cheats, scripts): unoptimized, rewind alone took 85% of a DS frame.
+[profile.dev.package.emu-app]
+opt-level = 2
+[profile.dev.package.emu-core]
+opt-level = 2
+[profile.dev.package.emu-state]
+opt-level = 2
+[profile.dev.package.emu-sched]
+opt-level = 2
+[profile.dev.package.emu-psg]
+opt-level = 2
+[profile.dev.package.emu-cheats]
+opt-level = 2
+[profile.dev.package.emu-script]
+opt-level = 2
 [profile.dev.package.emu-gb]
 opt-level = 2
 [profile.dev.package.emu-gba]
