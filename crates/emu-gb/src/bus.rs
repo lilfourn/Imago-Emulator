@@ -80,7 +80,7 @@ impl Bus {
             wram: vec![0; 0x8000].into_boxed_slice(),
             wram_bank: 1,
             hram: vec![0; 0x7F].into_boxed_slice(),
-            timer: Timer::after_boot(),
+            timer: Timer::after_boot(model),
             ppu: Ppu::after_boot(model),
             apu: Apu::after_boot(model),
             joypad: Joypad::default(),
@@ -318,7 +318,7 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.ppu.write_oam(address, value),
             0xFF00 => self.joypad.write(value),
-            0xFF01 | 0xFF02 => self.serial.write(address, value),
+            0xFF01 | 0xFF02 => self.serial.write(address, value, self.timer.counter()),
             0xFF04..=0xFF07 => {
                 let div_before = self.timer.counter();
                 self.timer.write(address, value, &mut self.interrupt_flag);

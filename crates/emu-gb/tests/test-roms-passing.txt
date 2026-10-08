@@ -51,6 +51,7 @@ mooneye-test-suite/acceptance/add_sp_e_timing.gb
 mooneye-test-suite/acceptance/bits/mem_oam.gb
 mooneye-test-suite/acceptance/bits/reg_f.gb
 mooneye-test-suite/acceptance/bits/unused_hwio-GS.gb
+mooneye-test-suite/acceptance/boot_div-dmgABCmgb.gb
 mooneye-test-suite/acceptance/boot_hwio-dmgABCmgb.gb
 mooneye-test-suite/acceptance/boot_regs-dmgABC.gb
 mooneye-test-suite/acceptance/call_cc_timing.gb
@@ -91,6 +92,7 @@ mooneye-test-suite/acceptance/ret_timing.gb
 mooneye-test-suite/acceptance/reti_intr_timing.gb
 mooneye-test-suite/acceptance/reti_timing.gb
 mooneye-test-suite/acceptance/rst_timing.gb
+mooneye-test-suite/acceptance/serial/boot_sclk_align-dmgABCmgb.gb
 mooneye-test-suite/acceptance/timer/div_write.gb
 mooneye-test-suite/acceptance/timer/rapid_toggle.gb
 mooneye-test-suite/acceptance/timer/tim00.gb

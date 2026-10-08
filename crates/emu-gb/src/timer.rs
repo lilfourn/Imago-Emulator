@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::interrupts;
+use crate::model::Model;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Timer {
@@ -31,10 +32,16 @@ pub(crate) struct Timer {
 }
 
 impl Timer {
-    /// The state the DMG boot ROM leaves.
-    pub(crate) const fn after_boot() -> Self {
+    /// The state the boot ROM leaves. On DMG the counter is where the boot
+    /// ROM's fixed run ends, so DIV next ticks 14 M-cycles in (Mooneye
+    /// `boot_div`). The CGB boot ROM's run time varies, and nothing
+    /// measured pins it down, so it keeps the DMG's rounder value.
+    pub(crate) const fn after_boot(model: Model) -> Self {
         Self {
-            counter: 0xABCC,
+            counter: match model {
+                Model::Dmg => 0xABC8,
+                Model::Cgb => 0xABCC,
+            },
             tima: 0,
             tma: 0,
             tac: 0,
@@ -145,7 +152,7 @@ mod tests {
 
     #[test]
     fn tima_counts_at_the_selected_rate_and_reloads() {
-        let mut timer = Timer::after_boot();
+        let mut timer = Timer::after_boot(Model::Dmg);
         let mut interrupt_flag = 0;
         timer.write(0xFF04, 0, &mut interrupt_flag);
         timer.write(0xFF06, 0xFE, &mut interrupt_flag);
@@ -165,7 +172,7 @@ mod tests {
 
     #[test]
     fn an_overflow_from_stopping_the_timer_reloads_at_once() {
-        let mut timer = Timer::after_boot();
+        let mut timer = Timer::after_boot(Model::Dmg);
         let mut interrupt_flag = 0;
         timer.write(0xFF04, 0, &mut interrupt_flag);
         timer.write(0xFF06, 0x42, &mut interrupt_flag);

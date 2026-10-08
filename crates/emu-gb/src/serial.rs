@@ -5,6 +5,11 @@
 //! fast clock). Bytes sent are recorded so test ROMs that report over
 //! serial (Blargg's, Mooneye's) can be checked.
 //!
+//! The internal clock is divided from the same counter as DIV, so its
+//! edges keep their phase from power-on rather than from the write that
+//! starts a transfer: the first bit can take anything up to a whole bit
+//! time (Mooneye `serial/boot_sclk_align`).
+//!
 //! For link play, a transfer this side clocks offers its byte through
 //! [`Serial::take_outgoing`]; the other side answers with
 //! [`Serial::receive`] if it is waiting on the external clock.
@@ -14,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use crate::interrupts;
 use crate::model::Model;
 
-/// M-cycles to shift 8 bits at 8192 Hz.
-const TRANSFER_CYCLES: u16 = 1024;
-/// M-cycles to shift 8 bits with the CGB fast clock (SC bit 1).
-const FAST_TRANSFER_CYCLES: u16 = 32;
+/// Clock cycles per bit at 8192 Hz.
+const BIT_CLOCKS: u16 = 512;
+/// Clock cycles per bit with the CGB fast clock (SC bit 1).
+const FAST_BIT_CLOCKS: u16 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Serial {
@@ -104,7 +109,9 @@ impl Serial {
         }
     }
 
-    pub(crate) fn write(&mut self, address: u16, value: u8) {
+    /// Writes SB or SC. `counter` is the timer's internal counter, which
+    /// the internal serial clock is divided from.
+    pub(crate) fn write(&mut self, address: u16, value: u8, counter: u16) {
         if address == 0xFF01 {
             self.data = value;
             return;
@@ -114,11 +121,56 @@ impl Serial {
             self.sent.push(self.data);
             self.outgoing = Some(self.data);
             self.incoming = 0xFF;
-            self.remaining = if self.control & 0x02 != 0 {
-                FAST_TRANSFER_CYCLES
+            let bit_clocks = if self.control & 0x02 != 0 {
+                FAST_BIT_CLOCKS
             } else {
-                TRANSFER_CYCLES
+                BIT_CLOCKS
             };
+            self.remaining = transfer_cycles(counter, bit_clocks);
         }
+    }
+}
+
+/// M-cycles until a transfer started now on the internal clock finishes:
+/// to the clock's next falling edge, plus seven more bit times. The counter
+/// advances four clock cycles per M-cycle. The serial clock's edges fall
+/// when the counter, plus one M-cycle, crosses a multiple of the bit time:
+/// one M-cycle ahead of DIV, as measured against DIV's own phase by
+/// Mooneye's `boot_div` and `serial/boot_sclk_align`.
+fn transfer_cycles(counter: u16, bit_clocks: u16) -> u16 {
+    let phase = (counter.wrapping_add(4)) % bit_clocks;
+    let to_first_edge = (bit_clocks - phase).div_ceil(4);
+    to_first_edge + 7 * (bit_clocks / 4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transfers_end_on_the_serial_clock_not_eight_bits_after_the_write() {
+        // The edge is one M-cycle away: barely more than seven bit times.
+        assert_eq!(transfer_cycles(0x01F8, BIT_CLOCKS), 1 + 7 * 128);
+        // Just past an edge: a whole eight bit times.
+        assert_eq!(transfer_cycles(0x01FC, BIT_CLOCKS), 8 * 128);
+        assert_eq!(transfer_cycles(0x0000, BIT_CLOCKS), 127 + 7 * 128);
+        assert_eq!(transfer_cycles(0x000C, FAST_BIT_CLOCKS), 4 + 7 * 4);
+    }
+
+    #[test]
+    fn a_transfer_without_a_partner_shifts_in_ff_and_interrupts() {
+        let mut serial = Serial::new(Model::Dmg);
+        let mut interrupt_flag = 0;
+        serial.write(0xFF01, 0x42, 0);
+        serial.write(0xFF02, 0x81, 0);
+        for _ in 0..transfer_cycles(0, BIT_CLOCKS) - 1 {
+            serial.tick(&mut interrupt_flag);
+        }
+        assert_eq!((serial.read(0xFF02), interrupt_flag), (0xFF, 0));
+        serial.tick(&mut interrupt_flag);
+        assert_eq!(serial.read(0xFF01), 0xFF);
+        assert_eq!(serial.read(0xFF02), 0x7F);
+        assert_eq!(interrupt_flag, interrupts::SERIAL);
+        assert_eq!(serial.sent(), [0x42]);
     }
 }
