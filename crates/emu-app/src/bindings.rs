@@ -214,8 +214,9 @@ pub struct Bindings {
 /// Laid out for playing on a keyboard: the left hand on WASD and the
 /// shoulders either side of it, the right hand on a square of four keys in
 /// the DS face-button positions (Y and X on top, B and A below). The arrow
-/// keys steer too, and B, for blow, blows into the microphone.
-const KEY_DEFAULTS: [(Held, &str); 20] = [
+/// keys steer too, Return presses A as well, as it confirms everywhere
+/// else, and B, for blow, blows into the microphone.
+const KEY_DEFAULTS: [(Held, &str); 21] = [
     (Held::Button(Button::Up), "w"),
     (Held::Button(Button::Left), "a"),
     (Held::Button(Button::Down), "s"),
@@ -228,9 +229,10 @@ const KEY_DEFAULTS: [(Held, &str); 20] = [
     (Held::Button(Button::X), "i"),
     (Held::Button(Button::B), "j"),
     (Held::Button(Button::A), "k"),
+    (Held::Button(Button::A), "enter"),
     (Held::Button(Button::L), "q"),
     (Held::Button(Button::R), "e"),
-    (Held::Button(Button::Start), "enter"),
+    (Held::Button(Button::Start), "space"),
     (Held::Button(Button::Select), "backspace"),
     (Held::FastForward, "tab"),
     (Held::SlowMotion, "1"),
@@ -555,6 +557,9 @@ mod tests {
         assert_eq!(key("i"), Some(Held::Button(Button::X)));
         assert_eq!(key("j"), Some(Held::Button(Button::B)));
         assert_eq!(key("k"), Some(Held::Button(Button::A)));
+        assert_eq!(key("enter"), Some(Held::Button(Button::A)));
+        assert_eq!(key("space"), Some(Held::Button(Button::Start)));
+        assert_eq!(key("backspace"), Some(Held::Button(Button::Select)));
         assert_eq!(key("q"), Some(Held::Button(Button::L)));
         assert_eq!(key("e"), Some(Held::Button(Button::R)));
         assert_eq!(key("tab"), Some(Held::FastForward));
