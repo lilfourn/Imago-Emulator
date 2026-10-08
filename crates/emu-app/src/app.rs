@@ -163,7 +163,7 @@ fn menus() -> Vec<Menu> {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open ROM…", OpenRom),
-                MenuItem::action("Connect Link Cable…", ConnectLinkCable),
+                MenuItem::action("Connect Second Console…", ConnectLinkCable),
                 MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),
                 MenuItem::separator(),
                 MenuItem::action("Save Screenshot", SaveScreenshot),

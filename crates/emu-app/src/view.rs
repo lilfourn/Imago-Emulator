@@ -329,7 +329,11 @@ impl EmulatorView {
         self.sync_held();
         self.sessions += 1;
         if info.players > 1 {
-            self.layout.arrangement = Arrangement::Horizontal;
+            // Linked consoles sit side by side; a DS's own two screens
+            // keep the chosen layout.
+            if consoles(&info) == 1 {
+                self.layout.arrangement = Arrangement::Horizontal;
+            }
             window.set_window_title(&format!("{name} — {} link", info.system.name()));
         } else {
             window.set_window_title(&format!("{name} — {}", info.system.name()));
@@ -576,10 +580,12 @@ impl EmulatorView {
         )
     }
 
-    /// The running game's touchscreen: its index and size.
+    /// The touchscreen of the console being played: its index and size.
+    /// Each of two linked DSes has its own.
     fn touchscreen(&self) -> Option<(usize, ScreenSize)> {
         let info = &self.session.as_ref()?.info;
-        let screen = info.touch_screen?;
+        let per_console = info.screens.len() / consoles(info);
+        let screen = info.touch_screen? + self.active_player.min(consoles(info) - 1) * per_console;
         Some((screen, *info.screens.get(screen)?))
     }
 
@@ -823,7 +829,9 @@ impl EmulatorView {
         });
     }
 
-    /// Restarts the running Game Boy game linked to a second one.
+    /// Restarts the running game linked to a second one: by link cable
+    /// for the Game Boy and Game Boy Advance, over local wireless for the
+    /// DS.
     fn connect_link_cable(
         &mut self,
         _: &ConnectLinkCable,
@@ -831,15 +839,11 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         let first = self.session.as_ref().and_then(|session| {
-            let has_cable = matches!(session.info.system, System::Gb | System::Gba);
-            let single = session.info.players == 1 && has_cable;
+            let single = session.info.players == 1;
             single.then(|| session.rom_paths[0].clone())
         });
         let Some(first) = first else {
-            self.show_notice(
-                "Open a Game Boy or Game Boy Advance game first, then connect the cable",
-                cx,
-            );
+            self.show_notice("Open a game first, then connect a second console", cx);
             return;
         };
         self.prompt_for_rom("Connect", window, cx, move |this, second, window, cx| {
@@ -1297,7 +1301,10 @@ impl Render for EmulatorView {
         }
 
         if let Some(session) = self.session.as_mut() {
-            self.placements = self.layout.place(session.info.screens, viewport);
+            let consoles = consoles(&session.info);
+            self.placements = self
+                .layout
+                .place_consoles(session.info.screens, consoles, viewport);
             session.refresh_images(
                 &self.placements,
                 scale_factor,
@@ -1415,6 +1422,18 @@ fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
         Shortcut::SwapScreens => Box::new(SwapScreens),
         Shortcut::SwitchPlayer => Box::new(SwitchPlayer),
         Shortcut::FullScreen => Box::new(ToggleFullScreen),
+    }
+}
+
+/// How many consoles a session shows side by side, each laid out on its
+/// own: one, or each player's for linked systems with several screens
+/// each (two DSes). Single-screen consoles share one layout instead.
+fn consoles(info: &CoreInfo) -> usize {
+    let players = info.players.max(1);
+    if info.screens.len() > players {
+        players
+    } else {
+        1
     }
 }
 

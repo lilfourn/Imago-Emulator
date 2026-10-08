@@ -1806,6 +1806,22 @@ mod tests {
     }
 
     #[test]
+    fn two_ds_games_link_over_local_wireless() {
+        let (dir, paths) = rom_dir(
+            "wireless",
+            &[("white.nds", &nds_rom()), ("black.nds", &nds_rom())],
+        );
+        let loaded = load(&paths).expect("loads");
+        assert_eq!(
+            (loaded.info().system, loaded.info().players),
+            (System::Nds, 2)
+        );
+        assert_eq!(loaded.info().screens.len(), 4);
+        assert_eq!(loaded.player_rom_paths(), &paths[..]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
     fn games_that_would_share_a_save_file_are_refused() {
         let (dir, paths) = rom_dir(
             "shared-save",
