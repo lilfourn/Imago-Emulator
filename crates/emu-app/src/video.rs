@@ -69,6 +69,15 @@ pub fn shrink(frame: &Frame, size: ScreenSize) -> Cow<'_, Frame> {
 /// `frame` as BGRA bytes, enlarged `factor` times with nearest-neighbour
 /// sampling.
 pub fn upscale_bgra(frame: &Frame, factor: usize) -> Vec<u8> {
+    if factor <= 1 {
+        // Filtered and upscaled-3D frames come already large; a plain
+        // conversion compiles to a fast copy.
+        return frame
+            .pixels()
+            .iter()
+            .flat_map(|pixel| pixel.to_le_bytes())
+            .collect();
+    }
     let size = frame.size();
     let row_bytes = usize::from(size.width) * factor * 4;
     let mut out = Vec::with_capacity(row_bytes * usize::from(size.height) * factor);

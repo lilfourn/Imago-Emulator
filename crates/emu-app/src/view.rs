@@ -13,7 +13,8 @@ use gpui::{
 };
 
 use crate::app::{
-    ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver, EditCheats, InsertGbaCartridge,
+    ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver, EditCheats, FilterLcdGrid,
+    FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, InsertGbaCartridge,
     LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState, NextScreenGap,
     NextStateSlot, OpenRom, PreviousStateSlot, Reset, Resolution3d1x, Resolution3d2x,
     Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise, SaveState, ShowDebugger,
@@ -30,6 +31,7 @@ use crate::cursor::{self, Cursor};
 use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
 use crate::emulator::{self, Command, Emulator, Event, Loaded};
+use crate::filter::Filter;
 use crate::gamepad::{self, PadEvent};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::microphone::{self, Loudness, Microphone};
@@ -66,6 +68,8 @@ pub struct EmulatorView {
     heard: u8,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
+    /// How the screens are filtered on their way to the window.
+    filter: Filter,
     /// The debugger window, once opened.
     debugger: Option<WindowHandle<DebuggerWindow>>,
     /// Games started so far, which numbers each for the debugger.
@@ -198,6 +202,7 @@ impl EmulatorView {
             microphone: None,
             heard: 0,
             color_correction: true,
+            filter: Filter::default(),
             debugger: None,
             sessions: 0,
             session: None,
@@ -229,6 +234,7 @@ impl EmulatorView {
                 view.layout = settings.layout;
                 view.speeds = settings.speed;
                 view.resolution_3d = settings.resolution_3d;
+                view.filter = settings.filter;
             }
             Some(Err(error)) => view.show_notice(format!("{error}; using default settings"), cx),
             None => {}
@@ -970,6 +976,7 @@ impl EmulatorView {
             layout: self.layout,
             speed: self.speeds,
             resolution_3d: self.resolution_3d,
+            filter: self.filter,
         };
         if let Err(error) = settings.save(path) {
             let message = format!("Cannot save settings to {}: {error}", path.display());
@@ -1058,13 +1065,27 @@ impl EmulatorView {
             .collect()
     }
 
-    fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
-        self.color_correction = !self.color_correction;
+    /// Rebuilds every screen's image at the next render, after a change
+    /// in how frames become images.
+    fn rebuild_images(&mut self) {
         if let Some(session) = &mut self.session {
-            // Rebuild every screen with the new colours.
             let images = session.images.iter_mut().filter_map(Option::take);
             self.stale_images.extend(images.map(|(_, image)| image));
         }
+    }
+
+    /// Filters the screens with `filter` from now on, and saves that for
+    /// next launch.
+    fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        self.rebuild_images();
+        self.show_notice(filter.label(), cx);
+        self.save_settings(cx);
+    }
+
+    fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
+        self.color_correction = !self.color_correction;
+        self.rebuild_images();
         self.show_notice(
             if self.color_correction {
                 "Colour correction on"
@@ -1078,12 +1099,14 @@ impl EmulatorView {
 
 impl Session {
     /// Brings the images up to date with the latest frame and with how
-    /// each placement draws its screen.
+    /// each placement draws its screen. Each frame is colour corrected,
+    /// turned and filtered, then enlarged by the whole factor left.
     fn refresh_images(
         &mut self,
         placements: &[Placement],
         scale_factor: f32,
         color_correction: bool,
+        filter: Filter,
         window: &mut Window,
     ) {
         if let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) {
@@ -1116,12 +1139,18 @@ impl Session {
             if let Some((_, stale)) = slot.take() {
                 window.drop_image(stale).ok();
             }
+            // Frames drawn at a higher 3D resolution have several pixels
+            // to each console pixel.
+            let native = self.info.screens.get(placement.screen);
+            let cell = native.map_or(1, |native| frame.size().width / native.width.max(1));
             let corrected = correction.map(|correction| correction.frame(frame));
             let frame = corrected.as_ref().unwrap_or(frame);
             let turned =
                 (key.rotation != Rotation::Upright).then(|| video::turn(frame, key.rotation));
             let frame = turned.as_ref().unwrap_or(frame);
-            *slot = Some((key, video::render_image(frame, key.factor)));
+            let (filtered, factor) =
+                filter.apply(frame, key.factor, usize::from(cell), key.rotation);
+            *slot = Some((key, video::render_image(&filtered, factor)));
         }
     }
 }
@@ -1208,6 +1237,21 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleMicrophone, _, cx| {
                 this.toggle_microphone(cx);
             }))
+            .on_action(cx.listener(|this, _: &FilterNone, _, cx| {
+                this.set_filter(Filter::None, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterLcdGrid, _, cx| {
+                this.set_filter(Filter::LcdGrid, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterScanlines, _, cx| {
+                this.set_filter(Filter::Scanlines, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterScale2x, _, cx| {
+                this.set_filter(Filter::Scale2x, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FilterScale3x, _, cx| {
+                this.set_filter(Filter::Scale3x, cx);
+            }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
             }))
@@ -1243,6 +1287,7 @@ impl Render for EmulatorView {
                 &self.placements,
                 scale_factor,
                 self.color_correction,
+                self.filter,
                 window,
             );
             for (placement, image) in self.placements.iter().zip(&session.images) {

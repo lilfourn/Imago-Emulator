@@ -1,5 +1,6 @@
 //! Settings kept between launches: the screen layout, the speeds of
-//! fast-forward and slow motion, and the resolution of DS 3D.
+//! fast-forward and slow motion, the resolution of DS 3D and the video
+//! filter.
 //!
 //! The app writes them whenever one changes, as TOML next to the bindings
 //! file:
@@ -17,6 +18,7 @@
 //!
 //! [video]
 //! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
+//! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
 //! ```
 //!
 //! Settings missing from the file keep their defaults.
@@ -25,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::filter::Filter;
 use crate::layout::{Arrangement, Layout, Rotation};
 use crate::persist;
 use crate::speed::{MIN_RATE, Rate, Speed, Speeds};
@@ -51,6 +54,8 @@ pub struct Settings {
     /// How many times its own resolution DS 3D is drawn at, 1 to
     /// [`MAX_RESOLUTION_3D`] (see `Core::set_render_scale`).
     pub resolution_3d: u32,
+    /// How the screens are filtered on their way to the window.
+    pub filter: Filter,
 }
 
 impl Default for Settings {
@@ -59,6 +64,7 @@ impl Default for Settings {
             layout: Layout::default(),
             speed: Speeds::default(),
             resolution_3d: 1,
+            filter: Filter::None,
         }
     }
 }
@@ -75,12 +81,15 @@ struct SettingsFile {
 #[serde(default, deny_unknown_fields)]
 struct VideoSection {
     resolution_3d: u32,
+    filter: String,
 }
 
 impl Default for VideoSection {
     fn default() -> Self {
+        let settings = Settings::default();
         Self {
-            resolution_3d: Settings::default().resolution_3d,
+            resolution_3d: settings.resolution_3d,
+            filter: settings.filter.name().to_owned(),
         }
     }
 }
@@ -189,10 +198,13 @@ impl Settings {
         if !(1..=MAX_RESOLUTION_3D).contains(&resolution_3d) {
             return Err(SettingsError::UnsupportedResolution(resolution_3d));
         }
+        let filter = Filter::from_name(&file.video.filter)
+            .ok_or_else(|| SettingsError::UnknownFilter(file.video.filter.clone()))?;
         Ok(Self {
             layout: file.layout.to_layout()?,
             speed: file.speed.to_speeds()?,
             resolution_3d,
+            filter,
         })
     }
 
@@ -203,6 +215,7 @@ impl Settings {
             speed: SpeedSection::from(&self.speed),
             video: VideoSection {
                 resolution_3d: self.resolution_3d,
+                filter: self.filter.name().to_owned(),
             },
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
@@ -261,6 +274,9 @@ pub enum SettingsError {
     /// The rotation is not 0, 90, 180 or 270 degrees.
     #[error("unsupported rotation {0}° in settings")]
     UnsupportedRotation(u16),
+    /// The filter is not one of the five names.
+    #[error("unknown video filter {0:?} in settings")]
+    UnknownFilter(String),
     /// The 3D resolution is not 1 to [`MAX_RESOLUTION_3D`] times.
     #[error("unsupported 3D resolution {0}x in settings; use 1 to {max}", max = MAX_RESOLUTION_3D)]
     UnsupportedResolution(u32),
@@ -292,10 +308,12 @@ mod tests {
                 slow_motion: Rate::new(0.25).expect("valid rate"),
             },
             resolution_3d: 4,
+            filter: Filter::Scanlines,
         };
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
         assert!(text.contains("resolution_3d = 4"), "{text}");
+        assert!(text.contains("filter = \"scanlines\""), "{text}");
         assert!(text.contains("rotation = 270"), "{text}");
         assert!(text.contains("fast_forward = 3.0"), "{text}");
         assert_eq!(Settings::from_toml(&text), Ok(settings));
@@ -363,6 +381,17 @@ mod tests {
                 Err(SettingsError::UnsupportedResolution(wrong))
             );
         }
+    }
+
+    #[test]
+    fn the_filter_is_one_of_five_names() {
+        let settings = Settings::from_toml("[video]\nfilter = \"lcd-grid\"\n").expect("valid file");
+        assert_eq!(settings.filter, Filter::LcdGrid);
+        assert_eq!(Settings::from_toml("").map(|s| s.filter), Ok(Filter::None));
+        assert_eq!(
+            Settings::from_toml("[video]\nfilter = \"xbrz\"\n"),
+            Err(SettingsError::UnknownFilter("xbrz".to_owned()))
+        );
     }
 
     #[test]

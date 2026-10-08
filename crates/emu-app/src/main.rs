@@ -16,6 +16,7 @@ mod cursor;
 mod debugger;
 mod debugger_window;
 mod emulator;
+mod filter;
 mod gamepad;
 mod latch;
 mod layout;
