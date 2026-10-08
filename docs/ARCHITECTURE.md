@@ -31,7 +31,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-gba-cart` | The GBA cartridge: ROM, SRAM, Flash and EEPROM saves, and the GPIO clock. Shared by the GBA core and the DS's GBA slot ([decision 0006](decisions/0006-gba-slot.md)); depends only on `serde`. |
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
 | `emu-gba` | Game Boy Advance: memory map, wait states and the Game Pak prefetch buffer, PPU, APU with DMA FIFOs, DMA, timers, the interrupt controller, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
-| `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs. |
+| `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
@@ -77,7 +77,9 @@ pub trait Core: Send {
   second slot (the DS's GBA slot, [decision 0006](decisions/0006-gba-slot.md)).
 - **Players**: `CoreInfo::players` is 1, or 2 for a linked pair
   ([decision 0004](decisions/0004-linked-cores.md)). Each player has an
-  input and a cartridge; screens split evenly between players.
+  input and a cartridge; screens split evenly between players, so two
+  linked DSes have four: each console's top screen, then its bottom one.
+  `touch_screen` counts within a console, and each DS has its own.
 - **Battery saves are numbered by cartridge**: player `i`'s cartridge is
   `i`, and a DS's GBA slot cartridge is 1. Each keeps its own `.sav`.
 - **Input is per frame and per player**: a 12-bit button mask (bit order follows the GBA
@@ -121,8 +123,10 @@ pub trait Debugger {
 ```
 
 - **CPUs are numbers**: the DS's ARM9 is 0 and its ARM7 1; in a linked
-  pair player 0's CPU is 0 and player 1's is 1. Each `CpuInfo` says whose
-  player it is, so the app debugs the player the keyboard controls.
+  pair player 0's CPU is 0 and player 1's is 1, and in a linked DS pair
+  player 0's ARM9 and ARM7 are 0 and 1 and player 1's are 2 and 3. Each
+  `CpuInfo` says whose player it is, so the app debugs the player the
+  keyboard controls.
 - **Two ways to run a frame.** The app calls `run_frame` while nothing
   could stop it, so breakpoints cost nothing until one is set. With
   breakpoints, watchpoints or a step pending it calls `run_until`, which

@@ -15,7 +15,9 @@ Route 1, and its in-game save survives a restart. It has:
 - 16-channel sound with capture;
 - the game card with flash saves;
 - the GBA slot, which reads a GBA game and its save for Pal Park;
-- the touchscreen, microphone, firmware and RTC.
+- the touchscreen, microphone, firmware and RTC;
+- the Wi-Fi chip, for local wireless between two DSes: two Pokémon Whites
+  trade in the Union Room.
 It passes every test in RockPolish's rockwrestler and every page of
 armwrestler for the DS.
 
@@ -34,7 +36,7 @@ Neither core has been checked against commercial games yet; that needs your
 own dumps. The app has:
 - sound and gamepads;
 - save-state slots with thumbnails, rewind and fast-forward;
-- link play;
+- link play, including DS local wireless;
 - GBC/GBA colour correction, and DS 3D at 2×, 3× or 4× resolution;
 - filters: LCD grid, scanlines, Scale2x and Scale3x;
 - screenshots, and video recording to QuickTime movies;
@@ -61,6 +63,7 @@ The separate Metal Toolchain download is not needed.
 cargo run --release -p emu-app -- path/to/game.nds   # or open one with ⌘O
 cargo run --release -p emu-app -- red.gb blue.gb     # two Game Boys, linked
 cargo run --release -p emu-app -- fr.gba em.gba      # two GBAs, linked
+cargo run --release -p emu-app -- w.nds w2.nds       # two DSes in wireless range
 cargo run --release -p emu-app -- pt.nds em.gba      # a GBA game in the DS's GBA slot
 cargo test --workspace
 ```
@@ -271,13 +274,22 @@ indexed when it stops, so one cut short by a crash won't play.
 
 ## Link play
 
-Open a Game Boy or Game Boy Advance game, choose File > Connect Link
-Cable…, and pick a second game for the same system (or the same one with
-another save). Both run side by side on one cable; on the GBA the first
-game is the parent. Keyboard and gamepad control one console at a time:
-click its screen or press ⌘T to switch. Game Boy `.sav` files use the same
-layout as SameBoy, mGBA and BGB, including the MBC3 clock, so saves move
-between them.
+Open a game, choose File > Connect Second Console…, and pick a second game
+for the same system (or the same one with another save, under another
+name). Two Game Boys or GBAs run side by side on one cable; on the GBA the
+first game is the parent. Two DSes are in local wireless range of each
+other, each shown stacked, side by side, each with its own touchscreen.
+Keyboard and gamepad control one console at a time: click its screen or
+press ⌘T to switch. Game Boy `.sav` files use the same layout as SameBoy,
+mGBA and BGB, including the MBC3 clock, so saves move between them.
+
+The DS's local wireless is the console's own Wi-Fi chip, emulated well
+enough for Nintendo's multiplayer protocol: beacons, connecting, and the
+host's commands answered by its clients in their time slots
+([decision 0007](docs/decisions/0007-ds-local-wireless.md)). The two
+consoles get different MAC addresses. There is no internet connection
+(Nintendo WFC is gone) and no DS Download Play from the DS menu, since the
+emulator boots games directly.
 
 ## GBA slot
 

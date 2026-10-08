@@ -133,7 +133,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | NDS-7 | No anti-piracy symptoms in HG/SS, B/W or B2/W2 without patches. Any trigger is an emulator bug. | P0 · M15 |
 | NDS-8 | GBA slot: insert a GBA ROM and save so Pal Park works. ✅ (SRAM and Flash, [decision 0006](decisions/0006-gba-slot.md); Pal Park itself untried without GBA dumps) | P1 · M15 |
 | NDS-9 | 3D upscaling (N× internal resolution, or a Metal compute rasterizer). ✅ 1×–8× internal resolution on the CPU (`Core::set_render_scale`); the game still reads native 3D. | P1 · M16 |
-| NDS-10 | Local wireless between two instances (trades, battles). Microphone input or a "blow" button. ✅ microphone: a blow key and the computer's microphone, as loudness in `Input`. | P2 · M16 |
+| NDS-10 | Local wireless between two instances (trades, battles). Microphone input or a "blow" button. ✅ microphone: a blow key and the computer's microphone, as loudness in `Input`. ✅ local wireless: the Wi-Fi chip, and two consoles on one clock ([decision 0007](decisions/0007-ds-local-wireless.md)); two Pokémon Whites trade in the Union Room. Battles, Platinum and HG/SS untried. | P2 · M16 |
 | NDS-11 | HG/SS infrared cartridge (Pokéwalker). | P2 |
 
 ### 6.3 Frontend (`emu-app`)

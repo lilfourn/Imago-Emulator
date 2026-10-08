@@ -140,8 +140,8 @@ PRD Q5). The Pokémon checkpoints still need your own dumps.
 
 - Serial transfer between two GB cores in one process: `emu_gb::Linked`
   runs both in 8-M-cycle lockstep slices ([decision 0004](decisions/0004-linked-cores.md)).
-  Open a game, then File > Connect Link Cable…, or pass two ROMs on the
-  command line. Click a screen or press ⌘T to control the other Game Boy.
+  Open a game, then File > Connect Second Console…, or pass two ROMs on
+  the command line. Click a screen or press ⌘T to control the other Game Boy.
 - **Exit:** trade a Pokémon between two instances of Red/Blue or
   Gold/Silver.
 
@@ -252,6 +252,13 @@ are done.
   with the 2D layers enlarged around it; in White's bedroom, headless on an
   M5 Max, that runs at about 3.2× full speed at 2× and 2.7× at 4×. The
   microphone hears a blow key (B) or the computer's microphone.
+- Local wireless: two consoles in one process share a clock, and the ARM7's
+  Wi-Fi chip sends beacons, connects and runs Nintendo's multiplayer
+  exchange ([decision 0007](decisions/0007-ds-local-wireless.md)). Two
+  Pokémon White games, each from a save at the C-Gear, see each other in
+  the Union Room, talk, and trade (Tepig for Patrat, scripted through
+  `examples/link_probe.rs`). The pair runs at about 1.6× full speed
+  headless; one console's speed is unchanged.
 - RockPolish's rockwrestler passes all 23 of its tests, and armwrestler
   for the DS all eight of its pages, both checked by `cargo test`.
 - VBlankIntrWait, which libnds calls as swiWaitForVBlank, used to wait
@@ -268,7 +275,7 @@ are done.
 | M13 | Direct boot, VRAM, both 2D engines, SPI devices, RTC; hybrid layout, rotation, gap, gamepad touch | Frame CRCs against melonDS (the test-ROM runner reads text off the screen, not CRCs) |
 | M14 | 3D with anti-aliasing, sound with capture, 512 KB flash saves | The Platinum checkpoint (needs that dump) |
 | M15 | Pokémon White shows no anti-piracy symptoms; GBA slot with SRAM and Flash saves ([decision 0006](decisions/0006-gba-slot.md)) | Timing against melonDS traces; HG/SS and B2/W2; Pal Park with real GBA dumps |
-| M16 | 3D upscaling to 8× (NDS-9); microphone from a blow key or the computer's (NDS-10) | Local wireless |
+| M16 | 3D upscaling to 8× (NDS-9); microphone from a blow key or the computer's (NDS-10); local wireless, with a Union Room trade between two Pokémon Whites (NDS-10) | The exit's trade in Platinum or HG/SS (needs those dumps); DS Download Play |
 
 ### M12. Two CPUs
 
@@ -307,7 +314,11 @@ are done.
   instances.
 - Done: 3D upscaling (`Core::set_render_scale`, View > 3D Resolution); the
   microphone as a loudness in `Input` (hold B, or Emulation > Use
-  Microphone).
+  Microphone); local wireless between two consoles, `emu_nds::Linked`
+  ([decision 0007](decisions/0007-ds-local-wireless.md)). Open a DS game,
+  then File > Connect Second Console…, or pass two ROMs on the command
+  line. Two Pokémon Whites trade in the Union Room; Platinum and HG/SS are
+  untried.
 - **Exit:** trade between two instances of Platinum or HeartGold/SoulSilver
   over emulated local wireless.
 
@@ -350,5 +361,6 @@ are done.
 | Keyboard-first defaults, large window, full screen | UI-2, UI-5 | Phase 4 ✅ |
 | 3D upscaling (View > 3D Resolution) | NDS-9 | M16 ✅ |
 | Blow key, computer microphone | NDS-10 | M16 ✅ |
+| Two DSes in wireless range, side by side | NDS-10 | M16 ✅ |
 | Filters (LCD grid, scanlines, Scale2x/3x), screenshots, video recording | UI-4, UI-14 | Phase 4 ✅ |
 | xBRZ, slang presets, achievements, scripting | UI-4, UI-14 | Later |
