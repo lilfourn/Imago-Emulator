@@ -1697,6 +1697,7 @@ dependencies = [
  "crc32fast",
  "emu-core",
  "emu-cores",
+ "emu-script",
 ]
 
 [[package]]

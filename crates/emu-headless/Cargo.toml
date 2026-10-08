@@ -11,6 +11,7 @@ anyhow.workspace = true
 crc32fast.workspace = true
 emu-core.workspace = true
 emu-cores.workspace = true
+emu-script.workspace = true
 
 [lints]
 workspace = true
