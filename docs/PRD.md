@@ -103,11 +103,12 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | ID | Requirement | Priority |
 |---|---|---|
 | GB-1 | SM83 CPU: all opcodes including CB-prefixed, flags, interrupts, HALT/STOP, the EI delay, the HALT bug. ✅ | P0 · M1 |
-| GB-2 | Timer/DIV, joypad, and a scanline PPU (background, window, sprites with priority and the 10-per-line limit). ✅ | P0 · M2 |
+| GB-2 | Timer/DIV, joypad, and a scanline PPU (background, window, sprites with priority and the 10-per-line limit). ✅ STAT modes, interrupts and VRAM/OAM locking timed to the dot as Mooneye measures them. ✅ | P0 · M2 |
 | GB-3 | APU: two square channels (one with sweep), wave and noise, with length, envelope and frame sequencer. ✅ | P0 · M3 |
 | GB-4 | Cartridges: MBC1, MBC3 with RTC, MBC5, battery RAM. MBC3 RTC is saved in the de facto 48-byte trailer; 44- and 48-byte trailers are both read. ✅ | P0 · M3, M5 |
 | GB-5 | CGB mode: palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. ✅ | P0 · M5 |
 | GB-6 | Serial link cable between two instances in one process. ✅ | P1 · M6 |
+| GB-7 | Games made for the original Game Boy run on a Game Boy Color in DMG mode, coloured as its boot ROM colours them: by title, from SameBoy's MIT-licensed copy of the palette table, or with a button-combination palette; or in grey on a DMG. ✅ (colour by default; View > Original Game Boy Games, or `dmg_colors` in the settings file; Pokémon Red/Blue's palettes checked against the table, not in game) | P1 · M5 |
 
 **Game Boy Advance (`emu-gba`, `emu-arm`)**
 
@@ -238,5 +239,5 @@ they are project policy, not legal advice.
 | Q2 | Stay on crates.io GPUI 0.2.2, or pin a newer Zed git revision? | M3 |
 | Q3 | ~~Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI?~~ Decided: neither for now. Filters are CPU passes, and DS upscaling happens in the core ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | M11 |
 | Q4 | ~~Pace emulation from the audio clock or from display vsync?~~ Decided: a frame timer, with dynamic rate control on audio ([decision 0003](decisions/0003-frame-pacing.md)). | M3 |
-| Q5 | Bundle SameBoy's Expat-licensed open boot ROMs so the GB boots with an animation? | M2 |
+| Q5 | ~~Bundle SameBoy's Expat-licensed open boot ROMs so the GB boots with an animation?~~ Decided: no boot ROM is bundled, and games start as a boot ROM would leave them. Only the CGB boot ROM's compatibility palette table is taken from SameBoy, under its Expat (MIT) license, so games made for the original Game Boy get their Game Boy Color colours (GB-7). | M2 |
 | Q6 | ~~Write the optional CHIP-8 warm-up (M0) or start straight on the SM83?~~ Decided: straight to the SM83. | — |

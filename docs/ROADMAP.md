@@ -69,19 +69,21 @@ Frontend work in this phase: audio output, gamepads, the test-ROM suite and
 the trace logger. Doing them now, while the core is small, is cheaper than
 retrofitting.
 
-**Status (2026-10-05):** M1–M3 met on test ROMs; M4 met except state-slot
-thumbnails. 117 of 139 test ROMs pass
-(`crates/emu-gb/tests/test-roms-passing.txt`). The Pokémon checkpoints need
-your own cartridge dumps and have not been run.
+**Status (2026-10-08):** M1–M4 met on test ROMs. 152 of 159 test ROMs pass
+(`crates/emu-gb/tests/test-roms-passing.txt`), including every Mooneye
+acceptance test the harness runs on a DMG and all of Blargg's `dmg_sound`.
+The Pokémon checkpoints need your own cartridge dumps and have not been run.
 
 | Not yet passing | Why | Matters for games? |
 |---|---|---|
-| Mooneye PPU `intr_2_*`, `lcdon_*`, `stat_lyc_onoff` (7) | STAT mode bits lag the mode-2 interrupt by part of an M-cycle; the scanline renderer does not model it | Rarely; a few raster-effect demos |
-| Mooneye `boot_div`, `serial/boot_sclk_align` | Exact DIV and serial-clock phase left by the boot ROM | No |
-| Mooneye `timer/rapid_toggle` | TAC toggling glitch | No |
-| Mooneye MBC1 multicart | MBC1M wiring for compilation cartridges | Only those carts |
-| Blargg `dmg_sound` 09, 10, 12 | Wave-RAM access races while channel 3 plays | Rarely |
-| Blargg `oam_bug` | DMG OAM corruption bug | No (games avoid it) |
+| Blargg `oam_bug` 2, 4, 5, 7, 8 and the combined ROM (6) | The DMG's OAM corruption bug is not emulated | No (games avoid it) |
+
+Fixed on 2026-10-08: STAT now reports each mode a dot after the PPU enters
+it and the PPU locks VRAM and OAM (Mooneye `intr_2_*`, `lcdon_*`,
+`stat_lyc_onoff`, Blargg `oam_bug` 1); DIV and the serial clock keep the
+boot ROM's phase (`boot_div`, `boot_sclk_align`); an overflow from stopping
+the timer reloads at once (`rapid_toggle`); MBC1M multicarts; and DMG wave
+RAM while channel 3 plays (`dmg_sound` 09, 10, 12).
 
 ### M1. SM83 CPU ✅
 
@@ -109,7 +111,7 @@ your own cartridge dumps and have not been run.
 - **Exit:** Pokémon Red plays with sound; saving in game and restarting the
   app keeps the save. Most of Blargg `dmg_sound` passes.
 
-### M4. Save states, rewind and controllers ✅ (thumbnails pending)
+### M4. Save states, rewind and controllers ✅
 
 - Complete `save_state`/`load_state` for the GB core.
 - **Frontend:** rewind ring buffer (UI-11), state slots with thumbnails
@@ -122,17 +124,24 @@ your own cartridge dumps and have not been run.
 
 ## Phase 2 — Game Boy Color
 
-**Status (2026-10-05):** M5 and M6 met on test ROMs and unit tests. 135 of
-158 test ROMs pass. New gaps: `cgb-acid-hell` (2 pixels, mid-scanline
-effects) and DMG games are not colourised as on a real GBC (that needs the
-CGB boot ROM's palette table; SameBoy's open boot ROM is a candidate, see
-PRD Q5). The Pokémon checkpoints still need your own dumps.
+**Status (2026-10-08):** M5 and M6 met on test ROMs and unit tests. 152 of
+159 test ROMs pass. Games made for the original Game Boy run on a Game Boy
+Color in DMG mode by default, coloured as its boot ROM colours them: by
+title for Nintendo's games, from SameBoy's copy of the palette table (PRD
+Q5), or with one of the twelve button-combination palettes. dmg-acid2 run
+that way matches the CGB reference screenshot; View > Original Game Boy
+Games switches back to grey. Pokémon Red and Blue pick their red and blue
+palettes from the table, but without the dumps neither has been seen in
+game. Still open: `cgb-acid-hell` (2 pixels, mid-scanline effects). The
+Pokémon checkpoints still need your own dumps.
 
 ### M5. CGB mode and the MBC3 clock ✅ (test ROMs)
 
 - Palettes, VRAM bank 1 attributes, WRAM banking, HDMA, double speed. MBC3
   RTC with the latch sequence and day-counter carry, saved as the 48-byte
   trailer (read 44- and 48-byte forms).
+- DMG mode on a Game Boy Color for games made for the original Game Boy,
+  with the boot ROM's compatibility palettes.
 - **Exit:** cgb-acid2 passes. Pokémon Crystal's clock survives an emulator
   restart, day/night works, and Yellow runs with CGB palettes.
 

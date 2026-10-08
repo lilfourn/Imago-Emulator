@@ -21,9 +21,10 @@ Route 1, and its in-game save survives a restart. It has:
 It passes every test in RockPolish's rockwrestler and every page of
 armwrestler for the DS.
 
-The Game Boy and Game Boy Color core passes 135 of 158 open-source test
-ROMs, including all of Blargg's CPU tests, dmg-acid2 and cgb-acid2. The Game
-Boy Advance core has:
+The Game Boy and Game Boy Color core passes 152 of 159 open-source test
+ROMs, including all of Blargg's CPU and DMG sound tests, every Mooneye test
+it runs, dmg-acid2 and cgb-acid2. Games made for the original Game Boy play
+in the colours a Game Boy Color gives them. The Game Boy Advance core has:
 - an ARM7TDMI that passes all 2.25 million SingleStepTests cases;
 - video, sound, DMA, timers and an HLE BIOS;
 - SRAM, Flash and EEPROM saves;
@@ -106,6 +107,7 @@ cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua g
 | | | | | Debugger | ⌘⇧D |
 | | | | | Step / step over / next frame (debugger) | ⌘⇧I / ⌘⇧O / ⌘⇧N |
 | | | | | 3D resolution (DS) | View > 3D Resolution |
+| | | | | Original Game Boy games in colour or grey | View > Original Game Boy Games |
 | | | | | Computer's microphone on/off (DS) | Emulation > Use Microphone |
 
 The keys are laid out for playing on a keyboard: the left hand on W A S D
@@ -138,6 +140,15 @@ them stay pixel for pixel. The game still sees native 3D wherever it reads
 it back, so emulation and save states are the same at every resolution.
 States hold only native frames, so the first frame after loading one, and
 the frames rewind steps back through, show 3D at the native resolution.
+
+Games made for the original Game Boy play as on a Game Boy Color, in the
+colours it gives them: its boot ROM picks palettes by the title of a game
+Nintendo published (red for Pokémon Red, blue for Blue), and gives every
+other game the same default. View > Original Game Boy Games > In Grey plays
+them on an original Game Boy instead, from the next game opened.
+`dmg_colors` under `[game_boy]` in settings.toml can also name one of the
+twelve palettes a Game Boy Color gives when a button combination is held
+as it starts: `"right"`, `"left+a"`, `"down+b"` and so on.
 
 Hold B to blow into the DS microphone, for games that ask you to blow or
 shout. Emulation > Use Microphone listens to the computer's microphone
@@ -462,6 +473,10 @@ will. Dump your own cartridges and system files from hardware you own. Don't
 open issues or pull requests that link to ROMs or BIOS files. Games, BIOS
 dumps and saves are git-ignored, and CI fails if one is committed. See the
 [legal policy](docs/PRD.md#9-legal-policy).
+
+The Game Boy Color's palettes for original Game Boy games come from
+SameBoy's open-source boot ROM, copyright © 2015–2026 Lior Halphon, under
+the Expat (MIT) license.
 
 Recordings are encoded with the `jpeg-encoder` crate, which is based in
 part on the work of the Independent JPEG Group.

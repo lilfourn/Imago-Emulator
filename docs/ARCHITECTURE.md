@@ -29,7 +29,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. Also its disassembler and a bus wrapper for watchpoints. |
 | `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
 | `emu-gba-cart` | The GBA cartridge: ROM, SRAM, Flash and EEPROM saves, and the GPIO clock. Shared by the GBA core and the DS's GBA slot ([decision 0006](decisions/0006-gba-slot.md)); depends only on `serde`. |
-| `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges. Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
+| `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges, and the Game Boy Color's palettes for games made for the original Game Boy (SameBoy's table, MIT). Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
 | `emu-gba` | Game Boy Advance: memory map, wait states and the Game Pak prefetch buffer, PPU, APU with DMA FIFOs, DMA, timers, the interrupt controller, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
@@ -74,8 +74,10 @@ pub trait Core: Send {
 
 - **Construction is per system** (`emu_gba::Gba::new(&Media)`), so a core
   always has a game loaded. `Media` carries the ROM, the battery save, any
-  user-dumped BIOS/firmware, the RTC start time, and any cartridge in a
-  second slot (the DS's GBA slot, [decision 0006](decisions/0006-gba-slot.md)).
+  user-dumped BIOS/firmware, the RTC start time, any cartridge in a
+  second slot (the DS's GBA slot, [decision 0006](decisions/0006-gba-slot.md)),
+  and how a Game Boy shows games made for the original Game Boy: in grey,
+  or on a Game Boy Color in its colours.
 - **Players**: `CoreInfo::players` is 1, or 2 for a linked pair
   ([decision 0004](decisions/0004-linked-cores.md)). Each player has an
   input and a cartridge; screens split evenly between players, so two
