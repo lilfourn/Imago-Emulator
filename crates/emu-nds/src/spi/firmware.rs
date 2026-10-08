@@ -4,10 +4,15 @@
 //!
 //! The user's own `firmware.bin` is used when given. Otherwise the chip
 //! holds a synthesised 256 KiB image of a DS Lite with what games read: the
-//! header with the user settings location, wifi data with a valid CRC and a
-//! MAC address, three unconfigured access points, and two copies of the
-//! user settings. It has no boot code, as the machine boots games directly,
-//! and no real radio calibration, as there is no wifi to calibrate.
+//! header with the user settings location, wifi settings with a valid CRC,
+//! three unconfigured access points, and two copies of the user settings.
+//! It has no boot code, as the machine boots games directly.
+//!
+//! The wifi settings are a DS Lite's: its MAC address, the MAC's port
+//! values GBATEK lists after initialisation, and tables for its baseband
+//! and radio chip (an MM3218, "type 3"). The emulated chips only remember
+//! what is written to them, so their tables hold GBATEK's documented values
+//! and zeros elsewhere rather than a real console's calibration.
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +40,32 @@ const MAC_ADDRESS: [u8; 6] = [0x00, 0x16, 0x56, 0x2D, 0x53, 0x01];
 /// Wifi channels 1-13.
 const CHANNELS: u16 = 0x3FFE;
 const RF_CHIP_TYPE_3: u8 = 3;
+/// 20-bit serial words for the radio; bit 7 becomes W_RF_CNT bit 8.
+const RF_BITS_TYPE_3: u8 = 0x94;
+/// Radio registers the boot code sets, from 0xCE.
+const RF_REGISTERS: usize = 0x29;
+/// Values for the MAC's ports (W_CONFIG_xxx and W_POWER_TX) at 0x44-0x63:
+/// GBATEK's values after initialisation, and W_POWER_TX's power-on value.
+const MAC_PORTS: [u16; 16] = [
+    0x0002, 0x0017, 0x0026, 0x1818, 0x0048, 0x4840, 0x0058, 0x0042, 0x0140, 0x8064, 0xE0E0, 0x2443,
+    0x0003, 0x0032, 0x01F4, 0x0101,
+];
+/// Baseband registers GBATEK documents (the others start at zero): the
+/// DS Lite's 03h and 12h at 00h and 66h, the reset bit in 01h, carrier
+/// sense in 13h, the gain in 1Eh and the energy threshold in 35h.
+const BASEBAND: [(usize, u8); 6] = [
+    (0x00, 0x03),
+    (0x01, 0x9E),
+    (0x13, 0x00),
+    (0x1E, 0xBB),
+    (0x35, 0x1F),
+    (0x66, 0x12),
+];
+/// The baseband gain (register 1Eh) for channels 1-14, written on each
+/// channel change.
+const CHANNEL_GAINS: [u8; 14] = [
+    0xB1, 0xB1, 0xB2, 0xB2, 0xB3, 0xB3, 0xB4, 0xB4, 0xB5, 0xB5, 0xB6, 0xB6, 0xB7, 0xB7,
+];
 
 const SETTINGS_VERSION: u16 = 5;
 const NICKNAME: &str = "Player";
@@ -193,6 +224,34 @@ impl Firmware {
     pub(crate) fn calibration(&self) -> Calibration {
         Calibration::from_settings(&self.user_settings())
     }
+
+    /// The header and wifi settings: the image's first 0x200 bytes.
+    pub(crate) fn wifi_settings(&self) -> &[u8] {
+        let memory = self.flash.memory();
+        &memory[..memory.len().min(0x200)]
+    }
+
+    /// The console's MAC address (0x36).
+    pub(crate) fn mac_address(&self) -> [u8; 6] {
+        let mut mac = [0; 6];
+        if let Some(bytes) = self.flash.memory().get(0x36..0x3C) {
+            mac.copy_from_slice(bytes);
+        }
+        mac
+    }
+
+    /// Gives the console another MAC address, updating the wifi settings'
+    /// CRC, so two consoles from one image can tell each other apart.
+    pub(crate) fn set_mac_address(&mut self, mac: [u8; 6]) {
+        let memory = self.flash.memory_mut();
+        if memory.len() < 0x200 {
+            return;
+        }
+        memory[0x36..0x3C].copy_from_slice(&mac);
+        let length = usize::from(read_u16(memory, 0x2C)).min(0x200 - 0x2C);
+        let crc = crc16(0, &memory[0x2C..0x2C + length]);
+        write_u16(memory, 0x2A, crc);
+    }
 }
 
 fn default_user_settings() -> [u8; USER_SETTINGS_SIZE] {
@@ -244,6 +303,40 @@ fn empty_access_point() -> [u8; ACCESS_POINT_SIZE] {
     entry
 }
 
+/// The wifi settings at 0x2A-0x163 (GBATEK, "DS Firmware Wifi Calibration
+/// Data"), with their CRC.
+fn write_wifi_settings(header: &mut [u8]) {
+    header[0x2C..0x2C + WIFI_CONFIG_LENGTH].fill(0);
+    write_u16(header, 0x2C, WIFI_CONFIG_LENGTH as u16);
+    header[0x2F] = WIFI_VERSION_DS_LITE;
+    header[0x30..0x35].fill(0xFF);
+    header[0x36..0x3C].copy_from_slice(&MAC_ADDRESS);
+    write_u16(header, 0x3C, CHANNELS);
+    write_u16(header, 0x3E, 0xFFFF);
+    header[0x40] = RF_CHIP_TYPE_3;
+    header[0x41] = RF_BITS_TYPE_3;
+    header[0x42] = RF_REGISTERS as u8;
+    // Radio writes per channel change: none.
+    header[0x43] = 0;
+    for (index, value) in MAC_PORTS.into_iter().enumerate() {
+        write_u16(header, 0x44 + 2 * index, value);
+    }
+    for (register, value) in BASEBAND {
+        header[0x64 + register] = value;
+    }
+    // After the radio's registers, the channel tables: one baseband write
+    // per channel change, the gain.
+    let channels = 0xCE + RF_REGISTERS;
+    header[channels] = 1;
+    header[channels + 1] = 0x1E;
+    header[channels + 2..channels + 16].copy_from_slice(&CHANNEL_GAINS);
+    header[0x134..0x162].fill(0xFF);
+    header[0x162] = 0x1A;
+    header[0x163] = 0xFF;
+    let crc = crc16(0, &header[0x2C..0x2C + WIFI_CONFIG_LENGTH]);
+    write_u16(header, 0x2A, crc);
+}
+
 fn synthesize() -> Vec<u8> {
     let mut image = vec![0xFF; IMAGE_SIZE];
     let header = &mut image[..0x200];
@@ -257,24 +350,7 @@ fn synthesize() -> Vec<u8> {
     write_u16(header, 0x24, 0x7E40);
     write_u16(header, 0x26, 0);
 
-    // Wifi data; everything the radio would need stays zero.
-    header[0x2C..0x2C + WIFI_CONFIG_LENGTH].fill(0);
-    write_u16(header, 0x2C, WIFI_CONFIG_LENGTH as u16);
-    header[0x2F] = WIFI_VERSION_DS_LITE;
-    header[0x30..0x35].fill(0xFF);
-    header[0x36..0x3C].copy_from_slice(&MAC_ADDRESS);
-    write_u16(header, 0x3C, CHANNELS);
-    write_u16(header, 0x3E, 0xFFFF);
-    header[0x40] = RF_CHIP_TYPE_3;
-    // 29h radio registers, then two baseband and two radio indices per
-    // channel.
-    header[0x42] = 0x29;
-    header[0x43] = 0x02;
-    header[0xCE + 0x29] = 0x02;
-    header[0x134..0x162].fill(0xFF);
-    header[0x163] = 0xFF;
-    let crc = crc16(0, &header[0x2C..0x2C + WIFI_CONFIG_LENGTH]);
-    write_u16(header, 0x2A, crc);
+    write_wifi_settings(header);
 
     for index in 0..3 {
         let start = ACCESS_POINTS_OFFSET + index * ACCESS_POINT_SIZE;
@@ -330,6 +406,37 @@ mod tests {
         assert_eq!(
             crc16(0, &access_point[..0xFE]),
             read_u16(access_point, 0xFE)
+        );
+    }
+
+    #[test]
+    fn synthesised_wifi_settings_follow_gbatek() {
+        let firmware = Firmware::new(None);
+        let settings = firmware.wifi_settings();
+        assert_eq!(settings.len(), 0x200);
+        assert_eq!(settings[0x40], 3, "a DS Lite's radio");
+        assert_eq!(read_u16(settings, 0x4C), 0x0048, "W_CONFIG_120h");
+        assert_eq!(read_u16(settings, 0x62), 0x0101, "W_CONFIG_150h");
+        assert_eq!(settings[0x64 + 0x01], 0x9E, "BB[01h]");
+        // The channel tables follow the 29h radio registers.
+        assert_eq!(&settings[0xF7..0xFA], &[1, 0x1E, 0xB1]);
+        assert_eq!(settings[0x162], 0x1A);
+    }
+
+    #[test]
+    fn a_second_console_gets_its_own_mac_address() {
+        let mut firmware = Firmware::new(None);
+        let mut mac = firmware.mac_address();
+        assert_eq!(mac, MAC_ADDRESS);
+        mac[5] = 0x02;
+        firmware.set_mac_address(mac);
+        let memory = firmware.flash.memory();
+        assert_eq!(memory[0x36..0x3C], mac);
+        let length = usize::from(read_u16(memory, 0x2C));
+        assert_eq!(
+            crc16(0, &memory[0x2C..0x2C + length]),
+            read_u16(memory, 0x2A),
+            "the CRC still matches"
         );
     }
 

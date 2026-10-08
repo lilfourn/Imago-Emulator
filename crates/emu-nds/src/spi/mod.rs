@@ -180,6 +180,21 @@ impl Spi {
     pub(crate) fn calibration(&self) -> Calibration {
         self.firmware.calibration()
     }
+
+    /// The firmware's header and wifi settings, its first 0x200 bytes.
+    pub(crate) fn wifi_settings(&self) -> &[u8] {
+        self.firmware.wifi_settings()
+    }
+
+    /// The MAC address in the firmware's wifi settings.
+    pub(crate) fn mac_address(&self) -> [u8; 6] {
+        self.firmware.mac_address()
+    }
+
+    /// Changes the MAC address in the firmware's wifi settings.
+    pub(crate) fn set_mac_address(&mut self, mac: [u8; 6]) {
+        self.firmware.set_mac_address(mac);
+    }
 }
 
 #[cfg(test)]

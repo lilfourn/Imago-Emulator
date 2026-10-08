@@ -28,7 +28,7 @@ impl Hardware {
         }
     }
 
-    fn raw_16(&self, side: Side, offset: u32) -> u16 {
+    pub(crate) fn raw_16(&self, side: Side, offset: u32) -> u16 {
         let index = (offset & IO_PAGE & !1) as usize;
         let raw = self.raw(side);
         u16::from_le_bytes([raw[index], raw[index + 1]])
@@ -458,7 +458,12 @@ impl Hardware {
             return;
         }
         match offset {
-            0x304 => self.powcnt2 = value & 3,
+            0x304 => {
+                self.powcnt2 = value & 3;
+                let now = self.now(Side::Arm7);
+                self.wifi.set_enabled(value & 2 != 0, now);
+                self.sync_wifi();
+            }
             0x138 => {
                 let now = self.now(Side::Arm7);
                 self.rtc.write(value, now);

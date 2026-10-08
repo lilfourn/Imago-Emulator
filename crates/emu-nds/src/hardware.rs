@@ -23,6 +23,7 @@ use crate::sound::{self, Sound};
 use crate::spi::Spi;
 use crate::timer::Timers;
 use crate::vram::{Engine, Vram};
+use crate::wifi::Wifi;
 
 /// Main RAM: 4 MiB, mirrored through 0x02000000–0x02FFFFFF.
 pub(crate) const MAIN_RAM_SIZE: usize = 0x40_0000;
@@ -44,6 +45,8 @@ pub(crate) enum Event {
     CartSpiDone,
     /// A byte on the ARM7's SPI bus is done.
     SpiDone,
+    /// The wifi hardware has something to do.
+    Wifi,
 }
 
 /// One CPU's private devices and clock.
@@ -113,6 +116,7 @@ pub(crate) struct Hardware {
     pub(crate) gba_slot: GbaSlot,
     pub(crate) spi: Spi,
     pub(crate) rtc: Rtc,
+    pub(crate) wifi: Wifi,
     /// KEYINPUT: A, B, Select, Start, Right, Left, Up, Down, R, L; active low.
     pub(crate) keys: u16,
     /// EXTKEYIN bits 0 (X), 1 (Y), 6 (pen down) and 7 (hinge), active low.
@@ -174,6 +178,7 @@ impl Hardware {
             gba_slot: GbaSlot::default(),
             spi: Spi::new(None),
             rtc: Rtc::new(0),
+            wifi: Wifi::new(&[]),
             keys: 0x03FF,
             ext_keys: 0x007F,
             powcnt1: 0,
@@ -275,6 +280,27 @@ impl Hardware {
         self.sound = sound;
         self.scheduler
             .schedule_at(time + sound::CYCLES_PER_SAMPLE, Event::SoundSample);
+    }
+
+    /// Brings the wifi hardware up to bus cycle `time`, for its event.
+    pub(crate) fn run_wifi(&mut self, time: u64) {
+        self.wifi.advance(time);
+        self.sync_wifi();
+    }
+
+    /// Raises the ARM7's wifi interrupt if the wifi hardware asks, and
+    /// moves its event to its next deadline, after anything that may have
+    /// changed either.
+    pub(crate) fn sync_wifi(&mut self) {
+        if self.wifi.take_irq() {
+            self.arm7.interrupts.request(irq::WIFI);
+        }
+        if let Some(deadline) = self.wifi.reschedule() {
+            self.scheduler.cancel(|event| *event == Event::Wifi);
+            if let Some(time) = deadline {
+                self.scheduler.schedule_at(time, Event::Wifi);
+            }
+        }
     }
 
     /// Replaces timer `index`'s overflow event on `side` after it changed.

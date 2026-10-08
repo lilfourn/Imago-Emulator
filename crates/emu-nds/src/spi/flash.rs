@@ -68,6 +68,10 @@ impl Flash {
         &self.memory
     }
 
+    pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
+        &mut self.memory
+    }
+
     /// Whether a program or erase changed the memory since the last call.
     pub(crate) fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)

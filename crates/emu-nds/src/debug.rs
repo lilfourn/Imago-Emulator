@@ -31,9 +31,29 @@ fn side(cpu: usize) -> Side {
 
 /// A [`Stepper`] that checks every instruction against a debugger's
 /// stops and keeps the first that applies.
-struct Checks<'a> {
+pub(crate) struct Checks<'a> {
     stops: &'a Stops,
     hit: Option<Stop>,
+    /// The debugger's number for this console's ARM9; its ARM7 is the
+    /// next. 0, or 2 for the second console of a linked pair.
+    first: usize,
+}
+
+impl<'a> Checks<'a> {
+    /// Checks against `stops` for the console whose ARM9 the debugger
+    /// numbers `first`.
+    pub(crate) fn new(stops: &'a Stops, first: usize) -> Self {
+        Self {
+            stops,
+            hit: None,
+            first,
+        }
+    }
+
+    /// The stop that applied, if one did.
+    pub(crate) fn hit(&self) -> Option<Stop> {
+        self.hit
+    }
 }
 
 /// Records `access` by `cpu` in `hit` if a watchpoint catches it and
@@ -46,7 +66,7 @@ fn watch(stops: &Stops, hit: &mut Option<Stop>, cpu: usize, access: DataAccess) 
 
 impl Stepper for Checks<'_> {
     fn arm9(&mut self, cpu: &mut Arm9, bus: &mut Arm9Bus<'_>) {
-        let Self { stops, hit } = self;
+        let Self { stops, hit, first } = self;
         cpu.step(&mut Watched::new(bus, |address, bytes, write, value| {
             let access = DataAccess {
                 address,
@@ -54,12 +74,12 @@ impl Stepper for Checks<'_> {
                 write,
                 value,
             };
-            watch(stops, hit, ARM9, access);
+            watch(stops, hit, *first + ARM9, access);
         }));
     }
 
     fn arm7(&mut self, cpu: &mut emu_arm::Cpu, bus: &mut Arm7Bus<'_>) {
-        let Self { stops, hit } = self;
+        let Self { stops, hit, first } = self;
         cpu.step(&mut Watched::new(bus, |address, bytes, write, value| {
             let access = DataAccess {
                 address,
@@ -67,15 +87,16 @@ impl Stepper for Checks<'_> {
                 write,
                 value,
             };
-            watch(stops, hit, ARM7, access);
+            watch(stops, hit, *first + ARM7, access);
         }));
     }
 
     fn stop(&mut self, side: Side, ran: bool, next: u32) -> bool {
-        let cpu = match side {
-            Side::Arm9 => ARM9,
-            Side::Arm7 => ARM7,
-        };
+        let cpu = self.first
+            + match side {
+                Side::Arm9 => ARM9,
+                Side::Arm7 => ARM7,
+            };
         if self.hit.is_none() && ran {
             self.hit = self
                 .stops
@@ -225,11 +246,11 @@ impl Debugger for Nds {
         audio: &mut Vec<StereoSample>,
         stops: &Stops,
     ) -> RunOutcome {
-        let mut checks = Checks { stops, hit: None };
+        let mut checks = Checks::new(stops, 0);
         let frame_done = self.run(inputs, audio, &mut checks);
         RunOutcome {
             frame_done,
-            stop: checks.hit,
+            stop: checks.hit(),
         }
     }
 }

@@ -68,6 +68,9 @@ enum Place {
     GbaRam,
     /// The GBA slot while EXMEMCNT gives it to the other CPU: zeros.
     GbaDeselected,
+    /// The ARM7's wifi registers and RAM, 0x04800000-0x0480FFFF, on a
+    /// 16-bit bus.
+    Wifi,
     /// Nothing at all.
     Open,
 }
@@ -149,6 +152,7 @@ impl Hardware {
                 _ => Place::SharedWram(address as usize & 0x7FFF),
             },
             0x03 => Place::Arm7Wram(address as usize & 0xFFFF),
+            0x04 if (0x0480_0000..0x0481_0000).contains(&address) => Place::Wifi,
             0x04 => Place::Io,
             0x06 => Place::Vram(Region::Arm7, address & 0x3_FFFF),
             0x08 | 0x09 => self.gba_slot_place(Side::Arm7, Place::GbaRom),
@@ -199,6 +203,10 @@ impl Hardware {
             // An 8-bit bus: the byte repeats across the word.
             Place::GbaRam => u32::from(self.gba_slot.read_ram(unaligned)) * 0x0101_0101,
             Place::GbaDeselected => 0,
+            Place::Wifi => {
+                u32::from(self.wifi_read_16(address))
+                    | u32::from(self.wifi_read_16(address | 2)) << 16
+            }
             Place::Open => 0xFFFF_FFFF,
         }
     }
@@ -225,6 +233,7 @@ impl Hardware {
             Place::GbaRom => self.gba_slot.read_rom(address),
             Place::GbaRam => u16::from(self.gba_slot.read_ram(unaligned)) * 0x0101,
             Place::GbaDeselected => 0,
+            Place::Wifi => self.wifi_read_16(address),
             Place::Open => 0xFFFF,
         }
     }
@@ -249,6 +258,7 @@ impl Hardware {
             Place::GbaRom => (self.gba_slot.read_rom(address & !1) >> ((address & 1) * 8)) as u8,
             Place::GbaRam => self.gba_slot.read_ram(address),
             Place::GbaDeselected => 0,
+            Place::Wifi => (self.wifi_read_16(address & !1) >> ((address & 1) * 8)) as u8,
             Place::Open => 0xFF,
         }
     }
@@ -291,6 +301,10 @@ impl Hardware {
                 let byte = value.rotate_right((unaligned & 3) * 8) as u8;
                 self.gba_slot.write_ram(unaligned, byte);
             }
+            Place::Wifi => {
+                self.wifi_write_16(address, value as u16);
+                self.wifi_write_16(address | 2, (value >> 16) as u16);
+            }
             Place::Arm9Bios(_) | Place::Arm7Bios(_) | Place::GbaDeselected | Place::Open => {}
         }
     }
@@ -320,6 +334,7 @@ impl Hardware {
                 let byte = (value >> ((unaligned & 1) * 8)) as u8;
                 self.gba_slot.write_ram(unaligned, byte);
             }
+            Place::Wifi => self.wifi_write_16(address, value),
             Place::Arm9Bios(_) | Place::Arm7Bios(_) | Place::GbaDeselected | Place::Open => {}
         }
     }
@@ -338,9 +353,10 @@ impl Hardware {
                 }
             }
             Place::GbaRam => self.gba_slot.write_ram(address, value),
-            // Palette, OAM and the GBA slot's ROM ignore byte writes.
+            // Palette, OAM, the GBA slot's ROM and wifi ignore byte writes.
             Place::Palette(_)
             | Place::Oam(_)
+            | Place::Wifi
             | Place::Arm9Bios(_)
             | Place::Arm7Bios(_)
             | Place::GbaRom
@@ -369,6 +385,7 @@ impl Hardware {
             Place::GbaRom => byte(self.gba_slot.peek_rom(address)),
             Place::GbaRam => self.gba_slot.read_ram(address),
             Place::GbaDeselected => 0,
+            Place::Wifi => return self.wifi.peek(address),
             Place::Open => return None,
         })
     }
@@ -490,8 +507,49 @@ impl Hardware {
                 gba_slot::rom_cycles(self.gba_slot_timing(Side::Arm7), width, sequential)
             }
             Place::GbaRam => gba_slot::ram_cycles(self.gba_slot_timing(Side::Arm7)),
+            Place::Wifi => self.wifi_cycles(address, width, sequential),
             _ => 1,
         }
+    }
+
+    /// ARM7 cycles for a wifi access, by WIFIWAITCNT (0x04000206): each
+    /// halfword takes the first or next access time of its 32 KiB region,
+    /// WS0 (RAM's usual home) or WS1 (the registers'). GBATEK, "DS Power
+    /// Control".
+    fn wifi_cycles(&self, address: u32, width: Width, sequential: bool) -> u64 {
+        const FIRST: [u64; 4] = [10, 8, 6, 18];
+        let control = self.raw_16(Side::Arm7, 0x206);
+        let (first, next) = if address & 0x8000 == 0 {
+            (
+                FIRST[usize::from(control & 3)],
+                [6, 4][usize::from(control >> 2 & 1)],
+            )
+        } else {
+            (
+                FIRST[usize::from(control >> 3 & 3)],
+                [10, 4][usize::from(control >> 5 & 1)],
+            )
+        };
+        let first = if sequential { next } else { first };
+        if width == Width::Word {
+            first + next
+        } else {
+            first
+        }
+    }
+
+    /// A halfword from the wifi hardware, read by the ARM7 at its time.
+    fn wifi_read_16(&mut self, address: u32) -> u16 {
+        let now = self.now(Side::Arm7);
+        let value = self.wifi.read_16(address, now);
+        self.sync_wifi();
+        value
+    }
+
+    fn wifi_write_16(&mut self, address: u32, value: u16) {
+        let now = self.now(Side::Arm7);
+        self.wifi.write_16(address, value, now);
+        self.sync_wifi();
     }
 }
 

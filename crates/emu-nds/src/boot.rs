@@ -119,8 +119,9 @@ pub(crate) fn load(hw: &mut Hardware, rom: &[u8], user_settings: &[u8], chip_id:
     hw.arm7.postflg = 1;
     // Both LCDs and 2D engines on, 3D on, engine A on the top screen.
     hw.powcnt1 = 0x820F;
-    // Sound on.
+    // Sound on, wifi off; the firmware left WIFIWAITCNT at 0030h.
     hw.powcnt2 = 1;
+    hw.arm7_write_16(0x0400_0206, 0x0030);
     hw.arm7_write_16(0x0400_0504, 0x0200);
     header
 }

@@ -29,6 +29,8 @@
 //! - `SCALE=n` draws 3D at `n` times the native resolution (1 to 8), so
 //!   the screens and PNGs come out `n` times larger.
 //! - `INPUT` also takes `blow`, full loudness on the microphone.
+//! - `WIFI=1` prints the wifi hardware's state every 60 frames.
+//! - `RAM_OUT=path` writes main RAM (4 MiB) there at the end.
 
 use std::{env, fs, io::BufWriter, path::Path, process};
 
@@ -77,6 +79,7 @@ fn main() {
     let script = input_script();
     let snaps = snapshot_plan();
     let quiet = env::var_os("QUIET").is_some();
+    let wifi = env::var_os("WIFI").is_some();
     for frame in 0..frames {
         let input = script
             .iter()
@@ -90,6 +93,9 @@ fn main() {
         }
         if frame % 60 == 59 {
             println!("video frame={frame} {}", nds.debug_video());
+            if wifi {
+                println!("wifi frame={frame} {}", nds.debug_wifi());
+            }
         }
         if let Some((every, dir)) = &snaps
             && frame % every == every - 1
@@ -112,6 +118,12 @@ fn main() {
         let mut bytes = Vec::new();
         nds.save_state(&mut bytes);
         write_or_exit(&path, &bytes);
+    }
+    if let Ok(path) = env::var("RAM_OUT") {
+        let ram = nds
+            .memory(emu_core::MemoryRegion::MainRam)
+            .unwrap_or_default();
+        write_or_exit(&path, ram);
     }
 }
 

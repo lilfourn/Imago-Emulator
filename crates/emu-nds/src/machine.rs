@@ -222,6 +222,7 @@ impl Machine {
                         self.hw.arm7.interrupts.request(irq::SPI);
                     }
                 }
+                Event::Wifi => self.hw.run_wifi(due.time),
             }
         }
         progress

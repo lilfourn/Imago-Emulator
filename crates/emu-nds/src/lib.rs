@@ -24,6 +24,7 @@ mod interrupt;
 mod io;
 mod io_names;
 mod ipc;
+mod link;
 mod machine;
 mod math;
 mod memory;
@@ -32,12 +33,14 @@ mod sound;
 mod spi;
 mod timer;
 mod vram;
+mod wifi;
 
 use emu_core::{
     Button, Core, CoreInfo, Debugger, Frame, FrameRate, Input, LoadError, Media, MemoryRegion,
     ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge as GbaCartridge;
+pub use link::Linked;
 
 use cart::Cart;
 use display::FRAME_CYCLES;
@@ -46,6 +49,7 @@ use hardware::Hardware;
 use machine::{Machine, Plain, Stepper};
 use rtc::Rtc;
 use spi::Spi;
+use wifi::Wifi;
 
 const SCREEN: ScreenSize = ScreenSize::new(256, 192);
 const SCREENS: [ScreenSize; 2] = [SCREEN, SCREEN];
@@ -60,7 +64,7 @@ pub const INFO: CoreInfo = CoreInfo {
     frame_rate: FrameRate::new(33_513_982, 560_190),
     audio_sample_rate: 32_768,
     // Bump whenever any serialized struct changes shape.
-    state_version: 6,
+    state_version: 7,
 };
 
 /// A Nintendo DS with a game card inserted, and maybe a GBA cartridge.
@@ -123,6 +127,7 @@ impl Nds {
         hw.cart = Cart::new(media.rom.into(), media.backup);
         hw.gba_slot = gba_slot;
         hw.spi = Spi::new(media.system_file(SystemFileKind::NdsFirmware));
+        hw.wifi = Wifi::new(hw.spi.wifi_settings());
         hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
             machine: Machine::boot(hw, hle_bios),
@@ -206,6 +211,12 @@ impl Nds {
         )
     }
 
+    /// The wifi hardware's state, as one `key=value` line for debugging.
+    #[must_use]
+    pub fn debug_wifi(&self) -> String {
+        self.machine.hw.wifi.describe()
+    }
+
     /// BIOS functions each CPU has called, with counts, for debugging.
     #[must_use]
     pub fn debug_system_calls(&self) -> String {
@@ -255,6 +266,29 @@ impl Nds {
         ]
     }
 
+    /// Whether a saved `machine` fits this session.
+    fn check_state(&self, machine: &Machine) -> Result<(), StateError> {
+        if machine.hw.gba_slot.is_occupied() == self.machine.hw.gba_slot.is_occupied() {
+            Ok(())
+        } else {
+            Err(StateError::Malformed(
+                "the state's GBA slot does not match this session's",
+            ))
+        }
+    }
+
+    /// Replaces the machine with a saved one that [`Nds::check_state`]
+    /// accepted, keeping the media and display settings.
+    fn install(&mut self, mut machine: Machine) {
+        machine.hw.take_media_from(&mut self.machine.hw);
+        machine.hw.take_display_from(&mut self.machine.hw);
+        self.machine = machine;
+        // The rendered 3D image is not saved.
+        let hw = &mut self.machine.hw;
+        hw.gpu3d.render_frame(&hw.vram);
+        self.present();
+    }
+
     /// Bus cycles (33.51 MHz) since power-on.
     #[must_use]
     pub fn cycles(&self) -> u64 {
@@ -291,6 +325,8 @@ impl Nds {
                 break;
             }
         }
+        // A lone console's frames reach nobody.
+        self.machine.hw.wifi.take_transmissions();
         self.machine.hw.sound.drain_samples(audio);
         self.present();
         true
@@ -334,6 +370,7 @@ impl Core for Nds {
         std::mem::swap(&mut hw.spi, &mut old.spi);
         std::mem::swap(&mut hw.rtc, &mut old.rtc);
         std::mem::swap(&mut hw.gba_slot, &mut old.gba_slot);
+        hw.wifi = Wifi::new(hw.spi.wifi_settings());
         hw.rtc.restart_cycles(now);
         hw.gba_slot.restart_cycles(now);
         hw.take_display_from(old);
@@ -346,20 +383,10 @@ impl Core for Nds {
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let mut machine: Machine = postcard::from_bytes(state)
+        let machine: Machine = postcard::from_bytes(state)
             .map_err(|_| StateError::Malformed("not a Nintendo DS state"))?;
-        if machine.hw.gba_slot.is_occupied() != self.machine.hw.gba_slot.is_occupied() {
-            return Err(StateError::Malformed(
-                "the state's GBA slot does not match this session's",
-            ));
-        }
-        machine.hw.take_media_from(&mut self.machine.hw);
-        machine.hw.take_display_from(&mut self.machine.hw);
-        self.machine = machine;
-        // The rendered 3D image is not saved.
-        let hw = &mut self.machine.hw;
-        hw.gpu3d.render_frame(&hw.vram);
-        self.present();
+        self.check_state(&machine)?;
+        self.install(machine);
         Ok(())
     }
 
