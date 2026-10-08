@@ -1,15 +1,19 @@
 //! The backdrop behind the screens: a soft glow of the game's own colours
 //! filling the margins the screens' proportions leave in the window.
 //!
-//! The screens are sampled, as the window arranges them, into a picture a
-//! few dozen pixels across, which is blurred and dimmed. Drawn stretched
-//! over the whole window, GPUI's linear filtering smooths it the rest of
-//! the way; the screens themselves hide the middle of it.
+//! The screens are averaged, as the window arranges them, into a picture a
+//! few dozen pixels across, which is blurred, toned and faded in over a
+//! fraction of a second. Drawn stretched over the whole window, GPUI's
+//! linear filtering smooths it the rest of the way; the screens themselves
+//! hide the middle of it.
+
+use std::time::{Duration, Instant};
 
 use emu_core::{Frame, ScreenSize, rgb};
 
 use crate::color::Correction;
 use crate::layout::{Placement, Rect};
+use crate::theme::BACKGROUND;
 
 /// What fills the window around the screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -53,9 +57,9 @@ impl Backdrop {
 /// Pixels along the picture's longer side.
 const SIZE: f32 = 48.0;
 
-/// Samples averaged across and down each picture pixel, so small moving
-/// sprites do not make it flicker.
-const SAMPLES: u16 = 4;
+/// Most pixels averaged from each screen, a native DS screen's worth, so
+/// frames drawn at a higher 3D resolution cost no more than native ones.
+const MOST_SAMPLES: usize = 256 * 192;
 
 /// Reach of each box blur pass, in picture pixels.
 const BLUR_RADIUS: usize = 3;
@@ -63,21 +67,83 @@ const BLUR_RADIUS: usize = 3;
 /// Box blur passes each way; three come close to a Gaussian blur.
 const BLUR_PASSES: usize = 3;
 
-/// Brightness kept, in 256ths, so the glow stays behind the screens.
-const BRIGHTNESS: u32 = 112;
+/// Brightness kept, so the glow stays behind the screens.
+const BRIGHTNESS: f32 = 0.45;
 
-/// Red, green and blue.
-type Color = [u32; 3];
+/// How much more saturated than the screens the glow is; averaging greys
+/// colours out, and this gives some back.
+const SATURATION: f32 = 1.3;
+
+/// Brightness taken away at the window's corners, falling off smoothly
+/// from the middle.
+const VIGNETTE: f32 = 0.5;
+
+/// How long the glow takes to move most of the way (63%) to new colours,
+/// so a flash on screen swells rather than flickers.
+const FADE: Duration = Duration::from_millis(150);
+
+/// Longest time one step of a fade covers, so after a pause, with nothing
+/// drawn for a while, the next colours still fade in.
+const LONGEST_STEP: Duration = Duration::from_millis(50);
+
+/// Difference in any channel, out of 255, under which a fade is done.
+const SETTLED: f32 = 0.5;
+
+/// Pixels repeated around a picture's edges by [`Picture::frame`], to draw
+/// past the window's edges. GPUI packs images edge to edge in its texture
+/// atlas, and its linear filtering blends an image's outermost half pixel
+/// with whatever lies beside it there, which here would be a screen.
+pub const BORDER: u16 = 2;
+
+/// Red, green and blue, from 0 to 255.
+type Color = [f32; 3];
+
+/// A backdrop picture, in more precision than a frame holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Picture {
+    size: ScreenSize,
+    colors: Vec<Color>,
+}
+
+impl Picture {
+    /// The picture's size, in pixels.
+    pub fn size(&self) -> ScreenSize {
+        self.size
+    }
+
+    /// The picture as opaque pixels, with its edge pixels repeated
+    /// `border` times on every side.
+    pub fn frame(&self, border: u16) -> Frame {
+        let (width, height) = (usize::from(self.size.width), usize::from(self.size.height));
+        let border_width = usize::from(border);
+        let mut frame = Frame::new(ScreenSize::new(
+            self.size.width + 2 * border,
+            self.size.height + 2 * border,
+        ));
+        for (row, line) in frame.rows_mut().enumerate() {
+            let y = row.saturating_sub(border_width).min(height - 1);
+            for (column, pixel) in line.iter_mut().enumerate() {
+                let x = column.saturating_sub(border_width).min(width - 1);
+                *pixel = opaque(self.colors[y * width + x]);
+            }
+        }
+        frame
+    }
+}
 
 /// The backdrop for `frames` drawn at `placements`: the area the
-/// placements span, shrunk, blurred and dimmed, its colours corrected with
+/// placements span, shrunk, blurred and toned, its colours corrected with
 /// `correction` if given. Gaps between screens take the nearest screen's
 /// colours. `None` if nothing is placed.
+///
+/// Every screen pixel counts toward the picture pixel it is drawn in, so
+/// the picture is the same at any window size, and fine detail averages
+/// out rather than flickering as it moves.
 pub fn picture(
     frames: &[Frame],
     placements: &[Placement],
     correction: Option<&Correction>,
-) -> Option<Frame> {
+) -> Option<Picture> {
     let span = span(placements)?;
     let size = picture_size(span);
     let mut colors = sample(frames, placements, span, size, correction);
@@ -85,11 +151,78 @@ pub fn picture(
         colors = blur(&colors, size, (1, 0));
         colors = blur(&colors, size, (0, 1));
     }
-    let mut picture = Frame::new(size);
-    for (pixel, color) in picture.pixels_mut().iter_mut().zip(&colors) {
-        *pixel = dim(*color);
+    tone(&mut colors, size);
+    Some(Picture { size, colors })
+}
+
+/// Where to shadow the screens at `placements`: the area they span if they
+/// fill it, so screens that touch cast one shadow, or else each screen.
+pub fn shadows(placements: &[Placement]) -> Vec<Rect> {
+    let rects = || placements.iter().map(|placement| placement.rect);
+    let area = |rect: Rect| rect.width * rect.height;
+    match span(placements) {
+        Some(span) if (rects().map(area).sum::<f32>() - area(span)).abs() <= area(span) * 0.001 => {
+            vec![span]
+        }
+        _ => rects().collect(),
     }
-    Some(picture)
+}
+
+/// A backdrop moving smoothly from one picture to the next.
+#[derive(Debug, Clone)]
+pub struct Fade {
+    shown: Picture,
+    target: Picture,
+    at: Instant,
+}
+
+impl Fade {
+    /// A fade showing `target` from the start, at `now`.
+    pub fn new(target: Picture, now: Instant) -> Self {
+        Self {
+            shown: target.clone(),
+            target,
+            at: now,
+        }
+    }
+
+    /// Heads for `target` from wherever the fade has got to, or jumps
+    /// there if it is a different size.
+    pub fn aim(&mut self, target: Picture) {
+        if target.size != self.shown.size {
+            self.shown = target.clone();
+        }
+        self.target = target;
+    }
+
+    /// Moves on to `now`. Whether there is still further to go.
+    pub fn step(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.at).min(LONGEST_STEP);
+        self.at = now;
+        let amount = 1.0 - (-elapsed.as_secs_f32() / FADE.as_secs_f32()).exp();
+        let mut moving = false;
+        for (shown, target) in self.shown.colors.iter_mut().zip(&self.target.colors) {
+            for (shown, target) in shown.iter_mut().zip(target) {
+                *shown += (target - *shown) * amount;
+                if (target - *shown).abs() <= SETTLED {
+                    *shown = *target;
+                } else {
+                    moving = true;
+                }
+            }
+        }
+        moving
+    }
+
+    /// Whether the fade has arrived where it was heading.
+    pub fn settled(&self) -> bool {
+        self.shown == self.target
+    }
+
+    /// The picture the fade has got to.
+    pub fn shown(&self) -> &Picture {
+        &self.shown
+    }
 }
 
 /// The smallest rectangle around every placement, if it has an area.
@@ -119,7 +252,9 @@ fn picture_size(span: Rect) -> ScreenSize {
     ScreenSize::new(length(span.width), length(span.height))
 }
 
-/// Each picture pixel's average colour over the part of `span` it covers.
+/// Each picture pixel's average colour over the screen pixels drawn in
+/// the part of `span` it covers. Picture pixels no screen covers take the
+/// colour of the nearest screen pixel.
 fn sample(
     frames: &[Frame],
     placements: &[Placement],
@@ -127,31 +262,53 @@ fn sample(
     size: ScreenSize,
     correction: Option<&Correction>,
 ) -> Vec<Color> {
-    let step = (
-        span.width / f32::from(size.width * SAMPLES),
-        span.height / f32::from(size.height * SAMPLES),
+    let (width, height) = (usize::from(size.width), usize::from(size.height));
+    let scale = (
+        f32::from(size.width) / span.width,
+        f32::from(size.height) / span.height,
     );
-    let mut colors = Vec::with_capacity(size.pixel_count());
-    for row in 0..size.height {
-        for column in 0..size.width {
-            let mut sum = [0; 3];
-            let mut count = 0;
-            for (dx, dy) in (0..SAMPLES).flat_map(|dy| (0..SAMPLES).map(move |dx| (dx, dy))) {
-                let point = (
-                    span.x + (f32::from(column * SAMPLES + dx) + 0.5) * step.0,
-                    span.y + (f32::from(row * SAMPLES + dy) + 0.5) * step.1,
-                );
-                let Some(pixel) = pixel_near(frames, placements, point) else {
-                    continue;
-                };
+    let mut sums = vec![[0.0; 3]; size.pixel_count()];
+    let mut counts = vec![0_u32; size.pixel_count()];
+    for placement in placements {
+        let Some(frame) = frames.get(placement.screen) else {
+            continue;
+        };
+        let source = frame.size();
+        let (source_width, source_height) = (usize::from(source.width), usize::from(source.height));
+        // Every pixel, or for a large frame an even grid of them. Only the
+        // frame's size decides which, never the window's.
+        let stride = (source_width * source_height / MOST_SAMPLES).isqrt().max(1);
+        for y in (stride / 2..source_height).step_by(stride) {
+            for x in (stride / 2..source_width).step_by(stride) {
+                let centre = (x as f32 + 0.5, y as f32 + 0.5);
+                let (left, top) = placement.window_point(source, centre);
+                // `as` saturates, so points a rounding error outside the
+                // span land in its edge pixels.
+                let column = (((left - span.x) * scale.0) as usize).min(width - 1);
+                let row = (((top - span.y) * scale.1) as usize).min(height - 1);
+                let pixel = frame.pixels()[y * source_width + x];
                 let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
-                for (channel, shift) in sum.iter_mut().zip([16, 8, 0]) {
-                    *channel += (pixel >> shift) & 0xFF;
+                let index = row * width + column;
+                for (sum, channel) in sums[index].iter_mut().zip(channels(pixel)) {
+                    *sum += channel;
                 }
-                count += 1;
+                counts[index] += 1;
             }
-            colors.push(sum.map(|channel| channel / count.max(1)));
         }
+    }
+    let mut colors = Vec::with_capacity(sums.len());
+    for (index, (sum, count)) in sums.into_iter().zip(counts).enumerate() {
+        if count > 0 {
+            colors.push(sum.map(|channel| channel / count as f32));
+            continue;
+        }
+        let centre = (
+            span.x + ((index % width) as f32 + 0.5) / scale.0,
+            span.y + ((index / width) as f32 + 0.5) / scale.1,
+        );
+        let pixel = pixel_near(frames, placements, centre).unwrap_or(0);
+        let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
+        colors.push(channels(pixel));
     }
     colors
 }
@@ -162,14 +319,8 @@ fn pixel_near(frames: &[Frame], placements: &[Placement], point: (f32, f32)) -> 
     let placement = placements
         .iter()
         .min_by(|a, b| distance(a.rect, point).total_cmp(&distance(b.rect, point)))?;
-    let rect = placement.rect;
-    // Just inside the far edges, which belong to the next pixel over.
-    let inside = (
-        point.0.clamp(rect.x, rect.x + rect.width * 0.999),
-        point.1.clamp(rect.y, rect.y + rect.height * 0.999),
-    );
     let frame = frames.get(placement.screen)?;
-    let at = placement.pixel_at(frame.size(), inside)?;
+    let at = placement.pixel_nearest(frame.size(), point)?;
     let index = usize::from(at.y) * usize::from(frame.size().width) + usize::from(at.x);
     frame.pixels().get(index).copied()
 }
@@ -194,7 +345,7 @@ fn blur(colors: &[Color], size: ScreenSize, axis: (usize, usize)) -> Vec<Color> 
     let mut out = Vec::with_capacity(colors.len());
     for y in 0..height {
         for x in 0..width {
-            let mut sum = [0; 3];
+            let mut sum = [0.0; 3];
             for offset in 0..taps {
                 // Steps from -BLUR_RADIUS to +BLUR_RADIUS, held at the edges.
                 let along = |position: usize, length: usize, on: usize| {
@@ -207,17 +358,43 @@ fn blur(colors: &[Color], size: ScreenSize, axis: (usize, usize)) -> Vec<Color> 
                     *channel += value;
                 }
             }
-            // `taps` is a small constant, so the cast cannot truncate.
-            out.push(sum.map(|channel| channel / taps as u32));
+            out.push(sum.map(|channel| channel / taps as f32));
         }
     }
     out
 }
 
-/// `color` at [`BRIGHTNESS`], as an opaque pixel.
-fn dim(color: Color) -> u32 {
-    // Each channel is at most 255 and stays so once dimmed.
-    let [red, green, blue] = color.map(|channel| (channel * BRIGHTNESS / 256) as u8);
+/// Tones `colors`, a `size` picture, to sit behind the screens: richer,
+/// dimmer, darker toward the corners, and lit over the app's background
+/// so a black screen leaves it as it is.
+fn tone(colors: &mut [Color], size: ScreenSize) {
+    let (width, height) = (f32::from(size.width), f32::from(size.height));
+    let background = channels(BACKGROUND);
+    for (index, color) in colors.iter_mut().enumerate() {
+        // From -1 to 1 across and down, from the middle.
+        let u = ((index % usize::from(size.width)) as f32 + 0.5) / width * 2.0 - 1.0;
+        let v = ((index / usize::from(size.width)) as f32 + 0.5) / height * 2.0 - 1.0;
+        let light = BRIGHTNESS * (1.0 - VIGNETTE * (u * u + v * v) / 2.0);
+        let [red, green, blue] = *color;
+        let luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        for (channel, back) in color.iter_mut().zip(background) {
+            let lit = ((luma + (*channel - luma) * SATURATION).clamp(0.0, 255.0)) * light;
+            // Screen blending: light added to the background, never past
+            // white.
+            *channel = 255.0 - (255.0 - back) * (255.0 - lit) / 255.0;
+        }
+    }
+}
+
+/// `pixel`'s red, green and blue.
+fn channels(pixel: u32) -> Color {
+    [16, 8, 0].map(|shift| ((pixel >> shift) & 0xFF) as f32)
+}
+
+/// `color`, rounded, as an opaque pixel.
+fn opaque(color: Color) -> u32 {
+    // Clamped to 0..=255 first, so the casts cannot truncate.
+    let [red, green, blue] = color.map(|channel| channel.round().clamp(0.0, 255.0) as u8);
     rgb(red, green, blue)
 }
 
@@ -247,8 +424,32 @@ mod tests {
         }
     }
 
-    fn channels(pixel: u32) -> [u32; 3] {
-        [16, 8, 0].map(|shift| (pixel >> shift) & 0xFF)
+    /// A stacked DS drawn `scale` times its size, `left` from the window's
+    /// edge.
+    fn stacked(left: f32, scale: f32) -> [Placement; 2] {
+        let (width, height) = (256.0 * scale, 192.0 * scale);
+        [
+            placement(0, left, 0.0, width, height),
+            placement(1, left, height, width, height),
+        ]
+    }
+
+    /// One-pixel stripes, `first` in even columns and the other colour in
+    /// odd ones.
+    fn stripes(first: u32, second: u32) -> Frame {
+        let mut frame = Frame::new(DS);
+        for row in frame.rows_mut() {
+            for (column, pixel) in row.iter_mut().enumerate() {
+                *pixel = if column % 2 == 0 { first } else { second };
+            }
+        }
+        frame
+    }
+
+    fn pixel(picture: &Picture, x: usize, y: usize) -> [u32; 3] {
+        let frame = picture.frame(0);
+        let pixel = frame.pixels()[y * usize::from(picture.size().width) + x];
+        channels(pixel).map(|channel| channel as u32)
     }
 
     #[test]
@@ -267,14 +468,22 @@ mod tests {
     #[test]
     fn a_stacked_ds_gives_a_tall_picture_of_its_colours_dimmed() {
         let frames = [filled(DS, rgb(200, 100, 0)), filled(DS, rgb(200, 100, 0))];
-        let placements = [
-            placement(0, 100.0, 0.0, 256.0, 192.0),
-            placement(1, 100.0, 192.0, 256.0, 192.0),
-        ];
-        let picture = picture(&frames, &placements, None).expect("screens are placed");
+        let picture = picture(&frames, &stacked(100.0, 1.0), None).expect("screens are placed");
         assert_eq!(picture.size(), ScreenSize::new(32, 48));
-        let dimmed = rgb(87, 43, 0);
-        assert!(picture.pixels().iter().all(|&pixel| pixel == dimmed));
+        let [red, green, blue] = pixel(&picture, 16, 24);
+        assert!(red > green && green > blue, "{red} {green} {blue}");
+        assert!(red < 140, "dimmed: {red}");
+        // The corners are darker than the middle.
+        assert!(pixel(&picture, 0, 0)[0] < red);
+    }
+
+    #[test]
+    fn a_black_screen_leaves_the_background_as_it_is() {
+        let frames = [filled(DS, 0), filled(DS, 0)];
+        let picture = picture(&frames, &stacked(0.0, 1.0), None).expect("screens are placed");
+        let background = channels(BACKGROUND).map(|channel| channel as u32);
+        assert_eq!(pixel(&picture, 0, 0), background);
+        assert_eq!(pixel(&picture, 16, 24), background);
     }
 
     #[test]
@@ -286,14 +495,11 @@ mod tests {
             placement(1, 0.0, 282.0, 256.0, 192.0),
         ];
         let picture = picture(&frames, &placements, None).expect("screens are placed");
-        let pixels = picture.pixels();
-        let [top_red, _, top_blue] = channels(pixels[0]);
-        let [bottom_red, _, bottom_blue] = channels(pixels[pixels.len() - 1]);
-        assert!(top_red > 100 && top_blue == 0, "{top_red} {top_blue}");
-        assert!(
-            bottom_blue > 100 && bottom_red == 0,
-            "{bottom_red} {bottom_blue}"
-        );
+        let bottom = usize::from(picture.size().height) - 1;
+        let [top_red, _, top_blue] = pixel(&picture, 0, 0);
+        let [bottom_red, _, bottom_blue] = pixel(&picture, 0, bottom);
+        assert!(top_red > top_blue + 30, "{top_red} {top_blue}");
+        assert!(bottom_blue > bottom_red + 30, "{bottom_red} {bottom_blue}");
     }
 
     #[test]
@@ -310,8 +516,134 @@ mod tests {
             ..placement(0, 0.0, 0.0, 160.0, 240.0)
         }];
         let picture = picture(&[frame], &placements, None).expect("a screen is placed");
-        let pixels = picture.pixels();
-        assert_eq!(channels(pixels[0])[2], 0);
-        assert_eq!(channels(pixels[pixels.len() - 1])[0], 0);
+        let bottom = usize::from(picture.size().height) - 1;
+        let [top_red, _, top_blue] = pixel(&picture, 0, 0);
+        let [bottom_red, _, bottom_blue] = pixel(&picture, 0, bottom);
+        assert!(top_red > top_blue, "{top_red} {top_blue}");
+        assert!(bottom_blue > bottom_red, "{bottom_red} {bottom_blue}");
+    }
+
+    #[test]
+    fn fine_detail_averages_out_rather_than_flickering() {
+        // Stripes one pixel wide, moved along by one pixel, look the same.
+        let white = rgb(255, 255, 255);
+        let one = stripes(white, 0);
+        let other = stripes(0, white);
+        for scale in [1.0, 2.0, 2.734, 3.5] {
+            let placements = stacked(0.0, scale);
+            let before = picture(&[one.clone(), one.clone()], &placements, None);
+            let after = picture(&[other.clone(), other.clone()], &placements, None);
+            assert_eq!(before, after, "at {scale}x");
+        }
+    }
+
+    #[test]
+    fn the_picture_is_the_same_at_any_window_size() {
+        let mut frame = Frame::new(DS);
+        for (index, pixel) in frame.pixels_mut().iter_mut().enumerate() {
+            *pixel = rgb((index * 7) as u8, (index * 13) as u8, (index / 256) as u8);
+        }
+        let frames = [frame.clone(), frame];
+        let at = |left, scale| picture(&frames, &stacked(left, scale), None);
+        let native = at(0.0, 1.0);
+        for (left, scale) in [(37.5, 1.8229), (210.0, 2.0833), (5.25, 3.177)] {
+            assert_eq!(at(left, scale), native, "at {scale}x");
+        }
+    }
+
+    #[test]
+    fn large_frames_are_sampled_the_same_at_any_window_size() {
+        // A DS screen drawn at twice the resolution, in one-pixel stripes.
+        let mut frame = Frame::new(ScreenSize::new(512, 384));
+        for row in frame.rows_mut() {
+            for (column, pixel) in row.iter_mut().enumerate() {
+                *pixel = if column % 2 == 0 {
+                    rgb(255, 255, 255)
+                } else {
+                    0
+                };
+            }
+        }
+        let frames = [frame.clone(), frame];
+        let at = |scale| picture(&frames, &stacked(0.0, scale), None);
+        let native = at(1.0);
+        for scale in [2.5, 2.5026, 1.2, 4.0] {
+            assert_eq!(at(scale), native, "at {scale}x");
+        }
+    }
+
+    #[test]
+    fn frames_carry_a_border_of_their_edge_pixels() {
+        let frames = [filled(DS, rgb(255, 0, 0)), filled(DS, rgb(0, 0, 255))];
+        let picture = picture(&frames, &stacked(0.0, 1.0), None).expect("screens are placed");
+        let framed = picture.frame(BORDER);
+        let size = picture.size();
+        let border = usize::from(BORDER);
+        assert_eq!(
+            framed.size(),
+            ScreenSize::new(size.width + 2 * BORDER, size.height + 2 * BORDER)
+        );
+        let width = usize::from(framed.size().width);
+        let inner = picture.frame(0);
+        assert_eq!(framed.pixels()[0], inner.pixels()[0]);
+        assert_eq!(framed.pixels()[border * width + border], inner.pixels()[0]);
+        assert_eq!(
+            framed.pixels().last(),
+            inner.pixels().last(),
+            "the far corner repeats too"
+        );
+    }
+
+    #[test]
+    fn touching_screens_cast_one_shadow() {
+        assert_eq!(
+            shadows(&stacked(10.0, 2.0)),
+            vec![Rect {
+                x: 10.0,
+                y: 0.0,
+                width: 512.0,
+                height: 768.0
+            }]
+        );
+        let apart = [
+            placement(0, 0.0, 0.0, 256.0, 192.0),
+            placement(1, 0.0, 282.0, 256.0, 192.0),
+        ];
+        assert_eq!(shadows(&apart).len(), 2);
+    }
+
+    #[test]
+    fn a_fade_eases_toward_new_colours_and_settles() {
+        let dark = picture(&[filled(DS, 0)], &stacked(0.0, 1.0)[..1], None).expect("placed");
+        let light = picture(
+            &[filled(DS, rgb(255, 255, 255))],
+            &stacked(0.0, 1.0)[..1],
+            None,
+        )
+        .expect("placed");
+        let start = Instant::now();
+        let mut fade = Fade::new(dark.clone(), start);
+        fade.aim(light.clone());
+        assert!(fade.step(start + LONGEST_STEP / 2));
+        let middle = pixel(fade.shown(), 16, 12)[0];
+        assert!(
+            middle > pixel(&dark, 16, 12)[0] && middle < pixel(&light, 16, 12)[0],
+            "{middle}"
+        );
+        // However long it has been, one step covers only so much.
+        assert!(fade.step(start + FADE * 20));
+        let steps = (1..100).map(|step| start + FADE * 20 + LONGEST_STEP * step);
+        assert!(steps.map(|now| fade.step(now)).any(|moving| !moving));
+        assert_eq!(fade.shown(), &light);
+    }
+
+    #[test]
+    fn a_fade_jumps_to_a_picture_of_another_shape() {
+        let wide = picture(&[filled(DS, 0)], &stacked(0.0, 1.0)[..1], None).expect("placed");
+        let tall =
+            picture(&[filled(DS, 0), filled(DS, 0)], &stacked(0.0, 1.0), None).expect("placed");
+        let mut fade = Fade::new(wide, Instant::now());
+        fade.aim(tall.clone());
+        assert_eq!(fade.shown(), &tall);
     }
 }

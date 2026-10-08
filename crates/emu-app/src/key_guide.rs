@@ -1,26 +1,36 @@
-//! The key guide: a quiet strip along the foot of the window naming the
-//! keys that play the running game, read from the player's own bindings,
+//! The key guide: a translucent island floating over the foot of the
+//! window naming the keys that play the running game, read from the player's own bindings,
 //! so it stays right when they rebind. Each key sits over the button it
 //! presses, in small groups: the d-pad, the face buttons, the shoulders,
 //! Start and Select, and the menu. It only shows; it takes no clicks.
 
 use emu_core::{Button, System};
-use gpui::{AnyElement, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, BoxShadow, div, hsla, point, prelude::*, px, rgb, rgba};
 
 use crate::bindings::{Bindings, Held};
-use crate::theme::{BACKGROUND, LINE, MUTED, TEXT, with_alpha};
+use crate::theme::{BACKGROUND, MUTED, TEXT, with_alpha};
 
-/// Height of one line of the strip, and the room above and below the
-/// lines, in logical pixels.
-const LINE_HEIGHT: f32 = 30.0;
-const MARGIN: f32 = 6.0;
+/// Height of one line of keys, in logical pixels: a keycap over its label.
+const LINE_HEIGHT: f32 = 36.0;
+/// Room inside the island, above and below the lines and either side.
+const PAD_Y: f32 = 7.0;
+const PAD_X: f32 = 16.0;
+/// Room between the island and the window's edges, and between it and
+/// the screens above.
+const INSET: f32 = 10.0;
+const ABOVE: f32 = 6.0;
 /// Space between groups, either side of their divider, and between the
 /// keys of a group.
-const GROUP_GAP: f32 = 14.0;
-const KEY_GAP: f32 = 10.0;
+const GROUP_GAP: f32 = 12.0;
+const KEY_GAP: f32 = 8.0;
+/// A keycap's height, and its least width so single letters sit in
+/// squares.
+const CAP: f32 = 20.0;
 /// Rough width of a character, for working out how many lines the groups
 /// need.
 const CHAR_WIDTH: f32 = 7.0;
+/// Rounding of the island's corners.
+const RADIUS: f32 = 16.0;
 
 /// One key the guide names, over what it does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,17 +119,19 @@ fn width(group: &[Entry]) -> f32 {
     let columns: f32 = group
         .iter()
         .map(|entry| {
-            let chars = entry.key.chars().count().max(entry.label.chars().count());
-            CHAR_WIDTH * chars as f32
+            let key = CHAR_WIDTH * entry.key.chars().count() as f32 + 10.0;
+            let label = CHAR_WIDTH * entry.label.chars().count() as f32;
+            key.max(label).max(CAP)
         })
         .sum();
     columns + KEY_GAP * group.len().saturating_sub(1) as f32
 }
 
-/// How tall the strip is for `groups` in a window `window_width` wide:
-/// one line, or as many as they wrap onto.
+/// How tall the foot of the window the guide takes is, for `groups` in a
+/// window `window_width` wide: the island, one line tall or as many as
+/// the groups wrap onto, and the room around it.
 pub fn height(groups: &[Vec<Entry>], window_width: f32) -> f32 {
-    let room = (window_width - 2.0 * GROUP_GAP).max(1.0);
+    let room = (window_width - 2.0 * (INSET + PAD_X)).max(1.0);
     let mut lines = 1.0;
     let mut used = 0.0;
     for group in groups {
@@ -133,60 +145,104 @@ pub fn height(groups: &[Vec<Entry>], window_width: f32) -> f32 {
             used += if used > 0.0 { step } else { width };
         }
     }
-    lines * LINE_HEIGHT + 2.0 * MARGIN
+    ABOVE + lines * LINE_HEIGHT + 2.0 * PAD_Y + INSET
 }
 
-/// The strip itself, `height` tall across the foot of the window, with
-/// `groups` side by side, wrapping onto more lines if need be.
+/// The guide, in the foot of the window `height` tall: an island with
+/// `groups` side by side, wrapping onto more lines if need be, through
+/// which the backdrop shows.
 pub fn guide(groups: &[Vec<Entry>], height: f32) -> AnyElement {
     let groups = groups.iter().enumerate().map(|(index, group)| {
-        let keys = group.iter().map(|entry| {
+        let divider = (index > 0).then(|| {
             div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .child(
-                    div()
-                        .text_color(rgb(TEXT))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(entry.key.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(MUTED))
-                        .child(entry.label),
-                )
+                .w(px(1.0))
+                .h(px(22.0))
+                .bg(rgba(with_alpha(TEXT, 0x1F)))
         });
-        let divider = (index > 0).then(|| div().w(px(1.0)).h(px(18.0)).bg(rgb(LINE)));
         div()
             .flex()
             .items_center()
             .gap(px(GROUP_GAP))
             .children(divider)
-            .child(div().flex().items_center().gap(px(KEY_GAP)).children(keys))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(KEY_GAP))
+                    .children(group.iter().map(key)),
+            )
     });
+    let island = div()
+        .max_w_full()
+        .px(px(PAD_X))
+        .py(px(PAD_Y))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_center()
+        .gap_x(px(GROUP_GAP))
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(rgba(with_alpha(TEXT, 0x17)))
+        .bg(rgba(with_alpha(BACKGROUND, 0xA6)))
+        .shadow(vec![BoxShadow {
+            color: hsla(0.0, 0.0, 0.0, 0.35),
+            offset: point(px(0.0), px(4.0)),
+            blur_radius: px(18.0),
+            spread_radius: px(0.0),
+        }])
+        .children(groups);
     div()
         .absolute()
         .left_0()
         .right_0()
         .bottom_0()
         .h(px(height))
-        .px(px(GROUP_GAP))
-        .py(px(MARGIN))
+        .px(px(INSET))
+        .pb(px(INSET))
         .flex()
-        .flex_wrap()
-        .items_center()
-        .content_center()
+        .items_end()
         .justify_center()
-        .gap_x(px(GROUP_GAP))
         .overflow_hidden()
         .whitespace_nowrap()
-        .bg(rgba(with_alpha(BACKGROUND, 0xF2)))
         .text_xs()
         .line_height(px(14.0))
-        .children(groups)
+        .child(island)
         .into_any_element()
+}
+
+/// One key: its keycap over what it presses.
+fn key(entry: &Entry) -> impl IntoElement {
+    div()
+        .h(px(LINE_HEIGHT))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(2.0))
+        .child(
+            div()
+                .h(px(CAP))
+                .min_w(px(CAP))
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(rgba(with_alpha(TEXT, 0x24)))
+                .bg(rgba(with_alpha(TEXT, 0x0F)))
+                .text_color(rgb(TEXT))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(entry.key.clone()),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .line_height(px(12.0))
+                .text_color(rgb(MUTED))
+                .child(entry.label),
+        )
 }
 
 #[cfg(test)]
@@ -233,10 +289,10 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_fits_one_line_in_a_normal_window_and_wraps_when_narrow() {
+    fn the_island_fits_one_line_in_a_normal_window_and_wraps_when_narrow() {
         let ds = groups(System::Nds, &Bindings::default());
-        let one_line = LINE_HEIGHT + 2.0 * MARGIN;
-        assert_eq!(height(&ds, 500.0), one_line);
+        let one_line = ABOVE + LINE_HEIGHT + 2.0 * PAD_Y + INSET;
+        assert_eq!(height(&ds, 560.0), one_line);
         assert!(height(&ds, 200.0) > one_line);
     }
 

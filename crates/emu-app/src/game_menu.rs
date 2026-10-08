@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, Div, EventEmitter, KeyDownEvent,
-    SharedString, Stateful, Window, div, ease_out_quint, prelude::*, px, rgb, rgba,
+    ScrollHandle, SharedString, Stateful, Window, div, ease_out_quint, prelude::*, px, rgb, rgba,
 };
 
 use crate::theme::{ACCENT, LINE, MUTED as DIM, ON_ACCENT, TEXT, with_alpha};
@@ -35,6 +35,9 @@ const MAX_WIDTH: f32 = 420.0;
 const MARGIN: f32 = 14.0;
 const PADDING: f32 = 14.0;
 const GAP: f32 = 8.0;
+/// The narrowest a tile gets in a row of four; narrower, the tiles go
+/// two to a row.
+const MIN_TILE: f32 = 64.0;
 
 /// What the player chose in the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,17 +107,39 @@ enum Page {
     Restart(bool),
 }
 
-/// Where pressing `key` on `page` goes, with `cheats` cheats.
-fn moved(page: Page, key: &str, cheats: usize) -> Page {
+/// Where `tile` is in [`TILES`].
+fn tile_index(tile: Tile) -> usize {
+    TILES.iter().position(|&t| t == tile).unwrap_or(0)
+}
+
+/// How many tiles go in a row across `width` logical pixels, and how wide
+/// each is: all four, or two to a row when four would be too narrow.
+fn tile_grid(width: f32) -> (usize, f32) {
+    let side = |columns: usize| (width - GAP * (columns - 1) as f32) / columns as f32;
+    let columns = if side(TILES.len()) >= MIN_TILE {
+        TILES.len()
+    } else {
+        TILES.len() / 2
+    };
+    (columns, side(columns))
+}
+
+/// Where pressing `key` on `page` goes, with `cheats` cheats and the tiles
+/// `columns` to a row. Up and down only move between rows of tiles.
+fn moved(page: Page, key: &str, cheats: usize, columns: usize) -> Page {
+    let columns = columns.max(1);
+    let last = TILES.len() - 1;
     match (page, key) {
-        (Page::Tiles(tile), "left" | "a" | "right" | "d") => {
-            let at = TILES.iter().position(|&t| t == tile).unwrap_or(0);
-            let at = if matches!(key, "left" | "a") {
-                at.saturating_sub(1)
-            } else {
-                (at + 1).min(TILES.len() - 1)
-            };
-            Page::Tiles(TILES[at])
+        (Page::Tiles(tile), "left" | "a") => Page::Tiles(TILES[tile_index(tile).saturating_sub(1)]),
+        (Page::Tiles(tile), "right" | "d") => Page::Tiles(TILES[(tile_index(tile) + 1).min(last)]),
+        (Page::Tiles(tile), "up" | "w") => {
+            let at = tile_index(tile);
+            Page::Tiles(TILES[at.checked_sub(columns).unwrap_or(at)])
+        }
+        (Page::Tiles(tile), "down" | "s") => {
+            let at = tile_index(tile);
+            let below = Some(at + columns).filter(|&below| below <= last);
+            Page::Tiles(TILES[below.unwrap_or(at)])
         }
         (Page::Cheats(at), "up" | "w") => Page::Cheats(at.saturating_sub(1)),
         // Edit Cheats sits one past the last cheat.
@@ -126,12 +151,28 @@ fn moved(page: Page, key: &str, cheats: usize) -> Page {
     }
 }
 
+/// Which of the items `page` lists the keyboard is on there, with
+/// `cheats` cheats and the tiles `columns` to a row: the row of tiles, the
+/// cheat (after the hint that there are none) or the buttons under the
+/// question.
+fn focused_item(page: Page, cheats: usize, columns: usize) -> usize {
+    match page {
+        Page::Tiles(tile) => tile_index(tile) / columns.max(1),
+        Page::Cheats(at) => at + usize::from(cheats == 0),
+        Page::Restart(_) => 1,
+    }
+}
+
 /// The game menu's view.
 pub struct GameMenu {
     /// The game's name, over the menu.
     title: SharedString,
     cheats: Vec<CheatRow>,
     page: Page,
+    /// How many tiles go in a row, as last drawn.
+    columns: usize,
+    /// Scrolls the page when it is taller than the window has room for.
+    scroll: ScrollHandle,
 }
 
 impl EventEmitter<MenuEvent> for GameMenu {}
@@ -143,6 +184,8 @@ impl GameMenu {
             title: title.into(),
             cheats,
             page: Page::Tiles(Tile::Resume),
+            columns: TILES.len(),
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -150,7 +193,7 @@ impl GameMenu {
     pub fn set_cheats(&mut self, cheats: Vec<CheatRow>, cx: &mut Context<Self>) {
         self.cheats = cheats;
         if let Page::Cheats(at) = self.page {
-            self.page = Page::Cheats(at.min(self.cheats.len()));
+            self.go(Page::Cheats(at.min(self.cheats.len())));
         }
         cx.notify();
     }
@@ -163,34 +206,38 @@ impl GameMenu {
         match event.keystroke.key.as_str() {
             "escape" => self.back(cx),
             "enter" | "space" => self.choose(self.page, cx),
-            key => self.page = moved(self.page, key, self.cheats.len()),
+            key => self.go(moved(self.page, key, self.cheats.len(), self.columns)),
         }
         cx.notify();
     }
 
+    /// Puts the keyboard on `page`, scrolling what it is on into view.
+    fn go(&mut self, page: Page) {
+        self.page = page;
+        let item = focused_item(page, self.cheats.len(), self.columns);
+        self.scroll.scroll_to_item(item);
+    }
+
     /// Goes back a page, or closes the menu from the tiles.
     fn back(&mut self, cx: &mut Context<Self>) {
-        self.page = match self.page {
-            Page::Tiles(_) => {
-                cx.emit(MenuEvent::Resume);
-                return;
-            }
-            Page::Cheats(_) => Page::Tiles(Tile::Cheats),
-            Page::Restart(_) => Page::Tiles(Tile::Restart),
-        };
+        match self.page {
+            Page::Tiles(_) => cx.emit(MenuEvent::Resume),
+            Page::Cheats(_) => self.go(Page::Tiles(Tile::Cheats)),
+            Page::Restart(_) => self.go(Page::Tiles(Tile::Restart)),
+        }
     }
 
     fn choose(&mut self, page: Page, cx: &mut Context<Self>) {
-        self.page = page;
+        self.go(page);
         match page {
             Page::Tiles(Tile::Resume) => cx.emit(MenuEvent::Resume),
-            Page::Tiles(Tile::Cheats) => self.page = Page::Cheats(0),
-            Page::Tiles(Tile::Restart) => self.page = Page::Restart(false),
+            Page::Tiles(Tile::Cheats) => self.go(Page::Cheats(0)),
+            Page::Tiles(Tile::Restart) => self.go(Page::Restart(false)),
             Page::Tiles(Tile::Library) => cx.emit(MenuEvent::ExitToLibrary),
             Page::Cheats(at) if at < self.cheats.len() => cx.emit(MenuEvent::ToggleCheat(at)),
             Page::Cheats(_) => cx.emit(MenuEvent::EditCheats),
             Page::Restart(true) => cx.emit(MenuEvent::StartOver),
-            Page::Restart(false) => self.page = Page::Tiles(Tile::Restart),
+            Page::Restart(false) => self.go(Page::Tiles(Tile::Restart)),
         }
         cx.notify();
     }
@@ -236,6 +283,7 @@ impl GameMenu {
             .line_clamp(1)
             .child(subtitle.map_or_else(|| self.title.clone(), SharedString::from));
         div()
+            .flex_none()
             .flex()
             .items_center()
             .gap_2()
@@ -244,43 +292,54 @@ impl GameMenu {
             .into_any_element()
     }
 
-    fn tiles(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let side = (width - GAP * (TILES.len() - 1) as f32) / TILES.len() as f32;
-        let tiles = TILES.map(|tile| {
-            let resume = tile == Tile::Resume;
-            self.part(Page::Tiles(tile), tile.label(), cx)
-                .w(px(side))
-                .h(px(side.min(84.0)))
-                .rounded(px(14.0))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .bg(rgba(if resume {
-                    with_alpha(ACCENT, 0xFF)
-                } else {
-                    TILE
-                }))
-                .when(resume, |tile| tile.hover(|tile| tile.opacity(0.9)))
-                .when(!resume, |tile| tile.hover(|tile| tile.bg(rgba(TILE_HOVER))))
-                .child(
-                    div()
-                        .text_xl()
-                        .text_color(rgb(if tile == Tile::Restart { DANGER } else { TEXT }))
-                        .child(tile.glyph()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(if resume { ON_ACCENT } else { DIM }))
-                        .child(tile.label()),
-                )
-        });
-        div().flex().gap(px(GAP)).children(tiles).into_any_element()
+    /// `tile`, `side` logical pixels wide.
+    fn tile(&self, tile: Tile, side: f32, cx: &mut Context<Self>) -> AnyElement {
+        let resume = tile == Tile::Resume;
+        self.part(Page::Tiles(tile), tile.label(), cx)
+            .w(px(side))
+            .h(px(side.min(84.0)))
+            .rounded(px(14.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .bg(rgba(if resume {
+                with_alpha(ACCENT, 0xFF)
+            } else {
+                TILE
+            }))
+            .when(resume, |tile| tile.hover(|tile| tile.opacity(0.9)))
+            .when(!resume, |tile| tile.hover(|tile| tile.bg(rgba(TILE_HOVER))))
+            .child(
+                div()
+                    .text_xl()
+                    .text_color(rgb(if tile == Tile::Restart { DANGER } else { TEXT }))
+                    .child(tile.glyph()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(if resume { ON_ACCENT } else { DIM }))
+                    .child(tile.label()),
+            )
+            .into_any_element()
     }
 
-    fn cheats(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The tiles, in rows of `columns`, each `side` wide.
+    fn tiles(&self, columns: usize, side: f32, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut rows = Vec::new();
+        for row in TILES.chunks(columns.max(1)) {
+            let tiles: Vec<AnyElement> =
+                row.iter().map(|&tile| self.tile(tile, side, cx)).collect();
+            rows.push(div().flex().gap(px(GAP)).children(tiles).into_any_element());
+        }
+        rows
+    }
+
+    /// The cheats, each a row with its switch, then Edit Cheats; with a
+    /// hint first if there are none.
+    fn cheats(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let rows: Vec<_> = self
             .cheats
             .iter()
@@ -327,17 +386,17 @@ impl GameMenu {
             } else {
                 "Edit Cheats…"
             });
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .children(rows)
-            .children(empty)
-            .child(edit)
-            .into_any_element()
+        // The order `focused_item` counts in.
+        empty
+            .map(IntoElement::into_any_element)
+            .into_iter()
+            .chain(rows.into_iter().map(IntoElement::into_any_element))
+            .chain([edit.into_any_element()])
+            .collect()
     }
 
-    fn restart(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The question before restarting, then Cancel and Erase & Restart.
+    fn restart(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let cancel = self
             .part(Page::Restart(false), "cancel", cx)
             .flex_1()
@@ -363,18 +422,20 @@ impl GameMenu {
             .text_color(rgb(0x00FF_FFFF))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .child("Erase & Restart");
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(DIM))
-                    .child("This erases your saved progress in this game and starts it from the very beginning."),
-            )
-            .child(div().flex().gap(px(GAP)).child(cancel).child(erase))
-            .into_any_element()
+        // The order `focused_item` counts in.
+        vec![
+            div()
+                .text_sm()
+                .text_color(rgb(DIM))
+                .child("This erases your saved progress in this game and starts it from the very beginning.")
+                .into_any_element(),
+            div()
+                .flex()
+                .gap(px(GAP))
+                .child(cancel)
+                .child(erase)
+                .into_any_element(),
+        ]
     }
 }
 
@@ -383,16 +444,28 @@ impl gpui::Render for GameMenu {
         let viewport = window.viewport_size();
         let sheet_width = (f32::from(viewport.width) - 2.0 * MARGIN).min(MAX_WIDTH);
         let inner = sheet_width - 2.0 * PADDING - 2.0;
-        let (subtitle, body) = match self.page {
-            Page::Tiles(_) => (None, self.tiles(inner, cx)),
-            Page::Cheats(_) => (Some("Cheats"), self.cheats(cx)),
-            Page::Restart(_) => (Some("Start over?"), self.restart(cx)),
+        let (columns, side) = tile_grid(inner);
+        self.columns = columns;
+        let (subtitle, gap, items) = match self.page {
+            Page::Tiles(_) => (None, GAP, self.tiles(columns, side, cx)),
+            Page::Cheats(_) => (Some("Cheats"), 6.0, self.cheats(cx)),
+            Page::Restart(_) => (Some("Start over?"), 12.0, self.restart(cx)),
         };
+        // Only the page scrolls, under its header, when the window is too
+        // short for it.
+        let body = div()
+            .id("game-menu-body")
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .flex()
+            .flex_col()
+            .gap(px(gap))
+            .children(items);
         let sheet = div()
             .id("game-menu")
             .w(px(sheet_width))
             .max_h(px(f32::from(viewport.height) - 2.0 * MARGIN))
-            .overflow_y_scroll()
             .px(px(PADDING))
             .pt(px(8.0))
             .pb(px(PADDING))
@@ -407,7 +480,7 @@ impl gpui::Render for GameMenu {
             .gap(px(12.0))
             .child(
                 // The grabber, as on a sheet on a phone.
-                div().w_full().flex().justify_center().child(
+                div().flex_none().w_full().flex().justify_center().child(
                     div()
                         .w(px(36.0))
                         .h(px(4.0))
@@ -465,35 +538,93 @@ mod tests {
     #[test]
     fn arrows_move_along_the_tiles() {
         assert_eq!(
-            moved(Page::Tiles(Tile::Resume), "right", 0),
+            moved(Page::Tiles(Tile::Resume), "right", 0, 4),
             Page::Tiles(Tile::Cheats)
         );
         assert_eq!(
-            moved(Page::Tiles(Tile::Resume), "a", 0),
+            moved(Page::Tiles(Tile::Resume), "a", 0, 4),
             Page::Tiles(Tile::Resume)
         );
         assert_eq!(
-            moved(Page::Tiles(Tile::Library), "d", 0),
+            moved(Page::Tiles(Tile::Library), "d", 0, 4),
             Page::Tiles(Tile::Library)
         );
         assert_eq!(
-            moved(Page::Tiles(Tile::Cheats), "down", 0),
+            moved(Page::Tiles(Tile::Cheats), "down", 0, 4),
             Page::Tiles(Tile::Cheats)
         );
+    }
+
+    #[test]
+    fn two_rows_of_tiles_move_up_and_down_too() {
+        // Resume  Cheats
+        // Restart Library
+        assert_eq!(
+            moved(Page::Tiles(Tile::Cheats), "down", 0, 2),
+            Page::Tiles(Tile::Library)
+        );
+        assert_eq!(
+            moved(Page::Tiles(Tile::Restart), "w", 0, 2),
+            Page::Tiles(Tile::Resume)
+        );
+        assert_eq!(
+            moved(Page::Tiles(Tile::Resume), "up", 0, 2),
+            Page::Tiles(Tile::Resume)
+        );
+        assert_eq!(
+            moved(Page::Tiles(Tile::Library), "s", 0, 2),
+            Page::Tiles(Tile::Library)
+        );
+        assert_eq!(
+            moved(Page::Tiles(Tile::Cheats), "right", 0, 2),
+            Page::Tiles(Tile::Restart)
+        );
+    }
+
+    #[test]
+    fn tiles_go_two_to_a_row_when_four_are_too_narrow() {
+        let (columns, side) = tile_grid(390.0);
+        assert_eq!(columns, 4);
+        assert!((side * 4.0 + GAP * 3.0 - 390.0).abs() < 0.01);
+        // The narrowest window: four would be about 43 pixels each.
+        let (columns, side) = tile_grid(198.0);
+        assert_eq!(columns, 2);
+        assert!(side >= MIN_TILE);
+        assert_eq!(tile_grid(4.0 * MIN_TILE + 3.0 * GAP).0, 4);
     }
 
     #[test]
     fn the_cheats_page_ends_with_edit_cheats_and_goes_back_left() {
-        assert_eq!(moved(Page::Cheats(0), "down", 2), Page::Cheats(1));
-        assert_eq!(moved(Page::Cheats(1), "s", 2), Page::Cheats(2));
-        assert_eq!(moved(Page::Cheats(2), "down", 2), Page::Cheats(2));
-        assert_eq!(moved(Page::Cheats(0), "up", 2), Page::Cheats(0));
-        assert_eq!(moved(Page::Cheats(1), "left", 2), Page::Tiles(Tile::Cheats));
+        assert_eq!(moved(Page::Cheats(0), "down", 2, 4), Page::Cheats(1));
+        assert_eq!(moved(Page::Cheats(1), "s", 2, 4), Page::Cheats(2));
+        assert_eq!(moved(Page::Cheats(2), "down", 2, 4), Page::Cheats(2));
+        assert_eq!(moved(Page::Cheats(0), "up", 2, 4), Page::Cheats(0));
+        assert_eq!(
+            moved(Page::Cheats(1), "left", 2, 4),
+            Page::Tiles(Tile::Cheats)
+        );
     }
 
     #[test]
     fn restarting_starts_on_cancel() {
-        assert_eq!(moved(Page::Restart(false), "right", 0), Page::Restart(true));
-        assert_eq!(moved(Page::Restart(true), "left", 0), Page::Restart(false));
+        assert_eq!(
+            moved(Page::Restart(false), "right", 0, 4),
+            Page::Restart(true)
+        );
+        assert_eq!(
+            moved(Page::Restart(true), "left", 0, 4),
+            Page::Restart(false)
+        );
+    }
+
+    #[test]
+    fn the_item_in_view_is_what_the_keyboard_is_on() {
+        assert_eq!(focused_item(Page::Tiles(Tile::Library), 0, 4), 0);
+        assert_eq!(focused_item(Page::Tiles(Tile::Library), 0, 2), 1);
+        assert_eq!(focused_item(Page::Tiles(Tile::Cheats), 0, 2), 0);
+        assert_eq!(focused_item(Page::Cheats(3), 5, 4), 3);
+        // Edit Cheats comes after the hint that there are none.
+        assert_eq!(focused_item(Page::Cheats(0), 0, 4), 1);
+        assert_eq!(focused_item(Page::Restart(true), 0, 4), 1);
     }
 }

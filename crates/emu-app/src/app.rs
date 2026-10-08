@@ -3,11 +3,12 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, Pixels, SystemMenuType, TitlebarOptions,
     WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
 };
 
 use crate::layout;
+use crate::settings::{self, Settings, WindowPlace};
 use crate::speed::{self, Speed, Speeds};
 use crate::view::EmulatorView;
 use crate::window_chrome;
@@ -97,6 +98,9 @@ const APP_ICON: &[u8] = include_bytes!("../../../assets/app-icon.png");
 /// the game shows through it.
 pub const TOP_BAR: f32 = 40.0;
 
+/// The smallest the main window can be, in logical pixels.
+const MIN_SIZE: (f32, f32) = (256.0, 192.0);
+
 /// Where the close button's top-left corner sits in [`TOP_BAR`], centring
 /// the buttons in it.
 const TRAFFIC_LIGHTS: (f32, f32) = (16.0, 13.0);
@@ -164,11 +168,31 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             (f32::from(size.width), f32::from(size.height))
         });
         let (width, height) = initial_size(display);
-        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+        let fresh = Bounds::centered(None, size(px(width), px(height)), cx);
+        // Where the window was left, if that display is still there.
+        let left = settings::default_path()
+            .and_then(|path| Settings::load(&path).ok())
+            .and_then(|settings| settings.window_place);
+        let display = left.and_then(|place| match place.display {
+            Some(uuid) => cx
+                .displays()
+                .into_iter()
+                .find(|display| display.uuid().is_ok_and(|id| id.as_u128() == uuid)),
+            None => cx.primary_display(),
+        });
+        let window_bounds = opening_bounds(
+            left,
+            display.as_ref().map(|display| display.bounds()),
+            fresh,
+        );
+        let display_id = display
+            .filter(|_| window_bounds != WindowBounds::Windowed(fresh))
+            .map(|display| display.id());
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(window_bounds),
+            display_id,
             titlebar: Some(top_bar("ds-emulator")),
-            window_min_size: Some(size(px(256.0), px(192.0))),
+            window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
             app_id: Some("ds-emulator".to_owned()),
             ..WindowOptions::default()
         };
@@ -188,6 +212,35 @@ pub fn top_bar(title: &'static str) -> TitlebarOptions {
         title: Some(title.into()),
         appears_transparent: true,
         traffic_light_position: Some(point(px(TRAFFIC_LIGHTS.0), px(TRAFFIC_LIGHTS.1))),
+    }
+}
+
+/// Where to open the main window: at `left`, where it was left, if its
+/// top bar is still on the `display` it was on, to drag it by, or else at
+/// `fresh`. Both are measured across that display.
+fn opening_bounds(
+    left: Option<WindowPlace>,
+    display: Option<Bounds<Pixels>>,
+    fresh: Bounds<Pixels>,
+) -> WindowBounds {
+    let Some(place) = left else {
+        return WindowBounds::Windowed(fresh);
+    };
+    let bounds = Bounds::new(
+        point(px(place.x), px(place.y)),
+        size(
+            px(place.width.max(MIN_SIZE.0)),
+            px(place.height.max(MIN_SIZE.1)),
+        ),
+    );
+    let bar = point(px(place.x + place.width / 2.0), px(place.y + TOP_BAR / 2.0));
+    if !display.is_some_and(|display| display.contains(&bar)) {
+        return WindowBounds::Windowed(fresh);
+    }
+    if place.fullscreen {
+        WindowBounds::Fullscreen(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
     }
 }
 
@@ -375,6 +428,63 @@ fn checked(label: &str, on: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+    }
+
+    #[test]
+    fn the_window_opens_where_it_was_left() {
+        let display = Some(bounds(0.0, 0.0, 1512.0, 982.0));
+        let fresh = bounds(500.0, 100.0, 529.0, 793.0);
+        let place = WindowPlace {
+            x: 40.0,
+            y: 60.0,
+            width: 600.0,
+            height: 900.0,
+            fullscreen: false,
+            display: None,
+        };
+        assert_eq!(
+            opening_bounds(Some(place), display, fresh),
+            WindowBounds::Windowed(bounds(40.0, 60.0, 600.0, 900.0))
+        );
+        let full = WindowPlace {
+            fullscreen: true,
+            ..place
+        };
+        assert_eq!(
+            opening_bounds(Some(full), display, fresh),
+            WindowBounds::Fullscreen(bounds(40.0, 60.0, 600.0, 900.0))
+        );
+        assert_eq!(
+            opening_bounds(None, display, fresh),
+            WindowBounds::Windowed(fresh)
+        );
+    }
+
+    #[test]
+    fn a_window_off_its_display_or_on_one_now_gone_opens_afresh() {
+        let display = Some(bounds(0.0, 0.0, 1512.0, 982.0));
+        let fresh = bounds(500.0, 100.0, 529.0, 793.0);
+        let place = WindowPlace {
+            x: 40.0,
+            y: 60.0,
+            width: 600.0,
+            height: 900.0,
+            fullscreen: false,
+            display: Some(7),
+        };
+        let off = WindowPlace { x: 2000.0, ..place };
+        assert_eq!(
+            opening_bounds(Some(off), display, fresh),
+            WindowBounds::Windowed(fresh)
+        );
+        assert_eq!(
+            opening_bounds(Some(place), None, fresh),
+            WindowBounds::Windowed(fresh)
+        );
+    }
 
     #[test]
     fn window_opens_large_on_a_laptop_display() {

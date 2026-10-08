@@ -231,6 +231,19 @@ impl Placement {
         Some(TouchPoint { x, y })
     }
 
+    /// The pixel of a `size` screen nearest window `point`: the one under
+    /// it, or for a point outside, the one at the nearest edge. `None`
+    /// only if the placement has no area.
+    pub fn pixel_nearest(&self, size: ScreenSize, point: (f32, f32)) -> Option<TouchPoint> {
+        let rect = self.rect;
+        // Just inside the far edges, which belong to the next pixel over.
+        let inside = (
+            point.0.clamp(rect.x, rect.x + rect.width * 0.999),
+            point.1.clamp(rect.y, rect.y + rect.height * 0.999),
+        );
+        self.pixel_at(size, inside)
+    }
+
     /// Where `point`, in pixels from the top-left corner of an upright
     /// `size` screen, is drawn in the window.
     pub fn window_point(&self, size: ScreenSize, point: (f32, f32)) -> (f32, f32) {
@@ -697,6 +710,24 @@ mod tests {
         );
         assert_eq!(bottom.pixel_at(size, (100.0, 383.0)), None);
         assert_eq!(bottom.pixel_at(size, (512.0, 500.0)), None);
+    }
+
+    #[test]
+    fn pixel_nearest_holds_points_outside_at_the_edge() {
+        let bottom = placement(rect(0.0, 384.0, 512.0, 384.0), Rotation::Upright);
+        let size = DS[1];
+        assert_eq!(
+            bottom.pixel_nearest(size, (100.0, 500.0)),
+            bottom.pixel_at(size, (100.0, 500.0))
+        );
+        assert_eq!(
+            bottom.pixel_nearest(size, (-40.0, 300.0)),
+            Some(TouchPoint { x: 0, y: 0 })
+        );
+        assert_eq!(
+            bottom.pixel_nearest(size, (900.0, 2000.0)),
+            Some(TouchPoint { x: 255, y: 191 })
+        );
     }
 
     #[test]
