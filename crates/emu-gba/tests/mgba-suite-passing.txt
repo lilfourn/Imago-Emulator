@@ -8,6 +8,6 @@ Carry tests: 93/93
 Multiply long tests: 72/72
 BIOS math tests: 615/615
 DMA tests: 1244/1244
-SIO register R/W tests: 55/90
+SIO register R/W tests: 89/90
 SIO timing tests: 0/4
 Misc. edge case tests: 7/12

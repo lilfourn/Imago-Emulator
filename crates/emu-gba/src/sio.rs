@@ -29,7 +29,9 @@ enum Mode {
     Normal8,
     Normal32,
     Multi,
-    /// UART, JOY Bus or general-purpose: no transfers emulated.
+    /// UART: no transfers emulated.
+    Uart,
+    /// JOY Bus or general-purpose (RCNT bit 15): no transfers emulated.
     Other,
 }
 
@@ -98,7 +100,7 @@ impl Sio {
             0 => Mode::Normal8,
             1 => Mode::Normal32,
             2 => Mode::Multi,
-            _ => Mode::Other,
+            _ => Mode::Uart,
         }
     }
 
@@ -106,31 +108,58 @@ impl Sio {
         self.control & START != 0
     }
 
-    /// Reads the register at `offset` from 0x04000120.
+    /// Reads the register at `offset` from 0x04000120. The data registers
+    /// read as 0 in modes that do not use them, as do SIOCNT's and RCNT's
+    /// unused bits (the mGBA suite's SIO register tests).
     pub(crate) fn read(&self, offset: u32) -> u16 {
+        let mode = self.mode();
+        let index = (offset / 2) as usize;
         match offset {
-            0x00..=0x07 => self.data[(offset / 2) as usize],
+            // SIODATA32, or SIOMULTI0-1.
+            0x00..=0x03 if matches!(mode, Mode::Normal32 | Mode::Multi) => self.data[index],
+            // SIOMULTI2-3.
+            0x04..=0x07 if mode == Mode::Multi => self.data[index],
             0x08 => self.read_control(),
+            // UART's receive FIFO is always empty.
+            0x0A if mode == Mode::Uart => 0,
             0x0A => self.send,
-            0x14 => self.rcnt,
+            0x14 => self.read_rcnt(),
             _ => 0,
         }
     }
 
+    /// SIOCNT, laid out for the mode its own bits 12-13 select.
     fn read_control(&self) -> u16 {
-        if self.mode() != Mode::Multi {
-            return self.control;
+        let control = self.control & 0x7FFF;
+        if self.mode() == Mode::Multi {
+            // SI is low only at the parent's end of a cable.
+            let si = u16::from(self.position != Some(0));
+            let sd = u16::from(self.ready);
+            let id = u16::from(self.position.unwrap_or(0));
+            return (control & !0x007C) | si << 2 | sd << 3 | id << 4;
         }
-        // SI is low only at the parent's end of a cable.
-        let si = u16::from(self.position != Some(0));
-        let sd = u16::from(self.ready);
-        let id = u16::from(self.position.unwrap_or(0));
-        (self.control & !0x007C) | si << 2 | sd << 3 | id << 4
+        // Bits 4-6 are unused in normal mode; in UART mode they say the
+        // send FIFO is not full, the receive FIFO is empty, and no error.
+        let uart = (self.control >> 12) & 3 == 3;
+        (control & !0x0070) | if uart { 0x0020 } else { 0 }
+    }
+
+    /// RCNT: in normal mode the SD and SO bits read 0, and in JOY Bus mode
+    /// SC and SD do.
+    fn read_rcnt(&self) -> u16 {
+        let rcnt = self.rcnt & 0xC1FF;
+        match self.mode() {
+            Mode::Normal8 | Mode::Normal32 => rcnt & !0x000A,
+            Mode::Other if rcnt & 0x4000 != 0 => rcnt & !0x0003,
+            _ => rcnt,
+        }
     }
 
     /// Writes the register at `offset` from 0x04000120.
     pub(crate) fn write(&mut self, offset: u32, value: u16) -> Action {
         match offset {
+            // In multi-player mode, SIOMULTI0-3 hold received data only.
+            0x00..=0x07 if self.mode() == Mode::Multi => {}
             0x00..=0x07 => self.data[(offset / 2) as usize] = value,
             0x08 => return self.write_control(value),
             0x0A => self.send = value,
@@ -143,6 +172,16 @@ impl Sio {
     fn write_control(&mut self, value: u16) -> Action {
         let was_busy = self.busy();
         self.control = (value & !START) | (self.control & START);
+        if matches!(self.mode(), Mode::Uart | Mode::Other) {
+            // No transfer runs, so bit 7 keeps what was written: UART's data
+            // length, or a start that never completes. One in progress
+            // stops.
+            self.control = value;
+            if was_busy && self.outgoing.take().is_some() {
+                return Action::Cancelled;
+            }
+            return Action::None;
+        }
         if value & START == 0 {
             // A multi-player transfer runs to the end; a normal one stops.
             if !was_busy || self.mode() == Mode::Multi {
@@ -183,7 +222,7 @@ impl Sio {
                 });
                 Action::Started(cycles)
             }
-            // A child, or a mode without transfers: START does nothing.
+            // A child: START does nothing.
             _ => Action::None,
         }
     }
@@ -216,7 +255,7 @@ impl Sio {
             Mode::Normal8 => self.send = (self.send & 0xFF00) | (self.incoming[0] & 0xFF),
             Mode::Normal32 => self.data[..2].copy_from_slice(&self.incoming[..2]),
             Mode::Multi => self.data = self.incoming,
-            Mode::Other => {}
+            Mode::Uart | Mode::Other => {}
         }
         self.control &= !START;
         self.outgoing = None;
@@ -296,6 +335,32 @@ mod tests {
     use super::*;
 
     const MULTI_115200: u16 = 0x2003;
+
+    /// Hardware values from the mGBA suite's SIO register tests, after
+    /// writing ones.
+    #[test]
+    fn registers_read_back_as_their_mode_uses_them() {
+        let mut sio = Sio::default();
+        // Normal 8-bit mode: no 32-bit data, SIOCNT bits 4-6 and RCNT's SD
+        // and SO read 0.
+        sio.write(0x00, 0xFFFF);
+        sio.write(0x08, 0xCF7F);
+        sio.write(0x14, 0x3FFF);
+        assert_eq!(sio.read(0x00), 0);
+        assert_eq!(sio.read(0x08) & 0xFF7F, 0x4F0F);
+        assert_eq!(sio.read(0x14), 0x01F5);
+        // Normal 32-bit mode: the data written earlier shows.
+        sio.write(0x08, 0x1000);
+        assert_eq!(sio.read(0x00), 0xFFFF);
+        assert_eq!(sio.read(0x04), 0);
+        // UART: bit 7 sticks, the receive FIFO is empty.
+        sio.write(0x08, 0xFFFF);
+        assert_eq!(sio.read(0x08), 0x7FAF);
+        assert_eq!(sio.read(0x0A), 0);
+        // JOY Bus: RCNT's SC and SD read 0.
+        sio.write(0x14, 0xFFFF);
+        assert_eq!(sio.read(0x14), 0xC1FC);
+    }
 
     #[test]
     fn a_lone_console_is_a_child_and_cannot_start_multi_player() {
