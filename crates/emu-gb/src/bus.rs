@@ -72,6 +72,12 @@ struct Dma {
 
 impl Bus {
     pub(crate) fn new(model: Model, cartridge: Cartridge, boot_rom: Option<Box<[u8]>>) -> Self {
+        // A boot ROM switches the LCD on itself.
+        let ppu = if boot_rom.is_some() {
+            Ppu::power_on(model)
+        } else {
+            Ppu::after_boot(model)
+        };
         Self {
             model,
             cartridge,
@@ -81,7 +87,7 @@ impl Bus {
             wram_bank: 1,
             hram: vec![0; 0x7F].into_boxed_slice(),
             timer: Timer::after_boot(model),
-            ppu: Ppu::after_boot(model),
+            ppu,
             apu: Apu::after_boot(model),
             joypad: Joypad::default(),
             serial: Serial::new(model),
@@ -317,7 +323,7 @@ impl Bus {
                 self.wram[index] = value;
             }
             0xFE00..=0xFE9F => self.ppu.write_oam(address, value),
-            0xFF00 => self.joypad.write(value),
+            0xFF00 => self.joypad.write(value, &mut self.interrupt_flag),
             0xFF01 | 0xFF02 => self.serial.write(address, value, self.timer.counter()),
             0xFF04..=0xFF07 => {
                 let div_before = self.timer.counter();

@@ -32,8 +32,12 @@ impl Joypad {
         0xC0 | self.select | self.lines()
     }
 
-    pub(crate) fn write(&mut self, value: u8) {
+    /// Writes the select bits, requesting the joypad interrupt if
+    /// selecting a group with a button held pulled a line low.
+    pub(crate) fn write(&mut self, value: u8, interrupt_flag: &mut u8) {
+        let before = self.lines();
         self.select = value & 0x30;
+        self.interrupt_on_fall(before, interrupt_flag);
     }
 
     /// Updates the held buttons, requesting the joypad interrupt if a
@@ -47,8 +51,41 @@ impl Joypad {
             | bit(Button::Left, 2)
             | bit(Button::Up, 4)
             | bit(Button::Down, 8);
+        self.interrupt_on_fall(before, interrupt_flag);
+    }
+
+    /// Requests the joypad interrupt if a line that was `before` high is
+    /// now low (Pan Docs, "INT $60 — Joypad interrupt").
+    fn interrupt_on_fall(&self, before: u8, interrupt_flag: &mut u8) {
         if before & !self.lines() != 0 {
             *interrupt_flag |= interrupts::JOYPAD;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selecting_a_group_with_a_button_held_interrupts() {
+        let mut joypad = Joypad::default();
+        let mut interrupt_flag = 0;
+        let mut a = Buttons::default();
+        a.set(Button::A, true);
+        // Only the directions selected while A is pressed: no line falls.
+        joypad.write(0x20, &mut interrupt_flag);
+        joypad.set_buttons(a, &mut interrupt_flag);
+        assert_eq!((joypad.read() & 0x0F, interrupt_flag), (0x0F, 0));
+        // Selecting the actions pulls A's line low.
+        joypad.write(0x10, &mut interrupt_flag);
+        assert_eq!(
+            (joypad.read() & 0x0F, interrupt_flag),
+            (0x0E, interrupts::JOYPAD)
+        );
+        // Selecting both groups pulls no other line low.
+        interrupt_flag = 0;
+        joypad.write(0x00, &mut interrupt_flag);
+        assert_eq!(interrupt_flag, 0);
     }
 }
