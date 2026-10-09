@@ -20,6 +20,14 @@ use crate::game_db;
 use crate::persist;
 use crate::rom_info::{Platform, RomInfo};
 
+/// `path` as the library keeps it: absolute, from the current folder if
+/// it is relative, so a game opened as `./game.gba` is the same game
+/// wherever the app runs from next. Links are left as they are, as the
+/// game's saves sit next to the path the user gave.
+pub fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_owned())
+}
+
 /// One game in the library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Game {
@@ -370,6 +378,14 @@ mod tests {
             Library::from_toml("game = 1"),
             Err(LibraryError::Syntax(_))
         ));
+    }
+
+    #[test]
+    fn relative_paths_become_absolute_from_the_current_folder() {
+        let here = std::env::current_dir().expect("a current folder");
+        assert_eq!(absolute(Path::new("roms/a.gba")), here.join("roms/a.gba"));
+        assert_eq!(absolute(Path::new("./a.gba")), here.join("a.gba"));
+        assert_eq!(absolute(Path::new("/roms/a.gba")), Path::new("/roms/a.gba"));
     }
 
     #[test]

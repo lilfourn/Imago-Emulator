@@ -67,7 +67,8 @@ impl Math {
     fn divide(&mut self) {
         let (quotient, remainder) = match self.div_control {
             0 => divide_32(self.numerator as i32, self.denominator as i32),
-            1 => divide_64(self.numerator as i64, i64::from(self.denominator as i32)),
+            // Mode 3 is reserved and divides like mode 1, 64/32.
+            1 | 3 => divide_64(self.numerator as i64, i64::from(self.denominator as i32)),
             _ => divide_64(self.numerator as i64, self.denominator as i64),
         };
         self.quotient = quotient as u64;
@@ -135,6 +136,18 @@ mod tests {
         math.write(0x1C, 0);
         math.write(0x18, 7);
         assert_eq!(result(&math), (14, 2));
+    }
+
+    #[test]
+    fn reserved_mode_3_divides_64_by_32_like_mode_1() {
+        let mut math = Math::default();
+        math.write(0x00, 3);
+        math.write(0x10, 100);
+        // Only the denominator's low word counts: 7, not 2^32 + 7.
+        math.write(0x18, 7);
+        math.write(0x1C, 1);
+        assert_eq!(result(&math), (14, 2));
+        assert_eq!(math.read(0x00) & 3, 3, "DIVCNT reads back as written");
     }
 
     #[test]

@@ -58,6 +58,12 @@ impl Controls {
         self.pressed.clear();
     }
 
+    /// Releases every source whose name starts with `prefix`, such as
+    /// `"key:"` for every keyboard key.
+    pub fn release_from(&mut self, prefix: &str) {
+        self.pressed.retain(|source, _| !source.starts_with(prefix));
+    }
+
     /// Turns latched fast-forward on or off; returns the new setting.
     pub fn toggle_fast_forward(&mut self) -> bool {
         self.fast_forward_latched = !self.fast_forward_latched;
@@ -166,6 +172,21 @@ mod tests {
         assert!(controls.state().blow);
         controls.release_all();
         assert!(!controls.state().blow);
+    }
+
+    #[test]
+    fn release_from_lets_go_of_one_kind_of_source() {
+        let mut controls = Controls::default();
+        let a = Some(Held::Button(Button::A));
+        controls.set("key:k".to_owned(), a, true);
+        controls.set("key:tab".to_owned(), Some(Held::FastForward), true);
+        controls.set("pad:1:East".to_owned(), a, true);
+        controls.release_from("key:");
+        let state = controls.state();
+        assert!(state.buttons.contains(Button::A), "the pad still holds A");
+        assert_eq!(state.pace, Pace::Normal);
+        controls.set("pad:1:East".to_owned(), None, false);
+        assert!(controls.state().buttons.is_empty());
     }
 
     #[test]

@@ -8,10 +8,14 @@ use std::path::Path;
 use emu_core::{Core, CoreInfo, LoadError, Media, System};
 
 /// File extensions this build recognises, and the system each belongs to.
-pub const ROM_EXTENSIONS: [(&str, System); 5] = [
+/// `.cgb` and `.agb` are older names for Game Boy Color and Game Boy
+/// Advance ROMs, the same files as `.gbc` and `.gba`.
+pub const ROM_EXTENSIONS: [(&str, System); 7] = [
     ("gb", System::Gb),
     ("gbc", System::Gb),
+    ("cgb", System::Gb),
     ("gba", System::Gba),
+    ("agb", System::Gba),
     ("nds", System::Nds),
     ("srl", System::Nds),
 ];
@@ -85,6 +89,8 @@ mod tests {
         assert_eq!(system_for_path(Path::new("red.GB")), Some(System::Gb));
         assert_eq!(system_for_path(Path::new("crystal.gbc")), Some(System::Gb));
         assert_eq!(system_for_path(Path::new("emerald.gba")), Some(System::Gba));
+        assert_eq!(system_for_path(Path::new("crystal.CGB")), Some(System::Gb));
+        assert_eq!(system_for_path(Path::new("emerald.agb")), Some(System::Gba));
         assert_eq!(
             system_for_path(Path::new("platinum.nds")),
             Some(System::Nds)

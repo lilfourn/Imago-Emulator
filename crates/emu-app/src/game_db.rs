@@ -58,6 +58,12 @@ impl GameDb {
         db
     }
 
+    /// Whether it lists no releases at all, as a truncated or garbled
+    /// download would.
+    pub fn is_empty(&self) -> bool {
+        self.by_title.is_empty()
+    }
+
     /// The release whose ROM has CRC-32 `crc`.
     pub fn by_crc(&self, crc: u32) -> Option<&str> {
         self.by_crc.get(&crc).map(String::as_str)

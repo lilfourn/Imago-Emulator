@@ -198,7 +198,7 @@ impl SettingsWindow {
             // The main window redraws every frame; only its settings show
             // here.
             cx.observe(&main, |this, main, cx| {
-                let settings = main.read(cx).settings();
+                let settings = main.read(cx).shown_settings();
                 if settings != this.settings {
                     this.settings = settings;
                     cx.notify();
@@ -208,7 +208,7 @@ impl SettingsWindow {
             cx.observe_release_in(&main, window, |_, _, window, _| window.remove_window()),
         ];
         Self {
-            settings: main.read(cx).settings(),
+            settings: main.read(cx).shown_settings(),
             main: main.downgrade(),
             focused: 0,
             focus,
@@ -223,7 +223,7 @@ impl SettingsWindow {
             return;
         };
         main.update(cx, |main, cx| {
-            let mut settings = main.settings();
+            let mut settings = main.shown_settings();
             edit(&mut settings);
             main.apply_settings(settings, cx);
         });

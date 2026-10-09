@@ -21,6 +21,9 @@ pub(crate) const HDRAW_CYCLES: u64 = 1007;
 /// Cycles in a whole line.
 pub(crate) const LINE_CYCLES: u64 = 1232;
 const LINES: u16 = 228;
+/// The lines whose HBlank starts DMA 3 in video capture mode; the next
+/// line's start stops it (GBATEK, "DMA3 Video Capture Mode").
+const CAPTURE_LINES: std::ops::Range<u16> = 2..162;
 
 /// Interrupt request bits produced by the PPU.
 pub(crate) mod irq {
@@ -36,6 +39,10 @@ pub(crate) struct Signals {
     pub(crate) vblank: bool,
     /// HBlank started on a visible line.
     pub(crate) hblank: bool,
+    /// HBlank started on a line video capture copies (2–161).
+    pub(crate) capture: bool,
+    /// The line after the last that video capture copies began (162).
+    pub(crate) capture_end: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,8 +137,9 @@ impl Ppu {
         (
             request,
             Signals {
-                vblank: false,
                 hblank: visible,
+                capture: CAPTURE_LINES.contains(&self.vcount),
+                ..Signals::default()
             },
         )
     }
@@ -146,7 +154,10 @@ impl Ppu {
         }
         let dispstat = self.dispstat();
         let mut request = 0;
-        let mut signals = Signals::default();
+        let mut signals = Signals {
+            capture_end: self.vcount == CAPTURE_LINES.end,
+            ..Signals::default()
+        };
         if usize::from(self.vcount) == HEIGHT {
             self.frame_ready = true;
             signals.vblank = true;

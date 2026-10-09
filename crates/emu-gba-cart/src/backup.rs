@@ -91,13 +91,11 @@ impl Backup {
             Self::Sram(memory) => memory,
             Self::Flash(flash) => &mut flash.memory,
             Self::Eeprom(eeprom) => {
-                // The file's size tells a 512 B part from an 8 KiB one.
-                if data.len() == 0x2000 {
-                    eeprom.memory = vec![0xFF; 0x2000];
-                    eeprom.address_bits = Some(14);
-                } else if data.len() == 0x200 {
-                    eeprom.address_bits = Some(6);
-                }
+                // The file's size suggests the part: 8 KiB if it holds that
+                // much (padded files included), otherwise 512 B. The game's
+                // first request settles it (see `Eeprom::note_dma_length`).
+                let size = if data.len() >= 0x2000 { 0x2000 } else { 0x200 };
+                eeprom.memory = vec![0xFF; size];
                 &mut eeprom.memory
             }
         };
@@ -258,8 +256,11 @@ impl Flash {
 /// EEPROM serial state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Eeprom {
+    /// The part's contents: 512 B or 8 KiB, or more where a loaded save
+    /// was bigger than the part turned out to be, which it keeps whole.
     memory: Vec<u8>,
-    /// 6 for 512 B parts, 14 for 8 KiB; unknown until a game uses it.
+    /// 6 for 512 B parts, 14 for 8 KiB; unknown until a game's DMA tells
+    /// (see [`Eeprom::address_width`] for the guess until then).
     address_bits: Option<u32>,
     /// Bits received for the command in progress, oldest first.
     incoming: Vec<bool>,
@@ -279,19 +280,29 @@ impl Eeprom {
 
     /// A DMA of `count` halfwords is about to talk to the EEPROM. A request
     /// is 9 or 73 bits long for 512 B parts and 17 or 81 for 8 KiB ones,
-    /// which settles the size the first time.
+    /// which settles the size the first time, over any guess from a loaded
+    /// save's size. Memory grows to fit but never shrinks, so the save's
+    /// bytes are kept either way.
     pub(crate) fn note_dma_length(&mut self, count: u32) {
         if self.address_bits.is_some() {
             return;
         }
-        match count {
-            9 | 73 => self.address_bits = Some(6),
-            17 | 81 => {
-                self.address_bits = Some(14);
-                self.memory = vec![0xFF; 0x2000];
-            }
-            _ => {}
+        let (address_bits, size) = match count {
+            9 | 73 => (6, 0x200),
+            17 | 81 => (14, 0x2000),
+            _ => return,
+        };
+        self.address_bits = Some(address_bits);
+        if self.memory.len() < size {
+            self.memory.resize(size, 0xFF);
         }
+    }
+
+    /// The address width requests use: the one a DMA settled, or until
+    /// then the one the memory's size suggests.
+    fn address_width(&self) -> usize {
+        let guess = if self.memory.len() >= 0x2000 { 14 } else { 6 };
+        self.address_bits.unwrap_or(guess) as usize
     }
 
     /// Reads one bit (bit 0 of the halfword).
@@ -304,7 +315,8 @@ impl Eeprom {
     /// changed.
     pub(crate) fn write(&mut self, value: u16) -> bool {
         self.incoming.push(value & 1 != 0);
-        let address_bits = self.address_bits.unwrap_or(6) as usize;
+        let address_bits = self.address_width();
+        let write_length = 2 + address_bits + 64 + 1;
         let bits = &self.incoming;
         let number = |range: std::ops::Range<usize>| {
             bits[range]
@@ -325,7 +337,7 @@ impl Eeprom {
                 false
             }
             // Write request: 1 0, address, 64 data bits, 0.
-            (Some(true), Some(false)) if bits.len() == 2 + address_bits + 64 + 1 => {
+            (Some(true), Some(false)) if bits.len() == write_length => {
                 let block = number(2..2 + address_bits) % (self.memory.len() / 8);
                 for byte in 0..8 {
                     let start = 2 + address_bits + byte * 8;
@@ -336,6 +348,12 @@ impl Eeprom {
                 true
             }
             (Some(false), _) => {
+                self.incoming.clear();
+                false
+            }
+            // As long as a write request and still unmatched: garbled (by
+            // the address width changing partway, say), so start afresh.
+            _ if bits.len() >= write_length => {
                 self.incoming.clear();
                 false
             }
@@ -428,5 +446,84 @@ mod tests {
         let read: Vec<bool> = (0..68).map(|_| eeprom.read() != 0).collect();
         assert_eq!(&read[..4], &[false; 4]);
         assert_eq!(read[4..], data[..]);
+    }
+
+    /// A `.sav` of `length` bytes, no two neighbouring blocks alike.
+    fn save_file(length: usize) -> Vec<u8> {
+        (0..length).map(|index| (index % 251) as u8).collect()
+    }
+
+    /// A blank EEPROM with `file` loaded.
+    fn eeprom_from(file: &[u8]) -> Eeprom {
+        let mut backup = Backup::Eeprom(Eeprom::new());
+        backup.load(file);
+        match backup {
+            Backup::Eeprom(eeprom) => eeprom,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Sends the low `width` bits of `value`, most significant first.
+    fn send(eeprom: &mut Eeprom, value: usize, width: usize) {
+        for bit in (0..width).rev() {
+            eeprom.write(((value >> bit) & 1) as u16);
+        }
+    }
+
+    /// Reads block `block` with a request of `address_bits`-bit address.
+    fn read_block(eeprom: &mut Eeprom, address_bits: usize, block: usize) -> Vec<u8> {
+        send(eeprom, 0b11, 2);
+        send(eeprom, block, address_bits);
+        send(eeprom, 0, 1);
+        let bits: Vec<u8> = (0..68).map(|_| eeprom.read() as u8).collect();
+        bits[4..]
+            .chunks(8)
+            .map(|byte| byte.iter().fold(0, |value, &bit| value << 1 | bit))
+            .collect()
+    }
+
+    #[test]
+    fn eeprom_keeps_a_padded_8_kib_save() {
+        let file = save_file(0x1_0000);
+        let mut eeprom = eeprom_from(&file);
+        eeprom.note_dma_length(17);
+        assert_eq!(read_block(&mut eeprom, 14, 0x3FF), file[0x1FF8..0x2000]);
+        assert_eq!(eeprom.memory, file[..0x2000]);
+    }
+
+    #[test]
+    fn eeprom_requests_settle_512_b_addressing_over_an_8_kib_save() {
+        let file = save_file(0x2000);
+        let mut eeprom = eeprom_from(&file);
+        eeprom.note_dma_length(9);
+        assert_eq!(read_block(&mut eeprom, 6, 5), file[40..48]);
+        // The rest of the file is kept, to be saved again as it was.
+        assert_eq!(eeprom.memory, file);
+    }
+
+    #[test]
+    fn eeprom_requests_settle_8_kib_addressing_over_a_512_b_save() {
+        let file = save_file(0x200);
+        let mut eeprom = eeprom_from(&file);
+        eeprom.note_dma_length(81);
+        assert_eq!(read_block(&mut eeprom, 14, 63), file[0x1F8..0x200]);
+        assert_eq!(read_block(&mut eeprom, 14, 64), [0xFF; 8]);
+        assert_eq!(eeprom.memory.len(), 0x2000);
+    }
+
+    #[test]
+    fn eeprom_drops_requests_that_outgrow_the_longest() {
+        let file = save_file(0x2000);
+        let mut eeprom = eeprom_from(&file);
+        // Half a 14-bit read request, then the game settles on 6 bits:
+        // the bits so far can no longer end a request.
+        send(&mut eeprom, 0b11, 2);
+        send(&mut eeprom, 0, 10);
+        eeprom.note_dma_length(9);
+        for _ in 0..100 {
+            eeprom.write(0);
+        }
+        assert!(eeprom.incoming.len() < 2 + 6 + 64 + 1);
+        assert_eq!(read_block(&mut eeprom, 6, 5), file[40..48]);
     }
 }

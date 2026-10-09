@@ -73,6 +73,9 @@ actions!(
         Resolution3d3x,
         Resolution3d4x,
         ToggleMicrophone,
+        CloseWindow,
+        Minimize,
+        Zoom,
         Quit,
     ]
 );
@@ -116,6 +119,26 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
         cx.on_action(|_: &HideApp, cx| cx.hide());
         cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
+        // Window actions act on whichever window is in front.
+        cx.on_action(|_: &CloseWindow, cx| {
+            if let Some(window) = cx.active_window() {
+                window
+                    .update(cx, |_, window, _| window.remove_window())
+                    .ok();
+            }
+        });
+        cx.on_action(|_: &Minimize, cx| {
+            if let Some(window) = cx.active_window() {
+                window
+                    .update(cx, |_, window, _| window.minimize_window())
+                    .ok();
+            }
+        });
+        cx.on_action(|_: &Zoom, cx| {
+            if let Some(window) = cx.active_window() {
+                window.update(cx, |_, window, _| window.zoom_window()).ok();
+            }
+        });
         cx.bind_keys([
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-h", HideApp, None),
@@ -123,6 +146,11 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             KeyBinding::new("cmd-o", OpenRom, None),
             KeyBinding::new("cmd-shift-a", AddToLibrary, None),
             KeyBinding::new("cmd-w", CloseGame, None),
+            // In the settings and debugger windows ⌘W closes the window,
+            // as in any Mac app; only the game's own window closes games.
+            KeyBinding::new("cmd-w", CloseWindow, Some("Settings")),
+            KeyBinding::new("cmd-w", CloseWindow, Some("Debugger")),
+            KeyBinding::new("cmd-m", Minimize, None),
             KeyBinding::new("cmd-t", SwitchPlayer, None),
             KeyBinding::new("cmd-p", TogglePause, None),
             KeyBinding::new("cmd-r", Reset, None),
@@ -395,6 +423,13 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                 MenuItem::action(key_guide, ToggleKeyGuide),
                 MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
                 MenuItem::action("Debugger", ShowDebugger),
+            ],
+        },
+        Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Zoom", Zoom),
             ],
         },
     ]

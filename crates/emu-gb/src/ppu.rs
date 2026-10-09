@@ -148,6 +148,16 @@ impl Ppu {
         }
     }
 
+    /// The state at power-on, for a boot ROM to start from: LCD off.
+    pub(crate) fn power_on(model: Model) -> Self {
+        Self {
+            lcdc: 0,
+            mode: Mode::HBlank,
+            reported_mode: Mode::HBlank,
+            ..Self::after_boot(model)
+        }
+    }
+
     fn cgb(&self) -> bool {
         self.model == Model::Cgb
     }
@@ -161,7 +171,8 @@ impl Ppu {
         &self.pixels
     }
 
-    /// Whether a frame finished since the last call.
+    /// Whether a frame finished, or switching the LCD off blanked the
+    /// screen, since the last call.
     pub(crate) fn take_frame_ready(&mut self) -> bool {
         std::mem::take(&mut self.frame_ready)
     }
@@ -279,6 +290,11 @@ impl Ppu {
     /// except to 0.
     fn comparing_ly(&self) -> bool {
         self.ly == 0 || self.dot != 0
+    }
+
+    /// STAT's LY=LYC bit.
+    fn coincidence(&self) -> bool {
+        self.lyc_match && self.comparing_ly()
     }
 
     fn update_stat_line(&mut self, interrupt_flag: &mut u8) {
@@ -620,7 +636,7 @@ impl Ppu {
         match address {
             0xFF40 => self.lcdc,
             0xFF41 => {
-                let coincidence = u8::from(self.lyc_match && self.comparing_ly()) << 2;
+                let coincidence = u8::from(self.coincidence()) << 2;
                 0x80 | self.stat_select | coincidence | self.reported_mode as u8
             }
             0xFF42 => self.scy,
@@ -669,7 +685,19 @@ impl Ppu {
                     self.window_in_frame = self.wy == 0;
                 }
             }
-            0xFF41 => self.stat_select = value & 0x78,
+            0xFF41 => {
+                // A DMG's write first enables the conditions for a moment:
+                // if STAT reads HBlank, VBlank or LY = LYC, the interrupt
+                // fires. Mode 2's does not (Pan Docs, "Spurious STAT
+                // interrupts"; GBMicrotest `stat_write_glitch_*`).
+                if self.model == Model::Dmg && self.lcd_enabled() && !self.stat_line {
+                    let blank = matches!(self.reported_mode, Mode::HBlank | Mode::VBlank);
+                    if blank || self.coincidence() {
+                        *interrupt_flag |= interrupts::STAT;
+                    }
+                }
+                self.stat_select = value & 0x78;
+            }
             0xFF42 => self.scy = value,
             0xFF43 => self.scx = value,
             0xFF45 => self.lyc = value,
@@ -858,6 +886,36 @@ mod tests {
         assert_eq!(stat_mode(&ppu), 3);
         run(&mut ppu, 93, &mut flags);
         assert_eq!(ppu.read_register(0xFF44), 1);
+    }
+
+    #[test]
+    fn writing_stat_on_a_dmg_in_hblank_vblank_or_at_ly_lyc_interrupts() {
+        for model in [Model::Dmg, Model::CgbDmgMode] {
+            let expected = if model == Model::Dmg {
+                interrupts::STAT
+            } else {
+                0
+            };
+            let mut ppu = Ppu::after_boot(model);
+            let mut flags = 0;
+            // Line 0, and LYC is 0.
+            ppu.write_register(0xFF41, 0x00, &mut flags);
+            assert_eq!(flags, expected);
+            // Line 1's OAM scan: nothing holds.
+            run(&mut ppu, 116, &mut flags);
+            flags = 0;
+            ppu.write_register(0xFF41, 0x00, &mut flags);
+            assert_eq!((stat_mode(&ppu), flags), (2, 0));
+            // Its HBlank.
+            run(&mut ppu, 65, &mut flags);
+            ppu.write_register(0xFF41, 0x00, &mut flags);
+            assert_eq!((stat_mode(&ppu), flags), (0, expected));
+            // VBlank, 144 lines on.
+            run(&mut ppu, 144 * 114, &mut flags);
+            flags = 0;
+            ppu.write_register(0xFF41, 0x00, &mut flags);
+            assert_eq!((stat_mode(&ppu), flags), (1, expected));
+        }
     }
 
     #[test]

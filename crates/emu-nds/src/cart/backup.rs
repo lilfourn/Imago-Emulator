@@ -3,8 +3,8 @@
 //!
 //! Nothing in the header says which chip a game has. A table of game codes
 //! decides for the games in it; otherwise a `.sav` file's size; otherwise
-//! [`DEFAULT`], a 64 KiB EEPROM, the most common type. See [`chip_kind`]
-//! for how the two combine.
+//! the game's first instructions to the chip (see [`Detector`]). See
+//! [`chip_kind`] for how the first two combine.
 //!
 //! Games with an infrared port (game codes starting with `I`, such as
 //! Pokémon HeartGold and Black) put an infrared controller in front of the
@@ -39,11 +39,16 @@ const SIZES: [Kind; 9] = [
     Kind::Flash(8192 * KIB),
 ];
 
-/// The type for games neither a save nor the table identifies.
+/// The type for a game whose first write does not show how long its
+/// addresses are: a 64 KiB EEPROM, the most common type.
 const DEFAULT: Kind = Kind::Eeprom(64 * KIB);
 
+/// The size for a game whose instructions show flash: the most common
+/// size, which also holds a 256 KiB part's addresses.
+const FLASH_SIZE: usize = 512 * KIB;
+
 /// Save types by game code (header 0x0C, without the region letter). Add a
-/// game here when the default is wrong for it.
+/// game here when detection picks the wrong chip for it.
 const GAMES: [(&[u8; 3], Kind); 14] = [
     (b"ADA", Kind::Flash(512 * KIB)),  // Pokémon Diamond
     (b"APA", Kind::Flash(512 * KIB)),  // Pokémon Pearl
@@ -69,6 +74,23 @@ const DESMUME_FOOTER: &[u8] =
 const IR_SAVE: u8 = 0x00;
 const IR_VERSION: u8 = 0x08;
 const IR_CHIP_VERSION: u8 = 0xAA;
+
+/// Save chip instructions that tell the types apart.
+const WRITE_STATUS: u8 = 0x01;
+const WRITE: u8 = 0x02;
+const READ: u8 = 0x03;
+const WRITE_DISABLE: u8 = 0x04;
+const READ_STATUS: u8 = 0x05;
+const WRITE_ENABLE: u8 = 0x06;
+/// Writes the upper 256 bytes of a 512 B EEPROM, or a page of flash.
+const WRITE_HIGH_OR_PAGE: u8 = 0x0A;
+const READ_ID: u8 = 0x9F;
+const SECTOR_ERASE: u8 = 0xD8;
+const PAGE_ERASE: u8 = 0xDB;
+
+/// What the data line reads while no chip drives it, and what an erased
+/// byte reads.
+const IDLE: u8 = 0xFF;
 
 /// The game code at header 0x0C, if the ROM is long enough.
 pub(crate) fn game_code(rom: &[u8]) -> Option<&[u8]> {
@@ -109,7 +131,8 @@ fn listed(rom: &[u8]) -> Option<Kind> {
         .map(|&(_, kind)| kind)
 }
 
-/// The chip for `rom` given a save of `length` bytes (0 for none).
+/// The chip for `rom` given a save of `length` bytes (0 for none), or
+/// `None` if neither the table nor the save says.
 ///
 /// A game in the table gets its listed chip whenever the save fits in it.
 /// A short or stray `.sav` (say 512 bytes for a 512 KiB flash game) would
@@ -119,10 +142,21 @@ fn listed(rom: &[u8]) -> Option<Kind> {
 /// that is too big. Here a save too big for the listed chip gets the
 /// smallest chip that holds all of it, so no byte of the file is dropped
 /// when it is written back. Other games go by the save's size.
-fn chip_kind(rom: &[u8], length: usize) -> Kind {
+fn chip_kind(rom: &[u8], length: usize) -> Option<Kind> {
     match listed(rom) {
-        Some(kind) if length <= size(kind) => kind,
-        listed => from_save_size(length).or(listed).unwrap_or(DEFAULT),
+        Some(kind) if length <= size(kind) => Some(kind),
+        listed => from_save_size(length).or(listed),
+    }
+}
+
+/// How many of the `count` bytes after a read or write instruction were
+/// its address, by DeSmuME's rule: a game's first access usually moves a
+/// single byte, and a longer one a multiple of four bytes.
+fn address_bytes(count: u32) -> Option<u32> {
+    match count {
+        0 | 1 => None,
+        2..=4 => Some(count - 1),
+        _ => Some(count % 4).filter(|&bytes| bytes != 0),
     }
 }
 
@@ -141,6 +175,168 @@ fn flash_id(size: usize) -> [u8; 3] {
 enum Chip {
     Eeprom(Eeprom),
     Flash(Flash),
+    /// Until the game shows which type it expects.
+    Unknown(Detector),
+}
+
+impl Chip {
+    /// A chip of `kind` holding `data`, a raw save, from its start; the
+    /// rest reads as erased.
+    fn new(kind: Kind, data: &[u8]) -> Self {
+        match kind {
+            Kind::Eeprom(size) => {
+                let mut eeprom = Eeprom::new(size);
+                eeprom.load(data);
+                Self::Eeprom(eeprom)
+            }
+            Kind::Flash(size) => {
+                let mut memory = vec![IDLE; size];
+                let length = data.len().min(size);
+                memory[..length].copy_from_slice(&data[..length]);
+                Self::Flash(Flash::new(memory, flash_id(size)))
+            }
+        }
+    }
+
+    /// Shifts one byte in and returns the byte shifted out.
+    fn transfer(&mut self, input: u8) -> u8 {
+        match self {
+            Self::Eeprom(eeprom) => eeprom.transfer(input),
+            Self::Flash(flash) => flash.transfer(input),
+            Self::Unknown(detector) => detector.transfer(input),
+        }
+    }
+
+    /// Chip select goes high. An unknown chip becomes the type the
+    /// instruction showed, if it showed one.
+    fn release(&mut self) {
+        match self {
+            Self::Eeprom(eeprom) => eeprom.release(),
+            Self::Flash(flash) => flash.release(),
+            Self::Unknown(detector) => {
+                if let Some(chip) = detector.release() {
+                    *self = chip;
+                }
+            }
+        }
+    }
+}
+
+/// A blank chip of a type not known yet, standing in until the game's
+/// instructions show which type it expects, as in DeSmuME. Reads return
+/// erased bytes, as a blank chip of any type would; the instruction that
+/// shows the type is replayed into a chip of it.
+///
+/// - Reading the ID (9Fh) or erasing (D8h, DBh) shows flash. The ID read
+///   answers as the flash picked here would.
+/// - The first read whose byte count shows its address length (see
+///   [`address_bytes`]) shows a 512 B EEPROM with one byte, a 64 KiB one
+///   (which serves 8 KiB parts too) with two, and with three a 128 KiB
+///   EEPROM or flash, which the first write tells apart.
+/// - Writing (02h) shows EEPROM, and 0Ah the upper half of a 512 B EEPROM
+///   or a flash page. Without a read first, the write's own byte count
+///   gives the address length.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Detector {
+    write_enabled: bool,
+    /// Address bytes the first read that showed them had.
+    address_bytes: Option<u32>,
+    /// The instruction since chip select, if one arrived.
+    command: Option<u8>,
+    /// Bytes received after the instruction.
+    count: u32,
+    /// Those bytes, for an instruction that changes the chip.
+    #[serde(with = "crate::bytes")]
+    written: Vec<u8>,
+}
+
+impl Detector {
+    /// Shifts one byte in and returns the byte shifted out.
+    fn transfer(&mut self, input: u8) -> u8 {
+        let Some(command) = self.command else {
+            match input {
+                WRITE_ENABLE => self.write_enabled = true,
+                WRITE_DISABLE => self.write_enabled = false,
+                _ => {}
+            }
+            self.command = Some(input);
+            return IDLE;
+        };
+        self.count += 1;
+        match command {
+            READ_STATUS => u8::from(self.write_enabled) << 1,
+            READ_ID => flash_id(FLASH_SIZE)
+                .get(self.count as usize - 1)
+                .copied()
+                .unwrap_or(IDLE),
+            WRITE | WRITE_HIGH_OR_PAGE | SECTOR_ERASE | PAGE_ERASE => {
+                self.written.push(input);
+                IDLE
+            }
+            _ => IDLE,
+        }
+    }
+
+    /// Chip select goes high: the instruction ends. Returns a chip of the
+    /// type it showed, with it replayed, if it showed one.
+    fn release(&mut self) -> Option<Chip> {
+        if self.command == Some(READ) && self.address_bytes.is_none() {
+            self.address_bytes = address_bytes(self.count);
+        }
+        let chip = self.kind().map(|kind| self.replay(kind));
+        if matches!(
+            self.command,
+            Some(WRITE_STATUS | WRITE | WRITE_HIGH_OR_PAGE | SECTOR_ERASE | PAGE_ERASE)
+        ) {
+            self.write_enabled = false;
+        }
+        self.command = None;
+        self.count = 0;
+        self.written.clear();
+        chip
+    }
+
+    /// The type the instruction since chip select shows, if it shows one.
+    fn kind(&self) -> Option<Kind> {
+        let address_length = self.address_bytes.or_else(|| address_bytes(self.count));
+        match self.command? {
+            READ_ID | SECTOR_ERASE | PAGE_ERASE => Some(Kind::Flash(FLASH_SIZE)),
+            READ => match self.address_bytes? {
+                1 => Some(Kind::Eeprom(512)),
+                2 => Some(DEFAULT),
+                // 128 KiB EEPROM or flash: the first write tells.
+                _ => None,
+            },
+            // Nothing was written.
+            WRITE | WRITE_HIGH_OR_PAGE if self.count < 2 => None,
+            WRITE => Some(match address_length {
+                Some(1) => Kind::Eeprom(512),
+                Some(3) => Kind::Eeprom(128 * KIB),
+                _ => DEFAULT,
+            }),
+            WRITE_HIGH_OR_PAGE if address_length == Some(1) => Some(Kind::Eeprom(512)),
+            WRITE_HIGH_OR_PAGE => Some(Kind::Flash(FLASH_SIZE)),
+            _ => None,
+        }
+    }
+
+    /// A blank chip of `kind` that has seen the write-enable latch's state
+    /// and the instruction since chip select.
+    fn replay(&self, kind: Kind) -> Chip {
+        let mut chip = Chip::new(kind, &[]);
+        if self.write_enabled {
+            chip.transfer(WRITE_ENABLE);
+            chip.release();
+        }
+        if let Some(command) = self.command {
+            chip.transfer(command);
+            for &byte in &self.written {
+                chip.transfer(byte);
+            }
+            chip.release();
+        }
+        chip
+    }
 }
 
 /// The infrared controller's view of one transfer.
@@ -162,39 +358,33 @@ impl Backup {
     /// The save chip for `rom`, holding `save` (a `.sav` file) if given.
     pub(crate) fn new(rom: &[u8], save: Option<&[u8]>) -> Self {
         let data = save.map(raw_save).unwrap_or_default();
-        let kind = chip_kind(rom, data.len());
-        let chip = match kind {
-            Kind::Eeprom(size) => {
-                let mut eeprom = Eeprom::new(size);
-                eeprom.load(data);
-                Chip::Eeprom(eeprom)
-            }
-            Kind::Flash(size) => {
-                let mut memory = vec![0xFF; size];
-                let length = data.len().min(size);
-                memory[..length].copy_from_slice(&data[..length]);
-                Chip::Flash(Flash::new(memory, flash_id(size)))
-            }
-        };
+        let chip = chip_kind(rom, data.len()).map_or_else(
+            || Chip::Unknown(Detector::default()),
+            |kind| Chip::new(kind, data),
+        );
         Self {
             chip,
             infrared: has_infrared(rom).then(Infrared::default),
         }
     }
 
-    /// The `.sav` file contents: the raw chip memory.
+    /// The `.sav` file contents: the raw chip memory, or nothing while the
+    /// type is unknown.
     pub(crate) fn data(&self) -> &[u8] {
         match &self.chip {
             Chip::Eeprom(eeprom) => eeprom.memory(),
             Chip::Flash(flash) => flash.memory(),
+            Chip::Unknown(_) => &[],
         }
     }
 
-    /// Whether a write changed the save since the last call.
+    /// Whether a write changed the save since the last call. A write that
+    /// shows an unknown chip's type counts when chip select goes high.
     pub(crate) fn take_changed(&mut self) -> bool {
         match &mut self.chip {
             Chip::Eeprom(eeprom) => eeprom.take_changed(),
             Chip::Flash(flash) => flash.take_changed(),
+            Chip::Unknown(_) => false,
         }
     }
 
@@ -222,17 +412,11 @@ impl Backup {
         if let Some(infrared) = &mut self.infrared {
             *infrared = Infrared::default();
         }
-        match &mut self.chip {
-            Chip::Eeprom(eeprom) => eeprom.release(),
-            Chip::Flash(flash) => flash.release(),
-        }
+        self.chip.release();
     }
 
     fn chip_transfer(&mut self, input: u8) -> u8 {
-        match &mut self.chip {
-            Chip::Eeprom(eeprom) => eeprom.transfer(input),
-            Chip::Flash(flash) => flash.transfer(input),
-        }
+        self.chip.transfer(input)
     }
 }
 
@@ -261,11 +445,117 @@ mod tests {
         assert!(backup.infrared.is_none());
 
         let unknown = rom_with_code(b"ZZZE");
-        assert_eq!(Backup::new(&unknown, None).data().len(), 64 * KIB);
+        let backup = Backup::new(&unknown, None);
+        assert!(matches!(backup.chip, Chip::Unknown(_)));
+        assert!(backup.data().is_empty(), "no save until the type shows");
         let backup = Backup::new(&unknown, Some(&[0x12; 0x200]));
         assert!(matches!(backup.chip, Chip::Eeprom(_)));
         assert_eq!(backup.data(), [0x12; 0x200]);
         assert_eq!(from_save_size(300 * KIB), Some(Kind::Flash(512 * KIB)));
+    }
+
+    #[test]
+    fn an_unknown_games_first_read_shows_a_512_byte_eeprom() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        // The status register and its latch work before the type shows.
+        assert_eq!(command(&mut backup, &[0x05, 0]), [IDLE, 0]);
+        command(&mut backup, &[0x06]);
+        assert_eq!(command(&mut backup, &[0x05, 0]), [IDLE, 2]);
+        // One address byte, then one data byte.
+        assert_eq!(command(&mut backup, &[0x03, 0x10, 0]), [IDLE; 3]);
+        assert!(matches!(backup.chip, Chip::Eeprom(_)));
+        assert_eq!(backup.data().len(), 512);
+        // The latch carried over, and 0Ah writes the upper half.
+        command(&mut backup, &[0x0A, 0x10, 0xAB]);
+        assert!(backup.take_changed());
+        assert_eq!(backup.data()[0x110], 0xAB);
+    }
+
+    #[test]
+    fn an_unknown_games_first_read_shows_a_64_kib_eeprom() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x03, 0x00, 0x00, 0]);
+        assert!(matches!(backup.chip, Chip::Eeprom(_)));
+        assert_eq!(backup.data().len(), 64 * KIB);
+    }
+
+    #[test]
+    fn an_unknown_flash_game_shows_by_its_first_page_write() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        // Three address bytes: 128 KiB EEPROM or flash, so still unknown.
+        command(&mut backup, &[0x03, 0x00, 0x01, 0x00, 0]);
+        assert!(matches!(backup.chip, Chip::Unknown(_)));
+        command(&mut backup, &[0x06]);
+        command(&mut backup, &[0x0A, 0x00, 0x01, 0x00, 1, 2, 3, 4]);
+        assert!(matches!(backup.chip, Chip::Flash(_)));
+        assert!(backup.take_changed());
+        assert_eq!(backup.data().len(), FLASH_SIZE);
+        assert_eq!(backup.data()[0x100..0x104], [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_three_byte_address_eeprom_write_shows_128_kib() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x03, 0x00, 0x01, 0x00, 0]);
+        command(&mut backup, &[0x06]);
+        command(&mut backup, &[0x02, 0x01, 0x00, 0x02, 0x77]);
+        assert!(matches!(backup.chip, Chip::Eeprom(_)));
+        assert_eq!(backup.data().len(), 128 * KIB);
+        assert_eq!(backup.data()[0x1_0002], 0x77);
+    }
+
+    #[test]
+    fn flash_only_instructions_show_flash() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        assert_eq!(
+            command(&mut backup, &[0x9F, 0, 0, 0]),
+            [IDLE, 0x20, 0x40, 0x13]
+        );
+        assert!(matches!(backup.chip, Chip::Flash(_)));
+
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x06]);
+        command(&mut backup, &[0xD8, 0x00, 0x00, 0x00]);
+        assert!(matches!(backup.chip, Chip::Flash(_)));
+        assert_eq!(
+            command(&mut backup, &[0x05, 0]),
+            [IDLE, 0],
+            "erase used the latch"
+        );
+    }
+
+    #[test]
+    fn a_write_before_any_read_goes_by_its_own_length() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x06]);
+        // One address byte and 16 data bytes.
+        let mut write = vec![0x02, 0x20];
+        write.extend_from_slice(&[0x5A; 16]);
+        command(&mut backup, &write);
+        assert_eq!(backup.data().len(), 512);
+        assert_eq!(backup.data()[0x20..0x30], [0x5A; 16]);
+    }
+
+    #[test]
+    fn detection_survives_a_save_state() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x03, 0x00, 0x01, 0x00, 0]);
+        command(&mut backup, &[0x06]);
+        let state = postcard::to_stdvec(&backup).expect("backup state serializes");
+        let mut loaded: Backup = postcard::from_bytes(&state).expect("backup state deserializes");
+        // The three-byte addresses and the latch carried over.
+        command(&mut loaded, &[0x02, 0x00, 0x00, 0x05, 0x42]);
+        assert_eq!(loaded.data().len(), 128 * KIB);
+        assert_eq!(loaded.data()[5], 0x42);
+    }
+
+    #[test]
+    fn detection_works_behind_the_infrared_controller() {
+        let mut backup = Backup::new(&rom_with_code(b"IZZE"), None);
+        command(&mut backup, &[IR_SAVE, 0x06]);
+        command(&mut backup, &[IR_SAVE, 0x0A, 0x00, 0x00, 0x10, 0x99]);
+        assert!(matches!(backup.chip, Chip::Flash(_)));
+        assert_eq!(backup.data()[0x10], 0x99);
     }
 
     #[test]

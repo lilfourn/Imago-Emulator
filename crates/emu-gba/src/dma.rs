@@ -2,9 +2,9 @@
 //!
 //! This type holds the registers and decides what to copy; the bus performs
 //! the copies, paying the usual wait states. A channel starts two cycles
-//! after its trigger (the enable bit, a blank period, a sound FIFO) and
-//! runs when the CPU next needs the bus, which waits; a higher-priority
-//! channel that starts meanwhile interrupts it.
+//! after its trigger (the enable bit, a blank period, a sound FIFO, a line
+//! to capture) and runs when the CPU next needs the bus, which waits; a
+//! higher-priority channel that starts meanwhile interrupts it.
 
 use serde::{Deserialize, Serialize};
 
@@ -185,6 +185,27 @@ impl Dma {
                     && channel.current_destination == FIFO_ADDRESSES[fifo]
             })
             .fold(0, |set, index| set | 1 << index)
+    }
+
+    /// Channel 3 if it waits for video capture, which the PPU asks for at
+    /// HBlank on lines 2–161, as a bit set, for the bus to start after
+    /// [`START_DELAY`].
+    pub(crate) fn triggered_by_capture(&self) -> u8 {
+        u8::from(self.captures_video()) << 3
+    }
+
+    /// Line 162 began, which ends video capture: channel 3 turns itself off
+    /// if it was capturing. A transfer still under way finishes.
+    pub(crate) fn end_capture(&mut self) {
+        if self.captures_video() {
+            self.channels[3].control &= !0x8000;
+        }
+    }
+
+    /// Whether channel 3 is enabled in video capture mode.
+    fn captures_video(&self) -> bool {
+        let channel = &self.channels[3];
+        channel.enabled() && channel.timing() == Timing::Special
     }
 
     /// Whether channel `index` is enabled.

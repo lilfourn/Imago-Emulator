@@ -344,6 +344,9 @@ impl Bus {
                     if signals.hblank {
                         self.start_dmas(self.dma.triggered(Timing::HBlank), due.time);
                     }
+                    if signals.capture {
+                        self.start_dmas(self.dma.triggered_by_capture(), due.time);
+                    }
                     self.scheduler.schedule_at(
                         due.time + ppu::LINE_CYCLES - ppu::HDRAW_CYCLES,
                         Event::LineStart,
@@ -355,6 +358,9 @@ impl Bus {
                     self.request_interrupt_at(request & ppu::irq::VCOUNT, due.time + 2);
                     if signals.vblank {
                         self.start_dmas(self.dma.triggered(Timing::VBlank), due.time);
+                    }
+                    if signals.capture_end {
+                        self.dma.end_capture();
                     }
                     self.scheduler
                         .schedule_at(due.time + ppu::HDRAW_CYCLES, Event::HBlank);
@@ -1073,14 +1079,19 @@ mod tests {
         )
     }
 
-    /// Runs DMA 3 copying `count` halfwords from `source` to `destination`.
-    fn dma3(bus: &mut Bus, source: u32, destination: u32, count: u16) {
+    /// Sets DMA 3's registers, `control` last.
+    fn dma3_registers(bus: &mut Bus, source: u32, destination: u32, count: u16, control: u16) {
         bus.write_io_16(0xD4, source as u16);
         bus.write_io_16(0xD6, (source >> 16) as u16);
         bus.write_io_16(0xD8, destination as u16);
         bus.write_io_16(0xDA, (destination >> 16) as u16);
         bus.write_io_16(0xDC, count);
-        bus.write_io_16(0xDE, 0x8000);
+        bus.write_io_16(0xDE, control);
+    }
+
+    /// Runs DMA 3 copying `count` halfwords from `source` to `destination`.
+    fn dma3(bus: &mut Bus, source: u32, destination: u32, count: u16) {
+        dma3_registers(bus, source, destination, count, 0x8000);
         bus.tick(dma::START_DELAY as u32);
         bus.run_dma();
     }
@@ -1117,6 +1128,30 @@ mod tests {
             .map(|index| bus.read_16(0x0200_1000 + index * 2, Access::NONSEQUENTIAL) & 1)
             .collect();
         assert_eq!(received[4..], data[..]);
+    }
+
+    #[test]
+    fn video_capture_copies_lines_2_to_161_then_stops() {
+        let mut bus = blank_bus();
+        // DMA 3, one halfword a line from EWRAM to VRAM: repeat, video
+        // capture timing.
+        dma3_registers(&mut bus, 0x0200_0000, 0x0600_0000, 1, 0xB200);
+        // Runs through the start of `line`, returning the lines copied.
+        let run_to_line = |bus: &mut Bus, line: u64| {
+            while bus.cycles() < line * ppu::LINE_CYCLES {
+                bus.idle_to_next_event();
+                bus.run_dma();
+            }
+            (bus.dma.transfer(3).destination - 0x0600_0000) / 2
+        };
+        assert_eq!(run_to_line(&mut bus, 2), 0);
+        assert_eq!(run_to_line(&mut bus, 3), 1);
+        assert_eq!(run_to_line(&mut bus, 161), 159);
+        assert!(bus.dma.enabled(3));
+        assert_eq!(run_to_line(&mut bus, 162), 160);
+        assert!(!bus.dma.enabled(3));
+        // Off, it waits out the next frame.
+        assert_eq!(run_to_line(&mut bus, 228 + 163), 160);
     }
 
     #[test]

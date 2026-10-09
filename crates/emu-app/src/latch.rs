@@ -5,10 +5,15 @@
 //! seen, and a trackpad's tap to click can send its button-down and
 //! button-up a few milliseconds apart, inside one frame. A
 //! [`Latch`] shows each newly pressed button for at least
-//! [`BUTTON_FRAMES`] frames and each new touch for at least
-//! [`TOUCH_FRAMES`], putting off a release that comes sooner until then.
-//! It counts emulated frames, not time, so the hold is the same at any
-//! speed.
+//! [`BUTTON_FRAMES`] frames, each direction for at least
+//! [`DIRECTION_FRAMES`] and each new touch for at least [`TOUCH_FRAMES`],
+//! putting off a release that comes sooner until then. It counts emulated
+//! frames, not time, so the hold is the same at any speed.
+//!
+//! Directions are steered, not tapped: a press on one side lets go of a
+//! quick tap on the other still being held over, so turning round on the
+//! D-pad never shows the game both sides at once. One held down by hand
+//! stays held.
 
 use emu_core::{Button, Input};
 
@@ -19,6 +24,11 @@ use emu_core::{Button, Input};
 /// still (Pokemon White's opening movie checks A every sixth frame), but
 /// holding every tap that long would turn quick taps into holds.
 pub const BUTTON_FRAMES: u8 = 2;
+
+/// The fewest frames a newly pressed direction is held: one, so a tap is
+/// seen and its release reaches the game a frame later. Holding a step
+/// any longer makes walking feel late to stop and turn.
+pub const DIRECTION_FRAMES: u8 = 1;
 
 /// The fewest frames a new touch is held. A DS game sees the touchscreen
 /// through a sample its ARM7 takes and hands to the ARM9, and many DS
@@ -42,11 +52,18 @@ pub struct Latch {
 
 impl Latch {
     /// Takes what the player holds now. A new press or touch, or a move
-    /// of the touch, shows at once; a release waits out the minimum hold.
+    /// of the touch, shows at once; a release waits out the minimum hold,
+    /// unless the opposite direction is pressed first.
     pub fn set(&mut self, held: Input) {
         for button in Button::ALL {
+            let pressed = held.buttons.contains(button) && !self.held.buttons.contains(button);
+            if let Some(opposite) = opposite(button).filter(|_| pressed) {
+                self.button_frames[opposite as usize] = 0;
+            }
+        }
+        for button in Button::ALL {
             if held.buttons.contains(button) && !self.shown.buttons.contains(button) {
-                self.button_frames[button as usize] = BUTTON_FRAMES;
+                self.button_frames[button as usize] = min_frames(button);
             }
         }
         if held.touch.is_some() && self.shown.touch.is_none() {
@@ -80,6 +97,15 @@ impl Latch {
         self.show();
     }
 
+    /// Lets go of everything at once, without the minimum hold: for when
+    /// the player's keys stop reaching the game while they may still be
+    /// down, as when the window loses focus, and a release could come
+    /// late or never.
+    pub fn release(&mut self) {
+        self.held = Input::default();
+        self.clear();
+    }
+
     /// Shows what is held, plus whatever is still within its minimum hold.
     fn show(&mut self) {
         let mut buttons = self.held.buttons;
@@ -100,6 +126,26 @@ impl Latch {
             touch,
             microphone: self.held.microphone,
         };
+    }
+}
+
+/// The fewest frames `button`, newly pressed, is held.
+fn min_frames(button: Button) -> u8 {
+    if opposite(button).is_some() {
+        DIRECTION_FRAMES
+    } else {
+        BUTTON_FRAMES
+    }
+}
+
+/// The direction across the D-pad from `button`, if it is one.
+fn opposite(button: Button) -> Option<Button> {
+    match button {
+        Button::Up => Some(Button::Down),
+        Button::Down => Some(Button::Up),
+        Button::Left => Some(Button::Right),
+        Button::Right => Some(Button::Left),
+        _ => None,
     }
 }
 
@@ -316,5 +362,71 @@ mod tests {
         latch.set(buttons(&[Button::Down]));
         latch.clear();
         assert_eq!(latch.input(), buttons(&[Button::Down]));
+    }
+
+    #[test]
+    fn a_quick_direction_tap_is_held_for_direction_frames() {
+        let mut latch = Latch::default();
+        latch.set(buttons(&[Button::Up]));
+        latch.set(Input::default());
+        let held = run(&mut latch, 4)
+            .iter()
+            .filter(|input| input.buttons.contains(Button::Up))
+            .count();
+        assert_eq!(held, usize::from(DIRECTION_FRAMES));
+    }
+
+    #[test]
+    fn turning_round_drops_a_tap_still_held_over() {
+        let mut latch = Latch::default();
+        latch.set(buttons(&[Button::Up]));
+        latch.set(Input::default());
+        latch.set(buttons(&[Button::Down]));
+        assert_eq!(latch.input(), buttons(&[Button::Down]));
+        latch.set(Input::default());
+        let seen = run(&mut latch, 3);
+        assert!(seen.iter().all(|input| !input.buttons.contains(Button::Up)));
+        let down = seen.iter().filter(|i| i.buttons.contains(Button::Down));
+        assert_eq!(down.count(), usize::from(DIRECTION_FRAMES));
+    }
+
+    #[test]
+    fn a_direction_held_by_hand_stays_held_with_its_opposite() {
+        let mut latch = Latch::default();
+        latch.set(buttons(&[Button::Left]));
+        latch.set(buttons(&[Button::Left, Button::Right]));
+        assert_eq!(latch.input(), buttons(&[Button::Left, Button::Right]));
+        latch.set(buttons(&[Button::Left]));
+        assert!(
+            run(&mut latch, 3)
+                .iter()
+                .all(|i| i.buttons.contains(Button::Left))
+        );
+    }
+
+    #[test]
+    fn only_the_opposite_direction_cuts_a_tap_short() {
+        let mut latch = Latch::default();
+        latch.set(buttons(&[Button::A, Button::Up]));
+        latch.set(Input::default());
+        latch.set(buttons(&[Button::Right]));
+        assert_eq!(
+            latch.input(),
+            buttons(&[Button::A, Button::Up, Button::Right])
+        );
+    }
+
+    #[test]
+    fn release_lets_go_of_everything_at_once() {
+        let mut latch = Latch::default();
+        latch.set(Input {
+            buttons: [Button::A, Button::Left].into_iter().collect(),
+            touch: Some(POINT),
+            microphone: Input::LOUDEST,
+        });
+        latch.set(buttons(&[Button::Left]));
+        latch.release();
+        assert_eq!(latch.input(), Input::default());
+        assert!(run(&mut latch, 3).iter().all(|i| *i == Input::default()));
     }
 }

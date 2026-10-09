@@ -90,6 +90,14 @@ impl Turbo {
         }
     }
 
+    /// Stops every button at once, cutting short a press under way: for
+    /// when the player's turbo inputs stop reaching the game while they
+    /// may still be down.
+    pub fn release(&mut self) {
+        self.held = Buttons::NONE;
+        self.phase = [None; Button::ALL.len()];
+    }
+
     /// Whether a button `phase` frames into its pattern is pressed.
     fn pressed_at(&self, phase: u16) -> bool {
         phase < u16::from(self.frames)
@@ -251,6 +259,18 @@ mod tests {
         let input = turbo.apply(Input::default());
         assert!(input.buttons.contains(Button::A), "starts with a press");
         assert!(!input.buttons.contains(Button::B));
+    }
+
+    #[test]
+    fn release_stops_held_and_finishing_presses_at_once() {
+        let mut turbo = Turbo::default();
+        turbo.set(held(&[Button::A, Button::B]), 3);
+        // B finishes its press; A is still held.
+        turbo.set(held(&[Button::A]), 3);
+        turbo.release();
+        assert_eq!(turbo.apply(Input::default()).buttons, Buttons::NONE);
+        turbo.advance();
+        assert_eq!(turbo.apply(Input::default()).buttons, Buttons::NONE);
     }
 
     #[test]

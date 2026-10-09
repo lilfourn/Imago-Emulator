@@ -2,8 +2,8 @@
 //!
 //! With no link partner, a transfer started on the internal clock shifts in
 //! 0xFF and finishes after 8 bits at 8192 Hz (or 262 kHz with the CGB's
-//! fast clock). Bytes sent are recorded so test ROMs that report over
-//! serial (Blargg's, Mooneye's) can be checked.
+//! fast clock). The latest bytes sent are recorded so test ROMs that report
+//! over serial (Blargg's, Mooneye's) can be checked.
 //!
 //! The internal clock is divided from the same counter as DIV, so its
 //! edges keep their phase from power-on rather than from the write that
@@ -23,6 +23,9 @@ use crate::model::Model;
 const BIT_CLOCKS: u16 = 512;
 /// Clock cycles per bit with the CGB fast clock (SC bit 1).
 const FAST_BIT_CLOCKS: u16 = 16;
+/// How many of the latest bytes sent [`Serial::sent`] keeps at least:
+/// more than any test ROM's report.
+const SENT_KEPT: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Serial {
@@ -36,7 +39,8 @@ pub(crate) struct Serial {
     /// A transfer on the internal clock started and no partner has taken
     /// its byte yet.
     outgoing: Option<u8>,
-    /// Every byte the game has sent. Not machine state.
+    /// The latest bytes the game has sent, between [`SENT_KEPT`] and
+    /// twice that once it has sent that many. Not machine state.
     #[serde(skip)]
     sent: Vec<u8>,
 }
@@ -84,8 +88,19 @@ impl Serial {
         self.data
     }
 
+    /// The latest bytes sent, oldest first: at least the last
+    /// [`SENT_KEPT`].
     pub(crate) fn sent(&self) -> &[u8] {
         &self.sent
+    }
+
+    /// Records a byte sent, dropping the oldest half once the record is
+    /// full so it never grows past twice [`SENT_KEPT`].
+    fn record_sent(&mut self, byte: u8) {
+        if self.sent.len() == 2 * SENT_KEPT {
+            self.sent.drain(..SENT_KEPT);
+        }
+        self.sent.push(byte);
     }
 
     pub(crate) fn tick(&mut self, interrupt_flag: &mut u8) {
@@ -118,7 +133,7 @@ impl Serial {
         }
         self.control = value & self.control_mask();
         if value & 0x81 == 0x81 {
-            self.sent.push(self.data);
+            self.record_sent(self.data);
             self.outgoing = Some(self.data);
             self.incoming = 0xFF;
             let bit_clocks = if self.control & 0x02 != 0 {
@@ -172,5 +187,19 @@ mod tests {
         assert_eq!(serial.read(0xFF02), 0x7F);
         assert_eq!(interrupt_flag, interrupts::SERIAL);
         assert_eq!(serial.sent(), [0x42]);
+    }
+
+    #[test]
+    fn the_record_of_bytes_sent_keeps_the_latest_and_stays_bounded() {
+        let mut serial = Serial::new(Model::Dmg);
+        for index in 0..5 * SENT_KEPT {
+            serial.write(0xFF01, index as u8, 0);
+            serial.write(0xFF02, 0x81, 0);
+            assert!(serial.sent().len() <= 2 * SENT_KEPT);
+        }
+        let sent = serial.sent();
+        assert!(sent.len() >= SENT_KEPT);
+        let latest = (4 * SENT_KEPT..5 * SENT_KEPT).map(|index| index as u8);
+        assert!(sent[sent.len() - SENT_KEPT..].iter().copied().eq(latest));
     }
 }

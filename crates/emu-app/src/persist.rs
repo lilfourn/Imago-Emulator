@@ -8,51 +8,196 @@
 //! bindings are the DS game's. Screenshots and recordings go there too,
 //! named after the game and the time, as macOS names its own:
 //! `game 2026-10-07 at 18.58.12.png`.
+//!
+//! Two ROMs with one name for different systems, such as `game.nds` and
+//! `game.gba` in one folder, would share all those files. So a ROM with
+//! such a namesake beside it names its files with its extension too:
+//! `game.nds.sav`, `game.nds.ss1`, `game.nds.cht`, and `game.gba.sav` for
+//! the other. Once it has any file named so, it keeps to those names, even
+//! after the namesake goes, so its progress is never left behind. A ROM
+//! with neither keeps the plain names, which other emulators use too, so a
+//! `game.sav` copied from one loads. A plain `game.sav` left from before
+//! the namesake arrived could be either game's, so neither reads it (see
+//! [`stranded_save`]).
+//!
+//! The names are decided once, as a game starts (see [`GameFiles`]), and
+//! kept for as long as it runs.
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-/// The battery save file for `rom`.
-pub fn backup_path(rom: &Path) -> PathBuf {
-    rom.with_extension("sav")
+use crate::slots::STATE_SLOTS;
+
+/// Where one game's own files go: its battery save, cheats and bindings,
+/// and the session's save states if it is the first player's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameFiles {
+    /// Each file's path, but for the suffix after its last dot: `game`,
+    /// or `game.nds` when the files keep the ROM's extension.
+    base: PathBuf,
 }
 
-/// A key equal for any two ROMs whose battery saves land in one file: the
-/// save path with its folder resolved (so `./a.nds` and `/games/a.gba`
-/// match), compared without case, as macOS file systems usually do.
-pub fn backup_key(rom: &Path) -> String {
-    let save = backup_path(rom);
+impl GameFiles {
+    /// The files of the game in `rom`, named by the rules above as the
+    /// folder holds things now.
+    pub fn of(rom: &Path) -> Self {
+        let full = Self {
+            base: rom.to_owned(),
+        };
+        let base = if rom.extension().is_some() && (has_namesake(rom) || full.any_exist()) {
+            full.base
+        } else {
+            rom.with_extension("")
+        };
+        Self { base }
+    }
+
+    /// The battery save.
+    pub fn backup(&self) -> PathBuf {
+        self.named("sav")
+    }
+
+    /// The cheat list.
+    pub fn cheats(&self) -> PathBuf {
+        self.named("cht")
+    }
+
+    /// The game's own bindings, laid over the user's.
+    pub fn bindings(&self) -> PathBuf {
+        self.named("bindings.toml")
+    }
+
+    /// The save state in `slot` of a session whose first player's game
+    /// this is: `game.ss1`, or `game.ls1` if it is `linked` to others (a
+    /// cartridge in a second slot is not a player).
+    pub fn state(&self, slot: u8, linked: bool) -> PathBuf {
+        let kind = if linked { "ls" } else { "ss" };
+        self.named(&format!("{kind}{slot}"))
+    }
+
+    /// The file named `base.suffix`.
+    fn named(&self, suffix: &str) -> PathBuf {
+        let mut path = self.base.as_os_str().to_owned();
+        path.push(".");
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
+    /// Whether any of these files is there, or a battery save set aside
+    /// by Start Over: a game started over keeps its names, rather than
+    /// falling back to an older plain-named save.
+    fn any_exist(&self) -> bool {
+        let states =
+            (0..=STATE_SLOTS).flat_map(|slot| [self.state(slot, false), self.state(slot, true)]);
+        [
+            self.backup(),
+            self.named("sav.bak"),
+            self.cheats(),
+            self.bindings(),
+        ]
+        .into_iter()
+        .chain(states)
+        .any(|path| path.exists())
+    }
+}
+
+/// Whether a ROM with `rom`'s name but another ROM extension sits beside
+/// it, as `game.gba` does beside `game.nds`.
+fn has_namesake(rom: &Path) -> bool {
+    let Some(own) = rom.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    emu_cores::ROM_EXTENSIONS
+        .iter()
+        .map(|(extension, _)| *extension)
+        .filter(|extension| !extension.eq_ignore_ascii_case(own))
+        // Both cases, for file systems that tell them apart.
+        .flat_map(|extension| [extension.to_owned(), extension.to_ascii_uppercase()])
+        .any(|extension| rom.with_extension(extension).is_file())
+}
+
+/// The plain-named `game.sav` beside `rom`, if `files`, the ROM's, keep
+/// their full names (`game.nds.sav`), have no battery save yet, and the
+/// plain one exists: a save from before a namesake arrived, which could
+/// be either game's, so neither reads it.
+pub fn stranded_save(rom: &Path, files: &GameFiles) -> Option<PathBuf> {
+    let own = files.backup();
+    let plain = rom.with_extension("sav");
+    (own != plain && !own.exists() && plain.is_file()).then_some(plain)
+}
+
+/// A key equal for any two battery save paths that are one file: `save`
+/// with its folder resolved (so `./a.sav` and `/games/a.sav` match),
+/// compared without case, as macOS file systems usually do.
+pub fn backup_key(save: &Path) -> String {
     let folder = match save.parent() {
         Some(folder) if !folder.as_os_str().is_empty() => folder,
         _ => Path::new("."),
     };
     let resolved = match (fs::canonicalize(folder), save.file_name()) {
         (Ok(folder), Some(name)) => folder.join(name),
-        _ => save,
+        _ => save.to_owned(),
     };
     resolved.to_string_lossy().to_lowercase()
 }
 
-/// The cheat list for `rom`.
-pub fn cheats_path(rom: &Path) -> PathBuf {
-    rom.with_extension("cht")
+/// The record beside the save state at `state` of the battery saves it
+/// was saved with: `game.ss0.saves`.
+pub fn saves_record_path(state: &Path) -> PathBuf {
+    let mut path = state.as_os_str().to_owned();
+    path.push(".saves");
+    PathBuf::from(path)
 }
 
-/// The game's own bindings for `rom`, laid over the user's.
-pub fn bindings_path(rom: &Path) -> PathBuf {
-    rom.with_extension("bindings.toml")
+/// What the battery saves at `saves` hold now, a line each: the file's
+/// name and the CRC-32 of its bytes, or `none` if there is no file. Two
+/// readings are equal only while every file is unchanged.
+///
+/// # Errors
+///
+/// Returns the error if a file exists but cannot be read.
+pub fn saves_fingerprint(saves: &[PathBuf]) -> io::Result<String> {
+    let mut lines = String::new();
+    for save in saves {
+        let name = save
+            .file_name()
+            .map_or_else(|| save.to_string_lossy(), |name| name.to_string_lossy());
+        let crc = match fs::read(save) {
+            Ok(bytes) => format!("{:08X}", crc32fast::hash(&bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => "none".to_owned(),
+            Err(error) => return Err(error),
+        };
+        lines.push_str(&format!("{name} {crc}\n"));
+    }
+    Ok(lines)
 }
 
-/// The save state file in `slot` for a session of `roms`, one per player
-/// (a cartridge in a second slot is not a player).
+/// Renames the file at `path` to `path.bak`, or to `path.bak2`, `.bak3`
+/// and so on if that is taken, so no earlier backup is ever replaced.
+/// Returns where it went, or `None` if there was no file.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `roms` is empty.
-pub fn state_path(roms: &[PathBuf], slot: u8) -> PathBuf {
-    let extension = if roms.len() > 1 { "ls" } else { "ss" };
-    roms[0].with_extension(format!("{extension}{slot}"))
+/// Returns the error if the file cannot be renamed.
+pub fn set_aside(path: &Path) -> io::Result<Option<PathBuf>> {
+    for number in 1..=u32::MAX {
+        let mut backup = path.as_os_str().to_owned();
+        backup.push(".bak");
+        if number > 1 {
+            backup.push(number.to_string());
+        }
+        let backup = PathBuf::from(backup);
+        if backup.try_exists()? {
+            continue;
+        }
+        return match fs::rename(path, &backup) {
+            Ok(()) => Ok(Some(backup)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
+    Err(io::Error::other("every backup name is taken"))
 }
 
 /// Creates a new, empty file next to `rom` for a screenshot or recording
@@ -83,15 +228,32 @@ pub fn create_capture(rom: &Path, stamp: &str, extension: &str) -> io::Result<(P
     }
 }
 
-/// Replaces `path` with `bytes` so that a crash mid-write never leaves a
-/// half-written file: the bytes go to a sibling temporary file first, which
-/// is then renamed over `path`.
+/// Replaces `path` with `bytes` so that a crash or power cut mid-write
+/// never leaves a half-written file: the bytes go to a sibling temporary
+/// file first, reach the disk, and only then is it renamed over `path`.
+///
+/// On macOS the folder is not synced after the rename: syncing there
+/// flushes the whole drive's cache, which is slow, and without it a power
+/// cut can at worst undo the rename, leaving the old file whole.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
-    fs::write(&temporary, bytes)?;
-    fs::rename(&temporary, path)
+    let mut file = File::create(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, path)?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let folder = match path.parent() {
+            Some(folder) if !folder.as_os_str().is_empty() => folder,
+            _ => Path::new("."),
+        };
+        // Best effort: not every file system can sync a folder.
+        File::open(folder).and_then(|folder| folder.sync_all()).ok();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -100,21 +262,12 @@ mod tests {
 
     #[test]
     fn save_files_sit_next_to_the_rom() {
-        let rom = Path::new("/games/platinum.nds");
-        assert_eq!(backup_path(rom), Path::new("/games/platinum.sav"));
-        assert_eq!(
-            bindings_path(rom),
-            Path::new("/games/platinum.bindings.toml")
-        );
-        assert_eq!(
-            state_path(&[rom.to_owned()], 1),
-            Path::new("/games/platinum.ss1")
-        );
-        let linked = [
-            PathBuf::from("/games/red.gb"),
-            PathBuf::from("/games/blue.gb"),
-        ];
-        assert_eq!(state_path(&linked, 2), Path::new("/games/red.ls2"));
+        let files = GameFiles::of(Path::new("/games/platinum.nds"));
+        assert_eq!(files.backup(), Path::new("/games/platinum.sav"));
+        assert_eq!(files.cheats(), Path::new("/games/platinum.cht"));
+        assert_eq!(files.bindings(), Path::new("/games/platinum.bindings.toml"));
+        assert_eq!(files.state(1, false), Path::new("/games/platinum.ss1"));
+        assert_eq!(files.state(2, true), Path::new("/games/platinum.ls2"));
     }
 
     #[test]
@@ -146,9 +299,115 @@ mod tests {
     fn backup_keys_see_through_folder_spellings_and_case() {
         let dir = std::env::temp_dir().join(format!("emu-app-keys-{}", std::process::id()));
         fs::create_dir_all(dir.join("sub")).expect("create temp dir");
-        let key = backup_key(&dir.join("Pokemon.nds"));
-        assert_eq!(key, backup_key(&dir.join("sub/../pokemon.gba")));
-        assert_ne!(key, backup_key(&dir.join("sub/pokemon.gba")));
+        let key = backup_key(&dir.join("Pokemon.sav"));
+        assert_eq!(key, backup_key(&dir.join("sub/../pokemon.sav")));
+        assert_ne!(key, backup_key(&dir.join("sub/pokemon.sav")));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A fresh, empty folder for `test`.
+    fn temp_dir(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("emu-app-{test}-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn namesakes_for_other_systems_keep_files_of_their_own() {
+        let dir = temp_dir("persist-namesakes");
+        let gba = dir.join("Game.gba");
+        let nds = dir.join("Game.nds");
+        fs::write(&gba, b"rom").expect("write");
+        fs::write(dir.join("Game.txt"), b"notes").expect("write");
+        // Alone, as other emulators name it.
+        assert_eq!(GameFiles::of(&gba).backup(), dir.join("Game.sav"));
+        assert_eq!(GameFiles::of(&gba).cheats(), dir.join("Game.cht"));
+
+        fs::write(&nds, b"rom").expect("write");
+        let files = GameFiles::of(&nds);
+        assert_eq!(GameFiles::of(&gba).backup(), dir.join("Game.gba.sav"));
+        assert_eq!(files.backup(), dir.join("Game.nds.sav"));
+        assert_eq!(files.cheats(), dir.join("Game.nds.cht"));
+        assert_eq!(files.bindings(), dir.join("Game.nds.bindings.toml"));
+        assert_eq!(files.state(1, false), dir.join("Game.nds.ss1"));
+
+        // A plain save from before is neither's.
+        assert_eq!(stranded_save(&nds, &files), None);
+        fs::write(dir.join("Game.sav"), b"save").expect("write");
+        assert_eq!(stranded_save(&nds, &files), Some(dir.join("Game.sav")));
+        fs::write(dir.join("Game.nds.sav"), b"save").expect("write");
+        assert_eq!(stranded_save(&nds, &files), None);
+        let gba_files = GameFiles::of(&gba);
+        assert_eq!(stranded_save(&gba, &gba_files), Some(dir.join("Game.sav")));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn files_named_in_full_stay_so_once_the_namesake_goes() {
+        let dir = temp_dir("persist-namesake-gone");
+        let gba = dir.join("Game.gba");
+        let nds = dir.join("Game.nds");
+        fs::write(&gba, b"rom").expect("write");
+        fs::write(dir.join("Game.sav"), b"old").expect("write");
+        assert_eq!(GameFiles::of(&gba).backup(), dir.join("Game.sav"));
+        // The namesake comes, and the game saves under its full name...
+        fs::write(&nds, b"rom").expect("write");
+        let files = GameFiles::of(&gba);
+        fs::write(files.backup(), b"new").expect("write");
+        // ...which it keeps once the namesake goes, not the older plain one.
+        fs::remove_file(&nds).expect("remove");
+        assert_eq!(GameFiles::of(&gba), files);
+        assert_eq!(GameFiles::of(&gba).backup(), dir.join("Game.gba.sav"));
+        // Starting over sets the save aside, and the names still stay.
+        set_aside(&files.backup()).expect("set aside");
+        assert_eq!(GameFiles::of(&gba), files);
+
+        // A save state alone is enough to keep the names.
+        let other = dir.join("Other.gb");
+        fs::write(&other, b"rom").expect("write");
+        fs::write(dir.join("Other.gb.ss0"), b"state").expect("write");
+        assert_eq!(GameFiles::of(&other).backup(), dir.join("Other.gb.sav"));
+        assert_eq!(
+            GameFiles::of(&other).state(0, false),
+            dir.join("Other.gb.ss0")
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn setting_aside_never_replaces_an_earlier_backup() {
+        let dir = temp_dir("set-aside");
+        let save = dir.join("game.sav");
+        assert_eq!(set_aside(&save).expect("nothing to do"), None);
+        for (round, expected) in [(1, "game.sav.bak"), (2, "game.sav.bak2")] {
+            fs::write(&save, [round]).expect("write");
+            let kept = set_aside(&save).expect("renamed");
+            assert_eq!(kept, Some(dir.join(expected)));
+            assert!(!save.exists());
+        }
+        assert_eq!(fs::read(dir.join("game.sav.bak")).expect("first"), [1]);
+        assert_eq!(fs::read(dir.join("game.sav.bak2")).expect("second"), [2]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn fingerprints_change_with_the_battery_saves() {
+        let dir = temp_dir("fingerprint");
+        let saves = [dir.join("a.sav"), dir.join("b.sav")];
+        fs::write(&saves[0], b"one").expect("write");
+        let before = saves_fingerprint(&saves).expect("readable");
+        assert_eq!(
+            before,
+            format!("a.sav {:08X}\nb.sav none\n", crc32fast::hash(b"one"))
+        );
+        assert_eq!(saves_fingerprint(&saves).expect("readable"), before);
+        fs::write(&saves[0], b"two").expect("write");
+        assert_ne!(saves_fingerprint(&saves).expect("readable"), before);
+        assert_eq!(
+            saves_record_path(&dir.join("a.ss0")),
+            dir.join("a.ss0.saves")
+        );
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

@@ -21,7 +21,7 @@ Route 1, and its in-game save survives a restart. It has:
 It passes every test in RockPolish's rockwrestler and every page of
 armwrestler for the DS.
 
-The Game Boy and Game Boy Color core passes 152 of 159 open-source test
+The Game Boy and Game Boy Color core passes 170 of 181 open-source test
 ROMs, including all of Blargg's CPU and DMG sound tests, every Mooneye test
 it runs, dmg-acid2 and cgb-acid2. Games made for the original Game Boy play
 in the colours a Game Boy Color gives them. The Game Boy Advance core has:

@@ -229,13 +229,10 @@ impl Machine {
     }
 
     fn timer_overflow(&mut self, side: Side, index: usize, time: u64) {
-        let cpu = self.hw.cpu_mut(side);
-        let overflowed = cpu.timers.overflow(index, time);
-        for timer in (0..4).filter(|timer| overflowed & (1 << timer) != 0) {
-            if cpu.timers.interrupt_enabled(timer) {
-                cpu.interrupts.request(irq::TIMER0 << timer);
-            }
-        }
+        let timers = &mut self.hw.cpu_mut(side).timers;
+        let overflowed = timers.overflow(index, time);
+        let requested = timers.requesting(overflowed);
+        self.hw.request_timer_interrupts(side, requested);
         self.hw.schedule_timer(side, index);
     }
 

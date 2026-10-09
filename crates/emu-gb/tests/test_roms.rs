@@ -33,7 +33,43 @@ enum Check {
     /// At `LD B, B`, or when time runs out, the screen must match this PNG
     /// next to the ROM.
     Screenshot(&'static str),
+    /// Gambatte's: after [`GAMBATTE_CYCLES`], the screen's top row of
+    /// tiles shows, in [`GAMBATTE_DIGITS`], the hex digits after the last
+    /// `_out` in the file name. That is the CGB result, and the ROMs run
+    /// here ask for a CGB.
+    Gambatte,
+    /// GBMicrotest's: after [`MICROTEST_CYCLES`], 0xFF82 holds 0x01 for
+    /// a pass and 0xFF for a failure.
+    Microtest,
 }
+
+/// How long Gambatte's test runner runs a ROM: 16 frames.
+const GAMBATTE_CYCLES: u64 = 16 * 70_224;
+
+/// Gambatte's font for the digits 0 to F, one byte per row, leftmost
+/// pixel in bit 7; set bits are black, clear bits white (`testrunner.cpp`
+/// in gambatte-core).
+const GAMBATTE_DIGITS: [[u8; 8]; 16] = [
+    [0x00, 0x7F, 0x41, 0x41, 0x41, 0x41, 0x41, 0x7F],
+    [0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08],
+    [0x00, 0x7F, 0x01, 0x01, 0x7F, 0x40, 0x40, 0x7F],
+    [0x00, 0x7F, 0x01, 0x01, 0x3F, 0x01, 0x01, 0x7F],
+    [0x00, 0x41, 0x41, 0x41, 0x7F, 0x01, 0x01, 0x01],
+    [0x00, 0x7F, 0x40, 0x40, 0x7E, 0x01, 0x01, 0x7E],
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x41, 0x41, 0x7F],
+    [0x00, 0x7F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10],
+    [0x00, 0x3E, 0x41, 0x41, 0x3E, 0x41, 0x41, 0x3E],
+    [0x00, 0x7F, 0x41, 0x41, 0x7F, 0x01, 0x01, 0x7F],
+    [0x00, 0x08, 0x22, 0x41, 0x7F, 0x41, 0x41, 0x41],
+    [0x00, 0x7E, 0x41, 0x41, 0x7E, 0x41, 0x41, 0x7E],
+    [0x00, 0x3E, 0x41, 0x40, 0x40, 0x40, 0x41, 0x3E],
+    [0x00, 0x7E, 0x41, 0x41, 0x41, 0x41, 0x41, 0x7E],
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x40, 0x40, 0x7F],
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x40, 0x40, 0x40],
+];
+
+/// How long a GBMicrotest ROM runs: two frames is enough for all of them.
+const MICROTEST_CYCLES: u64 = 2 * 70_224;
 
 struct Case {
     /// Name in the report and the ratchet: the path, plus the subtest for
@@ -60,6 +96,12 @@ fn bundle_root() -> PathBuf {
 }
 
 fn roms_in(directory: &str) -> Vec<String> {
+    roms_with_extension(directory, "gb")
+}
+
+/// Every file ending in `.{extension}` under `directory`, relative to the
+/// bundle root, sorted.
+fn roms_with_extension(directory: &str, extension: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut pending = vec![bundle_root().join(directory)];
     while let Some(dir) = pending.pop() {
@@ -70,7 +112,7 @@ fn roms_in(directory: &str) -> Vec<String> {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "gb") {
+            } else if path.extension().is_some_and(|ext| ext == extension) {
                 let relative = path
                     .strip_prefix(bundle_root())
                     .expect("under the bundle root");
@@ -140,6 +182,19 @@ fn cases() -> Vec<Case> {
         5,
     );
     add(roms_in("blargg/cgb_sound"), Check::BlarggMemory, 40);
+    // HALT with an interrupt both requested and enabled, after EI or with
+    // IME off: the HALT bug.
+    let halt_bug = roms_with_extension("gambatte/halt", "gbc")
+        .into_iter()
+        .filter(|path| path.contains("ifandie"))
+        .collect();
+    add(halt_bug, Check::Gambatte, 1);
+    // Writing STAT on a DMG raises a spurious STAT interrupt.
+    let stat_write = roms_in("gbmicrotest")
+        .into_iter()
+        .filter(|path| path.contains("stat_write_glitch"))
+        .collect();
+    add(stat_write, Check::Microtest, 1);
     add(
         vec!["mbc3-tester/mbc3-tester.gb".to_owned()],
         Check::Screenshot("mbc3-tester-dmg.png"),
@@ -229,6 +284,12 @@ fn run(case: &Case) -> Result<(), String> {
             Check::Fibonacci | Check::Screenshot(_) if opcode == Some(0x40) => {
                 return finish(case.check, &gb, &rom_path);
             }
+            Check::Gambatte if gb.cycles() >= GAMBATTE_CYCLES => {
+                return finish(case.check, &gb, &rom_path);
+            }
+            Check::Microtest if gb.cycles() >= MICROTEST_CYCLES => {
+                return finish(case.check, &gb, &rom_path);
+            }
             Check::Serial | Check::BlarggMemory if gb.cycles() >= next_poll => {
                 next_poll = gb.cycles() + CYCLES_PER_SECOND / 10;
                 if let Some(result) = blargg_result(case.check, &gb) {
@@ -291,6 +352,11 @@ fn finish(check: Check, gb: &Gb, rom_path: &Path) -> Result<(), String> {
             }
             result
         }
+        Check::Gambatte => compare_digits(gb, rom_path),
+        Check::Microtest => match gb.peek(0xFF82) {
+            0x01 => Ok(()),
+            result => Err(format!("0xFF82 = {result:#04x}")),
+        },
         _ => {
             let r = gb.registers();
             let got = [r.b, r.c, r.d, r.e, r.h, r.l];
@@ -301,6 +367,38 @@ fn finish(check: Check, gb: &Gb, rom_path: &Path) -> Result<(), String> {
             }
         }
     }
+}
+
+/// Whether the screen's top row of tiles shows the hex digits after the
+/// last `_out` in `rom_path`'s name, black on white in Gambatte's font.
+fn compare_digits(gb: &Gb, rom_path: &Path) -> Result<(), String> {
+    let stem = rom_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let digits: Vec<u32> = stem
+        .rsplit_once("_out")
+        .map(|(_, out)| out.chars().map_while(|c| c.to_digit(16)).collect())
+        .unwrap_or_default();
+    if digits.is_empty() {
+        return Err("no expected digits in the file name".to_owned());
+    }
+    let screen = &gb.screens()[0];
+    let width = usize::from(screen.size().width);
+    for (index, digit) in digits.iter().enumerate() {
+        let glyph = GAMBATTE_DIGITS[*digit as usize];
+        for (y, row) in glyph.iter().enumerate() {
+            for x in 0..8 {
+                // Gambatte ignores the low three bits of each channel.
+                let pixel = screen.pixels()[y * width + index * 8 + x] & 0xF8_F8F8;
+                let black = row & (0x80 >> x) != 0;
+                if pixel != if black { 0 } else { 0xF8_F8F8 } {
+                    return Err(format!("digit {index} does not show {digit:X}"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_screen(gb: &Gb, path: &Path) -> std::io::Result<()> {

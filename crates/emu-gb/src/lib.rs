@@ -113,6 +113,15 @@ impl Machine {
     }
 }
 
+/// The model that runs `rom` when the player shows games made for the
+/// original Game Boy as `dmg_colors` says.
+fn model_for(rom: &[u8], dmg_colors: DmgColors) -> Model {
+    match Model::for_rom(rom) {
+        Model::Dmg if dmg_colors != DmgColors::Grey => Model::CgbDmgMode,
+        model => model,
+    }
+}
+
 impl Gb {
     /// Powers on a Game Boy with `media`'s cartridge.
     ///
@@ -145,10 +154,7 @@ impl Gb {
             });
         }
 
-        let model = match Model::for_rom(media.rom) {
-            Model::Dmg if media.dmg_colors != DmgColors::Grey => Model::CgbDmgMode,
-            model => model,
-        };
+        let model = model_for(media.rom, media.dmg_colors);
         let cartridge = Cartridge::new(media.rom, media.backup, media.start_time)?;
         // The CGB boot ROM switches to DMG mode itself, which is not
         // emulated, so DMG mode starts where it would leave off.
@@ -189,8 +195,9 @@ impl Gb {
 
     /// Runs `step` until a frame finishes or a step stops, for
     /// [`Core::run_frame`] and [`Debugger::run_until`]. A frame finishes
-    /// at VBlank, or after a frame's time with the LCD off (when no frame
-    /// ever completes) and after two frames' time in any case.
+    /// at VBlank, or after two frames' time if VBlank never comes. With the
+    /// LCD off it finishes after a frame's time, including the frame the
+    /// LCD is switched off in, so the frontend gets a whole frame of sound.
     fn run(
         &mut self,
         inputs: &[Input],
@@ -202,9 +209,13 @@ impl Gb {
         let outcome = loop {
             let mut outcome = step(self);
             let elapsed = self.cycles().saturating_sub(start);
-            let lcd_off = !self.machine.bus.ppu.is_on();
-            outcome.frame_done |=
-                (lcd_off && elapsed >= CYCLES_PER_FRAME) || elapsed >= 2 * CYCLES_PER_FRAME;
+            // Switching the LCD off shows a blank screen at once, but the
+            // frame runs its full time.
+            outcome.frame_done = if self.machine.bus.ppu.is_on() {
+                outcome.frame_done || elapsed >= 2 * CYCLES_PER_FRAME
+            } else {
+                elapsed >= CYCLES_PER_FRAME
+            };
             if outcome.frame_done || outcome.stop.is_some() {
                 break outcome;
             }
@@ -249,7 +260,8 @@ impl Gb {
         self.machine.bus.peek(address)
     }
 
-    /// Every byte sent through the serial port since power-on.
+    /// The latest bytes sent through the serial port, oldest first: at
+    /// least the last 4 KiB, more than any test ROM's report.
     #[must_use]
     pub fn serial_output(&self) -> &[u8] {
         self.machine.bus.serial.sent()
@@ -289,9 +301,12 @@ impl Core for Gb {
     }
 
     fn reset(&mut self) {
-        let model = self.model();
         let (mut cartridge, boot_rom) = self.machine.bus.take_media();
         cartridge.power_cycle();
+        // The player's colour choice picks the model, not a loaded state,
+        // which may come from the other choice: the model always matches
+        // the palettes and the boot ROM.
+        let model = model_for(cartridge.rom(), self.dmg_colors);
         self.machine = Machine::power_on(model, self.dmg_colors, cartridge, boot_rom);
         self.frame_start = None;
     }
@@ -402,6 +417,45 @@ mod tests {
     }
 
     #[test]
+    fn switching_the_lcd_off_blanks_the_screen_but_not_the_frames_time() {
+        // LD A,0; LDH (LCDC),A; JR -2
+        let rom = rom_with_program(&[0x3E, 0x00, 0xE0, 0x40, 0x18, 0xFE]);
+        let mut gb = Gb::new(&Media::new(&rom)).expect("valid rom");
+        gb.screens[0].pixels_mut().fill(0);
+        gb.run_frame(&[Input::default()], &mut Vec::new());
+        // A JR takes 12 cycles, so the frame ends within 12 of its time.
+        assert!((CYCLES_PER_FRAME..CYCLES_PER_FRAME + 12).contains(&gb.cycles()));
+        assert!(
+            gb.screens()[0]
+                .pixels()
+                .iter()
+                .all(|pixel| *pixel == ppu::DMG_SHADES[0])
+        );
+    }
+
+    #[test]
+    fn a_boot_rom_starts_with_the_lcd_off() {
+        // The boot ROM spins: JR -2.
+        let mut boot_rom = vec![0; 0x100];
+        boot_rom[..2].copy_from_slice(&[0x18, 0xFE]);
+        let rom = rom_with_program(&[]);
+        let mut gb = Gb::new(&Media {
+            system_files: &[emu_core::SystemFile {
+                kind: SystemFileKind::GbBootRom,
+                data: &boot_rom,
+            }],
+            ..Media::new(&rom)
+        })
+        .expect("valid rom");
+        assert_eq!(gb.registers().pc, 0x0000);
+        assert_eq!(gb.peek(0xFF40), 0x00);
+        for _ in 0..1000 {
+            gb.step();
+        }
+        assert_eq!(gb.peek(0xFF44), 0);
+    }
+
+    #[test]
     fn cgb_flag_selects_the_model() {
         let dmg = Gb::new(&Media::new(&rom_for(Model::Dmg, &[]))).expect("valid rom");
         let cgb = Gb::new(&Media::new(&rom_for(Model::Cgb, &[]))).expect("valid rom");
@@ -442,6 +496,33 @@ mod tests {
         })
         .expect("valid rom");
         assert_eq!(cgb.model(), Model::Cgb);
+    }
+
+    #[test]
+    fn reset_keeps_the_players_colour_choice_after_a_state_from_the_other() {
+        let rom = rom_with_program(&[0x18, 0xFE]);
+        let mut grey = Gb::new(&Media::new(&rom)).expect("valid rom");
+        let mut colour = Gb::new(&Media {
+            dmg_colors: DmgColors::ByTitle,
+            ..Media::new(&rom)
+        })
+        .expect("valid rom");
+        let mut grey_state = Vec::new();
+        grey.save_state(&mut grey_state);
+        let mut colour_state = Vec::new();
+        colour.save_state(&mut colour_state);
+
+        grey.load_state(&colour_state).expect("same game");
+        assert_eq!(grey.model(), Model::CgbDmgMode);
+        grey.reset();
+        assert_eq!(grey.model(), Model::Dmg);
+
+        colour.load_state(&grey_state).expect("same game");
+        assert_eq!(colour.model(), Model::Dmg);
+        colour.reset();
+        assert_eq!(colour.model(), Model::CgbDmgMode);
+        // Combination 0's background colour 1, not palette RAM's 0xFF.
+        assert_eq!(colour.machine.bus.ppu.bg_palette_ram()[2..4], [0xEF, 0x1B]);
     }
 
     #[test]

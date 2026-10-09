@@ -52,6 +52,24 @@ blargg/oam_bug/rom_singles/6-timing_no_bug.gb
 cgb-acid2/cgb-acid2.gbc
 dmg-acid2/dmg-acid2.gb
 dmg-acid2/dmg-acid2.gb (CGB in DMG mode)
+gambatte/halt/ifandie_ei_halt_m2int_m0stat_2_dmg08_cgb04c_out2.gbc
+gambatte/halt/ifandie_ei_halt_sra_dmg08_cgb04c_out0A.gbc
+gambatte/halt/noime_ifandie_halt_lda_3c_dmg08_cgb04c_out3F.gbc
+gambatte/halt/noime_ifandie_halt_sra_dmg08_cgb04c_outF1.gbc
+gambatte/halt/noime_ifandie_m2int_m0stat_2_dmg08_cgb04c_out2.gbc
+gbmicrotest/stat_write_glitch_l0_a.gb
+gbmicrotest/stat_write_glitch_l0_b.gb
+gbmicrotest/stat_write_glitch_l0_c.gb
+gbmicrotest/stat_write_glitch_l143_a.gb
+gbmicrotest/stat_write_glitch_l143_b.gb
+gbmicrotest/stat_write_glitch_l143_d.gb
+gbmicrotest/stat_write_glitch_l154_a.gb
+gbmicrotest/stat_write_glitch_l154_b.gb
+gbmicrotest/stat_write_glitch_l154_c.gb
+gbmicrotest/stat_write_glitch_l1_a.gb
+gbmicrotest/stat_write_glitch_l1_b.gb
+gbmicrotest/stat_write_glitch_l1_c.gb
+gbmicrotest/stat_write_glitch_l1_d.gb
 mbc3-tester/mbc3-tester.gb
 mooneye-test-suite/acceptance/add_sp_e_timing.gb
 mooneye-test-suite/acceptance/bits/mem_oam.gb

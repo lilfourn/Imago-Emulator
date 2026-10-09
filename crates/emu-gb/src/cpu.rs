@@ -246,7 +246,15 @@ impl Cpu {
         self.ime = false;
         bus.tick();
         bus.tick();
-        let [high, low] = self.regs.pc.to_be_bytes();
+        // After EI; HALT with an interrupt pending, the HALT bug meets the
+        // interrupt: the handler returns to the HALT, which runs again
+        // (Pan Docs, "halt bug").
+        let pc = if std::mem::take(&mut self.halt_bug) {
+            self.regs.pc.wrapping_sub(1)
+        } else {
+            self.regs.pc
+        };
+        let [high, low] = pc.to_be_bytes();
         self.regs.sp = self.regs.sp.wrapping_sub(1);
         bus.write(self.regs.sp, high);
         // Pushing the high byte can overwrite IE (SP = 0x0000), which
@@ -848,5 +856,31 @@ mod tests {
             cpu.step(&mut bus);
         }
         assert_eq!(cpu.regs.a, 2);
+    }
+
+    #[test]
+    fn ei_then_halt_with_an_interrupt_pending_returns_to_the_halt() {
+        // EI; HALT; INC B with VBlank pending. The handler, INC A; RETI,
+        // runs once and returns to the HALT, which then waits.
+        let mut bus = TestBus::with_program(&[0xFB, 0x76, 0x04]);
+        bus.memory[0x40] = 0x3C;
+        bus.memory[0x41] = 0xD9;
+        bus.interrupt_enable = 0x01;
+        bus.interrupt_flag = 0x01;
+        let mut cpu = Cpu::new(Registers {
+            pc: 0x100,
+            sp: 0xFFFE,
+            ..Registers::default()
+        });
+        // EI, HALT, the dispatch, INC A, RETI.
+        for _ in 0..5 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.regs.a, 1);
+        assert_eq!(cpu.regs.pc, 0x0101);
+        assert_eq!(cpu.step(&mut bus), Some(0x76));
+        assert_eq!(cpu.step(&mut bus), None);
+        assert!(cpu.halted());
+        assert_eq!(cpu.regs.b, 0);
     }
 }

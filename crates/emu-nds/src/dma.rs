@@ -23,9 +23,11 @@ pub(crate) enum Timing {
     VBlank,
     /// ARM9 only.
     HBlank,
-    /// ARM9 only: the start of each displayed line.
+    /// ARM9 only: the start of lines 2–193. The display switches these
+    /// channels off at line 194.
     DisplayStart,
-    /// ARM9 only.
+    /// ARM9 only: feeds the main memory display FIFO (DISP_MMEM_FIFO),
+    /// which is not emulated, so these channels never start.
     MainMemoryDisplay,
     /// A word of cartridge data is ready: one unit per trigger.
     Cart,
@@ -199,6 +201,16 @@ impl Dma {
         for index in 0..4 {
             if self.channels[index].enabled() && self.timing(index) == timing {
                 self.channels[index].pending = true;
+            }
+        }
+    }
+
+    /// Switches off the channels waiting for `timing`. A run already
+    /// started still finishes.
+    pub(crate) fn stop(&mut self, timing: Timing) {
+        for index in 0..4 {
+            if self.timing(index) == timing {
+                self.channels[index].control &= !(1 << 31);
             }
         }
     }
