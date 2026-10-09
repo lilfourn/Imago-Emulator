@@ -124,9 +124,14 @@ impl Hardware {
                 self.cpu_mut(side).dma.write(register, merged);
             }
             0x100..=0x10F => {
-                let now = self.now(side);
-                if let Some(timer) = self.cpu_mut(side).timers.write(offset - 0x100, value, now) {
-                    self.schedule_timer(side, timer);
+                let index = ((offset - 0x100) / 4) as usize;
+                if offset.is_multiple_of(4) {
+                    self.cpu_mut(side).timers.write_reload(index, value);
+                } else {
+                    let now = self.now(side);
+                    let requested = self.cpu_mut(side).timers.write_control(index, value, now);
+                    self.request_timer_interrupts(side, requested);
+                    self.schedule_timer(side, index);
                 }
             }
             0x132 => {
@@ -365,6 +370,11 @@ impl Hardware {
     }
 
     pub(crate) fn io9_write_8(&mut self, address: u32, value: u8) {
+        // The IPC FIFO and card data ports above the page take no bytes,
+        // and the page is not mirrored there.
+        if address >= 0x0400_2000 {
+            return;
+        }
         let offset = address & IO_PAGE;
         match offset {
             0x240..=0x246 | 0x248 | 0x249 => {
@@ -488,6 +498,9 @@ impl Hardware {
     }
 
     pub(crate) fn io7_write_8(&mut self, address: u32, value: u8) {
+        if address >= 0x0400_2000 {
+            return;
+        }
         let offset = address & IO_PAGE;
         match offset {
             0x214..=0x217 => self
@@ -610,6 +623,23 @@ mod tests {
             0,
             "the ARM7 has no maths unit"
         );
+    }
+
+    #[test]
+    fn byte_writes_above_the_io_page_reach_no_register() {
+        let mut hw = hardware();
+        hw.arm9.interrupts.request(irq::VBLANK);
+        hw.arm7.interrupts.request(irq::VBLANK);
+        // 0x04100214 and 0x04102247 would hit IF and WRAMCNT if the page
+        // were mirrored.
+        hw.arm9_write_8(0x0410_0214, irq::VBLANK as u8);
+        hw.arm9_write_8(0x0410_2247, 3);
+        hw.arm7_write_8(0x0410_0214, irq::VBLANK as u8);
+        hw.arm7_write_8(0x0410_0301, 0x80);
+        assert_eq!(hw.arm9.interrupts.flags, irq::VBLANK);
+        assert_eq!(hw.arm7.interrupts.flags, irq::VBLANK);
+        assert_eq!(hw.wramcnt, 0);
+        assert!(!hw.arm7.halted);
     }
 
     #[test]

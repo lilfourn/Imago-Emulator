@@ -308,6 +308,14 @@ impl Hardware {
         }
     }
 
+    /// Raises the interrupts of the timers in `requested` (bit `n` for
+    /// timer `n`) on `side`.
+    pub(crate) fn request_timer_interrupts(&mut self, side: Side, requested: u8) {
+        for timer in (0..4).filter(|timer| requested & (1 << timer) != 0) {
+            self.cpu_mut(side).interrupts.request(irq::TIMER0 << timer);
+        }
+    }
+
     /// Replaces timer `index`'s overflow event on `side` after it changed.
     pub(crate) fn schedule_timer(&mut self, side: Side, index: usize) {
         let event = Event::TimerOverflow(side, index as u8);

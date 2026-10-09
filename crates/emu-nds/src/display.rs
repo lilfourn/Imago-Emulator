@@ -30,6 +30,10 @@ const SCALED_LINES_PER_THREAD: usize = 24;
 pub(crate) const VISIBLE_LINES: u16 = 192;
 /// The line where the 3D engine renders the coming frame.
 const RENDER_3D_LINE: u16 = 214;
+/// Start-of-display DMA starts at each of these lines' starts, and its
+/// channels switch off at the next line (melonDS's timing; GBATEK only
+/// names the mode).
+const DISPLAY_START_DMA_LINES: std::ops::Range<u16> = 2..194;
 /// Bus cycles per frame.
 pub(crate) const FRAME_CYCLES: u64 = LINE_CYCLES * LINES as u64;
 
@@ -269,6 +273,11 @@ impl Hardware {
             RENDER_3D_LINE => self.gpu3d.render_frame(&self.vram),
             _ => {}
         }
+        if DISPLAY_START_DMA_LINES.contains(&self.vcount) {
+            self.arm9.dma.trigger(Timing::DisplayStart);
+        } else if self.vcount == DISPLAY_START_DMA_LINES.end {
+            self.arm9.dma.stop(Timing::DisplayStart);
+        }
         for side in [Side::Arm9, Side::Arm7] {
             let stored = self.cpu(side).dispstat;
             let setting = (stored >> 8) | (stored & 0x80) << 1;
@@ -340,6 +349,24 @@ mod tests {
         hw.arm9_write_16(0x0400_000E, 0x4885);
         hw.draw_line(0);
         assert_eq!(hw.screen_a[0], 0xFFFF_0000, "{:08X}", hw.screen_a[0]);
+    }
+
+    #[test]
+    fn start_of_display_dma_runs_on_lines_2_to_193_then_switches_off() {
+        let mut hw = Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into());
+        hw.start_display();
+        // ARM9 DMA 0: start of display, repeating, 4 halfwords a line.
+        hw.arm9_write_32(0x0400_00B8, 1 << 31 | 1 << 25 | 3 << 27 | 4);
+        let mut lines = Vec::new();
+        for line in 1..LINES {
+            run_events(&mut hw, LINE_CYCLES * u64::from(line));
+            if hw.arm9.dma.next_pending() == Some(0) {
+                lines.push(line);
+                hw.arm9.dma.finish(0, 4, 0, 0);
+            }
+        }
+        assert_eq!(lines, (2..194).collect::<Vec<_>>());
+        assert_eq!(hw.arm9_read_32(0x0400_00B8) & 1 << 31, 0, "switched off");
     }
 
     #[test]

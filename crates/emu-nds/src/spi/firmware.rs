@@ -20,6 +20,8 @@ use super::flash::Flash;
 
 /// Bytes of user settings copied to RAM at boot (0x027FFC80).
 pub(crate) const USER_SETTINGS_SIZE: usize = 0x70;
+/// The header and wifi settings: the least a firmware dump must hold.
+pub(crate) const MIN_IMAGE_SIZE: usize = 0x200;
 /// One user settings area: the settings, an update counter, the CRC and
 /// unused bytes.
 const AREA_SIZE: usize = 0x100;

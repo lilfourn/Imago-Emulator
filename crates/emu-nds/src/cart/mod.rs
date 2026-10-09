@@ -157,6 +157,7 @@ impl Cart {
         self.spi_control = value & AUXSPICNT_WRITABLE;
         if value & SPI_MODE == 0 || value & SLOT_ENABLE == 0 {
             self.backup.release();
+            self.count_backup_change();
         }
     }
 
@@ -174,14 +175,20 @@ impl Cart {
             return None;
         }
         self.spi_data = self.backup.transfer(value);
-        if self.backup.take_changed() {
-            self.generation += 1;
-        }
         if self.spi_control & SPI_HOLD == 0 {
             self.backup.release();
         }
+        self.count_backup_change();
         self.spi_busy = true;
         Some((8 * SPI_CYCLES_PER_BIT) << (self.spi_control & SPI_BAUD))
+    }
+
+    /// Counts a save write if the save chip changed. Checked after a
+    /// release too: the write that shows an unknown chip's type lands then.
+    fn count_backup_change(&mut self) {
+        if self.backup.take_changed() {
+            self.generation += 1;
+        }
     }
 
     /// The AUXSPI transfer ends.
@@ -444,5 +451,26 @@ mod tests {
         loaded.take_rom_from(&mut cart);
         assert_eq!(loaded.backup_generation(), Some(2));
         assert_eq!(loaded.rom().len(), 0x2_0000);
+    }
+
+    #[test]
+    fn a_save_chip_found_by_its_first_write_counts_the_write() {
+        let mut rom = rom();
+        rom[0x0C..0x10].copy_from_slice(b"ZZZE");
+        let mut cart = Cart::new(rom, None);
+        let mut exchange = |bytes: &[u8]| {
+            for (i, &byte) in bytes.iter().enumerate() {
+                let hold = if i + 1 < bytes.len() { SPI_HOLD } else { 0 };
+                cart.write_spi_control(SLOT_ENABLE | SPI_MODE | hold);
+                cart.write_spi_data(byte);
+            }
+        };
+        exchange(&[0x06]);
+        // A flash page write; the chip select ends it with the last byte.
+        exchange(&[0x0A, 0x00, 0x01, 0x00, 0x5A]);
+        assert_eq!(cart.backup_generation(), Some(1));
+        let mut save = Vec::new();
+        cart.save_backup(&mut save);
+        assert_eq!((save.len(), save[0x100]), (0x8_0000, 0x5A));
     }
 }

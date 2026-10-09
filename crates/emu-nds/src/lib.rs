@@ -85,8 +85,9 @@ impl Nds {
     ///
     /// # Errors
     ///
-    /// Returns [`LoadError::InvalidRom`] if the cartridge header is missing
-    /// or either program lies outside the ROM. The Nintendo logo is not
+    /// Returns [`LoadError::InvalidRom`] if the cartridge header is missing,
+    /// either program lies outside the ROM, or the firmware dump is too
+    /// short to hold its header and wifi settings. The Nintendo logo is not
     /// checked, so homebrew without it runs too.
     pub fn new(media: &Media<'_>) -> Result<Self, LoadError> {
         let invalid = |reason| LoadError::InvalidRom {
@@ -104,6 +105,12 @@ impl Nds {
         };
         if !fits(header.arm9) || !fits(header.arm7) {
             return Err(invalid("a program in the header lies outside the ROM"));
+        }
+        let firmware = media.system_file(SystemFileKind::NdsFirmware);
+        if firmware.is_some_and(|image| image.len() < spi::firmware::MIN_IMAGE_SIZE) {
+            return Err(invalid(
+                "the firmware dump is shorter than its header and wifi settings",
+            ));
         }
         let dumps = media
             .system_file(SystemFileKind::NdsBios9)
@@ -127,7 +134,7 @@ impl Nds {
         let mut hw = Hardware::new(arm9_bios, arm7_bios);
         hw.cart = Cart::new(media.rom.into(), media.backup);
         hw.gba_slot = gba_slot;
-        hw.spi = Spi::new(media.system_file(SystemFileKind::NdsFirmware));
+        hw.spi = Spi::new(firmware);
         hw.wifi = Wifi::new(hw.spi.wifi_settings());
         hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
@@ -502,6 +509,25 @@ mod tests {
         assert_eq!(peek_half(&nds, 0x0400_0102), 0x0080);
         assert_eq!(nds.peek(0, 0x0400_0000), None, "other I/O stays hidden");
         assert_eq!(nds.peek(0, 0x0400_0110), None);
+    }
+
+    #[test]
+    fn rejects_a_firmware_dump_too_short_for_its_header() {
+        let rom = rom();
+        let with_firmware = |image: &[u8]| {
+            let files = [emu_core::SystemFile {
+                kind: SystemFileKind::NdsFirmware,
+                data: image,
+            }];
+            Nds::new(&Media {
+                system_files: &files,
+                ..Media::new(&rom)
+            })
+            .is_ok()
+        };
+        assert!(!with_firmware(&[0; 0x20]), "no user settings location");
+        assert!(!with_firmware(&[0; 0x1FF]));
+        assert!(with_firmware(&[0; 0x200]));
     }
 
     #[test]
