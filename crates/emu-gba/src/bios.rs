@@ -10,7 +10,7 @@
 
 use std::f64::consts::PI;
 
-use emu_arm::{Access, Bus as _, Cpu};
+use emu_arm::{Access, Bus as _, Cpu, Mode, psr};
 
 use crate::bus::Bus;
 
@@ -41,9 +41,10 @@ pub(crate) fn image() -> Box<[u8]> {
     image.into_boxed_slice()
 }
 
-/// What BIOS reads return from outside the BIOS just after boot and just
-/// after a system call: the opcodes the real BIOS last fetched at those
-/// points (GBATEK, "BIOS Memory Protection").
+/// What BIOS reads return from outside the BIOS just after boot (or
+/// SoftReset, which ends the same way) and just after a system call: the
+/// opcodes the real BIOS last fetched at those points (GBATEK, "BIOS
+/// Memory Protection").
 pub(crate) const OPEN_BUS_AFTER_BOOT: u32 = 0xE129_F000;
 pub(crate) const OPEN_BUS_AFTER_SWI: u32 = 0xE3A0_2004;
 
@@ -73,10 +74,7 @@ pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
     let (r0, r1, r2, r3) = (r(0), r(1), r(2), r(3));
     // The function's own cycles, where they are modelled.
     let cycles = match number {
-        0x00 => {
-            soft_reset(cpu, bus);
-            0
-        }
+        0x00 => return soft_reset(cpu, bus),
         0x01 => {
             register_ram_reset(bus, r0);
             0
@@ -177,19 +175,34 @@ pub(crate) fn call(cpu: &mut Cpu, bus: &mut Bus) {
     cpu.return_from_exception(bus);
 }
 
+/// SoftReset (GBATEK, "BIOS Reset Functions"): clears the top 0x200 bytes
+/// of IWRAM, sets the Supervisor, IRQ and System stacks and zeroes those
+/// first two modes' R14 and saved PSRs, then restarts the game in System
+/// mode, ARM state, with R0–R12 zeroed: at 0x02000000 if the byte at
+/// 0x03007FFA is set, otherwise at 0x08000000. It never returns to the
+/// caller, so the call's usual return is skipped.
 fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
     bus.forget_vblank_wait();
     let to_ram = bus.read_8(0x0300_7FFA, Access::NONSEQUENTIAL) != 0;
     for address in (0x0300_7E00..0x0300_8000).step_by(4) {
         bus.write_32(address, 0, Access::NONSEQUENTIAL);
     }
-    let mut registers = cpu.registers();
-    registers.svc[0] = 0x0300_7FE0;
-    registers.irq[0] = 0x0300_7FA0;
-    registers.usr[5] = 0x0300_7F00;
-    registers.svc[1] = if to_ram { 0x0200_0000 } else { 0x0800_0000 };
-    registers.spsr[1] = 0x1F;
-    *cpu = Cpu::from_registers(&registers, cpu.pipeline(), cpu.fetch_access());
+    for (mode, stack) in [(Mode::Supervisor, 0x0300_7FE0), (Mode::Irq, 0x0300_7FA0)] {
+        cpu.set_cpsr(mode.bits() | psr::I | psr::F);
+        cpu.set_reg(13, stack);
+        cpu.set_reg(14, 0);
+        cpu.set_saved_psr(0);
+    }
+    // System mode's R14 is left holding the entry point, as on the DS.
+    let entry = if to_ram { 0x0200_0000 } else { 0x0800_0000 };
+    cpu.set_cpsr(Mode::System.bits());
+    for index in 0..13 {
+        cpu.set_reg(index, 0);
+    }
+    cpu.set_reg(13, 0x0300_7F00);
+    cpu.set_reg(14, entry);
+    bus.set_bios_open_bus(OPEN_BUS_AFTER_BOOT);
+    cpu.jump(bus, entry);
 }
 
 fn register_ram_reset(bus: &mut Bus, flags: u32) {
@@ -890,6 +903,66 @@ mod tests {
         assert_eq!(call(0xFFFF_0001, 0xFFFF_0000), (0xA001, Some(0xFFFF_C002)));
         assert_eq!(call(0xFFFF_8000, 0x1_0000), (0x52E4, Some(0xFFFF_F000)));
         assert_eq!(call(0x4000, 0), (0, None));
+    }
+
+    /// Boots a cartridge running `program` (ARM words from 0x08000000) and
+    /// runs it until its first system call has been handled.
+    fn run_to_first_swi(program: &[u32]) -> crate::Gba {
+        let mut rom = vec![0u8; 0x200];
+        for (index, word) in program.iter().enumerate() {
+            rom[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        rom[0xB2] = 0x96;
+        let mut gba = crate::Gba::new(&emu_core::Media::new(&rom)).expect("valid rom");
+        for _ in 0..100 {
+            let cpu = gba.cpu();
+            let entering = cpu.reg(15) == SWI_ENTERED_PC && cpu.mode() == Mode::Supervisor;
+            gba.step();
+            if entering {
+                return gba;
+            }
+        }
+        panic!("the program made no system call");
+    }
+
+    /// The registers SoftReset leaves, about to run from `entry`.
+    fn assert_soft_reset_registers(cpu: &Cpu, entry: u32) {
+        assert_eq!((cpu.mode(), cpu.thumb()), (Mode::System, false));
+        assert_eq!(cpu.reg(15), entry + 8);
+        let registers = cpu.registers();
+        assert_eq!(&registers.r[..13], &[0; 13]);
+        assert_eq!((registers.r[13], registers.r[14]), (0x0300_7F00, entry));
+        assert_eq!(registers.svc, [0x0300_7FE0, 0]);
+        assert_eq!(registers.irq, [0x0300_7FA0, 0]);
+        // Saved PSRs: Supervisor's and IRQ's.
+        assert_eq!((registers.spsr[1], registers.spsr[3]), (0, 0));
+    }
+
+    #[test]
+    fn soft_reset_from_arm_restarts_where_the_flag_says() {
+        let mut gba = run_to_first_swi(&[
+            0xE3A0_0403, // MOV R0, #0x03000000
+            0xE280_0C7F, // ADD R0, R0, #0x7F00
+            0xE3A0_1001, // MOV R1, #1
+            0xE5C0_10FA, // STRB R1, [R0, #0xFA]  (restart in EWRAM)
+            0xE3A0_D402, // MOV SP, #0x02000000
+            0xEF00_0000, // SWI 0x00  (SoftReset)
+        ]);
+        assert_soft_reset_registers(gba.cpu(), 0x0200_0000);
+        let flag = gba.machine.bus.read_8(0x0300_7FFA, Access::NONSEQUENTIAL);
+        assert_eq!(flag, 0);
+    }
+
+    #[test]
+    fn soft_reset_from_thumb_restarts_the_rom_in_arm_state() {
+        let gba = run_to_first_swi(&[
+            0xE3A0_C00C, // MOV R12, #12
+            0xE3A0_D402, // MOV SP, #0x02000000
+            0xE28F_0001, // ADD R0, PC, #1
+            0xE12F_FF10, // BX R0
+            0x46C0_DF00, // (Thumb) SWI 0x00  (SoftReset); NOP
+        ]);
+        assert_soft_reset_registers(gba.cpu(), 0x0800_0000);
     }
 
     #[test]
