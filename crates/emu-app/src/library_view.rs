@@ -22,7 +22,7 @@ use gpui::{
 
 use crate::app::TOP_BAR;
 use crate::boxart;
-use crate::library::{Game, Library};
+use crate::library::{self, Game, Library};
 use crate::rom_info;
 
 use crate::theme::{ACCENT as CARET, BACKGROUND as TOP, MUTED as DIM, PANEL, TEXT};
@@ -112,9 +112,11 @@ impl LibraryView {
     /// Games already in the library are left as they are, so playing one
     /// does not read its ROM again.
     pub fn add(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut seen = HashSet::new();
         let paths: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|path| !self.library.contains(path))
+            .iter()
+            .map(|path| library::absolute(path))
+            .filter(|path| !self.library.contains(path) && seen.insert(path.clone()))
             .collect();
         if paths.is_empty() {
             return;
@@ -170,6 +172,9 @@ impl LibraryView {
                 self.query.clear();
                 self.selected = None;
             }
+            // Return held down plays the game once, not again on every
+            // repeat, which would restart its loading each time.
+            "enter" if event.is_held => {}
             "enter" => {
                 let shown = self.shown();
                 if let Some(game) = shown.get(position(&shown, self.selected.as_deref())) {
@@ -570,11 +575,15 @@ fn icon_button(
 }
 
 /// The box art of the ROM with checksum `crc32` in `cache`, or failing
-/// that its DS icon.
+/// that, or if the art is not a picture, its DS icon.
 fn cover_on_disk(cache: &Path, crc32: u32) -> Option<PathBuf> {
     let art = boxart::art_path(cache, crc32);
     let icon = boxart::icon_path(cache, crc32);
-    [art, icon].into_iter().find(|path| path.exists())
+    if boxart::is_png(&art) {
+        Some(art)
+    } else {
+        icon.exists().then_some(icon)
+    }
 }
 
 /// The game in the ROM at `path`, with its DS icon saved in `cache`.

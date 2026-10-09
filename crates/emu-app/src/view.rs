@@ -6,15 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use emu_core::{
-    Button, Buttons, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb,
-};
+use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
     BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions,
-    RenderImage, SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, RenderImage, SharedString, Subscription, Task, Window, WindowBounds,
+    WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
 };
 
 use crate::ambient::{self, Backdrop};
@@ -45,12 +43,13 @@ use crate::filter::Filter;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
 use crate::key_guide;
+use crate::key_routes::{KeyRoutes, Route};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::library::{self, Library};
 use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
-use crate::persist;
+use crate::persist::{self, GameFiles};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
@@ -75,6 +74,10 @@ const PLACE_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// The source name under which a held mouse button presses A, off the
 /// touchscreen.
 const MOUSE: &str = "mouse:left";
+
+/// What every keyboard key's source name starts with, before the key's
+/// GPUI name.
+const KEY: &str = "key:";
 
 /// The save-state slot that holds each game's checkpoint: where the
 /// player left it, picked up when the game next starts.
@@ -155,6 +158,9 @@ pub struct EmulatorView {
     controls: Controls,
     /// Gamepad hotkey chords in progress.
     chords: Chords,
+    /// Where each key held down went when pressed, which its repeats go
+    /// to as well.
+    key_routes: KeyRoutes,
     /// The gamepad's touchscreen cursor, once a gamepad has used it.
     cursor: Option<Cursor>,
     /// What the emulation thread was last told is held.
@@ -193,12 +199,22 @@ pub struct DebugTarget {
 
 /// A running game and the images last drawn for it.
 struct Session {
+    /// Passes the emulation thread's events to the view. Dropped before
+    /// `emulator`, with `events`, so that what the thread says as it stops
+    /// goes to stderr rather than nowhere; [`Session::finish`] shows it
+    /// instead.
+    _events: Task<()>,
+    /// The events, for what is left of them as the game stops.
+    events: async_channel::Receiver<Event>,
     emulator: Emulator,
     info: CoreInfo,
     /// Each cartridge's ROM: one per player, then any in a second slot.
     rom_paths: Vec<PathBuf>,
-    /// Each player's ROM, which names their cheats and the states.
+    /// Each player's ROM.
     player_rom_paths: Vec<PathBuf>,
+    /// Each cartridge's own files, in `rom_paths`' order, named as the
+    /// game started and kept so while it runs.
+    files: Vec<GameFiles>,
     frames: Vec<Frame>,
     sequence: u64,
     /// Per player: the cheat file's text when last sent to the emulator.
@@ -213,7 +229,6 @@ struct Session {
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     /// The ambient backdrop, while it is shown.
     ambient: Option<Glow>,
-    _events: Task<()>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
 }
@@ -264,7 +279,10 @@ impl EmulatorView {
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     // Keys released while another window has focus never
-                    // send key-up.
+                    // send key-up. Keys still down when focus comes back
+                    // count once pressed again (the arrows may count from
+                    // their next repeat, which GPUI passes on as a press).
+                    this.key_routes.clear();
                     this.release_all();
                 } else {
                     // Back from editing a cheat file, perhaps.
@@ -276,13 +294,16 @@ impl EmulatorView {
             }),
             cx.observe_window_bounds(window, Self::remember_window_place),
             // Closing the window drops the view before quitting, so a
-            // place not yet saved is saved here.
+            // place not yet saved is saved here, and the game's checkpoint:
+            // the emulation thread writes it, and the battery saves, before
+            // it stops as the view goes.
             cx.on_release(|this, _| {
                 if this.place_save.take().is_some()
                     && let Some(path) = &this.settings_path
                 {
                     this.settings().save(path).ok();
                 }
+                this.save_checkpoint();
             }),
             // Stop the emulation thread on quit so the battery save is flushed.
             cx.on_app_quit(|this, cx| {
@@ -350,6 +371,7 @@ impl EmulatorView {
             placements: Vec::new(),
             controls: Controls::default(),
             chords: Chords::default(),
+            key_routes: KeyRoutes::default(),
             cursor: None,
             sent: HeldState::default(),
             sent_touch: None,
@@ -424,17 +446,24 @@ impl EmulatorView {
     /// game with a GBA game in its slot, or two games joined by a link
     /// cable.
     fn open(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        // A game opened from the command line is the same game, in the
+        // library too, whatever folder it was opened from.
+        let paths: Vec<PathBuf> = paths.iter().map(|path| library::absolute(path)).collect();
         // Stopping writes the running game's battery saves. Reopening one
         // of its games (to link it or insert a cartridge) must read those,
         // not the copy on disk from up to a second ago.
-        let saves: Vec<String> = paths.iter().map(|path| persist::backup_key(path)).collect();
+        let saves: Vec<String> = paths
+            .iter()
+            .map(|path| persist::backup_key(&GameFiles::of(path).backup()))
+            .collect();
         let reopening = self.session.as_ref().is_some_and(|session| {
-            let mut roms = session.rom_paths.iter();
-            roms.any(|rom| saves.contains(&persist::backup_key(rom)))
+            let mut files = session.files.iter();
+            files.any(|files| saves.contains(&persist::backup_key(&files.backup())))
         });
         if reopening {
             self.save_checkpoint();
-            self.stop(window);
+            let stopped = self.stop(window);
+            self.keep_for_start(stopped);
         }
         let name = paths
             .iter()
@@ -459,14 +488,11 @@ impl EmulatorView {
     fn start(&mut self, loaded: Loaded, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         // Stop the previous game first so its battery save is flushed.
         self.save_checkpoint();
-        self.stop(window);
+        let stopped = self.stop(window);
         let info = loaded.info();
-        let (audio_output, audio_sink) = match audio::open(info.audio_sample_rate) {
-            Ok((output, sink)) => (Some(output), Some(sink)),
-            Err(error) => {
-                self.show_notice(format!("No sound: {error:#}"), cx);
-                (None, None)
-            }
+        let (audio_output, audio_sink, no_sound) = match audio::open(info.audio_sample_rate) {
+            Ok((output, sink)) => (Some(output), Some(sink), None),
+            Err(error) => (None, None, Some(format!("No sound: {error:#}"))),
         };
         let (events, receiver) = async_channel::unbounded();
         let rom_paths = loaded.rom_paths().to_vec();
@@ -474,24 +500,42 @@ impl EmulatorView {
         self.library
             .update(cx, |library, cx| library.add(played, cx));
         let player_rom_paths = loaded.player_rom_paths().to_vec();
+        let files = loaded.files().to_vec();
         let emulator = Emulator::start(loaded, events, audio_sink);
         emulator.send(Command::SetRenderScale(self.resolution_3d));
-        // Pick up where the player left off.
-        if persist::state_path(&player_rom_paths, CHECKPOINT).exists() {
-            emulator.send(Command::LoadState(CHECKPOINT));
-        }
-        let task = cx.spawn(async move |this, cx| {
-            while let Ok(event) = receiver.recv().await {
-                if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
-                    break;
+        // Pick up where the player left off, unless a battery save has
+        // changed since: the emulation thread checks.
+        emulator.send(Command::LoadCheckpoint(CHECKPOINT));
+        let stranded: Vec<String> = rom_paths
+            .iter()
+            .zip(&files)
+            .filter_map(|(rom, files)| {
+                let plain = persist::stranded_save(rom, files)?;
+                Some(format!(
+                    "{} is not loaded, as it may be another game's of the same name; rename it {} to play on from it",
+                    file_name(&plain),
+                    file_name(&files.backup()),
+                ))
+            })
+            .collect();
+        let task = cx.spawn({
+            let receiver = receiver.clone();
+            async move |this, cx| {
+                while let Ok(event) = receiver.recv().await {
+                    if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
+                        break;
+                    }
                 }
             }
         });
         self.session = Some(Session {
+            _events: task,
+            events: receiver,
             emulator,
             info,
             rom_paths,
             player_rom_paths,
+            files,
             frames: Vec::new(),
             sequence: 0,
             cheat_texts: vec![None; info.players.max(1)],
@@ -500,7 +544,6 @@ impl EmulatorView {
             recording: false,
             images: Vec::new(),
             ambient: None,
-            _events: task,
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
@@ -533,9 +576,12 @@ impl EmulatorView {
         };
         let notes = [
             Some(running),
+            no_sound,
             pace,
             bindings,
             self.reload_cheats(),
+            (!stranded.is_empty()).then(|| stranded.join(" · ")),
+            stopped,
             self.startup_notice.take(),
         ];
         let notice: Vec<String> = notes.into_iter().flatten().collect();
@@ -594,10 +640,10 @@ impl EmulatorView {
         };
         let session = self.session.as_mut()?;
         session.bindings = session
-            .player_rom_paths
+            .player_files()
             .iter()
-            .map(|rom| {
-                let path = persist::bindings_path(rom);
+            .map(|files| {
+                let path = files.bindings();
                 user.overlay_file(&path).unwrap_or_else(|error| {
                     problems.push(format!("{} not applied: {error}", file_name(&path)));
                     user.clone()
@@ -616,10 +662,15 @@ impl EmulatorView {
     /// the emulator. Returns a summary of the changes, if any.
     fn reload_cheats(&mut self) -> Option<String> {
         let session = self.session.as_mut()?;
-        let players = session.player_rom_paths.len();
+        let paths: Vec<PathBuf> = session
+            .player_files()
+            .iter()
+            .map(GameFiles::cheats)
+            .collect();
+        let players = paths.len();
         let mut changes = Vec::new();
-        for (player, rom) in session.player_rom_paths.iter().enumerate() {
-            let text = cheats::read(&persist::cheats_path(rom));
+        for (player, path) in paths.iter().enumerate() {
+            let text = cheats::read(path);
             if text == session.cheat_texts[player] {
                 continue;
             }
@@ -647,14 +698,10 @@ impl EmulatorView {
     /// Opens the active player's cheat file in the text editor, creating it
     /// from a template first if needed.
     fn edit_cheats(&mut self, _: &EditCheats, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(rom) = self.session.as_ref().and_then(|session| {
-            let player = self.active_player.min(session.player_rom_paths.len() - 1);
-            session.player_rom_paths.get(player)
-        }) else {
+        let Some(path) = self.cheat_file() else {
             self.show_notice("Open a game first, then edit its cheats", cx);
             return;
         };
-        let path = persist::cheats_path(rom);
         let opened = cheats::create_if_missing(&path).and_then(|()| cheats::open_in_editor(&path));
         match opened {
             Ok(()) => self.show_notice(
@@ -668,17 +715,34 @@ impl EmulatorView {
         }
     }
 
-    fn stop(&mut self, window: &mut Window) {
+    /// Stops the game, if one runs, and closes its menu. Returns what the
+    /// emulation thread said as it stopped, such as a battery save it
+    /// could not write, for the caller to show.
+    fn stop(&mut self, window: &mut Window) -> Option<String> {
         // A preview still loading belongs to the game stopping.
         self.slot_preview_task = None;
         self.linked_side_by_side = false;
-        if let Some(session) = self.session.take() {
-            let images = session.images.into_iter().flatten();
-            let ambient = session.ambient.map(|glow| glow.image);
-            for image in images.map(|(_, image)| image).chain(ambient) {
-                window.drop_image(image).ok();
-            }
+        self.menu = None;
+        let mut session = self.session.take()?;
+        let images = session.images.drain(..).flatten();
+        let ambient = session.ambient.take().map(|glow| glow.image);
+        for image in images.map(|(_, image)| image).chain(ambient) {
+            window.drop_image(image).ok();
         }
+        let said: Vec<String> = session
+            .finish()
+            .into_iter()
+            .filter_map(checkpoint_notice)
+            .collect();
+        (!said.is_empty()).then(|| said.join(" · "))
+    }
+
+    /// Keeps `note` to show with the next game's start, after whatever
+    /// shows meanwhile.
+    fn keep_for_start(&mut self, note: Option<String>) {
+        let notes = [self.startup_notice.take(), note];
+        let notes: Vec<String> = notes.into_iter().flatten().collect();
+        self.startup_notice = (!notes.is_empty()).then(|| notes.join(" · "));
     }
 
     fn handle(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -694,11 +758,29 @@ impl EmulatorView {
                     self.show_notice(text, cx);
                 }
             }
+            // Joins the game's starting notice, which may hold warnings.
+            Event::PickedUp(loaded) => {
+                let picked = if loaded {
+                    "Picked up where you left off"
+                } else {
+                    "The battery save changed after you left off, so the game starts from it"
+                };
+                let text = match &self.notice {
+                    Some(shown) => format!("{shown} · {picked}"),
+                    None => picked.to_owned(),
+                };
+                self.show_notice(text, cx);
+            }
             Event::Recording(on) => {
                 if let Some(session) = &mut self.session {
                     session.recording = on;
                 }
                 cx.notify();
+            }
+            // Kept up until another notice, as no more frames come.
+            Event::Stopped(text) => {
+                self.show_notice(text, cx);
+                self.notice_timer = None;
             }
         }
     }
@@ -751,29 +833,24 @@ impl EmulatorView {
         });
     }
 
-    /// Hands keyboard and gamepad control to `player`, releasing everything
-    /// the previous player held.
+    /// Hands keyboard and gamepad control to `player`. The previous player
+    /// lets go of everything at once, and the new one starts with nothing
+    /// held: what is down now was pressed under the previous player's
+    /// bindings, so it counts again only once pressed again.
+    ///
+    /// Not while the game menu is open: it is the active player's game's
+    /// menu, its cheats and Start Over that player's, so the player stays
+    /// until it closes.
     fn switch_player(&mut self, player: usize, cx: &mut Context<Self>) {
         let Some(players) = self.session.as_ref().map(|s| s.info.players) else {
             return;
         };
-        if players < 2 || player == self.active_player || player >= players {
+        if players < 2 || player == self.active_player || player >= players || self.menu.is_some() {
             return;
         }
         // The mouse touches the screen it was pressed on, not the next
-        // player's.
-        if self.stylus.take().is_some() {
-            self.sent_touch = None;
-        }
-        self.send(Command::SetInput {
-            player: self.active_player,
-            input: Input::default(),
-        });
-        self.send(Command::SetTurbo {
-            player: self.active_player,
-            buttons: Buttons::NONE,
-            frames: self.bindings.turbo_frames(),
-        });
+        // player's, so it lets go too.
+        self.release_player();
         self.active_player = player;
         // Keyboard and gamepads now play the other player's game.
         if let Some(bindings) = self
@@ -843,47 +920,150 @@ impl EmulatorView {
         Some((screen, *info.screens.get(screen)?))
     }
 
+    /// Lets go of everything held, at once: for when keys and buttons stop
+    /// reaching the game while they may still be down, as when the window
+    /// loses focus or the game menu opens. A key still down counts again
+    /// only once pressed again, as its repeats are not presses.
     fn release_all(&mut self) {
+        self.release_player();
+        // The microphone goes on being heard.
+        self.send_input();
+    }
+
+    /// Forgets everything held, and has the active player let go of it in
+    /// the game at once, microphone and all: quick taps and turbo presses
+    /// are cut short rather than held for the game to see.
+    fn release_player(&mut self) {
         self.stylus = None;
         self.controls.release_all();
         self.chords.clear();
         self.sync_held();
+        self.send(Command::ReleaseInput {
+            player: self.active_player,
+        });
+    }
+
+    /// What the window shows of the gamepad cursor: where it is, and
+    /// whether it touches. Held inputs show nowhere else, so input events
+    /// redraw only when this changes; a redraw holds up the events behind
+    /// it.
+    fn cursor_look(&self) -> (Option<Cursor>, bool) {
+        (self.cursor, self.sent.touch)
+    }
+
+    /// Where keys go now.
+    fn key_route(&self) -> Route {
+        if self.session.is_none() {
+            Route::Library
+        } else if self.menu.is_some() {
+            Route::Menu
+        } else {
+            Route::Game
+        }
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let route = self.key_route();
+        let key = event.keystroke.key.as_str();
+        // A key held down repeats. GPUI passes on the repeats of keys that
+        // type nothing (the arrows, Escape, Backspace) as fresh presses, so
+        // a key already down is repeating whatever the event says.
+        let pressed_to = self.key_routes.route_of(key);
+        let repeat = event.is_held || pressed_to.is_some();
+        if !repeat {
+            // ⌘ keys are shortcuts, and macOS may never say they came up.
+            if !event.keystroke.modifiers.platform {
+                self.key_routes.press(key, route);
+            }
+        } else if pressed_to != Some(route) {
+            // Repeats go only where the press went: Return held to choose
+            // in the menu or the library never reaches what comes after.
+            return;
+        }
+        let event = KeyDownEvent {
+            keystroke: event.keystroke.clone(),
+            is_held: repeat,
+        };
         // Without a game, keys search and choose in the library.
-        if self.session.is_none() {
+        if route == Route::Library {
             self.library
-                .update(cx, |library, cx| library.key_down(event, cx));
+                .update(cx, |library, cx| library.key_down(&event, cx));
             return;
         }
         // While the game menu is open, keys are the menu's.
         if let Some((menu, _)) = &self.menu {
-            menu.clone().update(cx, |menu, cx| menu.key_down(event, cx));
+            menu.clone()
+                .update(cx, |menu, cx| menu.key_down(&event, cx));
+            return;
+        }
+        // The game holds a key from its press to its release; repeats add
+        // nothing. A key still down when the game stopped hearing it, as
+        // the menu opened, counts again once pressed again.
+        if repeat {
             return;
         }
         let modifiers = event.keystroke.modifiers;
         let plain = !modifiers.platform && !modifiers.control && !modifiers.alt;
-        if event.keystroke.key == "escape" && plain && !event.is_held {
+        if key == "escape" && plain {
             self.open_menu(window, cx);
             return;
         }
         // Command and Control chords are menu shortcuts, not game input.
         if !modifiers.platform && !modifiers.control {
-            let key = &event.keystroke.key;
+            let looked = self.cursor_look();
             let action = self.bindings.key_action(key);
-            self.controls.set(format!("key:{key}"), action, true);
+            self.controls.set(format!("{KEY}{key}"), action, true);
             self.sync_held();
             // Redraw the cursor if a key touches with it, even when paused.
-            cx.notify();
+            if self.cursor_look() != looked {
+                cx.notify();
+            }
         }
     }
 
     fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let key = &event.keystroke.key;
-        self.controls.set(format!("key:{key}"), None, false);
+        let looked = self.cursor_look();
+        let key = event.keystroke.key.as_str();
+        // Shift going down or up while a key is down renames some keys: `1`
+        // held as Shift goes down comes up as `!`. A key that went down
+        // under this name is the one coming up, though, such as a keypad
+        // `1`, which Shift leaves alone.
+        let name = match bindings::shift_twin(key) {
+            Some(twin)
+                if self.key_routes.route_of(key).is_none()
+                    && self.key_routes.route_of(twin).is_some() =>
+            {
+                twin
+            }
+            _ => key,
+        };
+        self.key_routes.release(name);
+        self.controls.set(format!("{KEY}{name}"), None, false);
         self.sync_held();
-        cx.notify();
+        if self.cursor_look() != looked {
+            cx.notify();
+        }
+    }
+
+    /// Lets go of every key held for the game when ⌘ goes down: macOS
+    /// sends no key-up for a key let go of while ⌘ is down, which would
+    /// leave it held. A key still down counts again once pressed again.
+    fn modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.modifiers.platform {
+            return;
+        }
+        let looked = self.cursor_look();
+        self.key_routes.clear();
+        self.controls.release_from(KEY);
+        self.sync_held();
+        if self.cursor_look() != looked {
+            cx.notify();
+        }
     }
 
     fn pad_event(&mut self, event: &PadEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -891,6 +1071,7 @@ impl EmulatorView {
         if self.menu.is_some() {
             return;
         }
+        let looked = self.cursor_look();
         match event {
             PadEvent::Control {
                 controller,
@@ -906,7 +1087,9 @@ impl EmulatorView {
             PadEvent::Pointer { dx, dy } => self.move_cursor((*dx, *dy)),
         }
         // Redraw the cursor, even when paused.
-        cx.notify();
+        if self.cursor_look() != looked {
+            cx.notify();
+        }
     }
 
     /// Carries out one effect of a control on `controller` going down or
@@ -1028,12 +1211,12 @@ impl EmulatorView {
         let slot = self.state_slot;
         self.show_notice(format!("State slot {slot}"), cx);
         self.save_settings(cx);
-        let Some(rom_paths) = self.session.as_ref().map(|s| s.player_rom_paths.clone()) else {
+        let Some(state) = self.session.as_ref().map(|s| s.state_path(slot)) else {
             return;
         };
         let preview = cx
             .background_executor()
-            .spawn(async move { slots::preview(&rom_paths, slot) });
+            .spawn(async move { slots::preview(&state) });
         self.slot_preview_task = Some(cx.spawn(async move |this, cx| {
             let preview = preview.await;
             this.update(cx, |this, cx| this.show_slot_preview(slot, preview, cx))
@@ -1064,8 +1247,12 @@ impl EmulatorView {
 
     /// A click. On the touchscreen it is the stylus touching there, so the
     /// game moves its selection there and presses it at once, as on a DS;
-    /// anywhere else it presses A.
+    /// anywhere else it presses A. The click that brings the window to the
+    /// front only does that.
     fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.first_mouse {
+            return;
+        }
         // In a multi-player session, clicking a screen takes control of it.
         let point = (f32::from(event.position.x), f32::from(event.position.y));
         let clicked = self.session.as_ref().and_then(|session| {
@@ -1190,12 +1377,16 @@ impl EmulatorView {
         if self.menu.is_some() {
             return;
         }
-        let rom = session.player_rom_paths[0].clone();
+        // The active player's game, which Start Over erases.
+        let player = self.active_player.min(session.player_rom_paths.len() - 1);
+        let rom = session.player_rom_paths[player].clone();
         let title = self
             .library
             .read(cx)
             .title_of(&rom)
             .unwrap_or_else(|| file_name(&rom));
+        // Let go at once, before pausing, so no quick tap waits under the
+        // menu to reach the game when it resumes.
         self.release_all();
         self.send_debug(debugger::Command::Pause);
         let cheats = self.menu_cheats();
@@ -1207,15 +1398,23 @@ impl EmulatorView {
         cx.notify();
     }
 
-    /// Closes the game menu, playing on if `resume`.
-    fn close_menu(&mut self, resume: bool, cx: &mut Context<Self>) {
+    /// Closes the game menu, if open, and plays on.
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
         if self.menu.take().is_none() {
             return;
         }
-        if resume {
-            self.send_debug(debugger::Command::Continue);
-        }
+        self.send_debug(debugger::Command::Continue);
         cx.notify();
+    }
+
+    /// Closes the game menu, if open, and plays on, returning whether it
+    /// was open: a shortcut that acts on the game (pause, reset, load
+    /// state) ends the menu's pause, so the game never runs or changes
+    /// unseen under it.
+    fn leave_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.menu.is_some();
+        self.close_menu(cx);
+        open
     }
 
     fn menu_event(
@@ -1226,7 +1425,7 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         match *event {
-            MenuEvent::Resume => self.close_menu(true, cx),
+            MenuEvent::Resume => self.close_menu(cx),
             MenuEvent::ToggleCheat(index) => self.toggle_cheat(index, cx),
             MenuEvent::EditCheats => self.edit_cheats(&EditCheats, window, cx),
             MenuEvent::StartOver => self.start_over(window, cx),
@@ -1235,43 +1434,46 @@ impl EmulatorView {
     }
 
     /// Saves where the game is as its checkpoint, to pick up from when it
-    /// next starts. The emulation thread finishes this before it stops.
+    /// next starts, with the battery saves it goes with. The emulation
+    /// thread finishes this before it stops.
     fn save_checkpoint(&self) {
-        self.send(Command::SaveState(CHECKPOINT));
+        self.send(Command::SaveCheckpoint(CHECKPOINT));
     }
 
-    /// Erases the running game's progress, its checkpoint and battery
-    /// saves, and starts it again. Each battery save is kept as
-    /// `game.sav.bak` in case it was a mistake.
+    /// Erases the active player's progress, the session's checkpoint and
+    /// the battery save of the game the menu names, and starts the session
+    /// again. Other cartridges, such as a GBA game in a DS's slot or the
+    /// other player's game, keep theirs. The battery save is kept as
+    /// `game.sav.bak`, or `.bak2` and so on, never replacing an earlier
+    /// one, in case it was a mistake.
     fn start_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let roms = session.rom_paths.clone();
-        let checkpoint = persist::state_path(&session.player_rom_paths, CHECKPOINT);
-        self.close_menu(false, cx);
-        // Stopping writes the battery saves, so they are set aside after.
-        self.stop(window);
-        let erased = remove_if_present(&checkpoint).and_then(|()| {
-            roms.iter().try_for_each(|rom| {
-                let save = persist::backup_path(rom);
-                match fs::rename(&save, save.with_extension("sav.bak")) {
-                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-                    _ => Ok(()),
-                }
-            })
-        });
-        if let Err(error) = erased {
-            self.show_notice(format!("Cannot erase progress: {error}"), cx);
-        }
+        let save = session.player_files_of(self.active_player).backup();
+        let checkpoint = session.state_path(CHECKPOINT);
+        // Stopping writes the battery saves, so the save is set aside after.
+        let stopped = self.stop(window);
+        self.keep_for_start(stopped);
+        let erased = remove_if_present(&checkpoint)
+            .and_then(|()| remove_if_present(&persist::saves_record_path(&checkpoint)))
+            .and_then(|()| persist::set_aside(&save));
+        // Said once the game is running again, after the loading notice.
+        let said = match erased {
+            Ok(Some(kept)) => Some(format!("Your old save is kept as {}", file_name(&kept))),
+            Ok(None) => None,
+            Err(error) => Some(format!("Cannot erase progress: {error}")),
+        };
+        self.keep_for_start(said);
         self.open(roms, window, cx);
+        cx.notify();
     }
 
     /// The active player's cheat file, while a game runs.
     fn cheat_file(&self) -> Option<PathBuf> {
         let session = self.session.as_ref()?;
-        let player = self.active_player.min(session.player_rom_paths.len() - 1);
-        Some(persist::cheats_path(session.player_rom_paths.get(player)?))
+        Some(session.player_files_of(self.active_player).cheats())
     }
 
     /// The active player's cheats, as the game menu lists them.
@@ -1338,9 +1540,10 @@ impl EmulatorView {
         if self.session.is_none() {
             return;
         }
-        self.close_menu(false, cx);
         self.save_checkpoint();
-        self.stop(window);
+        if let Some(said) = self.stop(window) {
+            self.show_notice(said, cx);
+        }
         window.set_window_title("ds-emulator");
         cx.notify();
     }
@@ -1413,6 +1616,19 @@ impl EmulatorView {
     fn drop_files(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = paths.paths().first() {
             self.open(vec![path.clone()], window, cx);
+        }
+    }
+
+    /// The layout the window shows: the user's, but with a linked game's
+    /// consoles side by side until the user picks an arrangement.
+    fn shown_layout(&self) -> Layout {
+        if self.linked_side_by_side {
+            Layout {
+                arrangement: Arrangement::Horizontal,
+                ..self.layout
+            }
+        } else {
+            self.layout
         }
     }
 
@@ -1539,12 +1755,38 @@ impl EmulatorView {
         }
     }
 
+    /// The settings as the window shows them, for the settings window: a
+    /// linked game's consoles side by side, while they are.
+    pub fn shown_settings(&self) -> Settings {
+        Settings {
+            layout: self.shown_layout(),
+            ..self.settings()
+        }
+    }
+
     /// Switches to `settings`, as the menu items for each would, and saves
     /// them for next launch. The speeds, which only the settings file sets,
-    /// stay as they are.
+    /// stay as they are. Its layout is a change to the one shown (see
+    /// [`EmulatorView::shown_settings`]).
     pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
-        if settings.layout != self.settings().layout {
-            self.set_layout(settings.layout, cx);
+        let shown = self.shown_layout();
+        if settings.layout != shown {
+            // An arrangement picked ends a linked game's side by side, as
+            // from the menu; any other change keeps it, and keeps the
+            // user's own arrangement for after.
+            let arrangement = if settings.layout.arrangement == shown.arrangement {
+                self.layout.arrangement
+            } else {
+                self.linked_side_by_side = false;
+                settings.layout.arrangement
+            };
+            self.set_layout(
+                Layout {
+                    arrangement,
+                    ..settings.layout
+                },
+                cx,
+            );
         }
         if settings.resolution_3d != self.resolution_3d {
             self.set_resolution_3d(settings.resolution_3d, cx);
@@ -1829,6 +2071,43 @@ impl EmulatorView {
 }
 
 impl Session {
+    /// Each player's game's own files.
+    fn player_files(&self) -> &[GameFiles] {
+        &self.files[..self.player_rom_paths.len()]
+    }
+
+    /// The own files of `player`'s game, or of the last player's if there
+    /// are fewer.
+    fn player_files_of(&self, player: usize) -> &GameFiles {
+        &self.files[player.min(self.player_rom_paths.len() - 1)]
+    }
+
+    /// The session's save state file in `slot`.
+    fn state_path(&self, slot: u8) -> PathBuf {
+        self.files[0].state(slot, self.info.players > 1)
+    }
+
+    /// Stops the emulation thread, which first finishes what it was asked,
+    /// such as saving the checkpoint, and writes the battery saves.
+    /// Returns what it said meanwhile that was not yet shown.
+    fn finish(self) -> Vec<String> {
+        let Self {
+            emulator,
+            events,
+            _audio: audio,
+            ..
+        } = self;
+        drop(emulator);
+        // The thread has stopped, so the device can go.
+        drop(audio);
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::Notice(text) | Event::Stopped(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Takes the emulation thread's latest frames, if they are new,
     /// retiring every screen image drawn from the last ones. The ambient
     /// backdrop fades over to them instead.
@@ -1987,12 +2266,21 @@ impl Render for EmulatorView {
                 let players = this.session.as_ref().map_or(1, |s| s.info.players);
                 this.switch_player((this.active_player + 1) % players.max(1), cx);
             }))
-            .on_action(cx.listener(|this, _: &TogglePause, _, _| this.send(Command::TogglePause)))
-            .on_action(cx.listener(|this, _: &Reset, _, _| this.send(Command::Reset)))
+            .on_action(cx.listener(|this, _: &TogglePause, _, cx| {
+                // Under the game menu the game is paused already: resume.
+                if !this.leave_menu(cx) {
+                    this.send(Command::TogglePause);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Reset, _, cx| {
+                this.leave_menu(cx);
+                this.send(Command::Reset);
+            }))
             .on_action(cx.listener(|this, _: &SaveState, _, _| {
                 this.send(Command::SaveState(this.state_slot));
             }))
-            .on_action(cx.listener(|this, _: &LoadState, _, _| {
+            .on_action(cx.listener(|this, _: &LoadState, _, cx| {
+                this.leave_menu(cx);
                 this.send(Command::LoadState(this.state_slot));
             }))
             .on_action(
@@ -2098,6 +2386,7 @@ impl Render for EmulatorView {
             }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -2130,16 +2419,9 @@ impl Render for EmulatorView {
         // Black around the screens in full screen, unless the backdrop
         // glows.
         root = root.bg(rgb(if fullscreen { 0x0000_0000 } else { BACKGROUND }));
+        let shown = self.shown_layout();
         if let Some(session) = self.session.as_mut() {
             let consoles = consoles(&session.info);
-            let shown = if self.linked_side_by_side {
-                Layout {
-                    arrangement: Arrangement::Horizontal,
-                    ..self.layout
-                }
-            } else {
-                self.layout
-            };
             self.placements = shown.place_consoles(session.info.screens, consoles, viewport);
             session.take_frames(window);
             session.refresh_images(

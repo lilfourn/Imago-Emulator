@@ -290,6 +290,49 @@ fn map_of<A: Copy>(defaults: &[(A, &str)]) -> Map<A> {
         .collect()
 }
 
+/// The keys of a US keyboard that type something else with Shift, each
+/// with what it types then.
+const SHIFTED: [(&str, &str); 21] = [
+    ("`", "~"),
+    ("1", "!"),
+    ("2", "@"),
+    ("3", "#"),
+    ("4", "$"),
+    ("5", "%"),
+    ("6", "^"),
+    ("7", "&"),
+    ("8", "*"),
+    ("9", "("),
+    ("0", ")"),
+    ("-", "_"),
+    ("=", "+"),
+    ("[", "{"),
+    ("]", "}"),
+    ("\\", "|"),
+    (";", ":"),
+    ("'", "\""),
+    (",", "<"),
+    (".", ">"),
+    ("/", "?"),
+];
+
+/// The other name GPUI gives key `key` with Shift down, or without it:
+/// `!` for `1` and `1` for `!`. GPUI names a key by what it types, so a
+/// key held while Shift goes down or up comes up under its other name.
+/// Letters keep theirs, as do named keys such as `enter`. This knows a US
+/// keyboard's symbols; other layouts shift some keys to other symbols.
+pub fn shift_twin(key: &str) -> Option<&'static str> {
+    SHIFTED.iter().find_map(|&(plain, shifted)| {
+        if key == plain {
+            Some(shifted)
+        } else if key == shifted {
+            Some(plain)
+        } else {
+            None
+        }
+    })
+}
+
 impl Default for Bindings {
     fn default() -> Self {
         Self {
@@ -530,6 +573,16 @@ mod tests {
         }
         assert_eq!(bindings.pad_action("any", "RightThumb"), Some(Held::Touch));
         assert_eq!(bindings.key_action("1"), Some(Held::SlowMotion));
+    }
+
+    #[test]
+    fn shifted_keys_know_their_other_name() {
+        assert_eq!(shift_twin("1"), Some("!"));
+        assert_eq!(shift_twin("!"), Some("1"));
+        assert_eq!(shift_twin("`"), Some("~"));
+        assert_eq!(shift_twin("\""), Some("'"));
+        assert_eq!(shift_twin("w"), None);
+        assert_eq!(shift_twin("enter"), None);
     }
 
     #[test]

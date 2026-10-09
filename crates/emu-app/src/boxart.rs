@@ -55,12 +55,25 @@ pub fn database(cache: &Path, platform: Platform) -> anyhow::Result<GameDb> {
     let path = cache.join("databases").join(format!("{name}.dat"));
     if !path.exists() {
         let url = format!("{DATABASES}/{}.dat", encode(name));
-        if !download(&url, &path)? {
+        let Some(bytes) = download(&url)? else {
             bail!("no game database for {name}");
+        };
+        // Checked before it is kept, so a bad download is tried again.
+        let text = String::from_utf8_lossy(&bytes);
+        if GameDb::parse(&text).is_empty() {
+            bail!("the game database for {name} came down empty or garbled");
         }
+        write(&path, &bytes)?;
     }
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(GameDb::parse(&text))
+    let db = GameDb::parse(&text);
+    if db.is_empty() {
+        // Kept by an older version without checking: fetch it again next
+        // time rather than find nothing in it for good.
+        fs::remove_file(&path).ok();
+        bail!("the game database for {name} was empty or garbled");
+    }
+    Ok(db)
 }
 
 /// Each platform's game database, parsed, kept between lookups.
@@ -141,7 +154,7 @@ fn look_up(
             }
         };
         if let Some(name) = name_in(db, game) {
-            if !art_path(cache, game.crc32).exists() {
+            if !is_png(&art_path(cache, game.crc32)) {
                 download_art(cache, platform, &name, game.crc32)?;
             }
             return Ok(Some(name));
@@ -198,11 +211,30 @@ pub fn download_art(
     );
     let path = art_path(cache, crc32);
     for file in game_db::thumbnail_names(name) {
-        if download(&format!("{folder}/{}", encode(&file)), &path)? {
+        let url = format!("{folder}/{}", encode(&file));
+        if let Some(bytes) = download(&url)? {
+            // A page in place of the picture would hide the DS icon for
+            // good.
+            if !bytes.starts_with(PNG_SIGNATURE) {
+                bail!("{url} is not a PNG");
+            }
+            write(&path, &bytes)?;
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// What every PNG file starts with.
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+/// Whether the file at `path` is there and starts as a PNG does: box art
+/// an older version kept from a bad download is not.
+pub fn is_png(path: &Path) -> bool {
+    let mut start = [0; PNG_SIGNATURE.len()];
+    fs::File::open(path)
+        .and_then(|mut file| io::Read::read_exact(&mut file, &mut start))
+        .is_ok_and(|()| start == PNG_SIGNATURE)
 }
 
 /// Saves a DS banner icon, 32×32 RGBA `pixels`, as a PNG at
@@ -234,30 +266,36 @@ pub fn save_icon(cache: &Path, crc32: u32, pixels: &[u8]) -> io::Result<PathBuf>
     Ok(path)
 }
 
-/// Downloads `url` to `path`. Whether the server had it: `false` for a
+/// Downloads `url`, whole: its bytes, or `None` if the server answered
 /// 404.
 ///
 /// # Errors
 ///
-/// Fails if `curl` cannot run, the server cannot be reached or answers
-/// with an error other than 404, or the file cannot be written.
-fn download(url: &str, path: &Path) -> anyhow::Result<bool> {
+/// Fails if `curl` cannot run or stops short, as when the connection
+/// drops or times out part-way, or the server cannot be reached or
+/// answers with an error other than 404.
+fn download(url: &str) -> anyhow::Result<Option<Vec<u8>>> {
     let output = Command::new("curl")
-        .args(["--silent", "--location", "--compressed"])
+        .args(["--silent", "--show-error", "--location", "--compressed"])
         .args(["--connect-timeout", "10", "--max-time", "60"])
         .args(["--output", "-", "--write-out", "\n%{http_code}"])
         .arg(url)
         .output()
         .context("running curl")?;
-    let body = &output.stdout;
+    let mut body = output.stdout;
     let split = body.iter().rposition(|&b| b == b'\n').unwrap_or(0);
     let status = String::from_utf8_lossy(&body[split..]).trim().to_owned();
+    // A transfer cut short still says 200; only curl's own status tells.
+    if !output.status.success() {
+        let why = String::from_utf8_lossy(&output.stderr);
+        bail!("cannot download {url}: {}", why.trim());
+    }
     match status.as_str() {
         "200" => {
-            write(path, &body[..split])?;
-            Ok(true)
+            body.truncate(split);
+            Ok(Some(body))
         }
-        "404" => Ok(false),
+        "404" => Ok(None),
         _ => bail!("cannot download {url}: HTTP status {status:?}"),
     }
 }
@@ -333,6 +371,38 @@ game (
             Some("Advance Wars (USA)")
         );
         assert_eq!(name_in(&db, &game("hack.gba", 9, Some("ZZZZ"))), None);
+    }
+
+    #[test]
+    fn a_garbled_cached_database_is_dropped_to_fetch_again() {
+        let cache = std::env::temp_dir().join(format!("ds-emulator-db-{}", std::process::id()));
+        let name = Platform::Gba.libretro_name();
+        let path = cache.join("databases").join(format!("{name}.dat"));
+        write(&path, b"<html>Too many requests</html>").expect("written");
+        let error = database(&cache, Platform::Gba).expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("empty or garbled"),
+            "{error:#}"
+        );
+        assert!(!path.exists(), "dropped");
+        let dat =
+            "game (\n\tname \"Metroid Fusion (USA)\"\n\trom ( name \"x.gba\" crc 00000001 )\n)\n";
+        write(&path, dat.as_bytes()).expect("written");
+        let db = database(&cache, Platform::Gba).expect("kept");
+        assert_eq!(db.by_crc(1), Some("Metroid Fusion (USA)"));
+        fs::remove_dir_all(&cache).ok();
+    }
+
+    #[test]
+    fn only_pngs_count_as_box_art() {
+        let cache = std::env::temp_dir().join(format!("ds-emulator-art-{}", std::process::id()));
+        let path = art_path(&cache, 7);
+        assert!(!is_png(&path), "missing");
+        write(&path, b"<html>Not Found</html>").expect("written");
+        assert!(!is_png(&path));
+        write(&path, PNG_SIGNATURE).expect("written");
+        assert!(is_png(&path));
+        fs::remove_dir_all(&cache).ok();
     }
 
     #[test]
