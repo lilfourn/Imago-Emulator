@@ -34,6 +34,9 @@ rtrb.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+# Unpacks downloaded games; reading only needs inflate, not the zopfli
+# compressor the plain `deflate` feature adds.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # AppKit, for what GPUI leaves out: hiding the window's close, minimise and
 # zoom buttons, the standard About panel and the Dock icon. The versions GPUI

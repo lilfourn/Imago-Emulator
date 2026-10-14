@@ -8,6 +8,7 @@
 
 mod ambient;
 mod app;
+mod archive;
 mod audio;
 mod bindings;
 mod boxart;

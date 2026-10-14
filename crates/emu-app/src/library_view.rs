@@ -21,6 +21,7 @@ use gpui::{
 };
 
 use crate::app::TOP_BAR;
+use crate::archive;
 use crate::boxart;
 use crate::library::{self, Game, Library};
 use crate::rom_info;
@@ -108,9 +109,10 @@ impl LibraryView {
         view
     }
 
-    /// Adds the games at `paths`, reading them off the UI thread.
-    /// Games already in the library are left as they are, so playing one
-    /// does not read its ROM again.
+    /// Adds the games at `paths`, reading them off the UI thread, and
+    /// those in any zip files among them once unpacked. Games already in
+    /// the library are left as they are, so playing one does not read its
+    /// ROM again.
     pub fn add(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut seen = HashSet::new();
         let paths: Vec<PathBuf> = paths
@@ -125,7 +127,7 @@ impl LibraryView {
         let read = cx.background_executor().spawn(async move {
             paths
                 .iter()
-                .map(|path| read_game(path, cache.as_deref()))
+                .flat_map(|path| read_games(path, cache.as_deref()))
                 .collect::<Vec<_>>()
         });
         cx.spawn(async move |this, cx| {
@@ -482,7 +484,7 @@ impl LibraryView {
         let (title, hint) = if self.library.games.is_empty() {
             (
                 "No games yet".to_owned(),
-                "Add some with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file here.".to_owned(),
+                "Add some with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, or a .zip of one, here.".to_owned(),
             )
         } else {
             (
@@ -583,6 +585,18 @@ fn cover_on_disk(cache: &Path, crc32: u32) -> Option<PathBuf> {
         Some(art)
     } else {
         icon.exists().then_some(icon)
+    }
+}
+
+/// The games at `path`: the ROM there, or each one in it if it is a zip
+/// file, unpacked into the games folder.
+fn read_games(path: &Path, cache: Option<&Path>) -> Vec<Result<Game, String>> {
+    if !archive::is_zip(path) {
+        return vec![read_game(path, cache)];
+    }
+    match archive::unpack(path) {
+        Ok(roms) => roms.iter().map(|rom| read_game(rom, cache)).collect(),
+        Err(error) => vec![Err(error)],
     }
 }
 
