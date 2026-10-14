@@ -29,6 +29,7 @@ use crate::app::{
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
 };
+use crate::archive;
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Held, Shortcut};
 use crate::cheats;
@@ -446,6 +447,10 @@ impl EmulatorView {
     /// game with a GBA game in its slot, or two games joined by a link
     /// cable.
     fn open(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if paths.iter().any(|path| archive::is_zip(path)) {
+            self.unpack_and_open(paths, window, cx);
+            return;
+        }
         // A game opened from the command line is the same game, in the
         // library too, whatever folder it was opened from.
         let paths: Vec<PathBuf> = paths.iter().map(|path| library::absolute(path)).collect();
@@ -483,6 +488,43 @@ impl EmulatorView {
             })
             .ok();
         }));
+    }
+
+    /// Unpacks the zip files among `paths` off the UI thread, then opens
+    /// the first game from each in its place.
+    fn unpack_and_open(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = paths
+            .iter()
+            .map(|path| file_name(path))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        self.show_notice(format!("Unpacking {name}…"), cx);
+        let unpack = cx.background_executor().spawn(async move {
+            paths
+                .into_iter()
+                .map(|path| {
+                    if archive::is_zip(&path) {
+                        archive::unpack(&path).map(|games| games[0].clone())
+                    } else {
+                        Ok(path)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = unpack.await;
+            this.update_in(cx, |this, window, cx| match paths {
+                Ok(paths) => this.open(paths, window, cx),
+                Err(error) => this.show_notice(error, cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn start(&mut self, loaded: Loaded, name: &str, window: &mut Window, cx: &mut Context<Self>) {

@@ -65,6 +65,7 @@ The separate Metal Toolchain download is not needed.
 
 ```sh
 cargo run --release -p emu-app -- path/to/game.nds   # or open one with ⌘O
+cargo run --release -p emu-app -- download.zip       # a zipped game, unpacked first
 cargo run --release -p emu-app -- red.gb blue.gb     # two Game Boys, linked
 cargo run --release -p emu-app -- fr.gba em.gba      # two GBAs, linked
 cargo run --release -p emu-app -- w.nds w2.nds       # two DSes in wireless range
@@ -72,6 +73,12 @@ cargo run --release -p emu-app -- pt.nds em.gba      # a GBA game in the DS's GB
 cargo run --release -p emu-app -- --script scripts/lua/frame-counter.lua game.gba
 cargo test --workspace
 ```
+
+A game downloaded as a `.zip` can be opened, dropped on the window or added
+to the library as it is. The ROMs inside are unpacked into
+`~/Library/Application Support/ds-emulator/Games`, where they and their saves
+stay after the download is deleted. Unpacking the same game again reuses it; a
+different game with the same file name is numbered, as in `Game (2).gba`.
 
 Run a core without a window, for tests and scripting:
 
