@@ -1,0 +1,16 @@
+[package]
+name = "emu-patch"
+description = "ROM-hack patches: applies IPS, UPS, BPS and xdelta (VCDIFF) patches to the ROMs they were made from."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+# Pure Rust (MIT): xdelta3 compresses parts of its patches as .xz streams.
+lzma-rs = "0.3"
+thiserror.workspace = true
+
+[lints]
+workspace = true
