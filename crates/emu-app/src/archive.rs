@@ -1,18 +1,27 @@
-//! Games downloaded as `.zip` files. The ROMs inside are unpacked into the
-//! app's own games folder, where they and their saves stay after the
-//! download is deleted.
+//! Games downloaded as archives: `.zip` files, and `.7z` and `.rar`
+//! ones, which macOS's own `tar` (libarchive) unpacks. The ROMs inside
+//! are unpacked into the app's own games folder, where they and their
+//! saves stay after the download is deleted. ROM-hack patches inside are
+//! unpacked into a temporary folder, for [`crate::romhack`] to make their
+//! games from.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use zip::ZipArchive;
 
 use crate::persist;
+use crate::romhack;
 
 /// The most a ROM unpacks to: a DS cartridge holds at most 512 MiB, so a
-/// bigger file is not a game.
-const MAX_ROM: u64 = 512 << 20;
+/// bigger file is not a game. Patches are held to it too.
+pub const MAX_ROM: u64 = 512 << 20;
+
+/// The archives games come in, by extension.
+const ARCHIVES: [&str; 3] = ["zip", "7z", "rar"];
 
 /// Where unpacked games are kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Games` on macOS.
@@ -20,62 +29,203 @@ pub fn games_dir() -> Option<PathBuf> {
     Some(dirs::data_dir()?.join("ds-emulator").join("Games"))
 }
 
-/// Whether `path` is a zip file, judged by its extension.
-pub fn is_zip(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+/// Where patches unpacked from archives are kept until their games are
+/// made.
+fn patches_dir() -> PathBuf {
+    std::env::temp_dir().join("ds-emulator-patches")
 }
 
-/// Unpacks the games in the zip file at `zip` into the games folder and
-/// returns where each is now: at least one.
+/// Whether `path` is an archive, judged by its extension.
+pub fn is_archive(path: &Path) -> bool {
+    has_extension(path, &ARCHIVES)
+}
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extensions
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
+
+/// Unpacks the games and patches in the archive at `archive`, games into
+/// the games folder, and returns where each is now: at least one, in the
+/// archive's order.
 ///
 /// Blocking file I/O; call it off the UI thread.
 ///
 /// # Errors
 ///
-/// Fails if the zip cannot be read, holds no game, or a game cannot be
-/// written.
-pub fn unpack(zip: &Path) -> Result<Vec<PathBuf>, String> {
+/// Fails if the archive cannot be read, holds no game or patch, or a
+/// file cannot be written.
+pub fn unpack(archive: &Path) -> Result<Vec<PathBuf>, String> {
     let folder = games_dir().ok_or("There is no folder to unpack games into")?;
-    unpack_into(zip, &folder)
+    unpack_into(archive, &folder, &patches_dir())
 }
 
-fn unpack_into(zip: &Path, folder: &Path) -> Result<Vec<PathBuf>, String> {
-    let failed =
-        |error: &dyn std::fmt::Display| format!("Cannot unpack {}: {error}", zip.display());
-    let file = File::open(zip).map_err(|error| failed(&error))?;
-    let mut archive = ZipArchive::new(file).map_err(|error| failed(&error))?;
-    let mut games = Vec::new();
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(|error| failed(&error))?;
-        // macOS adds a copy of each file's metadata under `__MACOSX`, with
-        // the file's own name and extension.
-        let name = entry
-            .enclosed_name()
-            .filter(|inner| entry.is_file() && !inner.starts_with("__MACOSX"))
-            .filter(|inner| emu_cores::system_for_path(inner).is_some())
-            .and_then(|inner| inner.file_name().map(PathBuf::from));
-        let Some(name) = name else {
-            continue;
-        };
-        fs::create_dir_all(folder).map_err(|error| failed(&error))?;
-        let crc32 = entry.crc32();
-        games.push(extract(&mut entry, crc32, folder, &name).map_err(|error| failed(&error))?);
-    }
+fn unpack_into(archive: &Path, folder: &Path, patches: &Path) -> Result<Vec<PathBuf>, String> {
+    let unpacked = if has_extension(archive, &["zip"]) {
+        unpack_zip(archive, folder, patches)
+    } else {
+        unpack_with_tar(archive, folder, patches)
+    };
+    let games =
+        unpacked.map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
     if games.is_empty() {
         return Err(format!(
-            "{} holds no .gb, .gbc, .gba or .nds game",
-            zip.display()
+            "{} holds no .gb, .gbc, .gba or .nds game, or patch for one",
+            archive.display()
         ));
     }
     Ok(games)
 }
 
-/// Writes the ROM `entry`, whose CRC-32 is `crc32`, into `folder` as
-/// `name`, and returns its path. The same game unpacked before is used as
-/// it is; a different one of that name is left alone, as it may have
-/// saves beside it, and this one is numbered: `Game (2).gba`.
-fn extract(entry: &mut impl Read, crc32: u32, folder: &Path, name: &Path) -> io::Result<PathBuf> {
+/// Whether to unpack the file `inner` from an archive: a game or a patch,
+/// but not macOS's copy of a file's metadata under `__MACOSX`, which has
+/// the file's own name and extension.
+fn wanted(inner: &Path) -> bool {
+    !inner.starts_with("__MACOSX")
+        && (emu_cores::system_for_path(inner).is_some() || romhack::is_patch(inner))
+}
+
+fn unpack_zip(zip: &Path, folder: &Path, patches: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut archive = ZipArchive::new(File::open(zip)?).map_err(io::Error::other)?;
+    let mut games = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(io::Error::other)?;
+        let name = entry
+            .enclosed_name()
+            .filter(|inner| entry.is_file() && wanted(inner))
+            .and_then(|inner| inner.file_name().map(PathBuf::from));
+        let Some(name) = name else {
+            continue;
+        };
+        let game = if romhack::is_patch(&name) {
+            keep_patch(&read_capped(&mut entry, &name)?, patches, &name)?
+        } else {
+            let crc32 = entry.crc32();
+            store(folder, &name, crc32, || read_capped(&mut entry, &name))?
+        };
+        games.push(game);
+    }
+    Ok(games)
+}
+
+/// Unpacks a `.7z` or `.rar` file with `/usr/bin/tar`, which on macOS is
+/// libarchive's `bsdtar`: it reads both, and by default writes nothing
+/// outside the folder it is given. It unpacks everything into a scratch
+/// folder, from which the games and patches are taken in name order.
+fn unpack_with_tar(archive: &Path, folder: &Path, patches: &Path) -> io::Result<Vec<PathBuf>> {
+    let scratch = Scratch::new()?;
+    let output = Command::new("/usr/bin/tar")
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(&scratch.0)
+        .output()?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        // `tar: Error opening archive: …`
+        let said = said.trim().trim_start_matches("tar: ");
+        return Err(io::Error::other(said.to_owned()));
+    }
+    let mut files = Vec::new();
+    find_files(&scratch.0, &scratch.0, &mut files)?;
+    files.sort();
+    let mut games = Vec::new();
+    for inner in files.iter().filter(|inner| wanted(inner)) {
+        let Some(name) = inner.file_name().map(PathBuf::from) else {
+            continue;
+        };
+        let mut file = File::open(scratch.0.join(inner))?;
+        let bytes = read_capped(&mut file, &name)?;
+        let game = if romhack::is_patch(&name) {
+            keep_patch(&bytes, patches, &name)?
+        } else {
+            store(folder, &name, crc32fast::hash(&bytes), || Ok(bytes))?
+        };
+        games.push(game);
+    }
+    Ok(games)
+}
+
+/// Adds the files under `folder`, a folder in `root`, to `files`, as
+/// paths within `root`. Links are not followed.
+fn find_files(root: &Path, folder: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(folder)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            find_files(root, &entry.path(), files)?;
+        } else if kind.is_file()
+            && let Ok(inner) = entry.path().strip_prefix(root)
+        {
+            files.push(inner.to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// A new, empty temporary folder, removed with everything in it when
+/// dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> io::Result<Self> {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ds-emulator-unpack-{}-{number}",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&path).ok();
+        fs::create_dir_all(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// All of `file`, which is called `name`, unless it is too big to be a
+/// game.
+fn read_capped(file: &mut impl Read, name: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(MAX_ROM + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_ROM {
+        return Err(io::Error::other(format!(
+            "{} is too big to be a game",
+            name.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Writes the patch `bytes` into `patches` as `name`, replacing any patch
+/// of that name, and returns its path.
+fn keep_patch(bytes: &[u8], patches: &Path, name: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(patches)?;
+    let path = patches.join(name);
+    persist::write_atomic(&path, bytes)?;
+    Ok(path)
+}
+
+/// Writes the ROM whose CRC-32 is `crc32` into `folder` as `name`, with
+/// `read` giving its bytes, and returns its path. The same game written
+/// before is used as it is, and not read again; a different one of that
+/// name is left alone, as it may have saves beside it, and this one is
+/// numbered: `Game (2).gba`.
+pub fn store(
+    folder: &Path,
+    name: &Path,
+    crc32: u32,
+    read: impl FnOnce() -> io::Result<Vec<u8>>,
+) -> io::Result<PathBuf> {
     let stem = name.file_stem().unwrap_or_default().to_string_lossy();
     let extension = name.extension().unwrap_or_default().to_string_lossy();
     for number in 1.. {
@@ -90,15 +240,8 @@ fn extract(entry: &mut impl Read, crc32: u32, folder: &Path, name: &Path) -> io:
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let mut rom = Vec::new();
-        entry.take(MAX_ROM + 1).read_to_end(&mut rom)?;
-        if rom.len() as u64 > MAX_ROM {
-            return Err(io::Error::other(format!(
-                "{} is too big to be a game",
-                name.display()
-            )));
-        }
-        persist::write_atomic(&path, &rom)?;
+        fs::create_dir_all(folder)?;
+        persist::write_atomic(&path, &read()?)?;
         return Ok(path);
     }
     unreachable!("a free name is always found")
@@ -128,6 +271,28 @@ mod tests {
         path
     }
 
+    /// A 7-Zip file in `dir` named `name` holding `files`, made by
+    /// macOS's `tar`, which writes 7-Zip as well as reading it.
+    fn seven_zip_file(dir: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let contents = dir.join(format!("{name} contents"));
+        for (file, bytes) in files {
+            let path = contents.join(file);
+            fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+            fs::write(path, bytes).expect("file");
+        }
+        let path = dir.join(name);
+        let status = Command::new("/usr/bin/tar")
+            .args(["--format", "7zip", "-cf"])
+            .arg(&path)
+            .arg("-C")
+            .arg(&contents)
+            .arg(".")
+            .status()
+            .expect("tar runs");
+        assert!(status.success());
+        path
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("emu-app-{name}-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
@@ -136,16 +301,18 @@ mod tests {
     }
 
     #[test]
-    fn recognises_zips_by_extension() {
-        assert!(is_zip(Path::new("Tetris (World).ZIP")));
-        assert!(!is_zip(Path::new("tetris.gb")));
-        assert!(!is_zip(Path::new("zip")));
+    fn recognises_archives_by_extension() {
+        assert!(is_archive(Path::new("Tetris (World).ZIP")));
+        assert!(is_archive(Path::new("Platinum.7z")));
+        assert!(is_archive(Path::new("Platinum.rar")));
+        assert!(!is_archive(Path::new("tetris.gb")));
+        assert!(!is_archive(Path::new("zip")));
     }
 
     #[test]
-    fn unpacks_only_the_games() {
+    fn unpacks_only_the_games_and_patches() {
         let dir = temp_dir("unpack-games");
-        let games = dir.join("Games");
+        let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let zip = zip_file(
             &dir,
             "Tetris.zip",
@@ -153,33 +320,79 @@ mod tests {
                 ("Tetris/Tetris (World).gb", b"tetris"),
                 ("__MACOSX/Tetris/._Tetris (World).gb", b"metadata"),
                 ("Tetris/readme.txt", b"hello"),
+                ("Tetris/Tetris DX.ips", b"PATCHEOF"),
             ],
         );
-        let unpacked = unpack_into(&zip, &games).expect("unpacks");
-        assert_eq!(unpacked, [games.join("Tetris (World).gb")]);
+        let unpacked = unpack_into(&zip, &games, &patches).expect("unpacks");
+        assert_eq!(
+            unpacked,
+            [
+                games.join("Tetris (World).gb"),
+                patches.join("Tetris DX.ips")
+            ]
+        );
         assert_eq!(fs::read(&unpacked[0]).expect("unpacked"), b"tetris");
+        assert_eq!(fs::read(&unpacked[1]).expect("unpacked"), b"PATCHEOF");
         assert_eq!(fs::read_dir(&games).expect("games").count(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unpacks_7_zip_files_with_tar() {
+        let dir = temp_dir("unpack-7z");
+        let (games, patches) = (dir.join("Games"), dir.join("Patches"));
+        let archive = seven_zip_file(
+            &dir,
+            "Platinum.7z",
+            &[
+                ("b/Hack.xdelta", b"\xD6\xC3\xC4\x00"),
+                ("a/Platinum.nds", b"platinum"),
+                ("notes.txt", b"hello"),
+            ],
+        );
+        let unpacked = unpack_into(&archive, &games, &patches).expect("unpacks");
+        assert_eq!(
+            unpacked,
+            [games.join("Platinum.nds"), patches.join("Hack.xdelta")]
+        );
+        assert_eq!(fs::read(&unpacked[0]).expect("unpacked"), b"platinum");
+        let leftovers = fs::read_dir(std::env::temp_dir())
+            .expect("temp")
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with(&format!("ds-emulator-unpack-{}-", std::process::id()))
+            })
+            .count();
+        assert_eq!(leftovers, 0, "the scratch folder is removed");
+        let broken = dir.join("broken.7z");
+        fs::write(&broken, b"not a 7-Zip file").expect("written");
+        assert!(
+            unpack_into(&broken, &games, &patches)
+                .unwrap_err()
+                .starts_with("Cannot unpack")
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn unpacking_again_reuses_the_game_and_keeps_a_different_one() {
         let dir = temp_dir("unpack-again");
-        let games = dir.join("Games");
+        let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let first = zip_file(&dir, "a.zip", &[("Game.gba", b"first")]);
         let second = zip_file(&dir, "b.zip", &[("Game.gba", b"second")]);
         let path = games.join("Game.gba");
         assert_eq!(
-            unpack_into(&first, &games).expect("first"),
+            unpack_into(&first, &games, &patches).expect("first"),
             [path.as_path()]
         );
         assert_eq!(
-            unpack_into(&first, &games).expect("again"),
+            unpack_into(&first, &games, &patches).expect("again"),
             [path.as_path()]
         );
         let renamed = games.join("Game (2).gba");
         assert_eq!(
-            unpack_into(&second, &games).expect("second"),
+            unpack_into(&second, &games, &patches).expect("second"),
             [renamed.as_path()]
         );
         assert_eq!(fs::read(&path).expect("kept"), b"first");
@@ -188,19 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn a_zip_without_a_game_or_not_a_zip_is_refused() {
+    fn an_archive_without_a_game_or_not_an_archive_is_refused() {
         let dir = temp_dir("unpack-refused");
-        let games = dir.join("Games");
+        let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let empty = zip_file(&dir, "notes.zip", &[("notes.txt", b"notes")]);
         assert!(
-            unpack_into(&empty, &games)
+            unpack_into(&empty, &games, &patches)
                 .unwrap_err()
                 .contains("holds no")
         );
         let fake = dir.join("fake.zip");
         fs::write(&fake, b"not a zip").expect("written");
         assert!(
-            unpack_into(&fake, &games)
+            unpack_into(&fake, &games, &patches)
                 .unwrap_err()
                 .starts_with("Cannot unpack")
         );

@@ -9,7 +9,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 ```
                  emu-app (GPUI, binary: ds-emulator)     emu-headless (binary)
                     │        │                                 │
-                    │  emu-state, emu-cheats, emu-script ◄─────┤
+      emu-patch ◄───┤  emu-state, emu-cheats, emu-script ◄─────┤
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
                      ┌───────┼────────┐
@@ -34,6 +34,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
+| `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0008](decisions/0008-rom-hack-patches.md)). |
 | `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
@@ -322,6 +323,8 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Layout, speeds, 3D resolution, filter | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
 | Screenshot | next to the ROM, `game 2026-10-07 at 18.58.12.png` | 8-bit RGB PNG of the screens as the core drew them |
 | Recording | next to the ROM, `game 2026-10-07 at 18.58.12.mov` | QuickTime movie: Photo-JPEG video, 16-bit stereo PCM sound, see `emu-app/src/mov.rs` |
+| Unpacked game | `~/Library/Application Support/ds-emulator/Games/` | The ROM from a `.zip`, `.7z` or `.rar`, see `emu-app/src/archive.rs` |
+| Game made from a ROM-hack patch | `~/Library/Application Support/ds-emulator/Hacks/`, named after the patch | The patched ROM, see `emu-app/src/romhack.rs` |
 
 Writes go to `name.tmp` first and are renamed over the target, except
 recordings, which are written as they go and indexed when they stop.
@@ -361,6 +364,7 @@ order). A core's main loop:
 |---|---|---|
 | Unit tests | `#[cfg(test)]` in each module | `cargo test --workspace` |
 | Determinism | headless runner, run twice and diff | M1 test-ROM script |
+| ROM-hack patches | `emu-patch/tests/formats.rs` applies patches made by Floating IPS and xdelta3 from made-up ROMs; `scripts/make-patch-fixtures.sh` makes them again | `cargo test` |
 | Scripts | `emu-script` unit tests against a test core; `emu-headless/tests/script.rs` runs a script twice on a ROM it builds and diffs the output | `cargo test` |
 | Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |
 | Trace diffing | trace logger vs. mGBA/SameBoy/melonDS (TOOL-3) | by hand while debugging |

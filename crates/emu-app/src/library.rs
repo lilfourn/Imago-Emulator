@@ -73,6 +73,17 @@ impl Game {
         }
     }
 
+    /// Marks the game as made from a ROM-hack patch: titled with its file
+    /// name, which is the patch's, and never looked up, as the game
+    /// database would name it after the game it was made from, by the
+    /// game code a hack keeps.
+    pub fn made_from_patch(&mut self) {
+        if let Some(stem) = self.path.file_stem() {
+            self.title = stem.to_string_lossy().into_owned();
+        }
+        self.looked_up = true;
+    }
+
     /// Records the game database's answer: the game's No-Intro `name`, if
     /// it knows the game, which also gives its title.
     pub fn found(&mut self, name: Option<String>) {

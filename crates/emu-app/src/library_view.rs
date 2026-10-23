@@ -25,6 +25,7 @@ use crate::archive;
 use crate::boxart;
 use crate::library::{self, Game, Library};
 use crate::rom_info;
+use crate::romhack::{self, MakeError};
 
 use crate::theme::{ACCENT as CARET, BACKGROUND as TOP, MUTED as DIM, PANEL, TEXT};
 
@@ -109,10 +110,11 @@ impl LibraryView {
         view
     }
 
-    /// Adds the games at `paths`, reading them off the UI thread, and
-    /// those in any zip files among them once unpacked. Games already in
-    /// the library are left as they are, so playing one does not read its
-    /// ROM again.
+    /// Adds the games at `paths`, reading them off the UI thread: those in
+    /// any archives among them once unpacked, and those that any ROM-hack
+    /// patches among them make from games the library has. Games already
+    /// in the library are left as they are, so playing one does not read
+    /// its ROM again.
     pub fn add(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut seen = HashSet::new();
         let paths: Vec<PathBuf> = paths
@@ -124,10 +126,11 @@ impl LibraryView {
             return;
         }
         let cache = self.cache.clone();
+        let known = self.checksums();
         let read = cx.background_executor().spawn(async move {
             paths
                 .iter()
-                .flat_map(|path| read_games(path, cache.as_deref()))
+                .flat_map(|path| read_games(path, cache.as_deref(), &known))
                 .collect::<Vec<_>>()
         });
         cx.spawn(async move |this, cx| {
@@ -147,6 +150,13 @@ impl LibraryView {
             .ok();
         })
         .detach();
+    }
+
+    /// Each game's ROM checksum and path, for finding the game a patch is
+    /// for.
+    pub fn checksums(&self) -> Vec<(u32, PathBuf)> {
+        let games = self.library.games.iter();
+        games.map(|game| (game.crc32, game.path.clone())).collect()
     }
 
     /// The title the library shows for the game at `path`, if it has it.
@@ -484,7 +494,7 @@ impl LibraryView {
         let (title, hint) = if self.library.games.is_empty() {
             (
                 "No games yet".to_owned(),
-                "Add some with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, or a .zip of one, here.".to_owned(),
+                "Add some with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, a .zip, .7z or .rar of one, or a ROM-hack patch, here.".to_owned(),
             )
         } else {
             (
@@ -588,16 +598,45 @@ fn cover_on_disk(cache: &Path, crc32: u32) -> Option<PathBuf> {
     }
 }
 
-/// The games at `path`: the ROM there, or each one in it if it is a zip
-/// file, unpacked into the games folder.
-fn read_games(path: &Path, cache: Option<&Path>) -> Vec<Result<Game, String>> {
-    if !archive::is_zip(path) {
-        return vec![read_game(path, cache)];
+/// The games at `path`: the ROM there, or each one in it if it is an
+/// archive, unpacked into the games folder; and the game each ROM-hack
+/// patch there makes from the game it names among `known` (checksum and
+/// path) or the archive's ROMs.
+fn read_games(
+    path: &Path,
+    cache: Option<&Path>,
+    known: &[(u32, PathBuf)],
+) -> Vec<Result<Game, String>> {
+    let files = if archive::is_archive(path) {
+        match archive::unpack(path) {
+            Ok(files) => files,
+            Err(error) => return vec![Err(error)],
+        }
+    } else {
+        vec![path.to_owned()]
+    };
+    let (patches, roms): (Vec<PathBuf>, Vec<PathBuf>) =
+        files.into_iter().partition(|file| romhack::is_patch(file));
+    let mut games: Vec<Result<Game, String>> =
+        roms.iter().map(|rom| read_game(rom, cache)).collect();
+    let mut known = known.to_vec();
+    known.extend(
+        games
+            .iter()
+            .flatten()
+            .map(|game| (game.crc32, game.path.clone())),
+    );
+    for patch in patches {
+        games.push(match romhack::make(&patch, None, &known) {
+            Ok(rom) => read_game(&rom, cache),
+            Err(MakeError::NoBase(_)) => Err(format!(
+                "To add {}, open it with ⌘O and choose the game it patches",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )),
+            Err(MakeError::Failed(error)) => Err(error),
+        });
     }
-    match archive::unpack(path) {
-        Ok(roms) => roms.iter().map(|rom| read_game(rom, cache)).collect(),
-        Err(error) => vec![Err(error)],
-    }
+    games
 }
 
 /// The game in the ROM at `path`, with its DS icon saved in `cache`.
@@ -609,7 +648,11 @@ fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
         // The icon is only a fallback for missing box art.
         boxart::save_icon(cache, info.crc32, &icon).ok();
     }
-    Ok(Game::new(path, &info))
+    let mut game = Game::new(path, &info);
+    if romhack::is_hack(path) {
+        game.made_from_patch();
+    }
+    Ok(game)
 }
 
 /// How many tiles fit across `width` logical pixels, and how wide each is

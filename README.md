@@ -41,6 +41,7 @@ own dumps. The app has:
 - GBC/GBA colour correction, and DS 3D at 2×, 3× or 4× resolution;
 - filters: LCD grid, scanlines, Scale2x and Scale3x;
 - screenshots, and video recording to QuickTime movies;
+- ROM hacks, from IPS, UPS, BPS and xdelta patches;
 - cheats;
 - Lua scripts that read and write memory, press buttons and draw over the
   screens;
@@ -56,7 +57,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
 - [Scripting](docs/scripting.md): the Lua functions scripts can call
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, local wireless, ROM hacks
 
 ## Build and run
 
@@ -66,6 +67,8 @@ The separate Metal Toolchain download is not needed.
 ```sh
 cargo run --release -p emu-app -- path/to/game.nds   # or open one with ⌘O
 cargo run --release -p emu-app -- download.zip       # a zipped game, unpacked first
+cargo run --release -p emu-app -- hack.bps           # a ROM hack, made from the game it names
+cargo run --release -p emu-app -- fr.gba hack.ips    # a ROM hack, made from fr.gba
 cargo run --release -p emu-app -- red.gb blue.gb     # two Game Boys, linked
 cargo run --release -p emu-app -- fr.gba em.gba      # two GBAs, linked
 cargo run --release -p emu-app -- w.nds w2.nds       # two DSes in wireless range
@@ -74,11 +77,12 @@ cargo run --release -p emu-app -- --script scripts/lua/frame-counter.lua game.gb
 cargo test --workspace
 ```
 
-A game downloaded as a `.zip` can be opened, dropped on the window or added
-to the library as it is. The ROMs inside are unpacked into
+A game downloaded as a `.zip`, `.7z` or `.rar` can be opened, dropped on the
+window or added to the library as it is. The ROMs inside are unpacked into
 `~/Library/Application Support/ds-emulator/Games`, where they and their saves
 stay after the download is deleted. Unpacking the same game again reuses it; a
 different game with the same file name is numbered, as in `Game (2).gba`.
+`.7z` and `.rar` files are unpacked by macOS's own `tar`.
 
 Run a core without a window, for tests and scripting:
 
@@ -345,6 +349,31 @@ next to its ROM, so give the two ROMs different names: `pokemon.nds` and
 `pokemon.gba` in one folder would share `pokemon.sav`, and the app refuses
 to load them. Pal Park has not been tried yet; that needs GBA dumps.
 
+## ROM hacks
+
+A ROM hack comes as a patch for the game it was made from: `.ips`, `.ups`
+or `.bps` for Game Boy and GBA hacks, `.xdelta` for DS hacks. Open one, drop
+it on the window or add it to the library, on its own or in the archive it
+was downloaded in. The app applies it to your copy of that game and keeps
+the result as a game of its own in
+`~/Library/Application Support/ds-emulator/Hacks`, named after the patch, as
+in `Radical Red.gba`. It has its own saves and its own place in the library,
+and the original ROM is left as it is.
+
+UPS and BPS patches name their game by checksum, so the app finds it among
+the games in the library, and checks the result. IPS and xdelta patches
+don't, so the app asks which game to patch, unless it was opened with the
+patch (`ds-emulator fr.gba hack.ips`, or both in one archive). xdelta
+checks its result; IPS can't, so an IPS patch applied to the wrong game
+makes a broken one. A patch that needs another version of a game (another
+revision or region) says so, with the checksum it wants.
+
+Applying a patch again makes the same game and reuses it. A new version of
+a hack whose patch has the same name makes a different game, numbered as in
+`Radical Red (2).gba`; to play on from the old one's save, copy
+`Radical Red.sav` to `Radical Red (2).sav`. xdelta patches made with xdelta3's old DJW or FGK
+compression, which it uses only when asked to, are not read.
+
 ## Cheats
 
 Choose File > Edit Cheats… to open the game's `game.cht` in your text
@@ -487,6 +516,7 @@ commit's build.
 | `emu-gba` | Game Boy Advance core |
 | `emu-nds` | Nintendo DS core |
 | `emu-cheats` | Cheat list parsing and application |
+| `emu-patch` | ROM-hack patches: IPS, UPS, BPS and xdelta |
 | `emu-script` | Lua scripts, sandboxed, run between frames |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-headless` | Windowless runner for test ROMs |

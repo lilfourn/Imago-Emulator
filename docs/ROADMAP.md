@@ -373,4 +373,5 @@ are done.
 | Two DSes in wireless range, side by side | NDS-10 | M16 ✅ |
 | Filters (LCD grid, scanlines, Scale2x/3x), screenshots, video recording | UI-4, UI-14 | Phase 4 ✅ |
 | Lua scripting: File > Run Script…, `--script`, headless | UI-14 | Phase 4 ✅ |
+| ROM-hack patches (IPS, UPS, BPS, xdelta); `.7z` and `.rar` games | UI-15 | Frontend ✅ |
 | xBRZ, slang presets, achievements | UI-4, UI-14 | Later |
