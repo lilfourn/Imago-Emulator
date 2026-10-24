@@ -8,6 +8,7 @@
 
 mod ambient;
 mod app;
+mod app_icon;
 mod archive;
 mod audio;
 mod bindings;

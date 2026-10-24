@@ -16,6 +16,10 @@ use crate::{Debugger, Frame, Input, RomPatch, ScreenSize, StereoSample, System};
 /// core never reads the host clock, random numbers or the file system. Its
 /// real-time clock starts at [`crate::Media::start_time`] and advances with
 /// emulated cycles.
+///
+/// The one exception is the RPG Maker core (`emu-mkxp`), which plays a game
+/// that mkxp-z runs in a process of its own: it shows that process's frames,
+/// and its states are the game's own saves (see [`Core::try_save_state`]).
 pub trait Core: Send {
     /// Static facts about this core: system, screens, timing and audio rate.
     fn info(&self) -> CoreInfo;
@@ -157,6 +161,33 @@ pub trait Core: Send {
     /// The core's debugger, for stepping, breakpoints and looking inside
     /// the machine, or `None` if it has none. See [`crate::debug`].
     fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        None
+    }
+
+    /// Saves a state for the player to come back to: appends
+    /// [`Core::save_state`]'s bytes to `out`.
+    ///
+    /// # Errors
+    ///
+    /// A core whose game runs in another process saves only where that
+    /// game can, and says why not elsewhere, as in a battle.
+    fn try_save_state(&self, out: &mut Vec<u8>) -> Result<(), String> {
+        self.save_state(out);
+        Ok(())
+    }
+
+    /// Whether [`Core::save_state`] is quick and always works, so it can
+    /// run every frame for rewind, and unasked when the player leaves, to
+    /// pick up there next time. A core whose game runs in another process
+    /// saves only when asked (see [`Core::try_save_state`]).
+    fn saves_every_frame(&self) -> bool {
+        true
+    }
+
+    /// Why the game cannot go on, for a core whose game runs in another
+    /// process that has quit or stopped answering; `None` while it runs.
+    /// Once it is `Some`, frames stop coming.
+    fn ended(&self) -> Option<String> {
         None
     }
 }

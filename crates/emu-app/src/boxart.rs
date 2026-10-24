@@ -39,7 +39,8 @@ pub fn art_path(cache: &Path, crc32: u32) -> PathBuf {
     cache.join("boxart").join(format!("{crc32:08X}.png"))
 }
 
-/// Where the banner icon of the DS ROM with checksum `crc32` is kept.
+/// Where the banner icon of the DS ROM with checksum `crc32`, or the icon
+/// of the player app of the RPG Maker game with that checksum, is kept.
 pub fn icon_path(cache: &Path, crc32: u32) -> PathBuf {
     cache.join("icons").join(format!("{crc32:08X}.png"))
 }
@@ -183,13 +184,15 @@ pub fn name_in(db: &GameDb, game: &Game) -> Option<String> {
 }
 
 /// The platforms whose databases may list a `platform` game: Game Boy
-/// Color games that also run on a Game Boy can be in either.
+/// Color games that also run on a Game Boy can be in either. None list
+/// RPG Maker games.
 pub fn databases_for(platform: Platform) -> &'static [Platform] {
     match platform {
         Platform::Gb => &[Platform::Gb, Platform::Gbc],
         Platform::Gbc => &[Platform::Gbc, Platform::Gb],
         Platform::Gba => &[Platform::Gba],
         Platform::Nds => &[Platform::Nds],
+        Platform::RpgMaker => &[],
     }
 }
 

@@ -19,6 +19,7 @@ emu-gba-cart = { path = "crates/emu-gba-cart" }
 emu-nds = { path = "crates/emu-nds" }
 emu-psg = { path = "crates/emu-psg" }
 emu-cores = { path = "crates/emu-cores" }
+emu-mkxp = { path = "crates/emu-mkxp" }
 emu-cheats = { path = "crates/emu-cheats" }
 emu-script = { path = "crates/emu-script" }
 

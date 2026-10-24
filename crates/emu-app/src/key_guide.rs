@@ -59,7 +59,8 @@ pub fn groups(system: System, bindings: &Bindings) -> Vec<Vec<Entry>> {
             .collect()
     };
     let mut face = vec![(Button::A, "A"), (Button::B, "B")];
-    if system == System::Nds {
+    // RPG Maker games take the DS's buttons.
+    if matches!(system, System::Nds | System::RpgMaker) {
         face.extend([(Button::X, "X"), (Button::Y, "Y")]);
     }
     let shoulders: &[(Button, &str)] = if system == System::Gb {

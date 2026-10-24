@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use emu_cores::rpg_maker;
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, EventEmitter, KeyDownEvent, ObjectFit,
     ScrollHandle, SharedString, Task, Window, div, img, linear_color_stop, linear_gradient,
@@ -21,6 +22,7 @@ use gpui::{
 };
 
 use crate::app::TOP_BAR;
+use crate::app_icon;
 use crate::archive;
 use crate::boxart;
 use crate::library::{self, Game, Library};
@@ -484,7 +486,7 @@ impl LibraryView {
         let (title, hint) = if self.library.games.is_empty() {
             (
                 "No games yet".to_owned(),
-                "Add some with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, or a .zip of one, here.".to_owned(),
+                "Add some with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, a .zip of one, or an RPG Maker game's folder, here.".to_owned(),
             )
         } else {
             (
@@ -588,8 +590,8 @@ fn cover_on_disk(cache: &Path, crc32: u32) -> Option<PathBuf> {
     }
 }
 
-/// The games at `path`: the ROM there, or each one in it if it is a zip
-/// file, unpacked into the games folder.
+/// The games at `path`: the ROM or RPG Maker game there, or each ROM in it
+/// if it is a zip file, unpacked into the games folder.
 fn read_games(path: &Path, cache: Option<&Path>) -> Vec<Result<Game, String>> {
     if !archive::is_zip(path) {
         return vec![read_game(path, cache)];
@@ -600,8 +602,18 @@ fn read_games(path: &Path, cache: Option<&Path>) -> Vec<Result<Game, String>> {
     }
 }
 
-/// The game in the ROM at `path`, with its DS icon saved in `cache`.
+/// The game in the ROM at `path`, or the RPG Maker game there, with its DS
+/// icon or its player app's icon saved in `cache`.
 fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
+    if let Some(folder) = rpg_maker::game_folder(path) {
+        let game = Game::rpg_maker(&folder, rpg_maker::title(&folder));
+        let player = rpg_maker::player_app(&folder);
+        if let (Some(cache), Some(player)) = (cache, player) {
+            // Its only picture: no game database lists RPG Maker games.
+            app_icon::save(&player, &boxart::icon_path(cache, game.crc32)).ok();
+        }
+        return Ok(game);
+    }
     let rom = fs::read(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
     let info = rom_info::read(path, &rom)
         .ok_or_else(|| format!("{} is not a .gb, .gbc, .gba or .nds game", path.display()))?;

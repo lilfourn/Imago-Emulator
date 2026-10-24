@@ -10,6 +10,7 @@ publish.workspace = true
 emu-core.workspace = true
 emu-gb.workspace = true
 emu-gba.workspace = true
+emu-mkxp.workspace = true
 emu-nds.workspace = true
 
 [lints]
