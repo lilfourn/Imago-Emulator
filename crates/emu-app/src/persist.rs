@@ -5,7 +5,9 @@
 //! `game.ss1`, `game.cht` and `game.bindings.toml`. A linked pair saves its
 //! states next to the first player's ROM as `game.ls1`. A GBA game in a
 //! DS's GBA slot keeps its own `.sav`; the session's states, cheats and
-//! bindings are the DS game's. Screenshots and recordings go there too,
+//! bindings are the DS game's. An RPG Maker game, a folder, has its files
+//! beside the folder, under its whole name: `Game 1.2` gets `Game 1.2.ss1`.
+//! Screenshots and recordings go there too,
 //! named after the game and the time, as macOS names its own:
 //! `game 2026-10-07 at 18.58.12.png`.
 //!
@@ -51,6 +53,14 @@ impl GameFiles {
             rom.with_extension("")
         };
         Self { base }
+    }
+
+    /// The files of the game in `folder`, which are named after all of it:
+    /// a dot in a folder's name starts no extension.
+    pub fn of_folder(folder: &Path) -> Self {
+        Self {
+            base: folder.to_owned(),
+        }
     }
 
     /// The battery save.
@@ -268,6 +278,15 @@ mod tests {
         assert_eq!(files.bindings(), Path::new("/games/platinum.bindings.toml"));
         assert_eq!(files.state(1, false), Path::new("/games/platinum.ss1"));
         assert_eq!(files.state(2, true), Path::new("/games/platinum.ls2"));
+    }
+
+    #[test]
+    fn a_folder_names_its_files_with_all_its_name() {
+        let files = GameFiles::of_folder(Path::new("/games/Pokemon TGOM 4.2.2"));
+        assert_eq!(
+            files.state(1, false),
+            Path::new("/games/Pokemon TGOM 4.2.2.ss1")
+        );
     }
 
     #[test]

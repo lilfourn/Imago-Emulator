@@ -1676,6 +1676,7 @@ dependencies = [
  "emu-core",
  "emu-gb",
  "emu-gba",
+ "emu-mkxp",
  "emu-nds",
 ]
 
@@ -1720,6 +1721,17 @@ dependencies = [
  "emu-core",
  "emu-cores",
  "emu-script",
+]
+
+[[package]]
+name = "emu-mkxp"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "emu-core",
+ "libc",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

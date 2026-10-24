@@ -446,7 +446,7 @@ impl EmulatorView {
 
     /// Loads the ROMs off the UI thread, then starts them: one game, a DS
     /// game with a GBA game in its slot, or two games joined by a link
-    /// cable.
+    /// cable, or an RPG Maker game from its folder.
     fn open(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         if paths
             .iter()
@@ -1385,9 +1385,10 @@ impl EmulatorView {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
     ) {
+        // Folders too: an RPG Maker game is one.
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
-            directories: false,
+            directories: true,
             multiple: false,
             prompt: Some(prompt.into()),
         });
@@ -1408,7 +1409,7 @@ impl EmulatorView {
     fn add_to_library(&mut self, _: &AddToLibrary, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
-            directories: false,
+            directories: true,
             multiple: true,
             prompt: Some("Add".into()),
         });

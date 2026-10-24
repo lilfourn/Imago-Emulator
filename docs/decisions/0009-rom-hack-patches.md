@@ -1,4 +1,4 @@
-# 0008 — ROM hacks become games of their own, patched once
+# 0009 — ROM hacks become games of their own, patched once
 
 - Status: accepted
 - Date: 2026-10-23

@@ -4,7 +4,7 @@
 //! ```toml
 //! [[game]]
 //! path = "/Users/me/ROMs/Minish Cap.gba"
-//! platform = "gba"           # "gb", "gbc", "gba" or "nds"
+//! platform = "gba"           # "gb", "gbc", "gba", "nds" or "rpgmaker"
 //! crc32 = "ABCEBBB1"
 //! serial = "BZME"            # GBA and DS games only
 //! title = "The Legend of Zelda: The Minish Cap"
@@ -31,11 +31,12 @@ pub fn absolute(path: &Path) -> PathBuf {
 /// One game in the library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Game {
-    /// The ROM file.
+    /// The ROM file, or an RPG Maker game's folder.
     pub path: PathBuf,
-    /// The handheld it is for.
+    /// The system it is for.
     pub platform: Platform,
-    /// CRC-32 of the ROM.
+    /// CRC-32 of the ROM. An RPG Maker game has none, so it is of its
+    /// folder's path.
     pub crc32: u32,
     /// A GBA or DS game's four-letter game code.
     pub serial: Option<String>,
@@ -82,6 +83,27 @@ impl Game {
             self.title = stem.to_string_lossy().into_owned();
         }
         self.looked_up = true;
+    }
+
+    /// The RPG Maker game in `folder`, titled `title` (from its
+    /// `Game.ini`), or else with the folder's name. No game database lists
+    /// it, so it is not looked up.
+    pub fn rpg_maker(folder: &Path, title: Option<String>) -> Self {
+        let name = || {
+            folder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        Self {
+            path: folder.to_owned(),
+            platform: Platform::RpgMaker,
+            crc32: crc32fast::hash(folder.as_os_str().as_encoded_bytes()),
+            serial: None,
+            title: title.unwrap_or_else(name),
+            name: None,
+            looked_up: true,
+        }
     }
 
     /// Records the game database's answer: the game's No-Intro `name`, if
@@ -257,7 +279,7 @@ pub enum LibraryError {
     /// The file is not valid TOML of the expected shape.
     #[error("invalid library file: {0}")]
     Syntax(String),
-    /// A game's platform is not one of the four names.
+    /// A game's platform is not one of the five names.
     #[error("unknown platform {0:?} in the library")]
     UnknownPlatform(String),
     /// A game's checksum is not eight hex digits.
@@ -367,6 +389,26 @@ mod tests {
         let text = library.to_toml();
         assert!(text.contains("crc32 = \"ABCEBBB1\""), "{text}");
         assert!(text.contains("platform = \"nds\""), "{text}");
+        assert_eq!(Library::from_toml(&text), Ok(library));
+    }
+
+    #[test]
+    fn rpg_maker_games_are_titled_from_game_ini_and_told_apart_by_folder() {
+        let game = Game::rpg_maker(
+            Path::new("/Games/TGOM 4.2"),
+            Some("This Gym of Mine".into()),
+        );
+        assert_eq!(game.title, "This Gym of Mine");
+        assert_eq!(game.platform, Platform::RpgMaker);
+        assert!(game.looked_up, "no database lists RPG Maker games");
+        let other = Game::rpg_maker(Path::new("/Games/Pokemon Uranium"), None);
+        assert_eq!(other.title, "Pokemon Uranium");
+        assert_ne!(game.crc32, other.crc32);
+        let mut library = Library::default();
+        library.add(game);
+        library.add(other);
+        let text = library.to_toml();
+        assert!(text.contains("platform = \"rpgmaker\""), "{text}");
         assert_eq!(Library::from_toml(&text), Ok(library));
     }
 

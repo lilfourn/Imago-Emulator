@@ -45,6 +45,8 @@ own dumps. The app has:
 - cheats;
 - Lua scripts that read and write memory, press buttons and draw over the
   screens;
+- RPG Maker games, such as Pokémon Essentials fan games, played through
+  mkxp-z in the app's window;
 - a debugger: breakpoints and watchpoints on every CPU, disassembly,
   registers, a memory editor, graphics viewers, I/O registers and the
   scheduler's queue.
@@ -57,7 +59,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
 - [Scripting](docs/scripting.md): the Lua functions scripts can call
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, local wireless, ROM hacks
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks
 
 ## Build and run
 
@@ -349,6 +351,23 @@ next to its ROM, so give the two ROMs different names: `pokemon.nds` and
 `pokemon.gba` in one folder would share `pokemon.sav`, and the app refuses
 to load them. Pal Park has not been tried yet; that needs GBA dumps.
 
+## RPG Maker games
+
+Pokémon fan games made with Pokémon Essentials on RPG Maker XP play in the
+window, from a game folder set up for mkxp-z: one holding `Game.ini` and a
+mkxp-z player app. Open the folder (or the app in it), drop it on the
+window, or add it to the library, which shows the app's icon. The app runs
+the game's own player hidden and shows its frames, so the game takes the
+app's bindings and gamepad, pause, fast-forward, screenshots and
+recordings ([decision 0008](docs/decisions/0008-rpg-maker-games.md)).
+
+The game needs a preload script that reads the buttons the app holds and
+makes save states; `emu-mkxp`'s `bridge.rb` describes what it offers. The
+game saves in its own menu, to the same file as when it runs on its own.
+A save state is the game's own save, made on the spot: anywhere but in a
+battle. Loading one restarts the game straight into it.
+There is no rewind, link play, cheats, debugger or memory for these games.
+
 ## ROM hacks
 
 A ROM hack comes as a patch for the game it was made from: `.ips`, `.ups`
@@ -371,8 +390,9 @@ revision or region) says so, with the checksum it wants.
 Applying a patch again makes the same game and reuses it. A new version of
 a hack whose patch has the same name makes a different game, numbered as in
 `Radical Red (2).gba`; to play on from the old one's save, copy
-`Radical Red.sav` to `Radical Red (2).sav`. xdelta patches made with xdelta3's old DJW or FGK
-compression, which it uses only when asked to, are not read.
+`Radical Red.sav` to `Radical Red (2).sav`. xdelta patches made with
+xdelta3's old DJW or FGK compression, which it uses only when asked to, are
+not read ([decision 0009](docs/decisions/0009-rom-hack-patches.md)).
 
 ## Cheats
 
@@ -515,6 +535,7 @@ commit's build.
 | `emu-gb` | Game Boy and Game Boy Color core |
 | `emu-gba` | Game Boy Advance core |
 | `emu-nds` | Nintendo DS core |
+| `emu-mkxp` | RPG Maker games, played by mkxp-z in a hidden process |
 | `emu-cheats` | Cheat list parsing and application |
 | `emu-patch` | ROM-hack patches: IPS, UPS, BPS and xdelta |
 | `emu-script` | Lua scripts, sandboxed, run between frames |

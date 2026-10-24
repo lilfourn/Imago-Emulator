@@ -1,11 +1,16 @@
 //! Picks and constructs the right core for a game.
 //!
 //! This is the only crate that knows every system crate, so frontends
-//! depend on it instead of on `emu-gb`, `emu-gba` and `emu-nds` directly.
+//! depend on it instead of on `emu-gb`, `emu-gba`, `emu-nds` and
+//! `emu-mkxp` directly. RPG Maker games are folders, not ROMs: they start
+//! through [`rpg_maker`], not [`create`].
 
 use std::path::Path;
 
 use emu_core::{Core, CoreInfo, LoadError, Media, System};
+
+/// RPG Maker games, which mkxp-z runs in a hidden process of its own.
+pub use emu_mkxp as rpg_maker;
 
 /// File extensions this build recognises, and the system each belongs to.
 /// `.cgb` and `.agb` are older names for Game Boy Color and Game Boy
@@ -37,6 +42,7 @@ pub const fn info(system: System) -> CoreInfo {
         System::Gb => emu_gb::INFO,
         System::Gba => emu_gba::INFO,
         System::Nds => emu_nds::INFO,
+        System::RpgMaker => emu_mkxp::INFO,
     }
 }
 
@@ -46,7 +52,7 @@ pub const fn info(system: System) -> CoreInfo {
 pub const fn second_slot(system: System) -> Option<System> {
     match system {
         System::Nds => Some(System::Gba),
-        System::Gb | System::Gba => None,
+        System::Gb | System::Gba | System::RpgMaker => None,
     }
 }
 
@@ -56,14 +62,19 @@ pub const fn second_slot(system: System) -> Option<System> {
 /// # Errors
 ///
 /// Returns the core's [`LoadError`] if it rejects the ROM, or a second-slot
-/// cartridge on a system without one.
+/// cartridge on a system without one. RPG Maker games have no ROM, so
+/// they are refused: they start with [`rpg_maker::Mkxp::open`].
 pub fn create(system: System, media: &Media<'_>) -> Result<Box<dyn Core>, LoadError> {
     Ok(match system {
         System::Gb => Box::new(emu_gb::Gb::new(media)?),
         System::Gba => Box::new(emu_gba::Gba::new(media)?),
         System::Nds => Box::new(emu_nds::Nds::new(media)?),
+        System::RpgMaker => return Err(LoadError::Unsupported(NO_ROM)),
     })
 }
+
+/// Why an RPG Maker game cannot start from a ROM.
+const NO_ROM: &str = "an RPG Maker game starts from its folder, not a ROM";
 
 /// Powers on `system` with one game per entry of `media`, joined by a
 /// link cable (Game Boy, Game Boy Advance) or in local wireless range of
@@ -72,11 +83,13 @@ pub fn create(system: System, media: &Media<'_>) -> Result<Box<dyn Core>, LoadEr
 /// # Errors
 ///
 /// Returns the core's error if it rejects a ROM or the number of games.
+/// RPG Maker games do not link.
 pub fn create_linked(system: System, media: &[Media<'_>]) -> Result<Box<dyn Core>, LoadError> {
     Ok(match system {
         System::Gb => Box::new(emu_gb::Linked::new(media)?),
         System::Gba => Box::new(emu_gba::Linked::new(media)?),
         System::Nds => Box::new(emu_nds::Linked::new(media)?),
+        System::RpgMaker => return Err(LoadError::Unsupported(NO_ROM)),
     })
 }
 

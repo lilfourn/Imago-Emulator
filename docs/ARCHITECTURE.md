@@ -12,12 +12,12 @@ How the workspace fits together. The *why* behind the big choices lives in
       emu-patch ◄───┤  emu-state, emu-cheats, emu-script ◄─────┤
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
-                     ┌───────┼────────┐
-                  emu-gb  emu-gba  emu-nds
-                     │       ├────────┤
+                     ┌───────┼────────┬──────────┐
+                  emu-gb  emu-gba  emu-nds    emu-mkxp (RPG Maker games)
+                     │       ├────────┤          │
                      │    emu-arm  emu-sched (as cores adopt it)
                      │    emu-gba-cart (the GBA cartridge)
-                     └───────┴────────┘
+                     └───────┴────────┴──────────┘
                           emu-core
 ```
 
@@ -32,9 +32,10 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges, and the Game Boy Color's palettes for games made for the original Game Boy (SameBoy's table, MIT). Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
 | `emu-gba` | Game Boy Advance: memory map, wait states and the Game Pak prefetch buffer, PPU, APU with DMA FIFOs, DMA, timers, the interrupt controller, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
+| `emu-mkxp` | RPG Maker games, such as Pokémon Essentials fan games, which mkxp-z plays. Runs the game's own Mac player app, made hidden, in a process of its own, and talks to a bridge script in it over a Unix socket: frames and buttons a step at a time, and save states that are the game's own saves. Captures its sound through OpenAL Soft's WAV writer and a FIFO ([decision 0008](decisions/0008-rpg-maker-games.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
-| `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0008](decisions/0008-rom-hack-patches.md)). |
+| `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
 | `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
 | `emu-headless` | Runs a core without a window; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
@@ -70,6 +71,9 @@ pub trait Core: Send {
     fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]); // cheats' ROM patches
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
     fn debugger(&mut self) -> Option<&mut dyn Debugger>; // see "Debugging" below
+    fn try_save_state(&self, out: &mut Vec<u8>) -> Result<(), String>; // save_state, or why not
+    fn saves_every_frame(&self) -> bool;               // false: no rewind or unasked states
+    fn ended(&self) -> Option<String>;                 // why a game in another process stopped
 }
 ```
 
@@ -95,7 +99,10 @@ pub trait Core: Send {
   resamples.
 - **Determinism**: cores never read the clock, randomness or files. Same
   media and inputs give the same frames and state bytes. Rewind, netplay and
-  frame-CRC tests depend on it.
+  frame-CRC tests depend on it. The one exception is `emu-mkxp`, whose game
+  runs in another process: its states are the game's own saves, made only
+  when asked (`saves_every_frame` is false), so it has no rewind, and it
+  refuses a state where the game cannot save, as in a battle.
 - **ROM patches** are configuration, like the ROM itself: a core keeps the
   set it was last given, applies it to every ROM read, leaves it out of
   save states and keeps it through `load_state` and `reset`.
@@ -316,7 +323,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | File | Location | Format |
 |---|---|---|
 | Battery save | next to the ROM, `game.sav` | Raw backup bytes in the de facto layout for the system |
-| Save state | next to the ROM, `game.ss1` | `emu-state` container |
+| Save state | next to the ROM, `game.ss1`; an RPG Maker game's next to its folder, `Game.ss1` | `emu-state` container |
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
 | One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
@@ -325,6 +332,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Recording | next to the ROM, `game 2026-10-07 at 18.58.12.mov` | QuickTime movie: Photo-JPEG video, 16-bit stereo PCM sound, see `emu-app/src/mov.rs` |
 | Unpacked game | `~/Library/Application Support/ds-emulator/Games/` | The ROM from a `.zip`, `.7z` or `.rar`, see `emu-app/src/archive.rs` |
 | Game made from a ROM-hack patch | `~/Library/Application Support/ds-emulator/Hacks/`, named after the patch | The patched ROM, see `emu-app/src/romhack.rs` |
+| An RPG Maker game's hidden player | `~/Library/Application Support/ds-emulator/RPG Maker/<CRC-32 of the folder's path>/Player.app` | A copy of the game's player app, signed ad hoc; the bridge script beside it, see `emu-mkxp/src/player.rs` |
 
 Writes go to `name.tmp` first and are renamed over the target, except
 recordings, which are written as they go and indexed when they stop.
@@ -335,9 +343,9 @@ recordings, which are written as they go and indexed when they stop.
 |---|---|---|
 | 0 | 8 | magic `EMUSTATE` |
 | 8 | 2 | container version (1) |
-| 10 | 1 | system tag (1 GB, 2 GBA, 3 DS) |
+| 10 | 1 | system tag (1 GB, 2 GBA, 3 DS, 4 RPG Maker) |
 | 12 | 2 | core state version |
-| 16 | 4 | ROM CRC-32 |
+| 16 | 4 | ROM CRC-32 (an RPG Maker game: of its folder's path) |
 | 20 | 4 | payload length *n* |
 | 24 | *n* | core payload |
 | 24 + *n* | 4 | CRC-32 of everything before it |

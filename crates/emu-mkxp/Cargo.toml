@@ -1,0 +1,19 @@
+[package]
+name = "emu-mkxp"
+description = "Plays RPG Maker games that mkxp-z runs, hidden, in a process of its own."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+emu-core.workspace = true
+# O_NONBLOCK, to open the sound pipe without waiting for its other end.
+libc = "0.2"
+# The game's mkxp.json, read and written again for the hidden player.
+serde_json = "1"
+thiserror.workspace = true
+
+[lints]
+workspace = true
