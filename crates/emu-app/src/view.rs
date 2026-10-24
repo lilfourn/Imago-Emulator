@@ -51,6 +51,7 @@ use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist::{self, GameFiles};
+use crate::romhack::{self, MakeError};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
@@ -447,8 +448,11 @@ impl EmulatorView {
     /// game with a GBA game in its slot, or two games joined by a link
     /// cable, or an RPG Maker game from its folder.
     fn open(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if paths.iter().any(|path| archive::is_zip(path)) {
-            self.unpack_and_open(paths, window, cx);
+        if paths
+            .iter()
+            .any(|path| archive::is_archive(path) || romhack::is_patch(path))
+        {
+            self.prepare_and_open(paths, window, cx);
             return;
         }
         // A game opened from the command line is the same game, in the
@@ -490,9 +494,11 @@ impl EmulatorView {
         }));
     }
 
-    /// Unpacks the zip files among `paths` off the UI thread, then opens
-    /// the first game from each in its place.
-    fn unpack_and_open(
+    /// Unpacks the archives among `paths` and makes the game of a ROM-hack
+    /// patch among them, off the UI thread, then opens the games in their
+    /// place (see [`prepare`]). A patch whose game is not found asks for
+    /// it.
+    fn prepare_and_open(
         &mut self,
         paths: Vec<PathBuf>,
         window: &mut Window,
@@ -503,28 +509,35 @@ impl EmulatorView {
             .map(|path| file_name(path))
             .collect::<Vec<_>>()
             .join(" + ");
-        self.show_notice(format!("Unpacking {name}…"), cx);
-        let unpack = cx.background_executor().spawn(async move {
-            paths
-                .into_iter()
-                .map(|path| {
-                    if archive::is_zip(&path) {
-                        archive::unpack(&path).map(|games| games[0].clone())
-                    } else {
-                        Ok(path)
-                    }
-                })
-                .collect::<Result<Vec<_>, String>>()
-        });
+        let doing = if paths.iter().any(|path| archive::is_archive(path)) {
+            "Unpacking"
+        } else {
+            "Patching"
+        };
+        self.show_notice(format!("{doing} {name}…"), cx);
+        let known = self.library.read(cx).checksums();
+        let prepare = cx
+            .background_executor()
+            .spawn(async move { prepare(paths, &known) });
         cx.spawn_in(window, async move |this, cx| {
-            let paths = unpack.await;
-            this.update_in(cx, |this, window, cx| match paths {
+            let prepared = prepare.await;
+            this.update_in(cx, |this, window, cx| match prepared {
                 Ok(paths) => this.open(paths, window, cx),
-                Err(error) => this.show_notice(error, cx),
+                Err(MakeError::NoBase(patch)) => this.choose_base(patch, window, cx),
+                Err(MakeError::Failed(error)) => this.show_notice(error, cx),
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Asks for the game the patch at `patch` is for, then makes the
+    /// patched game from it and opens that.
+    fn choose_base(&mut self, patch: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_notice(format!("Choose the game {} patches", file_name(&patch)), cx);
+        self.prompt_for_file("Patch", window, cx, move |this, base, window, cx| {
+            this.prepare_and_open(vec![base, patch], window, cx);
+        });
     }
 
     fn start(&mut self, loaded: Loaded, name: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -2831,6 +2844,32 @@ fn consoles(info: &CoreInfo) -> usize {
         players
     } else {
         1
+    }
+}
+
+/// The games to open for `paths`, unpacking archives and making the game
+/// of a patch among them (see [`romhack::pair`]), from the one ROM with
+/// it or else the game among `known` (checksum and path) it names.
+///
+/// Blocking file I/O; call it off the UI thread.
+fn prepare(paths: Vec<PathBuf>, known: &[(u32, PathBuf)]) -> Result<Vec<PathBuf>, MakeError> {
+    let files = paths
+        .into_iter()
+        .map(|path| {
+            if archive::is_archive(&path) {
+                archive::unpack(&path)
+            } else {
+                Ok(vec![path])
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(MakeError::Failed)?;
+    match romhack::pair(files).map_err(MakeError::Failed)? {
+        (roms, None) => Ok(roms),
+        (roms, Some(patch)) => {
+            let base = roms.first().map(PathBuf::as_path);
+            Ok(vec![romhack::make(&patch, base, known)?])
+        }
     }
 }
 

@@ -155,6 +155,7 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | UI-12 | Debugger panels ✅ (View > Debugger): disassembly with breakpoints and watchpoints, registers, memory editor, tile/map/OAM/palette viewers, I/O registers, scheduler queue; trace logging ✅ (TOOL-3). | P1 · M7 |
 | UI-13 | Cheats: GameShark (✅ GB, with 8x/9x bank codes), Game Genie (✅ GB), Action Replay (✅ DS; ✅ GBA GameShark Advance / Action Replay v1/v2 and Pro Action Replay v3, encrypted or not, with ROM patches and I/O writes), CodeBreaker (✅ GBA, with encryption) and raw patches ✅ | P2 · M11 |
 | UI-14 | Screenshots (✅ PNG of the native screens, ⌘⇧S) and video recording (✅ every emulated frame and its sound, to a QuickTime movie, ⌘⇧R), RetroAchievements (rcheevos), Lua scripting hooks (✅ Lua 5.4 in `emu-script`: memory, buttons, state slots, pausing, drawing over the screens and breakpoint callbacks, sandboxed and deterministic; File > Run Script… ⌘⇧L, `--script` in the app and headless, [scripting.md](scripting.md)). | P2 |
+| UI-15 | ROM hacks from patches: IPS, UPS, BPS and xdelta (VCDIFF), each made into a game of its own beside the original, which is never changed. The game a patch is for is found by checksum or chosen. Games in `.7z` and `.rar` archives as well as `.zip`. ✅ ([decision 0009](decisions/0009-rom-hack-patches.md); not xdelta3's DJW or FGK compression) | P1 |
 
 ### 6.4 Tooling
 

@@ -42,6 +42,7 @@ mod resample;
 mod rewind;
 mod rewind_thread;
 mod rom_info;
+mod romhack;
 mod save_writer;
 mod scripting;
 mod settings;

@@ -21,6 +21,7 @@ emu-psg = { path = "crates/emu-psg" }
 emu-cores = { path = "crates/emu-cores" }
 emu-mkxp = { path = "crates/emu-mkxp" }
 emu-cheats = { path = "crates/emu-cheats" }
+emu-patch = { path = "crates/emu-patch" }
 emu-script = { path = "crates/emu-script" }
 
 anyhow = "1"
@@ -75,6 +76,8 @@ opt-level = 2
 [profile.dev.package.emu-psg]
 opt-level = 2
 [profile.dev.package.emu-cheats]
+opt-level = 2
+[profile.dev.package.emu-patch]
 opt-level = 2
 [profile.dev.package.emu-script]
 opt-level = 2

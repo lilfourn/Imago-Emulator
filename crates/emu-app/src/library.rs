@@ -74,6 +74,17 @@ impl Game {
         }
     }
 
+    /// Marks the game as made from a ROM-hack patch: titled with its file
+    /// name, which is the patch's, and never looked up, as the game
+    /// database would name it after the game it was made from, by the
+    /// game code a hack keeps.
+    pub fn made_from_patch(&mut self) {
+        if let Some(stem) = self.path.file_stem() {
+            self.title = stem.to_string_lossy().into_owned();
+        }
+        self.looked_up = true;
+    }
+
     /// The RPG Maker game in `folder`, titled `title` (from its
     /// `Game.ini`), or else with the folder's name. No game database lists
     /// it, so it is not looked up.
