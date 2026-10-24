@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-/// The handheld a game is for, as the library groups them. Game Boy Color
+/// The system a game is for, as the library groups them. Game Boy Color
 /// games are told apart from Game Boy ones, which the cores need not do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
@@ -15,14 +15,18 @@ pub enum Platform {
     Gba,
     /// Nintendo DS.
     Nds,
+    /// An RPG Maker game, such as a Pokémon fan game, which mkxp-z runs.
+    /// It is a folder, not a ROM.
+    RpgMaker,
 }
 
 /// Each platform and its name in the library file.
-const TAGS: [(Platform, &str); 4] = [
+const TAGS: [(Platform, &str); 5] = [
     (Platform::Gb, "gb"),
     (Platform::Gbc, "gbc"),
     (Platform::Gba, "gba"),
     (Platform::Nds, "nds"),
+    (Platform::RpgMaker, "rpgmaker"),
 ];
 
 impl Platform {
@@ -47,16 +51,23 @@ impl Platform {
             Self::Gbc => "GBC",
             Self::Gba => "GBA",
             Self::Nds => "DS",
+            Self::RpgMaker => "RPG",
         }
     }
 
     /// The system's name in libretro's databases and thumbnails.
+    ///
+    /// # Panics
+    ///
+    /// For RPG Maker games, which libretro does not list, so that
+    /// `boxart::databases_for` gives no database to look them up in.
     pub fn libretro_name(self) -> &'static str {
         match self {
             Self::Gb => "Nintendo - Game Boy",
             Self::Gbc => "Nintendo - Game Boy Color",
             Self::Gba => "Nintendo - Game Boy Advance",
             Self::Nds => "Nintendo - Nintendo DS",
+            Self::RpgMaker => unreachable!("libretro lists no RPG Maker games"),
         }
     }
 }
@@ -99,6 +110,7 @@ pub fn read(path: &Path, rom: &[u8]) -> Option<RomInfo> {
         Platform::Gbc => (ascii(rom, 0x134..0x143), None),
         Platform::Gba => (ascii(rom, 0xA0..0xAC), ascii(rom, 0xAC..0xB0)),
         Platform::Nds => (ascii(rom, 0x00..0x0C), ascii(rom, 0x0C..0x10)),
+        Platform::RpgMaker => return None,
     };
     Some(RomInfo {
         platform,

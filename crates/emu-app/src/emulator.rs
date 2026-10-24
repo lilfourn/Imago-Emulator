@@ -41,6 +41,7 @@ use anyhow::{Context as _, bail, ensure};
 use emu_cheats::Cheat;
 use emu_core::debug::{Breakpoint, RunOutcome, StopReason};
 use emu_core::{Buttons, Cartridge, Core, CoreInfo, DmgColors, Frame, Input, Media, System};
+use emu_cores::rpg_maker;
 use emu_script::{Draw, Script, ScriptError, StateRequest};
 
 use crate::audio::AudioSink;
@@ -62,6 +63,10 @@ const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Memory for rewind history: about a minute of Game Boy play.
 const REWIND_BUDGET_BYTES: usize = 64 << 20;
+
+/// Why a game whose core saves only when asked (an RPG Maker game's) has
+/// no rewind.
+const NO_REWIND: &str = "No rewind: this game saves states only when you ask";
 
 /// A game ready to run: the core plus what is needed to save it.
 pub struct Loaded {
@@ -143,9 +148,15 @@ fn capture_stamp() -> String {
 
 /// Reads the ROM at `rom_path` and its battery save at `backup_path`.
 fn read_rom(rom_path: &Path, backup_path: &Path) -> anyhow::Result<RomFile> {
+    if rom_path.join("Game.ini").is_file() {
+        bail!(
+            "{} is an RPG Maker game for Windows: it needs an mkxp-z player app in its folder",
+            rom_path.display()
+        );
+    }
     let system = emu_cores::system_for_path(rom_path).with_context(|| {
         format!(
-            "{} is not a .gb, .gbc, .gba or .nds file",
+            "{} is not a .gb, .gbc, .gba or .nds file, or an RPG Maker game",
             rom_path.display()
         )
     })?;
@@ -166,9 +177,11 @@ fn read_rom(rom_path: &Path, backup_path: &Path) -> anyhow::Result<RomFile> {
 
 /// Reads each ROM and battery save and powers on the right core: one
 /// game; a DS game with a GBA game, which goes in the DS's GBA slot; or two
-/// games for the same system joined by a link cable.
+/// games for the same system joined by a link cable. An RPG Maker game's
+/// folder, or its player app, starts the game in its hidden player.
 ///
-/// Blocking file I/O; call it off the UI thread.
+/// Blocking file I/O, and an RPG Maker game takes a few seconds to start;
+/// call it off the UI thread.
 ///
 /// # Errors
 ///
@@ -176,6 +189,11 @@ fn read_rom(rom_path: &Path, backup_path: &Path) -> anyhow::Result<RomFile> {
 /// ROMs are for different systems, two games would share a battery save
 /// file, or the core rejects them.
 pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Loaded> {
+    if let [path] = rom_paths
+        && let Some(game) = rpg_maker::game_folder(path)
+    {
+        return load_rpg_maker(&game);
+    }
     let names: Vec<GameFiles> = rom_paths.iter().map(|rom| GameFiles::of(rom)).collect();
     let files = rom_paths
         .iter()
@@ -226,6 +244,22 @@ pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Load
         rom_paths: rom_paths.to_vec(),
         files: names,
         rom_crc32,
+    })
+}
+
+/// Starts the RPG Maker game in the folder `game` in its hidden player,
+/// which is kept in the app's data folder.
+fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
+    let players = dirs::data_dir()
+        .context("there is no folder to keep the game's player in")?
+        .join("ds-emulator")
+        .join("RPG Maker");
+    let core = rpg_maker::Mkxp::open(game, &players)?;
+    Ok(Loaded {
+        core: Box::new(core),
+        rom_paths: vec![game.to_owned()],
+        files: vec![GameFiles::of_folder(game)],
+        rom_crc32: crc32fast::hash(game.as_os_str().as_encoded_bytes()),
     })
 }
 
@@ -683,6 +717,11 @@ impl Runner {
                     });
                 }
                 let outcome = self.run_frame(&inputs, &mut audio);
+                if let Some(why) = self.loaded.core.ended() {
+                    // Kept up, as no more frames come.
+                    self.events.try_send(Event::Stopped(why)).ok();
+                    break 'running;
+                }
                 self.mid_frame = !outcome.frame_done;
                 if !outcome.frame_done {
                     // A debugger stopped the frame part-way.
@@ -802,7 +841,13 @@ impl Runner {
                 }
             }
             Command::SetSpeed(speed) => self.speed = speed,
-            Command::SetRewind(on) => self.rewinding = on,
+            Command::SetRewind(on) => {
+                let can = self.loaded.core.saves_every_frame();
+                if on && !can {
+                    self.notice(NO_REWIND);
+                }
+                self.rewinding = on && can;
+            }
             Command::TogglePause => {
                 self.paused = !self.paused;
                 self.debug.pending = None;
@@ -1019,6 +1064,9 @@ impl Runner {
     /// for a system whose frames last `frame_duration`, and the rewind
     /// thread has caught up.
     fn record_for_rewind(&mut self, frame_duration: Duration) {
+        if !self.loaded.core.saves_every_frame() {
+            return;
+        }
         let now = Instant::now();
         let due = self.recorded_at.is_none_or(|at| {
             rewind::capture_due(self.speed, frame_duration, now.duration_since(at))
@@ -1241,7 +1289,10 @@ impl Runner {
     fn save_state(&self, slot: u8) -> anyhow::Result<()> {
         let info = self.loaded.core.info();
         let mut payload = Vec::new();
-        self.loaded.core.save_state(&mut payload);
+        self.loaded
+            .core
+            .try_save_state(&mut payload)
+            .map_err(anyhow::Error::msg)?;
         let header = emu_state::Header {
             system: info.system,
             state_version: info.state_version,
@@ -1302,6 +1353,10 @@ impl Runner {
     /// save was written, and the record comes last: should the state not
     /// be written, the one before keeps the record that matches it.
     fn save_checkpoint(&mut self, slot: u8) -> anyhow::Result<()> {
+        // A game that saves only when asked saves itself.
+        if !self.loaded.core.saves_every_frame() {
+            return Ok(());
+        }
         // A record of older saves on disk would let a later start load
         // this state over them once they could be written again.
         ensure!(self.write_saves(), "the battery save could not be written");
@@ -1320,7 +1375,7 @@ impl Runner {
     /// game's now, and otherwise undone.
     fn load_checkpoint(&mut self, slot: u8) -> anyhow::Result<PickUp> {
         let state = self.loaded.state_path(slot);
-        if !state.exists() {
+        if !state.exists() || !self.loaded.core.saves_every_frame() {
             return Ok(PickUp::Empty);
         }
         let record = persist::saves_record_path(&state);

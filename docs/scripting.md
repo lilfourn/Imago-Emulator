@@ -66,7 +66,7 @@ the script: it keeps its variables and its `emu.frame()` count.
 | Function | What it does |
 |---|---|
 | `emu.frame()` | Frames finished since the script started: 0 in the main body before any frame, 1 in the first frame's callbacks. |
-| `emu.system()` | `"gb"` (Game Boy or Game Boy Color), `"gba"` or `"nds"`. |
+| `emu.system()` | `"gb"` (Game Boy or Game Boy Color), `"gba"`, `"nds"` or `"rpgmaker"`. |
 | `emu.frameadvance()` | Waits for the next frame. Only in the main body; a callback that calls it fails. |
 | `emu.on_frame(fn)` | Calls `fn()` after every frame. |
 | `emu.on_exec(address, fn [, cpu])` | Calls `fn(address, cpu)` each time the CPU is about to run the instruction at `address`, mid-frame. |
