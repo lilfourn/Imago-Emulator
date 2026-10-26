@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
-    BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, RenderImage, SharedString, Subscription, Task, Window, WindowBounds,
-    WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
+    BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, PathPromptOptions, RenderImage, SharedString, Subscription, Task, Window,
+    WindowBounds, WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    rgba,
 };
 
 use crate::ambient::{self, Backdrop};
@@ -58,6 +59,7 @@ use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
 use crate::speed::{self, Pace, Speed, Speeds};
 use crate::theme::{BACKGROUND, INSET};
+use crate::trace;
 use crate::video;
 use crate::window_chrome;
 
@@ -234,6 +236,13 @@ struct Session {
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     /// The ambient backdrop, while it is shown.
     ambient: Option<Glow>,
+    /// The display whose refresh the emulation thread was last told of,
+    /// once it has been told.
+    display: Option<Option<DisplayId>>,
+    /// When the window last took a new frame.
+    taken_at: Option<Instant>,
+    /// Redraws the backdrop's fade once frames stop coming.
+    fade_wake: Option<Task<()>>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
 }
@@ -611,6 +620,9 @@ impl EmulatorView {
             recording: false,
             images: Vec::new(),
             ambient: None,
+            display: None,
+            taken_at: None,
+            fade_wake: None,
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
@@ -878,6 +890,7 @@ impl EmulatorView {
     }
 
     fn send_input(&self) {
+        trace::event("send", &[u64::from(self.sent.buttons.bits())]);
         self.send(Command::SetInput {
             player: self.active_player,
             input: Input {
@@ -2184,6 +2197,7 @@ impl Session {
             return;
         };
         self.sequence = sequence;
+        self.taken_at = Some(Instant::now());
         for (_, image) in self.images.iter_mut().filter_map(Option::take) {
             window.drop_image(image).ok();
         }
@@ -2292,6 +2306,7 @@ impl Session {
 
 impl Render for EmulatorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        trace::event("render", &[]);
         // Full screen shows its own bar on hover, buttons and all.
         let fullscreen = window.is_fullscreen();
         let show_controls = self.window_controls || fullscreen;
@@ -2492,7 +2507,20 @@ impl Render for EmulatorView {
         if let Some(session) = self.session.as_mut() {
             let consoles = consoles(&session.info);
             self.placements = shown.place_consoles(session.info.screens, consoles, viewport);
+            // Frames keep in step with the refreshes of the display the
+            // window is on.
+            let display = window.display(cx).map(|display| display.id());
+            if session.display != Some(display) {
+                session.display = Some(display);
+                let refresh = window_chrome::refresh_interval(window);
+                session.emulator.send(Command::SetRefresh(refresh));
+            }
+            let refreshing = Instant::now();
+            let seen = session.sequence;
             session.take_frames(window);
+            if session.sequence != seen {
+                trace::event("take", &[session.sequence]);
+            }
             session.refresh_images(
                 &self.placements,
                 scale_factor,
@@ -2500,10 +2528,24 @@ impl Render for EmulatorView {
                 self.filter,
                 window,
             );
+            if session.sequence != seen {
+                let made = trace::micros(refreshing.elapsed());
+                trace::event("drawn", &[session.sequence, made]);
+            }
             if self.backdrop == Backdrop::Ambient {
-                // Paused, no new frames come to draw the rest of the fade.
                 if session.refresh_ambient(&self.placements, self.color_correction, window) {
-                    window.request_animation_frame();
+                    // New frames draw the fade on as they come, so the
+                    // window redraws no more often than the game. Once they
+                    // stop, as when paused, it draws the rest itself.
+                    let wait = session.info.frame_rate.frame_duration() * 2;
+                    if session.taken_at.is_some_and(|at| at.elapsed() < wait) {
+                        session.fade_wake = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(wait).await;
+                            this.update(cx, |_, cx| cx.notify()).ok();
+                        }));
+                    } else {
+                        window.request_animation_frame();
+                    }
                 }
                 if let Some(glow) = &session.ambient {
                     root = root.child(ambient_layer(glow, window_size));

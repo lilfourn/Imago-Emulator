@@ -51,3 +51,23 @@ game ran 0.6% slow while a key was being tapped.
   reaching the view takes about 16 ms: half a frame waiting for the next
   frame to start, the frame itself, and that refresh. A vsync-locked mode
   could shave the refresh wait and the remaining uneven frames.
+
+Update, 2026-10-26: frames now keep in step with the display
+(`refresh.rs`), for ProMotion displays above all. At normal speed and at
+fast-forward speeds that allow it, frames last a whole number of
+refreshes, or a whole number of frames fit a refresh, when that is
+within 0.5% of the frame asked for: two refreshes at 120 Hz for the GB,
+GBA and DS, three for a 40 fps RPG Maker game, one frame a refresh for
+the DS at 2× or This Gym of Mine at 3×. The window reports when it takes
+each frame, and each frame's start is nudged by up to 1 ms so it is
+ready 2 ms before the refresh that shows it; a frame that just missed
+its refresh counts as late, not early. Sound plays as much faster as the
+frames then run, 0.29% for the DS and 0.46% for the GB and GBA, which
+the resampler's ±0.5% could not absorb on its own (`audio.rs` tests it).
+Fast-forward that fits no whole number, a display none fits (144 Hz),
+and a window that draws nothing keep the system's own clock. From a
+frame's start to the window drawing it fell from 6.1 to 3.4 ms in This
+Gym of Mine and from 6.9-12.6 to 6.2 ms in Pokémon Platinum, measured
+with `scripts/macos/bench.sh`. The 2 ms margin lets a frame run up to
+that much slower than usual and still catch its refresh; slower ones,
+as when an RPG Maker game loads a picture, still show a refresh late.

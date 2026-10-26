@@ -37,7 +37,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
 | `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
 | `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
-| `emu-headless` | Runs a core without a window; prints `key=value` lines. |
+| `emu-headless` | Runs a core without a window, or an RPG Maker game in a hidden player of its own; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
 Rules that keep this shape:
@@ -204,6 +204,13 @@ pub trait Debugger {
   a ring buffer and a resampler that nudges its ratio by up to ±0.5%
   ([decision 0003](decisions/0003-frame-pacing.md)). The `cpal` stream lives
   on the UI thread; the emulation thread owns the producer end.
+- Frames keep in step with the display's refreshes (`refresh.rs`): when
+  a whole number of refreshes, or of frames to a refresh, is within 0.5%
+  of the frame the speed asks for, frames last exactly that, and each
+  frame's start is nudged by up to 1 ms so it is ready 2 ms before the
+  refresh that shows it. The view tells the thread the display's refresh
+  interval (`Command::SetRefresh`, from AppKit) and when it takes each
+  frame (`Latest::taken`); sound plays as much faster as frames then run.
 - The emulation thread counts the frames it runs and rewind steps it
   takes (`Latest::frames_shown`); while View > Show FPS is on, the view
   samples the count twice a second (`meter.rs`) for the readout in the
@@ -257,7 +264,11 @@ pub trait Debugger {
 - The emulation thread serializes the core after every frame for the
   rewind history (`rewind.rs`), and a rewind thread
   (`rewind_thread.rs`) does the rest: the newest state whole, older ones
-  as LZ4-compressed XOR deltas, within 64 MiB. A DS state is about 6 MB,
+  as LZ4-compressed XOR deltas, within 64 MiB. A state's numbers take as
+  many bytes as their values need, so a growing register moves
+  everything after it; each 4 KB of the older state is XORed with where
+  it went in the newer one, so a Pokémon Platinum delta is about 41 KB
+  rather than 2.8 MB, and the history holds about 27 seconds. A DS state is about 6 MB,
   and the XOR and compression took as long as serializing, so the
   emulation thread only serializes, into a buffer the rewind thread
   handed back; if that thread falls two states behind, frames are
@@ -377,6 +388,7 @@ order). A core's main loop:
 | Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |
 | Trace diffing | trace logger vs. mGBA/SameBoy/melonDS (TOOL-3) | by hand while debugging |
 | Pokémon checkpoints | your own dumps, by hand | at each milestone |
+| Latency, pacing, CPU | the release app's timing trace (`trace.rs`, `DS_EMULATOR_TRACE`), read by `scripts/macos/bench-report.py` | `scripts/macos/bench.sh GAME` |
 
 ## Adding a core
 

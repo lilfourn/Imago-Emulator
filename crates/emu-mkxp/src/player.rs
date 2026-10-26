@@ -35,6 +35,15 @@ use crate::{Error, config, player_app};
 const BRIDGE: &str = include_str!("bridge.rb");
 /// How long a player has to quit by itself once the link closes.
 const QUIT_GRACE: Duration = Duration::from_secs(2);
+/// What the copy's `Info.plist` changes, besides its bundle ID: no Dock
+/// icon or menu bar, no App Nap, and a screen of the game's own size. On a
+/// Retina screen mkxp-z's OpenGL drawing read back a quarter of the screen,
+/// twice as large.
+const PLIST_CHANGES: [(&str, &str, &str); 3] = [
+    ("LSUIElement", "-bool", "true"),
+    ("LSAppNapIsDisabled", "-bool", "true"),
+    ("NSHighResolutionCapable", "-bool", "false"),
+];
 
 /// A game's hidden player.
 #[derive(Debug)]
@@ -257,7 +266,8 @@ fn copy_player(source: &Path, app: &Path, id: &str) -> Result<(), Error> {
     let modified = fs::metadata(source.join("Contents/Info.plist"))
         .and_then(|metadata| metadata.modified())
         .map_err(Error::io(format!("reading {}", source.display())))?;
-    let stamp = format!("{}\n{modified:?}\n", source.display());
+    // The changes are in the stamp, so a copy made with others is made again.
+    let stamp = format!("{}\n{modified:?}\n{PLIST_CHANGES:?}\n", source.display());
     if app.is_dir() && fs::read_to_string(&stamp_path).ok().as_deref() == Some(&stamp) {
         return Ok(());
     }
@@ -271,11 +281,8 @@ fn copy_player(source: &Path, app: &Path, id: &str) -> Result<(), Error> {
     }
     let plist = copy.join("Contents/Info.plist");
     let identifier = format!("local.ds-emulator.player.{id}");
-    for (key, kind, value) in [
-        ("LSUIElement", "-bool", "true"),
-        ("LSAppNapIsDisabled", "-bool", "true"),
-        ("CFBundleIdentifier", "-string", identifier.as_str()),
-    ] {
+    let bundle_id = ("CFBundleIdentifier", "-string", identifier.as_str());
+    for (key, kind, value) in PLIST_CHANGES.into_iter().chain([bundle_id]) {
         run(Command::new("plutil")
             .args(["-replace", key, kind, value])
             .arg(&plist))?;

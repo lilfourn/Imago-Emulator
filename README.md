@@ -96,6 +96,17 @@ cargo run -p emu-headless -- --frames 600 --dump /tmp/frames path/to/game.gba
 cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua game.gb
 # macro=done frame=92
 # system=gb frames=600 screen=0 width=160 height=144 crc32=…
+cargo run -p emu-headless -- --frames 600 ~/Games/My\ Fan\ Game   # an RPG Maker game's folder
+```
+
+Measure how a game plays in the release app: how long a key takes to reach
+the window, how evenly frames reach the display, and the CPU it costs. It
+plays behind the frontmost app, with copies of your settings and the
+game's saves, and taps keys at it:
+
+```sh
+scripts/macos/bench.sh path/to/game.nds 20          # 20 seconds, with your settings
+SPEED=normal FRONT=1 scripts/macos/bench.sh ~/Games/My\ Fan\ Game
 ```
 
 ## Controls

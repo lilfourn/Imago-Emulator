@@ -83,3 +83,19 @@ the menu, and Save there wrote the game's save, which Continue loaded
 after a reset. In the release app, a Lua script saved and loaded slots 1
 and 2 in turn without a hang, and the hidden player quit with the app.
 The game runs at about 116 fps unpaced, 2.9× its 40.
+
+Update, 2026-10-26: a frame's round trip to the player took 10.3 ms at
+40 fps, nearly all of it the bridge reading the screen back from the
+GPU: 7.8 ms under mkxp-z's Metal renderer. The hidden player now draws
+with OpenGL unless the game chose a renderer (1.2 ms, the same pixels:
+frames 120-124, 300, 600, 601 and 1300 hash the same), is not
+Retina-capable (under OpenGL on a Retina screen the bridge read back a
+quarter of the screen), and skips frames, so it never draws in its unseen
+window, which stalled a frame by 10 ms every 50 or so. The bridge's
+socket has room for a whole frame, where the usual 8 KB sent it in a
+hundred pieces, and each frame's pixels are freed as soon as they are
+sent, which stopped Ruby's minor collections. Measured with
+`scripts/macos/bench.sh` on This Gym of Mine's title screen at 40 fps,
+the round trip fell to 1.4 ms, a key reached the window 3.4 ms after its
+frame started rather than 17.5, and the player's CPU fell from 41% to
+6%. At 3× fast-forward the game now holds 120 fps.

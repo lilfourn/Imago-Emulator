@@ -1,14 +1,21 @@
 //! The hidden player's `mkxp.json`: the game's own settings, run from the
-//! game's folder with the bridge script loaded first.
+//! game's folder with the bridge script loaded first, drawing with OpenGL,
+//! and never in its own window.
 
 use std::path::Path;
 
 use serde_json::{Map, Value};
 
+/// mkxp-z's `renderer` setting for OpenGL. The bridge reads each frame
+/// back from the GPU, which took 7.8 ms a frame with mkxp-z's usual Metal
+/// and 1.2 ms with OpenGL, for the same pixels.
+const OPENGL: u64 = 2;
+
 /// The hidden player's settings: the game's own, `game_settings` (its
 /// `mkxp.json`, if it has one), with `gameFolder` set to `game` and
 /// `bridge` loaded before the game's own preload scripts. mkxp-z reads
-/// every other path in them from the game's folder, as before.
+/// every other path in them from the game's folder, as before. It draws
+/// with OpenGL, unless the game chose how.
 ///
 /// # Errors
 ///
@@ -33,6 +40,14 @@ pub fn player_settings(
             .ok_or_else(|| format!("{} is not a UTF-8 path", path.display()))
     };
     settings.insert("gameFolder".to_owned(), path(game)?);
+    settings
+        .entry("renderer")
+        .or_insert_with(|| Value::from(OPENGL));
+    // Its window is never seen, so it need not draw there: the bridge
+    // lifts mkxp-z's frame limit, so with frame skipping on, mkxp-z is
+    // always behind and skips it. Drawing there stalled a frame by about
+    // 10 ms, every 50 or so. The frames sent are drawn on their own.
+    settings.insert("frameSkip".to_owned(), Value::Bool(true));
     let mut preload = vec![path(bridge)?];
     if let Some(Value::Array(scripts)) = settings.remove("preloadScript") {
         preload.extend(scripts);
@@ -120,6 +135,8 @@ mod tests {
         let settings: Value = serde_json::from_str(&text).expect("JSON");
         assert_eq!(settings["gameFolder"], "/Games/My Game");
         assert_eq!(settings["rgssVersion"], 1);
+        assert_eq!(settings["renderer"], OPENGL);
+        assert_eq!(settings["frameSkip"], true);
         assert_eq!(
             settings["preloadScript"],
             serde_json::json!([
@@ -131,6 +148,14 @@ mod tests {
         let bare = player_settings(None, Path::new("/g"), Path::new("/b.rb")).expect("settings");
         let bare: Value = serde_json::from_str(&bare).expect("JSON");
         assert_eq!(bare["preloadScript"], serde_json::json!(["/b.rb"]));
+        let metal = player_settings(
+            Some("{\"renderer\": 4}"),
+            Path::new("/g"),
+            Path::new("/b.rb"),
+        )
+        .expect("settings");
+        let metal: Value = serde_json::from_str(&metal).expect("JSON");
+        assert_eq!(metal["renderer"], 4, "the game's own choice stays");
         assert!(player_settings(Some("[1]"), Path::new("/g"), Path::new("/b.rb")).is_err());
     }
 }

@@ -50,11 +50,13 @@ use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
 use crate::persist::{self, GameFiles};
 use crate::recorder::Recorder;
+use crate::refresh::Lock;
 use crate::rewind;
 use crate::rewind_thread::RewindThread;
 use crate::save_writer::SaveWriter;
 use crate::scripting::{self, Running};
 use crate::speed::{self, Speed};
+use crate::trace;
 use crate::turbo::Turbo;
 use crate::video;
 
@@ -344,6 +346,9 @@ pub enum Command {
     },
     /// Runs at this speed from the next frame on.
     SetSpeed(Speed),
+    /// The interval between the refreshes of the display the window is
+    /// on, if known: normal speed keeps frames in step with them.
+    SetRefresh(Option<Duration>),
     /// Steps backwards through recent frames while true.
     SetRewind(bool),
     /// Pauses or resumes.
@@ -450,6 +455,8 @@ struct Latest {
     debug: Mutex<Option<Arc<Snapshot>>>,
     unseen: AtomicBool,
     debug_unseen: AtomicBool,
+    /// The newest frame the window took to draw, and when.
+    taken: Mutex<Option<(u64, Instant)>>,
     /// Frames run, or stepped back through while rewinding, so far: what
     /// the speed readout counts.
     frames_shown: AtomicU64,
@@ -474,6 +481,7 @@ impl Emulator {
         let (commands, receiver) = mpsc::channel();
         let latest = Arc::new(Latest::default());
         let players = loaded.core.info().players.max(1);
+        let lock = Lock::new(loaded.core.info().frame_rate.frame_duration());
         let runner = Runner {
             flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
             backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
@@ -491,6 +499,7 @@ impl Emulator {
             speed: Speed::NORMAL,
             rewinding: false,
             rewind: RewindThread::start(REWIND_BUDGET_BYTES),
+            lock,
             recorded_at: None,
             events,
             latest: Arc::clone(&latest),
@@ -535,6 +544,11 @@ impl Emulator {
             return None;
         }
         frames.clone_from(latest_frames);
+        *self
+            .latest
+            .taken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((*sequence, Instant::now()));
         Some(*sequence)
     }
 
@@ -602,6 +616,8 @@ struct Runner {
     speed: Speed,
     rewinding: bool,
     rewind: RewindThread,
+    /// Keeps frames at normal speed in step with the display.
+    lock: Lock,
     /// When rewind last recorded a frame, if it has since the history was
     /// last cleared.
     recorded_at: Option<Instant>,
@@ -667,6 +683,7 @@ impl Runner {
         let mut last_flush = Instant::now();
 
         'running: loop {
+            let turn = Instant::now();
             loop {
                 // Rewinding and debugger steps work while paused;
                 // everything else waits.
@@ -716,7 +733,9 @@ impl Runner {
                         None => input,
                     });
                 }
+                let ran = Instant::now();
                 let outcome = self.run_frame(&inputs, &mut audio);
+                let run_time = ran.elapsed();
                 if let Some(why) = self.loaded.core.ended() {
                     // Kept up, as no more frames come.
                     self.events.try_send(Event::Stopped(why)).ok();
@@ -741,6 +760,7 @@ impl Runner {
                 if self.speed == Speed::NORMAL
                     && let Some(sink) = &mut self.audio
                 {
+                    sink.set_speed(self.lock.speed(Instant::now()));
                     sink.push(&audio);
                 }
                 self.record(&audio);
@@ -751,6 +771,12 @@ impl Runner {
                 self.script_frame(&inputs);
                 self.publish();
                 self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
+                if trace::on() {
+                    let frame = self.latest.frames.lock().map_or(0, |latest| latest.0);
+                    let buttons = inputs.first().map_or(0, |input| input.buttons.bits());
+                    let run_time = trace::micros(run_time);
+                    trace::event("run", &[frame, u64::from(buttons), run_time]);
+                }
                 self.record_for_rewind(frame_duration);
             }
 
@@ -764,9 +790,22 @@ impl Runner {
             } else {
                 self.speed
             };
+            let taken = *self
+                .latest
+                .taken
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some((sequence, at)) = taken {
+                self.lock.drawn(sequence, at);
+            }
             let now = Instant::now();
-            deadline = speed::next_deadline(deadline, now, speed.frame_step(frame_duration));
+            trace::event("busy", &[trace::micros(now - turn)]);
+            let step = speed
+                .frame_step(frame_duration)
+                .map(|frame| self.lock.step(now, frame));
+            deadline = speed::next_deadline(deadline, now, step);
             speed::sleep_until(deadline);
+            trace::event("late", &[trace::micros(deadline.elapsed())]);
         }
         self.shut_down();
     }
@@ -841,6 +880,7 @@ impl Runner {
                 }
             }
             Command::SetSpeed(speed) => self.speed = speed,
+            Command::SetRefresh(refresh) => self.lock.set_refresh(refresh),
             Command::SetRewind(on) => {
                 let can = self.loaded.core.saves_every_frame();
                 if on && !can {
@@ -1253,6 +1293,7 @@ impl Runner {
                 .unwrap_or_else(PoisonError::into_inner);
             let (sequence, frames) = &mut *latest;
             *sequence += 1;
+            self.lock.published(*sequence, Instant::now());
             let screens = self.loaded.core.screens();
             if frames.len() == screens.len() {
                 frames.clone_from_slice(screens);
