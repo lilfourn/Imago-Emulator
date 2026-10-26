@@ -59,6 +59,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [Roadmap](docs/ROADMAP.md): phases and milestones, GB → GBC → GBA → DS
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
 - [Scripting](docs/scripting.md): the Lua functions scripts can call
+- [Design system](docs/design-system.md): the app's layout rules, and the checks that hold it to them
 - [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks
 
 ## Build and run
@@ -77,6 +78,7 @@ cargo run --release -p emu-app -- w.nds w2.nds       # two DSes in wireless rang
 cargo run --release -p emu-app -- pt.nds em.gba      # a GBA game in the DS's GBA slot
 cargo run --release -p emu-app -- --script scripts/lua/frame-counter.lua game.gba
 cargo test --workspace
+scripts/macos/check-layout.sh   # the app's layout, in each screen state (needs the test ROMs)
 ```
 
 A game downloaded as a `.zip`, `.7z` or `.rar` can be opened, dropped on the

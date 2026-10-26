@@ -20,3 +20,9 @@ pub const ON_ACCENT: u32 = 0x00FF_FFFF;
 pub const fn with_alpha(colour: u32, alpha: u8) -> u32 {
     colour << 8 | alpha as u32
 }
+
+/// Room between the window's sides and what is in it, in logical pixels:
+/// as far in as the close button.
+pub const INSET: f32 = 16.0;
+/// Behind a control under the pointer.
+pub const HOVER: u32 = with_alpha(TEXT, 0x14);

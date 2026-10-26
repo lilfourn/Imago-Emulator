@@ -17,12 +17,24 @@ use crate::ambient::Backdrop;
 use crate::app::{TOP_BAR, top_bar};
 use crate::filter::Filter;
 use crate::layout::{Arrangement, GAPS, HINGE_GAP, Rotation};
+use crate::probe;
 use crate::settings::Settings;
 use crate::theme::{ACCENT, BACKGROUND, MUTED as DIM, ON_ACCENT, PANEL, TEXT, with_alpha};
 use crate::view::EmulatorView;
 
-/// Room for the names of the rows, in logical pixels.
-const NAME_WIDTH: f32 = 120.0;
+/// Size of the window's words, in logical pixels.
+const TEXT_SIZE: f32 = 14.0;
+/// Room between a row's name and its choices, either side of a choice's
+/// label, and around the choices inside their 1-pixel edge.
+const NAME_GAP: f32 = 12.0;
+const CHOICE_PADDING: f32 = 12.0;
+const TRACK_PADDING: f32 = 2.0;
+/// Rounding of the choices' track, and of the chosen one inside it, so
+/// the two corners share a centre.
+const TRACK_RADIUS: f32 = 8.0;
+const CHOICE_RADIUS: f32 = TRACK_RADIUS - TRACK_PADDING - 1.0;
+/// The least room either side of the rows.
+const MIN_SIDE: f32 = 24.0;
 
 /// The settings window's root view.
 pub struct SettingsWindow {
@@ -238,16 +250,17 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// `row`, the `index`th, ringed if the keyboard is on it.
-    fn row(&self, index: usize, row: Row, cx: &mut Context<Self>) -> AnyElement {
+    /// `row`, the `index`th, ringed if the keyboard is on it, with
+    /// `name_width` for its name.
+    fn row(&self, index: usize, row: Row, name_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let focused = index == self.focused;
         let buttons = row.labels.into_iter().enumerate().map(|(at, label)| {
             let chosen = row.chosen == Some(at);
             div()
                 .id((row.name, at))
-                .px_3()
+                .px(px(CHOICE_PADDING))
                 .py(px(3.0))
-                .rounded(px(5.0))
+                .rounded(px(CHOICE_RADIUS))
                 .cursor_pointer()
                 .when(chosen, |button| {
                     button.bg(rgb(ACCENT)).text_color(rgb(ON_ACCENT))
@@ -257,35 +270,38 @@ impl SettingsWindow {
                 })
                 .on_click(cx.listener(move |this, _, _, cx| this.pick(index, at, cx)))
                 .child(label)
+                .children(probe::part(format!("segment:{}.{at}", row.name)))
         });
         let choices = div()
             .flex()
             .items_center()
-            .gap_3()
+            .gap(px(NAME_GAP))
             .child(
                 div()
-                    .w(px(NAME_WIDTH))
+                    .w(px(name_width))
                     .flex()
                     .justify_end()
                     .text_color(rgb(if focused { TEXT } else { DIM }))
-                    .child(row.name),
+                    .child(row.name)
+                    .children(probe::part(format!("name:{}", row.name))),
             )
             .child(
                 div()
                     .flex()
-                    .gap(px(2.0))
-                    .p(px(2.0))
-                    .rounded_md()
+                    .gap(px(TRACK_PADDING))
+                    .p(px(TRACK_PADDING))
+                    .rounded(px(TRACK_RADIUS))
                     .bg(rgb(PANEL))
                     .border_1()
                     .border_color(rgba(if focused { with_alpha(ACCENT, 0xAA) } else { 0 }))
-                    .children(buttons),
+                    .children(buttons)
+                    .children(probe::bordered_part(format!("track:{}", row.name), 1.0)),
             );
         div()
             .flex()
             .flex_col()
             .gap_2()
-            .children(row.heading.map(section))
+            .children(row.heading.map(|heading| section(heading, name_width)))
             .child(choices)
             .into_any_element()
     }
@@ -320,11 +336,24 @@ impl SettingsWindow {
 }
 
 impl gpui::Render for SettingsWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<AnyElement> = rows(&self.settings)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The rows are centred as one form: the widest name, then the
+        // widest row of choices.
+        let rows = rows(&self.settings);
+        let widest = |width: &dyn Fn(&Row) -> f32| rows.iter().map(width).fold(0.0, f32::max);
+        let name_width = widest(&|row| text_width(row.name, window)).ceil();
+        let choices_width = widest(&|row| {
+            let labels = row.labels.iter();
+            let words: f32 = labels.map(|label| text_width(label, window)).sum();
+            let count = row.labels.len() as f32;
+            words + count * 2.0 * CHOICE_PADDING + (count + 1.0) * TRACK_PADDING + 2.0
+        });
+        let room = f32::from(window.viewport_size().width) - name_width - NAME_GAP - choices_width;
+        let side = (room / 2.0).max(MIN_SIDE);
+        let rows: Vec<AnyElement> = rows
             .into_iter()
             .enumerate()
-            .map(|(index, row)| self.row(index, row, cx))
+            .map(|(index, row)| self.row(index, row, name_width, cx))
             .collect();
         div()
             .track_focus(&self.focus)
@@ -334,8 +363,9 @@ impl gpui::Render for SettingsWindow {
             .flex_col()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(TEXT))
-            .text_sm()
+            .text_size(px(TEXT_SIZE))
             .on_key_down(cx.listener(Self::key_down))
+            .children(probe::begin())
             .child(
                 div()
                     .h(px(TOP_BAR))
@@ -344,7 +374,8 @@ impl gpui::Render for SettingsWindow {
                     .items_center()
                     .justify_center()
                     .text_color(rgb(DIM))
-                    .child("Settings"),
+                    .child("Settings")
+                    .children(probe::part("header.title")),
             )
             .child(
                 // Scrolls if the rows are taller than the window.
@@ -357,21 +388,33 @@ impl gpui::Render for SettingsWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .px_6()
-                    .pb_6()
+                    .px(px(side))
+                    .pb(px(MIN_SIDE))
                     .children(rows),
             )
+            .children(probe::end("settings"))
     }
 }
 
-/// A heading over a group of rows, lined up with the choices.
-fn section(title: &'static str) -> AnyElement {
+/// How wide `text` is drawn in the window's words, in logical pixels.
+fn text_width(text: &str, window: &Window) -> f32 {
+    let run = window.text_style().to_run(text.len());
+    let line = window
+        .text_system()
+        .shape_line(text.to_owned().into(), px(TEXT_SIZE), &[run], None);
+    f32::from(line.width)
+}
+
+/// A heading over a group of rows, lined up with the choices after names
+/// `name_width` wide.
+fn section(title: &'static str, name_width: f32) -> AnyElement {
     div()
         .pt_2()
-        .pl(px(NAME_WIDTH + 12.0))
+        .pl(px(name_width + NAME_GAP))
         .text_xs()
         .text_color(rgb(DIM))
         .child(title)
+        .children(probe::part(format!("heading:{title}")))
         .into_any_element()
 }
 

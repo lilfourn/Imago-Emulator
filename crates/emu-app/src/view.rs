@@ -51,12 +51,13 @@ use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist::{self, GameFiles};
+use crate::probe;
 use crate::romhack::{self, MakeError};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
 use crate::speed::{self, Pace, Speed, Speeds};
-use crate::theme::BACKGROUND;
+use crate::theme::{BACKGROUND, INSET};
 use crate::video;
 use crate::window_chrome;
 
@@ -2462,7 +2463,8 @@ impl Render for EmulatorView {
             // right one.
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
-            .on_drop(cx.listener(Self::drop_files));
+            .on_drop(cx.listener(Self::drop_files))
+            .children(probe::begin());
         // Listening only while a DS runs leaves the menu item disabled
         // otherwise.
         let system = self.session.as_ref().map(|session| session.info.system);
@@ -2569,22 +2571,14 @@ impl Render for EmulatorView {
             window.drop_image(image).ok();
         }
         if let Some(notice) = &self.notice {
-            let card = div().absolute().left(px(12.0));
+            let card = div().absolute().left(px(INSET));
             // Over the game menu, notices go to the top, clear of it.
             let card = if self.menu.is_some() {
                 card.top(px(TOP_BAR + 4.0))
             } else {
-                card.bottom(px(12.0 + footer))
+                card.bottom(px(INSET + footer))
             };
-            let mut card = card
-                .flex()
-                .flex_col()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(rgba(0x0000_00CC))
-                .text_sm();
+            let mut card = overlay_plate(card).flex_col().gap_1();
             if let Some(image) = &self.slot_image {
                 card = card.child(
                     img(Arc::clone(image))
@@ -2592,9 +2586,9 @@ impl Render for EmulatorView {
                         .object_fit(ObjectFit::Contain),
                 );
             }
-            root = root.child(card.child(notice.clone()));
+            root = root.child(card.child(notice.clone()).children(probe::part("notice")));
         }
-        root
+        root.children(probe::end("main"))
     }
 }
 
@@ -2755,22 +2749,33 @@ fn top_bar_shade() -> impl IntoElement {
         ))
 }
 
-/// A red dot and "REC" in the window's corner while a recording is under
-/// way. The recording is of the core's frames, so it never shows this.
-fn recording_mark() -> impl IntoElement {
-    div()
-        .absolute()
-        .top(px(10.0))
-        .right(px(10.0))
+/// The plate under words over the game: the notice, the speed readout and
+/// the recording mark. Its 12-pixel words on 16-pixel lines sit evenly in
+/// it.
+fn overlay_plate(plate: Div) -> Div {
+    plate
         .flex()
+        .px_2()
+        .py_1()
+        .rounded(px(8.0))
+        .bg(rgba(0x0000_00CC))
+        .text_xs()
+        .line_height(px(16.0))
+}
+
+/// A red dot and "REC" in the window's corner, on the traffic lights'
+/// midline, while a recording is under way. The recording is of the core's
+/// frames, so it never shows this.
+fn recording_mark() -> impl IntoElement {
+    overlay_plate(div())
+        .absolute()
+        .top(px(TOP_BAR / 2.0 - 12.0))
+        .right(px(INSET))
         .items_center()
         .gap_1()
-        .px_2()
-        .rounded_md()
-        .bg(rgba(0x0000_00AA))
-        .text_xs()
         .child(div().size(px(8.0)).rounded_full().bg(rgb(0x00E5_3935)))
         .child("REC")
+        .children(probe::part("rec"))
 }
 
 /// What to tell the player of the emulation thread's notice `text`:
@@ -2817,16 +2822,13 @@ fn slot_image(width: u16, height: u16, rgb: &[u8]) -> Arc<RenderImage> {
 /// The speed readout, small in the window's bottom right corner, above a
 /// key guide `footer` logical pixels tall.
 fn speed_readout(text: SharedString, footer: f32) -> impl IntoElement {
-    div()
+    overlay_plate(div())
         .absolute()
-        .bottom(px(8.0 + footer))
-        .right(px(8.0))
-        .px_1()
-        .rounded_sm()
-        .bg(rgba(0x0000_0099))
-        .text_xs()
+        .bottom(px(INSET + footer))
+        .right(px(INSET))
         .font_family("Menlo")
         .child(text)
+        .children(probe::part("speed"))
 }
 
 /// The menu action a gamepad hotkey runs.

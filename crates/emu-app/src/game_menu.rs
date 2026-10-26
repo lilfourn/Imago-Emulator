@@ -18,23 +18,28 @@ use gpui::{
     ScrollHandle, SharedString, Stateful, Window, div, ease_out_quint, prelude::*, px, rgb, rgba,
 };
 
-use crate::theme::{ACCENT, LINE, MUTED as DIM, ON_ACCENT, TEXT, with_alpha};
+use crate::icons;
+use crate::probe;
+use crate::theme::{ACCENT, INSET, LINE, MUTED as DIM, ON_ACCENT, TEXT, with_alpha};
 
 /// The sheet: graphite, a touch see-through.
 const SHEET: u32 = with_alpha(0x0013_1417, 0xF2);
 const TILE: u32 = 0xFFFF_FF0D;
 const TILE_HOVER: u32 = 0xFFFF_FF1A;
-const DANGER: u32 = 0x00FF_6B6B;
 const DANGER_FILL: u32 = 0x00E0_4848;
-/// The ring around whatever the keyboard is on.
+/// The ring around whatever the keyboard is on, and how thick it is.
 const FOCUS: u32 = 0xFFFF_FFCC;
+const RING: f32 = 2.0;
 
 /// Widest the sheet gets, in logical pixels.
 const MAX_WIDTH: f32 = 420.0;
 /// Room around and inside the sheet, and between tiles.
-const MARGIN: f32 = 14.0;
-const PADDING: f32 = 14.0;
+const MARGIN: f32 = INSET;
+const PADDING: f32 = 16.0;
 const GAP: f32 = 8.0;
+/// Height of a tile, a row and a button.
+const TILE_HEIGHT: f32 = 80.0;
+const ROW_HEIGHT: f32 = 40.0;
 /// The narrowest a tile gets in a row of four; narrower, the tiles go
 /// two to a row.
 const MIN_TILE: f32 = 64.0;
@@ -75,12 +80,12 @@ enum Tile {
 const TILES: [Tile; 4] = [Tile::Resume, Tile::Cheats, Tile::Restart, Tile::Library];
 
 impl Tile {
-    fn glyph(self) -> &'static str {
+    fn icon(self) -> &'static str {
         match self {
-            Self::Resume => "▶",
-            Self::Cheats => "✦",
-            Self::Restart => "↺",
-            Self::Library => "▦",
+            Self::Resume => icons::PLAY,
+            Self::Cheats => icons::CHEATS,
+            Self::Restart => icons::RESTART,
+            Self::Library => icons::LIBRARY,
         }
     }
 
@@ -102,7 +107,7 @@ enum Page {
     /// The cheats, with this one chosen; one past the last is Edit
     /// Cheats.
     Cheats(usize),
-    /// Asking before restarting; whether Erase rather than Cancel is
+    /// Asking before restarting; whether Start Over rather than Cancel is
     /// chosen.
     Restart(bool),
 }
@@ -252,7 +257,7 @@ impl GameMenu {
     ) -> Stateful<Div> {
         div()
             .id(id)
-            .border_2()
+            .border(px(RING))
             .border_color(rgba(if self.page == page { FOCUS } else { 0 }))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(page, cx)))
@@ -260,50 +265,46 @@ impl GameMenu {
 
     fn header(&self, subtitle: Option<&'static str>, cx: &mut Context<Self>) -> AnyElement {
         let back = subtitle.map(|_| {
-            div()
-                .id("back")
-                .size(px(26.0))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .text_color(rgb(TEXT))
-                .hover(|button| button.bg(rgba(TILE_HOVER)))
+            icons::button("back", icons::BACK)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.back(cx);
                     cx.notify();
                 }))
-                .child("‹")
+                .children(probe::part("button:back"))
         });
         let title = div()
             .flex_1()
             .text_color(rgb(TEXT))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .line_clamp(1)
-            .child(subtitle.map_or_else(|| self.title.clone(), SharedString::from));
+            .child(subtitle.map_or_else(|| self.title.clone(), SharedString::from))
+            .children(probe::part("menu.title"));
+        // As tall as the back button with it or without.
         div()
             .flex_none()
+            .h(px(icons::BUTTON))
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
             .children(back)
             .child(title)
+            .children(probe::part("menu.header"))
             .into_any_element()
     }
 
     /// `tile`, `side` logical pixels wide.
     fn tile(&self, tile: Tile, side: f32, cx: &mut Context<Self>) -> AnyElement {
         let resume = tile == Tile::Resume;
+        let colour = if resume { ON_ACCENT } else { TEXT };
         self.part(Page::Tiles(tile), tile.label(), cx)
             .w(px(side))
-            .h(px(side.min(84.0)))
+            .h(px(TILE_HEIGHT))
             .rounded(px(14.0))
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_1()
+            .gap_2()
             .bg(rgba(if resume {
                 with_alpha(ACCENT, 0xFF)
             } else {
@@ -313,16 +314,21 @@ impl GameMenu {
             .when(!resume, |tile| tile.hover(|tile| tile.bg(rgba(TILE_HOVER))))
             .child(
                 div()
-                    .text_xl()
-                    .text_color(rgb(if tile == Tile::Restart { DANGER } else { TEXT }))
-                    .child(tile.glyph()),
+                    .flex_none()
+                    .child(icons::icon(tile.icon(), 20.0, colour))
+                    .children(probe::part(format!("tile.icon:{}", tile.label()))),
             )
             .child(
+                // A line no taller than the letters, so the icon and the
+                // label are centred together by what is drawn.
                 div()
                     .text_xs()
+                    .line_height(px(12.0))
                     .text_color(rgb(if resume { ON_ACCENT } else { DIM }))
-                    .child(tile.label()),
+                    .child(tile.label())
+                    .children(probe::part(format!("tile.label:{}", tile.label()))),
             )
+            .children(probe::bordered_part(format!("tile:{}", tile.label()), RING))
             .into_any_element()
     }
 
@@ -346,7 +352,7 @@ impl GameMenu {
             .enumerate()
             .map(|(at, cheat)| {
                 self.part(Page::Cheats(at), ("cheat", at), cx)
-                    .h(px(40.0))
+                    .h(px(ROW_HEIGHT))
                     .px_3()
                     .rounded(px(10.0))
                     .flex()
@@ -361,7 +367,8 @@ impl GameMenu {
                             .line_clamp(1)
                             .child(SharedString::from(cheat.name.clone())),
                     )
-                    .child(switch(cheat.enabled))
+                    .child(switch(cheat.enabled).children(probe::part(format!("switch:{at}"))))
+                    .children(probe::bordered_part(format!("row:cheat.{at}"), RING))
             })
             .collect();
         let empty = self.cheats.is_empty().then(|| {
@@ -373,7 +380,7 @@ impl GameMenu {
         });
         let edit = self
             .part(Page::Cheats(self.cheats.len()), "edit-cheats", cx)
-            .h(px(36.0))
+            .h(px(ROW_HEIGHT))
             .rounded(px(10.0))
             .flex()
             .items_center()
@@ -385,7 +392,8 @@ impl GameMenu {
                 "Add Cheats…"
             } else {
                 "Edit Cheats…"
-            });
+            })
+            .children(probe::bordered_part("button:edit-cheats", RING));
         // The order `focused_item` counts in.
         empty
             .map(IntoElement::into_any_element)
@@ -395,12 +403,12 @@ impl GameMenu {
             .collect()
     }
 
-    /// The question before restarting, then Cancel and Erase & Restart.
+    /// The question before restarting, then Cancel and Start Over.
     fn restart(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let cancel = self
             .part(Page::Restart(false), "cancel", cx)
             .flex_1()
-            .h(px(40.0))
+            .h(px(ROW_HEIGHT))
             .rounded(px(10.0))
             .flex()
             .items_center()
@@ -408,11 +416,12 @@ impl GameMenu {
             .bg(rgba(TILE_HOVER))
             .hover(|button| button.bg(rgba(0xFFFF_FF26)))
             .text_color(rgb(TEXT))
-            .child("Cancel");
+            .child("Cancel")
+            .children(probe::bordered_part("button:cancel", RING));
         let erase = self
             .part(Page::Restart(true), "erase", cx)
             .flex_1()
-            .h(px(40.0))
+            .h(px(ROW_HEIGHT))
             .rounded(px(10.0))
             .flex()
             .items_center()
@@ -421,7 +430,8 @@ impl GameMenu {
             .hover(|button| button.opacity(0.9))
             .text_color(rgb(0x00FF_FFFF))
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .child("Erase & Restart");
+            .child("Start Over")
+            .children(probe::bordered_part("button:erase", RING));
         // The order `focused_item` counts in.
         vec![
             div()
@@ -443,6 +453,7 @@ impl gpui::Render for GameMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
         let sheet_width = (f32::from(viewport.width) - 2.0 * MARGIN).min(MAX_WIDTH);
+        // Inside the sheet's 1-pixel edge.
         let inner = sheet_width - 2.0 * PADDING - 2.0;
         let (columns, side) = tile_grid(inner);
         self.columns = columns;
@@ -466,9 +477,7 @@ impl gpui::Render for GameMenu {
             .id("game-menu")
             .w(px(sheet_width))
             .max_h(px(f32::from(viewport.height) - 2.0 * MARGIN))
-            .px(px(PADDING))
-            .pt(px(8.0))
-            .pb(px(PADDING))
+            .p(px(PADDING))
             .rounded(px(22.0))
             .bg(rgba(SHEET))
             .border_1()
@@ -478,18 +487,9 @@ impl gpui::Render for GameMenu {
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .child(
-                // The grabber, as on a sheet on a phone.
-                div().flex_none().w_full().flex().justify_center().child(
-                    div()
-                        .w(px(36.0))
-                        .h(px(4.0))
-                        .rounded_full()
-                        .bg(rgba(0xFFFF_FF2E)),
-                ),
-            )
             .child(self.header(subtitle, cx))
-            .child(body);
+            .child(body)
+            .children(probe::bordered_part("sheet", 1.0));
         // A dimmed backdrop that takes the clicks meant for the game.
         div()
             .id("game-menu-backdrop")
@@ -519,7 +519,7 @@ impl gpui::Render for GameMenu {
 }
 
 /// An on/off switch.
-fn switch(on: bool) -> impl IntoElement {
+fn switch(on: bool) -> Div {
     div()
         .w(px(36.0))
         .h(px(22.0))

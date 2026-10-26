@@ -8,6 +8,7 @@ use emu_core::{Button, System};
 use gpui::{AnyElement, BoxShadow, div, hsla, point, prelude::*, px, rgb, rgba};
 
 use crate::bindings::{Bindings, Held};
+use crate::probe;
 use crate::theme::{BACKGROUND, MUTED, TEXT, with_alpha};
 
 /// Height of one line of keys, in logical pixels: a keycap over its label.
@@ -164,19 +165,27 @@ pub fn guide(groups: &[Vec<Entry>], height: f32) -> AnyElement {
             .flex()
             .items_center()
             .gap(px(GROUP_GAP))
-            .children(divider)
+            .children(
+                divider
+                    .map(|divider| divider.children(probe::part(format!("guide.divider:{index}")))),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(KEY_GAP))
-                    .children(group.iter().map(key)),
+                    .children(group.iter().map(key))
+                    .children(probe::part(format!("guide.group:{index}"))),
             )
     });
+    // The labels' lines leave room under their letters for descenders,
+    // which none of them has: a point more padding goes above, so what is
+    // drawn sits evenly inside.
     let island = div()
         .max_w_full()
         .px(px(PAD_X))
-        .py(px(PAD_Y))
+        .pt(px(PAD_Y + 1.0))
+        .pb(px(PAD_Y - 1.0))
         .flex()
         .flex_wrap()
         .items_center()
@@ -192,7 +201,8 @@ pub fn guide(groups: &[Vec<Entry>], height: f32) -> AnyElement {
             blur_radius: px(18.0),
             spread_radius: px(0.0),
         }])
-        .children(groups);
+        .children(groups)
+        .children(probe::bordered_part("guide.island", 1.0));
     div()
         .absolute()
         .left_0()
@@ -235,7 +245,11 @@ fn key(entry: &Entry) -> impl IntoElement {
                 .bg(rgba(with_alpha(TEXT, 0x0F)))
                 .text_color(rgb(TEXT))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .child(entry.key.clone()),
+                .child(entry.key.clone())
+                .children(probe::bordered_part(
+                    format!("guide.cap:{}", entry.label),
+                    1.0,
+                )),
         )
         .child(
             div()

@@ -16,20 +16,22 @@ use std::time::Duration;
 
 use emu_cores::rpg_maker;
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, EventEmitter, KeyDownEvent, ObjectFit,
-    ScrollHandle, SharedString, Task, Window, div, img, linear_color_stop, linear_gradient,
-    prelude::*, px, rgb, rgba,
+    Animation, AnimationExt, AnyElement, App, Context, EventEmitter, KeyDownEvent, LineFragment,
+    ObjectFit, ScrollHandle, SharedString, Task, Window, div, img, linear_color_stop,
+    linear_gradient, prelude::*, px, rgb, rgba,
 };
 
 use crate::app::TOP_BAR;
 use crate::app_icon;
 use crate::archive;
 use crate::boxart;
+use crate::icons;
 use crate::library::{self, Game, Library};
+use crate::probe;
 use crate::rom_info;
 use crate::romhack::{self, MakeError};
 
-use crate::theme::{ACCENT as CARET, BACKGROUND as TOP, MUTED as DIM, PANEL, TEXT};
+use crate::theme::{ACCENT as CARET, BACKGROUND as TOP, INSET, MUTED as DIM, PANEL, TEXT};
 
 /// The background lightens a touch towards the foot of the window.
 const FOOT: u32 = 0x0016_181B;
@@ -39,13 +41,28 @@ const CHOSEN: u32 = 0xFFFF_FF1A;
 /// Room left of the header for the close, minimise and zoom buttons and
 /// a gap after them.
 const TRAFFIC_LIGHTS: f32 = 96.0;
-/// Space around the grid and between its games, in logical pixels.
-const PADDING: f32 = 20.0;
+/// Room right of the header's last button, which puts its icon's artwork
+/// as far from the window's right side as the close button is from the
+/// left.
+const HEADER_END: f32 = 8.0;
+/// Space between the games, in logical pixels.
 const GAP: f32 = 12.0;
+/// Room around a game's box art and title, inside its tile.
+const TILE_PADDING: f32 = 4.0;
 /// The narrowest a game's tile gets before the grid drops a column.
 const MIN_TILE: f32 = 116.0;
-/// Height of a line of a game's title.
+/// Size and line height of a game's title.
+const TITLE_SIZE: f32 = 12.0;
 const TITLE_LINE: f32 = 16.0;
+/// Height of the search field, and room around its magnifier. The
+/// magnifier's artwork sits about as far inside its 14 pixels as the field's
+/// edge is thick, so it is as far from the field's side as from its top and
+/// bottom.
+const SEARCH_HEIGHT: f32 = 32.0;
+const SEARCH_PADDING: f32 = 8.0;
+/// Size of the empty library's hint, and the widest it gets.
+const HINT_SIZE: f32 = 14.0;
+const HINT_WIDTH: f32 = 320.0;
 
 /// What the library asks of the main window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,31 +368,27 @@ impl LibraryView {
             .flex()
             .items_center()
             .pl(px(TRAFFIC_LIGHTS))
-            .pr(px(PADDING))
-            .gap_2()
+            .pr(px(HEADER_END))
+            .gap_1()
+            .children(probe::part("header"))
             .child(
                 div()
                     .flex_1()
                     .text_color(rgb(TEXT))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Library"),
+                    .child("Library")
+                    .children(probe::part("header.title")),
             )
-            .child(div().flex_1().flex().justify_end().gap_1().children([
-                icon_button(
-                    "settings",
-                    "⚙",
-                    cx.listener(|_, _, _, cx| {
-                        cx.emit(LibraryEvent::OpenSettings);
-                    }),
-                ),
-                icon_button(
-                    "add",
-                    "+",
-                    cx.listener(|_, _, _, cx| {
-                        cx.emit(LibraryEvent::AddGames);
-                    }),
-                ),
-            ]))
+            .child(
+                icons::button("settings", icons::SETTINGS)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::OpenSettings)))
+                    .children(probe::part("button:settings")),
+            )
+            .child(
+                icons::button("add", icons::ADD)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::AddGames)))
+                    .children(probe::part("button:add")),
+            )
             .into_any_element()
     }
 
@@ -402,14 +415,14 @@ impl LibraryView {
         };
         div()
             .id("search")
-            .mx(px(PADDING))
-            .mb(px(PADDING / 2.0))
-            .h(px(30.0))
+            .mx(px(INSET))
+            .mb(px(12.0))
+            .h(px(SEARCH_HEIGHT))
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
+            .px(px(SEARCH_PADDING))
             .rounded_lg()
             .bg(rgba(0xFFFF_FF12))
             .border_1()
@@ -424,7 +437,13 @@ impl LibraryView {
                 this.searching = true;
                 cx.notify();
             }))
-            .child(div().text_color(rgb(DIM)).child("⌕"))
+            .children(probe::bordered_part("field:search", 1.0))
+            .child(
+                div()
+                    .flex_none()
+                    .child(icons::icon(icons::MAGNIFIER, 14.0, DIM))
+                    .children(probe::part("field:search.icon")),
+            )
             .child(
                 div()
                     .flex()
@@ -432,13 +451,27 @@ impl LibraryView {
                     .gap(px(1.0))
                     .children(caret_before)
                     .child(text)
-                    .children(caret_after),
+                    .children(caret_after)
+                    .children(probe::part(if self.query.is_empty() {
+                        "field:search.placeholder"
+                    } else {
+                        "field:search.query"
+                    })),
             )
             .into_any_element()
     }
 
-    fn tile(&self, index: usize, game: &Game, width: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn tile(
+        &self,
+        index: usize,
+        game: &Game,
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let chosen = self.selected.as_ref() == Some(&game.path);
+        let inner = width - 2.0 * TILE_PADDING;
+        let title = centred_lines(&game.title, inner, TITLE_SIZE, 2, window, cx);
         let path = game.path.clone();
         let art = match self.covers.get(&game.crc32) {
             Some(cover) => img(cover.clone())
@@ -452,7 +485,8 @@ impl LibraryView {
                 .justify_center()
                 .rounded_md()
                 .bg(rgb(PANEL))
-                .text_2xl()
+                .text_size(px(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(rgb(DIM))
                 .child(game.platform.label())
                 .into_any_element(),
@@ -463,7 +497,7 @@ impl LibraryView {
             .flex()
             .flex_col()
             .gap_1()
-            .p_1()
+            .p(px(TILE_PADDING))
             .rounded_lg()
             .cursor_pointer()
             .when(chosen, |tile| tile.bg(rgba(CHOSEN)))
@@ -471,28 +505,30 @@ impl LibraryView {
                 this.selected = Some(path.clone());
                 cx.emit(LibraryEvent::Play(path.clone()));
             }))
+            .children(probe::part(format!("tile:{index}")))
             .child(
                 div()
                     .w_full()
-                    .h(px(width - 8.0))
+                    .h(px(inner))
                     .flex()
                     .items_end()
-                    .child(art),
+                    .child(art)
+                    .children(probe::part(format!("tile.art:{index}"))),
             )
             .child(
                 div()
                     .h(px(2.0 * TITLE_LINE))
-                    .text_xs()
+                    .text_size(px(TITLE_SIZE))
                     .line_height(px(TITLE_LINE))
                     .text_center()
-                    .line_clamp(2)
                     .text_color(rgb(if chosen { 0x00FF_FFFF } else { TEXT }))
-                    .child(SharedString::from(game.title.clone())),
+                    .child(title)
+                    .children(probe::part(format!("tile.title:{index}"))),
             )
             .into_any_element()
     }
 
-    fn empty(&self) -> AnyElement {
+    fn empty(&self, window: &Window, cx: &App) -> AnyElement {
         let (title, hint) = if self.library.games.is_empty() {
             (
                 "No games yet".to_owned(),
@@ -504,6 +540,15 @@ impl LibraryView {
                 "Press Escape to clear the search.".to_owned(),
             )
         };
+        let room = f32::from(window.viewport_size().width) - 2.0 * INSET;
+        let hint = centred_lines(
+            &hint,
+            room.min(HINT_WIDTH),
+            HINT_SIZE,
+            usize::MAX,
+            window,
+            cx,
+        );
         div()
             .flex_1()
             .flex()
@@ -511,8 +556,22 @@ impl LibraryView {
             .items_center()
             .justify_center()
             .gap_2()
-            .child(div().text_xl().text_color(rgb(TEXT)).child(title))
-            .child(div().text_sm().text_color(rgb(DIM)).child(hint))
+            .px(px(INSET))
+            .child(
+                div()
+                    .text_xl()
+                    .text_color(rgb(TEXT))
+                    .child(title)
+                    .children(probe::part("empty.title")),
+            )
+            .child(
+                div()
+                    .text_size(px(HINT_SIZE))
+                    .text_center()
+                    .text_color(rgb(DIM))
+                    .child(hint)
+                    .children(probe::part("empty.hint")),
+            )
             .into_any_element()
     }
 }
@@ -520,7 +579,7 @@ impl LibraryView {
 impl gpui::Render for LibraryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let width = f32::from(window.viewport_size().width);
-        let (columns, tile) = grid(width - 2.0 * PADDING);
+        let (columns, tile) = grid(width - 2.0 * INSET);
         self.columns = columns;
         let shown = self.shown();
         let at = position(&shown, self.selected.as_deref());
@@ -542,12 +601,12 @@ impl gpui::Render for LibraryView {
             .child(self.header(cx))
             .child(self.search_field(cx));
         if games.is_empty() {
-            return root.child(self.empty());
+            return root.child(self.empty(window, cx));
         }
         let tiles: Vec<AnyElement> = games
             .iter()
             .enumerate()
-            .map(|(index, game)| self.tile(index, game, tile, cx))
+            .map(|(index, game)| self.tile(index, game, tile, window, cx))
             .collect();
         root.child(
             div()
@@ -560,32 +619,12 @@ impl gpui::Render for LibraryView {
                 .flex_wrap()
                 .content_start()
                 .gap(px(GAP))
-                .px(px(PADDING))
-                .pb(px(PADDING))
-                .children(tiles),
+                .px(px(INSET))
+                .pb(px(INSET))
+                .children(tiles)
+                .children(probe::part("grid")),
         )
     }
-}
-
-/// A round button showing `glyph`.
-fn icon_button(
-    id: &'static str,
-    glyph: &'static str,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> AnyElement {
-    div()
-        .id(id)
-        .size(px(26.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .cursor_pointer()
-        .text_color(rgb(TEXT))
-        .hover(|button| button.bg(rgb(0x0033_3333)))
-        .on_click(on_click)
-        .child(glyph)
-        .into_any_element()
 }
 
 /// The box art of the ROM with checksum `crc32` in `cache`, or failing
@@ -665,6 +704,44 @@ fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
         game.made_from_patch();
     }
     Ok(game)
+}
+
+/// `text` broken into lines no wider than `width` logical pixels at
+/// `font_size`, at most `max_lines` of them, the last cut short with an
+/// ellipsis if need be. GPUI centres a line it wraps by its width up to the
+/// next line, which takes in the space it broke at and leaves the line half
+/// a space off centre; lines broken here are each centred on their own.
+fn centred_lines(
+    text: &str,
+    width: f32,
+    font_size: f32,
+    max_lines: usize,
+    window: &Window,
+    cx: &App,
+) -> SharedString {
+    let font = window.text_style().font();
+    let mut wrapper = cx.text_system().line_wrapper(font, px(font_size));
+    let mut lines: Vec<String> = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        if lines.len() + 1 == max_lines {
+            let last =
+                wrapper.truncate_line(rest.to_owned().into(), px(width), "…", &mut Vec::new());
+            lines.push(last.replace(" …", "…"));
+            break;
+        }
+        let fragments = [LineFragment::text(rest)];
+        let end = wrapper
+            .wrap_line(&fragments, px(width))
+            .next()
+            .map(|boundary| boundary.ix)
+            .filter(|&end| end > 0)
+            .unwrap_or(rest.len());
+        let (line, after) = rest.split_at(end);
+        lines.push(line.trim_end().to_owned());
+        rest = after.trim_start();
+    }
+    lines.join("\n").into()
 }
 
 /// How many tiles fit across `width` logical pixels, and how wide each is
