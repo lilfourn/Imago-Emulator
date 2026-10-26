@@ -800,11 +800,9 @@ impl Runner {
             }
             let now = Instant::now();
             trace::event("busy", &[trace::micros(now - turn)]);
-            let step = if speed == Speed::NORMAL {
-                Some(self.lock.step(now))
-            } else {
-                speed.frame_step(frame_duration)
-            };
+            let step = speed
+                .frame_step(frame_duration)
+                .map(|frame| self.lock.step(now, frame));
             deadline = speed::next_deadline(deadline, now, step);
             speed::sleep_until(deadline);
             trace::event("late", &[trace::micros(deadline.elapsed())]);

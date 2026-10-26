@@ -8,13 +8,14 @@
 //! caught it, so frames showed for one refresh or three instead of two,
 //! several times a second.
 //!
-//! [`Lock`] runs frames a whole number of refreshes long instead, when one
-//! is within half a percent of the system's own frame, and nudges each
-//! frame's start so that it is ready [`MARGIN`] before the refresh that
-//! shows it: soon enough for a slow frame still to catch it, and late
-//! enough not to wait long. Sound plays as much faster as the frames run
-//! ([`Lock::speed`]), which the audio's rate control could not absorb on
-//! its own.
+//! [`Lock`] runs frames a whole number of refreshes long instead, or a
+//! whole number of frames to a refresh when fast-forward runs them faster,
+//! when that is within half a percent of the frame the speed asks for,
+//! and nudges each frame's start so that the frame the window shows is
+//! ready [`MARGIN`] before its refresh: soon enough for a slow frame still
+//! to catch it, and late enough not to wait long. Sound plays as much
+//! faster as the frames run ([`Lock::speed`]), which the audio's rate
+//! control could not absorb on its own.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -111,41 +112,46 @@ impl Lock {
         self.nudge = (error * GAIN).clamp(-most, most);
     }
 
-    /// The whole number of refreshes that frames last, if frames are
-    /// locked to them at `now`.
-    fn refreshes(&self, now: Instant) -> Option<(u32, Duration)> {
+    /// The length that frames asked to last `frame` are locked to at
+    /// `now`, if they are: a whole number of refreshes, or of frames to a
+    /// refresh, near it.
+    fn locked(&self, now: Instant, frame: Duration) -> Option<Duration> {
         let refresh = self.refresh?;
         let recent = self
             .drawn_at
             .is_some_and(|at| now.saturating_duration_since(at) <= DRAWN_RECENTLY);
-        if !recent {
+        if !recent || frame.is_zero() {
             return None;
         }
-        let count = (self.native.as_secs_f64() / refresh.as_secs_f64()).round();
-        // At least one refresh, and within u32 as the check below holds.
-        let count = count.max(1.0) as u32;
-        let frame = refresh * count;
-        let off = (frame.as_secs_f64() / self.native.as_secs_f64() - 1.0).abs();
-        (off <= TOLERANCE).then_some((count, frame))
+        let ratio = frame.as_secs_f64() / refresh.as_secs_f64();
+        // Whole numbers of at least one, within u32 as `frame` is a
+        // frame's length and `refresh` a display's.
+        let locked = if ratio >= 1.0 {
+            refresh * ratio.round() as u32
+        } else {
+            refresh / (1.0 / ratio).round() as u32
+        };
+        let off = (locked.as_secs_f64() / frame.as_secs_f64() - 1.0).abs();
+        (off <= TOLERANCE).then_some(locked)
     }
 
-    /// How long after one frame's start the next starts, at normal speed,
-    /// from `now`: a whole number of refreshes, nudged, while locked, and
-    /// otherwise the system's own frame.
-    pub fn step(&mut self, now: Instant) -> Duration {
-        let Some((_, frame)) = self.refreshes(now) else {
+    /// How long after one frame's start the next starts, at `now`, for
+    /// frames asked to last `frame`: locked to the refreshes and nudged
+    /// while they can be, and otherwise `frame`.
+    pub fn step(&mut self, now: Instant, frame: Duration) -> Duration {
+        let Some(locked) = self.locked(now, frame) else {
             self.nudge = 0.0;
-            return self.native;
+            return frame;
         };
         let nudge = std::mem::take(&mut self.nudge);
-        Duration::from_secs_f64((frame.as_secs_f64() + nudge).max(0.0))
+        Duration::from_secs_f64((locked.as_secs_f64() + nudge).max(0.0))
     }
 
     /// How many times faster than the system's own clock frames run at
-    /// `now`, for the sound to keep up: 1 unless locked.
+    /// normal speed at `now`, for the sound to keep up: 1 unless locked.
     pub fn speed(&self, now: Instant) -> f64 {
-        self.refreshes(now).map_or(1.0, |(_, frame)| {
-            self.native.as_secs_f64() / frame.as_secs_f64()
+        self.locked(now, self.native).map_or(1.0, |locked| {
+            self.native.as_secs_f64() / locked.as_secs_f64()
         })
     }
 
@@ -177,14 +183,21 @@ mod tests {
     fn frames_last_whole_refreshes_when_one_is_close() {
         let now = Instant::now();
         let drawn = now + MARGIN;
-        assert_eq!(drawing(DS, HZ_120, now).step(drawn), HZ_120 * 2);
-        assert_eq!(drawing(GBA, HZ_120, now).step(drawn), HZ_120 * 2);
-        assert_eq!(drawing(RPG_MAKER, HZ_120, now).step(drawn), HZ_120 * 3);
+        let step = |native, refresh, frame| drawing(native, refresh, now).step(drawn, frame);
+        assert_eq!(step(DS, HZ_120, DS), HZ_120 * 2);
+        assert_eq!(step(GBA, HZ_120, GBA), HZ_120 * 2);
+        assert_eq!(step(RPG_MAKER, HZ_120, RPG_MAKER), HZ_120 * 3);
         let hz_60 = Duration::from_nanos(16_666_667);
-        assert_eq!(drawing(DS, hz_60, now).step(drawn), hz_60);
+        assert_eq!(step(DS, hz_60, DS), hz_60);
         // At 144 Hz two refreshes are 17% short of a DS frame.
         let hz_144 = Duration::from_nanos(6_944_444);
-        assert_eq!(drawing(DS, hz_144, now).step(drawn), DS);
+        assert_eq!(step(DS, hz_144, DS), DS);
+        // Fast-forward: 2x and 4x fit one and two frames to a refresh;
+        // 3x, one and a half, does not.
+        assert_eq!(step(DS, HZ_120, DS / 2), HZ_120);
+        assert_eq!(step(DS, HZ_120, DS / 4), HZ_120 / 2);
+        assert_eq!(step(DS, HZ_120, DS / 3), DS / 3);
+        assert_eq!(step(RPG_MAKER, HZ_120, RPG_MAKER / 3), HZ_120);
         let speed = drawing(DS, HZ_120, now).speed(drawn);
         assert!((speed - 1.0029).abs() < 0.0001, "{speed}");
     }
@@ -193,10 +206,10 @@ mod tests {
     fn frames_keep_their_own_clock_while_the_window_draws_none() {
         let now = Instant::now();
         let mut unknown = Lock::new(DS);
-        assert_eq!(unknown.step(now), DS);
+        assert_eq!(unknown.step(now, DS), DS);
         let mut lock = drawing(DS, HZ_120, now);
         let later = now + DRAWN_RECENTLY * 2;
-        assert_eq!(lock.step(later), DS);
+        assert_eq!(lock.step(later, DS), DS);
         assert_eq!(lock.speed(later), 1.0);
     }
 
@@ -208,7 +221,7 @@ mod tests {
             lock.set_refresh(Some(HZ_120));
             lock.published(7, now);
             lock.drawn(7, now + waited);
-            lock.step(now + waited)
+            lock.step(now + waited, DS)
         };
         assert_eq!(step(MARGIN), HZ_120 * 2, "on time");
         assert!(step(Duration::from_millis(5)) > HZ_120 * 2, "early: later");
@@ -228,7 +241,7 @@ mod tests {
         let now = Instant::now();
         let mut lock = drawing(DS, HZ_120, now);
         lock.drawn(1, now + Duration::from_millis(7));
-        assert_eq!(lock.step(now), HZ_120 * 2);
+        assert_eq!(lock.step(now, DS), HZ_120 * 2);
         assert_eq!(lock.frames_drawn(), 1);
     }
 }
