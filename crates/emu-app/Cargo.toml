@@ -42,8 +42,8 @@ toml.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # AppKit, for what GPUI leaves out: hiding the window's close, minimise and
-# zoom buttons, the standard About panel and the Dock icon. The versions GPUI
-# already uses.
+# zoom buttons, the standard About panel, the Dock icon and the display's
+# refresh rate. The versions GPUI already uses.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
@@ -55,6 +55,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSImage",
     "NSImageView",
     "NSResponder",
+    "NSScreen",
     "NSView",
     "NSWindow",
 ] }

@@ -1,6 +1,7 @@
 //! What GPUI leaves out of a macOS window's chrome, done through AppKit:
 //! showing or hiding the close, minimise and zoom buttons, the standard
-//! About panel and the Dock icon. Elsewhere these do nothing.
+//! About panel, the Dock icon, and how often the window's display
+//! refreshes. Elsewhere these do nothing.
 
 use gpui::Window;
 
@@ -67,6 +68,23 @@ pub fn set_dock_icon(png: &[u8]) {
 /// Shows the image in `png` as the app's Dock icon while it runs.
 #[cfg(not(target_os = "macos"))]
 pub fn set_dock_icon(_png: &[u8]) {}
+
+/// The interval between refreshes of the display `window` is mostly on:
+/// 8.3 ms on a 120 Hz ProMotion display.
+#[cfg(target_os = "macos")]
+pub fn refresh_interval(window: &Window) -> Option<std::time::Duration> {
+    let fps = mac::native_window(window)?
+        .screen()?
+        .maximumFramesPerSecond();
+    let fps = u32::try_from(fps).ok().filter(|fps| *fps > 0)?;
+    Some(std::time::Duration::from_secs(1) / fps)
+}
+
+/// The interval between refreshes of the display `window` is mostly on.
+#[cfg(not(target_os = "macos"))]
+pub fn refresh_interval(_window: &Window) -> Option<std::time::Duration> {
+    None
+}
 
 #[cfg(target_os = "macos")]
 mod mac {

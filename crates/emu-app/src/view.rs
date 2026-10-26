@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
-    BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent, KeyUpEvent,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, RenderImage, SharedString, Subscription, Task, Window, WindowBounds,
-    WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
+    BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, PathPromptOptions, RenderImage, SharedString, Subscription, Task, Window,
+    WindowBounds, WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    rgba,
 };
 
 use crate::ambient::{self, Backdrop};
@@ -235,6 +236,9 @@ struct Session {
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     /// The ambient backdrop, while it is shown.
     ambient: Option<Glow>,
+    /// The display whose refresh the emulation thread was last told of,
+    /// once it has been told.
+    display: Option<Option<DisplayId>>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
 }
@@ -612,6 +616,7 @@ impl EmulatorView {
             recording: false,
             images: Vec::new(),
             ambient: None,
+            display: None,
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
@@ -2495,6 +2500,14 @@ impl Render for EmulatorView {
         if let Some(session) = self.session.as_mut() {
             let consoles = consoles(&session.info);
             self.placements = shown.place_consoles(session.info.screens, consoles, viewport);
+            // Frames keep in step with the refreshes of the display the
+            // window is on.
+            let display = window.display(cx).map(|display| display.id());
+            if session.display != Some(display) {
+                session.display = Some(display);
+                let refresh = window_chrome::refresh_interval(window);
+                session.emulator.send(Command::SetRefresh(refresh));
+            }
             let refreshing = Instant::now();
             let seen = session.sequence;
             session.take_frames(window);

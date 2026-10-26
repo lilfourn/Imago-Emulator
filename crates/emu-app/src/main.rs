@@ -40,6 +40,7 @@ mod mov;
 mod persist;
 mod probe;
 mod recorder;
+mod refresh;
 mod resample;
 mod rewind;
 mod rewind_thread;

@@ -29,6 +29,8 @@ pub struct AudioSink {
     device_rate: u32,
     capacity: usize,
     scratch: Vec<[f32; 2]>,
+    /// How many times faster than its own clock the core runs.
+    speed: f64,
 }
 
 impl AudioSink {
@@ -36,7 +38,7 @@ impl AudioSink {
     /// do not fit are dropped.
     pub fn push(&mut self, samples: &[StereoSample]) {
         let fill = 1.0 - self.producer.slots() as f64 / self.capacity as f64;
-        let step = resample::step_for(self.source_rate, self.device_rate, fill);
+        let step = resample::step_for(self.source_rate, self.device_rate, fill) * self.speed;
         self.scratch.clear();
         self.resampler.process(samples, step, &mut self.scratch);
         for frame in &self.scratch {
@@ -44,6 +46,13 @@ impl AudioSink {
                 break;
             }
         }
+    }
+
+    /// Takes how many times faster than its own clock the core runs, as
+    /// when its frames keep to the display's refreshes: the samples play
+    /// that much faster, so the buffer stays half full.
+    pub fn set_speed(&mut self, speed: f64) {
+        self.speed = speed;
     }
 }
 
@@ -97,6 +106,7 @@ pub fn open(source_rate: u32) -> anyhow::Result<(AudioOutput, AudioSink)> {
             source_rate,
             device_rate,
             capacity,
+            speed: 1.0,
             scratch: Vec::new(),
         },
     ))
