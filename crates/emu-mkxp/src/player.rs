@@ -12,11 +12,16 @@
 //! starts it hidden, and SDL is asked not to bring it to the front, so the
 //! app keeps the keyboard.
 //!
+//! A game has one hidden player at a time. Its copy, socket and logs are
+//! the game's, so a second player started beside the first, as a double
+//! click while the game loads did, could take the first's link, and the
+//! open left without one stopped both once it gave up.
+//!
 //! Everything here blocks.
 //!
 //! [`config`]: crate::config
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,11 +47,14 @@ pub struct Player {
     output: PathBuf,
     errors: PathBuf,
     pid: Option<u32>,
+    /// Locked for as long as this is the game's player.
+    _lock: File,
 }
 
 impl Player {
     /// Makes or brings up to date the hidden player of the game in `game`,
-    /// in a folder of its own in `work_dir`.
+    /// in a folder of its own in `work_dir`, once the game has no other
+    /// player: an earlier one is waited for until it is dropped.
     ///
     /// # Errors
     ///
@@ -60,6 +68,10 @@ impl Player {
         );
         let dir = work_dir.join(&id);
         fs::create_dir_all(&dir).map_err(Error::io(format!("making {}", dir.display())))?;
+        let lock_path = dir.join("player.lock");
+        let lock = File::create(&lock_path)
+            .and_then(|lock| lock.lock().map(|()| lock))
+            .map_err(Error::io(format!("locking {}", lock_path.display())))?;
         let bridge = work_dir.join("bridge.rb");
         write_if_changed(&bridge, BRIDGE)
             .map_err(Error::io(format!("writing {}", bridge.display())))?;
@@ -88,6 +100,7 @@ impl Player {
             output: dir.join("player.log"),
             errors: dir.join("player-errors.log"),
             pid: None,
+            _lock: lock,
         })
     }
 
@@ -323,8 +336,53 @@ mod tests {
             errors: dir.join("player-errors.log"),
             // Never signalled: these tests end without a timeout.
             pid: None,
+            _lock: File::create(dir.join("player.lock")).expect("lock"),
         };
         (dir, player)
+    }
+
+    /// A game folder in `dir` whose player app is a stand-in, enough for
+    /// [`Player::prepare`] to copy and sign.
+    fn fake_game(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let game = dir.join("Game");
+        let contents = game.join("Game.app/Contents");
+        fs::create_dir_all(contents.join("MacOS")).expect("app");
+        fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleExecutable</key><string>game</string></dict></plist>
+"#,
+        )
+        .expect("Info.plist");
+        let executable = contents.join("MacOS/game");
+        fs::write(&executable, "#!/bin/sh\n").expect("executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("mode");
+        game
+    }
+
+    #[test]
+    fn a_game_has_one_player_at_a_time() {
+        use std::sync::mpsc;
+
+        let dir = crate::tests::temp_dir("one-player");
+        let game = fake_game(&dir);
+        let work = dir.join("work");
+        let first = Player::prepare(&game, &work).expect("first player");
+        let (prepared, second) = mpsc::channel();
+        let waiting = {
+            let (game, work) = (game.clone(), work.clone());
+            thread::spawn(move || prepared.send(Player::prepare(&game, &work).is_ok()))
+        };
+        assert!(
+            second.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the second player waits for the first"
+        );
+        drop(first);
+        assert_eq!(second.recv_timeout(Duration::from_secs(10)), Ok(true));
+        waiting.join().expect("thread").expect("sent");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

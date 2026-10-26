@@ -156,6 +156,8 @@ pub struct EmulatorView {
     /// A script from the command line, to run with the first game.
     startup_script: Option<PathBuf>,
     loading: Option<Task<()>>,
+    /// The games `loading` loads, until they start or fail to.
+    loading_games: Vec<PathBuf>,
     placements: Vec<Placement>,
     controls: Controls,
     /// Gamepad hotkey chords in progress.
@@ -370,6 +372,7 @@ impl EmulatorView {
             session: None,
             startup_script: script,
             loading: None,
+            loading_games: Vec::new(),
             placements: Vec::new(),
             controls: Controls::default(),
             chords: Chords::default(),
@@ -458,6 +461,10 @@ impl EmulatorView {
         // A game opened from the command line is the same game, in the
         // library too, whatever folder it was opened from.
         let paths: Vec<PathBuf> = paths.iter().map(|path| library::absolute(path)).collect();
+        // A second click while the game loads would start it twice.
+        if self.loading_games == paths {
+            return;
+        }
         // Stopping writes the running game's battery saves. Reopening one
         // of its games (to link it or insert a cartridge) must read those,
         // not the copy on disk from up to a second ago.
@@ -481,14 +488,18 @@ impl EmulatorView {
             .join(" + ");
         self.show_notice(format!("Loading {name}…"), cx);
         let dmg_colors = self.dmg_colors;
+        self.loading_games.clone_from(&paths);
         let load = cx
             .background_executor()
             .spawn(async move { emulator::load(&paths, dmg_colors) });
         self.loading = Some(cx.spawn_in(window, async move |this, cx| {
             let loaded = load.await;
-            this.update_in(cx, |this, window, cx| match loaded {
-                Ok(loaded) => this.start(loaded, &name, window, cx),
-                Err(error) => this.show_notice(format!("{error:#}"), cx),
+            this.update_in(cx, |this, window, cx| {
+                this.loading_games.clear();
+                match loaded {
+                    Ok(loaded) => this.start(loaded, &name, window, cx),
+                    Err(error) => this.show_notice(format!("{error:#}"), cx),
+                }
             })
             .ok();
         }));
