@@ -10,7 +10,9 @@ startup is left out. Times are in milliseconds:
   start, the frame, and from the frame to the window. The display shows
   it at its next refresh after that.
 - frames: frames run and drawn a second, redraws a second, frames run but
-  never drawn, and how evenly they come: the spread of the gaps between
+  never drawn, stalls (a covered window draws nothing until a key wakes it;
+  those gaps are left out of the rest), and how evenly frames come: the
+  spread of the gaps between
   frames drawn, and how many gaps a second are not the whole number of
   the display's refreshes that each frame should show for.
 - work: each frame's run and the emulation thread's whole turn, how late
@@ -21,12 +23,22 @@ startup is left out. Times are in milliseconds:
 import argparse
 import statistics
 
+# Milliseconds without a frame drawn that count as a stall.
+STALL = 100
+
 
 def pct(values, p):
     if not values:
         return float("nan")
     values = sorted(values)
     return values[min(len(values) - 1, int(p / 100 * len(values)))]
+
+
+def rate(events):
+    """Events a second, from the first of `events` to the last."""
+    if len(events) < 2:
+        return float("nan")
+    return (len(events) - 1) / (events[-1][0] - events[0][0]) * 1000
 
 
 def main():
@@ -91,8 +103,12 @@ def main():
     # left of the frame the key landed in: what the app's work adds.
     after = [latency - wait for latency, wait in zip(latencies, waits)]
 
-    take_gaps = [b[0] - a[0] for a, b in zip(takes, takes[1:])]
-    skipped = sum(max(0, b[2][0] - a[2][0] - 1) for a, b in zip(takes, takes[1:]))
+    # A window covered by others draws nothing until a key wakes it: those
+    # stalls are counted apart, not as uneven frames.
+    pairs = [(a, b) for a, b in zip(takes, takes[1:]) if b[0] - a[0] < STALL]
+    stalls = len(takes) - 1 - len(pairs)
+    take_gaps = [b[0] - a[0] for a, b in pairs]
+    skipped = sum(max(0, b[2][0] - a[2][0] - 1) for a, b in pairs)
     # Each frame should show for the same whole number of refreshes.
     refresh = 1000 / args.refresh_hz
     expected = refresh * max(1, round(period / refresh))
@@ -115,10 +131,11 @@ def main():
         "frame_ms_mean": statistics.fmean(frames) if frames else float("nan"),
         "frame_to_window_ms_mean": statistics.fmean(to_window) if to_window else float("nan"),
         "frame_period_ms": period,
-        "fps_run": len(runs) / seconds,
-        "fps_drawn": len(takes) / seconds,
+        "fps_run": rate(runs),
+        "fps_drawn": rate(takes),
         "redraws_per_s": len(of("render")) / seconds,
         "frames_never_drawn": skipped,
+        "stalls": stalls,
         "draw_gap_ms_stdev": statistics.pstdev(take_gaps) if take_gaps else float("nan"),
         "run_gap_ms_stdev": statistics.pstdev(gaps) if gaps else float("nan"),
         "uneven_gaps_per_s": uneven / seconds,
