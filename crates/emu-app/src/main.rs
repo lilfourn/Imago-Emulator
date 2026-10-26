@@ -52,6 +52,7 @@ mod settings_window;
 mod slots;
 mod speed;
 mod theme;
+mod trace;
 mod turbo;
 mod video;
 mod view;

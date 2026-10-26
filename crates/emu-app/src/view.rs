@@ -58,6 +58,7 @@ use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
 use crate::speed::{self, Pace, Speed, Speeds};
 use crate::theme::{BACKGROUND, INSET};
+use crate::trace;
 use crate::video;
 use crate::window_chrome;
 
@@ -878,6 +879,7 @@ impl EmulatorView {
     }
 
     fn send_input(&self) {
+        trace::event("send", &[u64::from(self.sent.buttons.bits())]);
         self.send(Command::SetInput {
             player: self.active_player,
             input: Input {
@@ -2292,6 +2294,7 @@ impl Session {
 
 impl Render for EmulatorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        trace::event("render", &[]);
         // Full screen shows its own bar on hover, buttons and all.
         let fullscreen = window.is_fullscreen();
         let show_controls = self.window_controls || fullscreen;
@@ -2492,7 +2495,12 @@ impl Render for EmulatorView {
         if let Some(session) = self.session.as_mut() {
             let consoles = consoles(&session.info);
             self.placements = shown.place_consoles(session.info.screens, consoles, viewport);
+            let refreshing = Instant::now();
+            let seen = session.sequence;
             session.take_frames(window);
+            if session.sequence != seen {
+                trace::event("take", &[session.sequence]);
+            }
             session.refresh_images(
                 &self.placements,
                 scale_factor,
@@ -2500,6 +2508,10 @@ impl Render for EmulatorView {
                 self.filter,
                 window,
             );
+            if session.sequence != seen {
+                let made = trace::micros(refreshing.elapsed());
+                trace::event("drawn", &[session.sequence, made]);
+            }
             if self.backdrop == Backdrop::Ambient {
                 // Paused, no new frames come to draw the rest of the fade.
                 if session.refresh_ambient(&self.placements, self.color_correction, window) {

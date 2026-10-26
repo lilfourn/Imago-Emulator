@@ -55,6 +55,7 @@ use crate::rewind_thread::RewindThread;
 use crate::save_writer::SaveWriter;
 use crate::scripting::{self, Running};
 use crate::speed::{self, Speed};
+use crate::trace;
 use crate::turbo::Turbo;
 use crate::video;
 
@@ -667,6 +668,7 @@ impl Runner {
         let mut last_flush = Instant::now();
 
         'running: loop {
+            let turn = Instant::now();
             loop {
                 // Rewinding and debugger steps work while paused;
                 // everything else waits.
@@ -716,7 +718,9 @@ impl Runner {
                         None => input,
                     });
                 }
+                let ran = Instant::now();
                 let outcome = self.run_frame(&inputs, &mut audio);
+                let run_time = ran.elapsed();
                 if let Some(why) = self.loaded.core.ended() {
                     // Kept up, as no more frames come.
                     self.events.try_send(Event::Stopped(why)).ok();
@@ -751,6 +755,12 @@ impl Runner {
                 self.script_frame(&inputs);
                 self.publish();
                 self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
+                if trace::on() {
+                    let frame = self.latest.frames.lock().map_or(0, |latest| latest.0);
+                    let buttons = inputs.first().map_or(0, |input| input.buttons.bits());
+                    let run_time = trace::micros(run_time);
+                    trace::event("run", &[frame, u64::from(buttons), run_time]);
+                }
                 self.record_for_rewind(frame_duration);
             }
 
@@ -765,8 +775,10 @@ impl Runner {
                 self.speed
             };
             let now = Instant::now();
+            trace::event("busy", &[trace::micros(now - turn)]);
             deadline = speed::next_deadline(deadline, now, speed.frame_step(frame_duration));
             speed::sleep_until(deadline);
+            trace::event("late", &[trace::micros(deadline.elapsed())]);
         }
         self.shut_down();
     }
