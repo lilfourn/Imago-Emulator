@@ -1636,6 +1636,7 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "lz4_flex",
+ "memchr",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
