@@ -25,6 +25,9 @@ module DSEmulator
   NO_STATE = 0xFFFF_FFFF
 
   @link = UNIXSocket.new(ENV.fetch("DS_EMULATOR_LINK"))
+  # Room for a whole frame: the usual 8 KB sent it in a hundred pieces,
+  # each waiting for ds-emulator to read the last.
+  @link.setsockopt(Socket::SOL_SOCKET, Socket::SO_SNDBUF, 4 << 20)
   @held = 0
 
   class << self
