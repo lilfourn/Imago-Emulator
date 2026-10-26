@@ -16,8 +16,8 @@ startup is left out. Times are in milliseconds:
   frames drawn, and how many gaps a second are not the whole number of
   the display's refreshes that each frame should show for.
 - work: each frame's run and the emulation thread's whole turn, how late
-  the thread woke, the window's time making images, and CPU used (percent
-  of one core).
+  the thread woke, the window's time making images, how full the sound
+  buffer kept (half is the aim), and CPU used (percent of one core).
 """
 
 import argparse
@@ -117,6 +117,7 @@ def main():
     busy = [e[2][0] / 1000 for e in of("busy")]
     late = [e[2][0] / 1000 for e in of("late")]
     made = [e[2][1] / 1000 for e in drawn]
+    fill = [e[2][0] / 10 for e in of("fill")]
 
     out = {
         "seconds": seconds,
@@ -147,6 +148,9 @@ def main():
         "late_ms_p99": pct(late, 99),
         "images_ms_median": statistics.median(made) if made else float("nan"),
         "images_ms_p95": pct(made, 95),
+        "sound_buffer_percent_min": min(fill, default=float("nan")),
+        "sound_buffer_percent_median": statistics.median(fill) if fill else float("nan"),
+        "sound_buffer_percent_max": max(fill, default=float("nan")),
     }
     if args.wall and args.app_cpu is not None:
         out["app_cpu_percent"] = args.app_cpu / args.wall * 100
