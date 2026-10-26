@@ -239,6 +239,10 @@ struct Session {
     /// The display whose refresh the emulation thread was last told of,
     /// once it has been told.
     display: Option<Option<DisplayId>>,
+    /// When the window last took a new frame.
+    taken_at: Option<Instant>,
+    /// Redraws the backdrop's fade once frames stop coming.
+    fade_wake: Option<Task<()>>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
 }
@@ -617,6 +621,8 @@ impl EmulatorView {
             images: Vec::new(),
             ambient: None,
             display: None,
+            taken_at: None,
+            fade_wake: None,
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
@@ -2191,6 +2197,7 @@ impl Session {
             return;
         };
         self.sequence = sequence;
+        self.taken_at = Some(Instant::now());
         for (_, image) in self.images.iter_mut().filter_map(Option::take) {
             window.drop_image(image).ok();
         }
@@ -2526,9 +2533,19 @@ impl Render for EmulatorView {
                 trace::event("drawn", &[session.sequence, made]);
             }
             if self.backdrop == Backdrop::Ambient {
-                // Paused, no new frames come to draw the rest of the fade.
                 if session.refresh_ambient(&self.placements, self.color_correction, window) {
-                    window.request_animation_frame();
+                    // New frames draw the fade on as they come, so the
+                    // window redraws no more often than the game. Once they
+                    // stop, as when paused, it draws the rest itself.
+                    let wait = session.info.frame_rate.frame_duration() * 2;
+                    if session.taken_at.is_some_and(|at| at.elapsed() < wait) {
+                        session.fade_wake = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(wait).await;
+                            this.update(cx, |_, cx| cx.notify()).ok();
+                        }));
+                    } else {
+                        window.request_animation_frame();
+                    }
                 }
                 if let Some(glow) = &session.ambient {
                     root = root.child(ambient_layer(glow, window_size));
