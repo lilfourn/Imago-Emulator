@@ -122,8 +122,16 @@ module DSEmulator
     end
 
     # Sends `screen` at the size of the first, which ds-emulator keeps.
+    # Its pixels' copy is freed at once: left for Ruby's collector, 786 KB
+    # a frame set off a collection every 50 frames or so, which held up
+    # those frames by a few milliseconds.
     def send_screen(screen)
-      return @link.write(screen.raw_data) if [screen.width, screen.height] == @size
+      if [screen.width, screen.height] == @size
+        pixels = screen.raw_data
+        @link.write(pixels)
+        pixels.clear
+        return
+      end
       fitted = Bitmap.new(*@size)
       fitted.stretch_blt(fitted.rect, screen, screen.rect)
       @link.write(fitted.raw_data)
