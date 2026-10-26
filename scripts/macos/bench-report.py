@@ -5,9 +5,10 @@ Only the stretch from the first tap to just after the last counts, so
 startup is left out. Times are in milliseconds:
 
 - latency: from a key's press reaching the app to the window having made
-  the images of the first frame that ran with it; then its parts: the wait
-  for that frame to start, the frame, and from the frame to the window.
-  The display shows it at its next refresh after that.
+  the images of the first frame that ran with it; the pipeline, the same
+  from that frame's start; then its parts: the wait for that frame to
+  start, the frame, and from the frame to the window. The display shows
+  it at its next refresh after that.
 - frames: frames run and drawn a second, redraws a second, frames run but
   never drawn, and how evenly they come: the spread of the gaps between
   frames drawn, and how many gaps a second are not the whole number of
@@ -86,6 +87,10 @@ def main():
         frames.append(took / 1000)
         to_window.append(shown - run[0])
 
+    # Without the wait for the frame to start, which is however long is
+    # left of the frame the key landed in: what the app's work adds.
+    after = [latency - wait for latency, wait in zip(latencies, waits)]
+
     take_gaps = [b[0] - a[0] for a, b in zip(takes, takes[1:])]
     skipped = sum(max(0, b[2][0] - a[2][0] - 1) for a, b in zip(takes, takes[1:]))
     # Each frame should show for the same whole number of refreshes.
@@ -104,6 +109,8 @@ def main():
         "latency_ms_median": statistics.median(latencies) if latencies else float("nan"),
         "latency_ms_mean": statistics.fmean(latencies) if latencies else float("nan"),
         "latency_ms_p95": pct(latencies, 95),
+        "pipeline_ms_median": statistics.median(after) if after else float("nan"),
+        "pipeline_ms_p95": pct(after, 95),
         "wait_for_frame_ms_mean": statistics.fmean(waits) if waits else float("nan"),
         "frame_ms_mean": statistics.fmean(frames) if frames else float("nan"),
         "frame_to_window_ms_mean": statistics.fmean(to_window) if to_window else float("nan"),
