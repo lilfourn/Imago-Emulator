@@ -3,8 +3,12 @@
 //!
 //! ```text
 //! emu-headless [--system gb|gba|nds] [--frames N] [--start-time SECS] [--dump DIR] [--wav FILE]
-//!              [--script FILE.lua] ROM
+//!              [--script FILE.lua] [--work-dir DIR] ROM
 //! ```
+//!
+//! An RPG Maker game's folder plays in place of a ROM, in a hidden player
+//! of its own kept in `--work-dir` (by default
+//! `~/Library/Caches/emu-headless`), apart from the app's.
 //!
 //! Output is plain `key=value` text, one line per screen:
 //!
@@ -30,7 +34,7 @@ use emu_core::{Core, Frame, Input, Media, StereoSample, System};
 use emu_script::{Output, Script, StateRequest};
 
 const USAGE: &str = "usage: emu-headless [--system gb|gba|nds] [--frames N] [--start-time SECS] \
-                     [--dump DIR] [--wav FILE] [--script FILE.lua] ROM";
+                     [--dump DIR] [--wav FILE] [--script FILE.lua] [--work-dir DIR] ROM";
 
 struct Args {
     rom: PathBuf,
@@ -40,6 +44,7 @@ struct Args {
     dump: Option<PathBuf>,
     wav: Option<PathBuf>,
     script: Option<PathBuf>,
+    work_dir: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -67,6 +72,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     let mut dump = None;
     let mut wav = None;
     let mut script = None;
+    let mut work_dir = None;
     while let Some(arg) = argv.next() {
         let mut value = |name: &str| argv.next().with_context(|| format!("{name} needs a value"));
         match arg.as_str() {
@@ -78,6 +84,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
             "--dump" => dump = Some(PathBuf::from(value("--dump")?)),
             "--wav" => wav = Some(PathBuf::from(value("--wav")?)),
             "--script" => script = Some(PathBuf::from(value("--script")?)),
+            "--work-dir" => work_dir = Some(PathBuf::from(value("--work-dir")?)),
             "-h" | "--help" => bail!("help requested"),
             flag if flag.starts_with('-') => bail!("unknown option {flag}"),
             path if rom.is_none() => rom = Some(PathBuf::from(path)),
@@ -92,25 +99,12 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
         dump,
         wav,
         script,
+        work_dir,
     })
 }
 
 fn run(args: &Args) -> anyhow::Result<()> {
-    let system = match args.system {
-        Some(system) => system,
-        None => emu_cores::system_for_path(&args.rom).with_context(|| {
-            format!(
-                "cannot tell the system of {}; pass --system",
-                args.rom.display()
-            )
-        })?,
-    };
-    let rom = fs::read(&args.rom).with_context(|| format!("reading {}", args.rom.display()))?;
-    let media = Media {
-        start_time: args.start_time,
-        ..Media::new(&rom)
-    };
-    let mut core = emu_cores::create(system, &media)?;
+    let (system, mut core) = open(args)?;
 
     let mut out = BufWriter::new(io::stdout().lock());
     let mut audio = Vec::new();
@@ -148,6 +142,36 @@ fn run(args: &Args) -> anyhow::Result<()> {
     }
     out.flush()?;
     Ok(())
+}
+
+/// The system and a core playing the game `args` names: a ROM, or an RPG
+/// Maker game's folder.
+fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
+    if let Some(game) = emu_cores::rpg_maker::game_folder(&args.rom) {
+        let work_dir = match &args.work_dir {
+            Some(dir) => dir.clone(),
+            None => std::env::home_dir()
+                .context("there is no home folder to keep the game's player in; pass --work-dir")?
+                .join("Library/Caches/emu-headless"),
+        };
+        let core = emu_cores::rpg_maker::Mkxp::open(&game, &work_dir)?;
+        return Ok((System::RpgMaker, Box::new(core)));
+    }
+    let system = match args.system {
+        Some(system) => system,
+        None => emu_cores::system_for_path(&args.rom).with_context(|| {
+            format!(
+                "cannot tell the system of {}; pass --system",
+                args.rom.display()
+            )
+        })?,
+    };
+    let rom = fs::read(&args.rom).with_context(|| format!("reading {}", args.rom.display()))?;
+    let media = Media {
+        start_time: args.start_time,
+        ..Media::new(&rom)
+    };
+    Ok((system, emu_cores::create(system, &media)?))
 }
 
 /// Runs up to `args.frames` frames with the script at `path` alongside,
