@@ -7,6 +7,7 @@ use gpui::{
     WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
 };
 
+use crate::icons;
 use crate::layout;
 use crate::settings::{self, Settings, WindowPlace};
 use crate::speed::{self, Speed, Speeds};
@@ -113,124 +114,126 @@ const TRAFFIC_LIGHTS: (f32, f32) = (16.0, 13.0);
 /// Game Boy Advance games. `script`, a Lua script, runs alongside the
 /// first game to start.
 pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
-    Application::new().run(move |cx: &mut App| {
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &About, _| window_chrome::show_about_panel());
-        cx.on_action(|_: &HideApp, cx| cx.hide());
-        cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
-        cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
-        // Window actions act on whichever window is in front.
-        cx.on_action(|_: &CloseWindow, cx| {
-            if let Some(window) = cx.active_window() {
-                window
-                    .update(cx, |_, window, _| window.remove_window())
-                    .ok();
-            }
-        });
-        cx.on_action(|_: &Minimize, cx| {
-            if let Some(window) = cx.active_window() {
-                window
-                    .update(cx, |_, window, _| window.minimize_window())
-                    .ok();
-            }
-        });
-        cx.on_action(|_: &Zoom, cx| {
-            if let Some(window) = cx.active_window() {
-                window.update(cx, |_, window, _| window.zoom_window()).ok();
-            }
-        });
-        cx.bind_keys([
-            KeyBinding::new("cmd-,", OpenSettings, None),
-            KeyBinding::new("cmd-h", HideApp, None),
-            KeyBinding::new("cmd-alt-h", HideOtherApps, None),
-            KeyBinding::new("cmd-o", OpenRom, None),
-            KeyBinding::new("cmd-shift-a", AddToLibrary, None),
-            KeyBinding::new("cmd-w", CloseGame, None),
-            // In the settings and debugger windows ⌘W closes the window,
-            // as in any Mac app; only the game's own window closes games.
-            KeyBinding::new("cmd-w", CloseWindow, Some("Settings")),
-            KeyBinding::new("cmd-w", CloseWindow, Some("Debugger")),
-            KeyBinding::new("cmd-m", Minimize, None),
-            KeyBinding::new("cmd-t", SwitchPlayer, None),
-            KeyBinding::new("cmd-p", TogglePause, None),
-            KeyBinding::new("cmd-r", Reset, None),
-            KeyBinding::new("cmd-s", SaveState, None),
-            KeyBinding::new("cmd-l", LoadState, None),
-            KeyBinding::new("cmd-shift-s", SaveScreenshot, None),
-            KeyBinding::new("cmd-shift-r", ToggleRecording, None),
-            KeyBinding::new("cmd-shift-l", RunScript, None),
-            KeyBinding::new("cmd-alt-l", StopScript, None),
-            KeyBinding::new("cmd-]", NextStateSlot, None),
-            KeyBinding::new("cmd-[", PreviousStateSlot, None),
-            KeyBinding::new("cmd-f", ToggleFastForward, None),
-            KeyBinding::new("cmd-shift-f", ToggleSlowMotion, None),
-            KeyBinding::new("cmd-alt-f", ToggleFps, None),
-            KeyBinding::new("cmd-1", LayoutVertical, None),
-            KeyBinding::new("cmd-2", LayoutHorizontal, None),
-            KeyBinding::new("cmd-3", LayoutSingle, None),
-            KeyBinding::new("cmd-4", LayoutHybrid, None),
-            KeyBinding::new("cmd-e", SwapScreens, None),
-            KeyBinding::new("cmd-alt-right", RotateClockwise, None),
-            KeyBinding::new("cmd-alt-left", RotateAnticlockwise, None),
-            KeyBinding::new("cmd-g", NextScreenGap, None),
-            KeyBinding::new("cmd-shift-c", ToggleColorCorrection, None),
-            KeyBinding::new("cmd-shift-d", ShowDebugger, None),
-            KeyBinding::new("cmd-shift-i", DebugStep, None),
-            KeyBinding::new("cmd-shift-o", DebugStepOver, None),
-            KeyBinding::new("cmd-shift-n", DebugNextFrame, None),
-            // AppKit puts View > Enter Full Screen in the menu itself, on
-            // Globe-F; this adds the classic shortcut.
-            KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
-            KeyBinding::new("cmd-q", Quit, None),
-        ]);
-        cx.set_menus(menus(MenuChecks::default()));
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+    Application::new()
+        .with_assets(icons::Icons)
+        .run(move |cx: &mut App| {
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_action(|_: &About, _| window_chrome::show_about_panel());
+            cx.on_action(|_: &HideApp, cx| cx.hide());
+            cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
+            cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
+            // Window actions act on whichever window is in front.
+            cx.on_action(|_: &CloseWindow, cx| {
+                if let Some(window) = cx.active_window() {
+                    window
+                        .update(cx, |_, window, _| window.remove_window())
+                        .ok();
+                }
+            });
+            cx.on_action(|_: &Minimize, cx| {
+                if let Some(window) = cx.active_window() {
+                    window
+                        .update(cx, |_, window, _| window.minimize_window())
+                        .ok();
+                }
+            });
+            cx.on_action(|_: &Zoom, cx| {
+                if let Some(window) = cx.active_window() {
+                    window.update(cx, |_, window, _| window.zoom_window()).ok();
+                }
+            });
+            cx.bind_keys([
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("cmd-h", HideApp, None),
+                KeyBinding::new("cmd-alt-h", HideOtherApps, None),
+                KeyBinding::new("cmd-o", OpenRom, None),
+                KeyBinding::new("cmd-shift-a", AddToLibrary, None),
+                KeyBinding::new("cmd-w", CloseGame, None),
+                // In the settings and debugger windows ⌘W closes the window,
+                // as in any Mac app; only the game's own window closes games.
+                KeyBinding::new("cmd-w", CloseWindow, Some("Settings")),
+                KeyBinding::new("cmd-w", CloseWindow, Some("Debugger")),
+                KeyBinding::new("cmd-m", Minimize, None),
+                KeyBinding::new("cmd-t", SwitchPlayer, None),
+                KeyBinding::new("cmd-p", TogglePause, None),
+                KeyBinding::new("cmd-r", Reset, None),
+                KeyBinding::new("cmd-s", SaveState, None),
+                KeyBinding::new("cmd-l", LoadState, None),
+                KeyBinding::new("cmd-shift-s", SaveScreenshot, None),
+                KeyBinding::new("cmd-shift-r", ToggleRecording, None),
+                KeyBinding::new("cmd-shift-l", RunScript, None),
+                KeyBinding::new("cmd-alt-l", StopScript, None),
+                KeyBinding::new("cmd-]", NextStateSlot, None),
+                KeyBinding::new("cmd-[", PreviousStateSlot, None),
+                KeyBinding::new("cmd-f", ToggleFastForward, None),
+                KeyBinding::new("cmd-shift-f", ToggleSlowMotion, None),
+                KeyBinding::new("cmd-alt-f", ToggleFps, None),
+                KeyBinding::new("cmd-1", LayoutVertical, None),
+                KeyBinding::new("cmd-2", LayoutHorizontal, None),
+                KeyBinding::new("cmd-3", LayoutSingle, None),
+                KeyBinding::new("cmd-4", LayoutHybrid, None),
+                KeyBinding::new("cmd-e", SwapScreens, None),
+                KeyBinding::new("cmd-alt-right", RotateClockwise, None),
+                KeyBinding::new("cmd-alt-left", RotateAnticlockwise, None),
+                KeyBinding::new("cmd-g", NextScreenGap, None),
+                KeyBinding::new("cmd-shift-c", ToggleColorCorrection, None),
+                KeyBinding::new("cmd-shift-d", ShowDebugger, None),
+                KeyBinding::new("cmd-shift-i", DebugStep, None),
+                KeyBinding::new("cmd-shift-o", DebugStepOver, None),
+                KeyBinding::new("cmd-shift-n", DebugNextFrame, None),
+                // AppKit puts View > Enter Full Screen in the menu itself, on
+                // Globe-F; this adds the classic shortcut.
+                KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
+                KeyBinding::new("cmd-q", Quit, None),
+            ]);
+            cx.set_menus(menus(MenuChecks::default()));
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
-        let display = cx.primary_display().map(|display| {
-            let size = display.bounds().size;
-            (f32::from(size.width), f32::from(size.height))
+            let display = cx.primary_display().map(|display| {
+                let size = display.bounds().size;
+                (f32::from(size.width), f32::from(size.height))
+            });
+            let (width, height) = initial_size(display);
+            let fresh = Bounds::centered(None, size(px(width), px(height)), cx);
+            // Where the window was left, if that display is still there.
+            let left = settings::default_path()
+                .and_then(|path| Settings::load(&path).ok())
+                .and_then(|settings| settings.window_place);
+            let display = left.and_then(|place| match place.display {
+                Some(uuid) => cx
+                    .displays()
+                    .into_iter()
+                    .find(|display| display.uuid().is_ok_and(|id| id.as_u128() == uuid)),
+                None => cx.primary_display(),
+            });
+            let window_bounds = opening_bounds(
+                left,
+                display.as_ref().map(|display| display.bounds()),
+                fresh,
+            );
+            let display_id = display
+                .filter(|_| window_bounds != WindowBounds::Windowed(fresh))
+                .map(|display| display.id());
+            let options = WindowOptions {
+                window_bounds: Some(window_bounds),
+                display_id,
+                titlebar: Some(top_bar("ds-emulator")),
+                window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
+                app_id: Some("ds-emulator".to_owned()),
+                ..WindowOptions::default()
+            };
+            cx.open_window(options, |window, cx| {
+                cx.new(|cx| EmulatorView::new(roms, script, window, cx))
+            })
+            .expect("opening the main window");
+            window_chrome::set_dock_icon(APP_ICON);
+            cx.activate(true);
         });
-        let (width, height) = initial_size(display);
-        let fresh = Bounds::centered(None, size(px(width), px(height)), cx);
-        // Where the window was left, if that display is still there.
-        let left = settings::default_path()
-            .and_then(|path| Settings::load(&path).ok())
-            .and_then(|settings| settings.window_place);
-        let display = left.and_then(|place| match place.display {
-            Some(uuid) => cx
-                .displays()
-                .into_iter()
-                .find(|display| display.uuid().is_ok_and(|id| id.as_u128() == uuid)),
-            None => cx.primary_display(),
-        });
-        let window_bounds = opening_bounds(
-            left,
-            display.as_ref().map(|display| display.bounds()),
-            fresh,
-        );
-        let display_id = display
-            .filter(|_| window_bounds != WindowBounds::Windowed(fresh))
-            .map(|display| display.id());
-        let options = WindowOptions {
-            window_bounds: Some(window_bounds),
-            display_id,
-            titlebar: Some(top_bar("ds-emulator")),
-            window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
-            app_id: Some("ds-emulator".to_owned()),
-            ..WindowOptions::default()
-        };
-        cx.open_window(options, |window, cx| {
-            cx.new(|cx| EmulatorView::new(roms, script, window, cx))
-        })
-        .expect("opening the main window");
-        window_chrome::set_dock_icon(APP_ICON);
-        cx.activate(true);
-    });
 }
 
 /// A title bar drawn by the window itself as its [`TOP_BAR`], with the
