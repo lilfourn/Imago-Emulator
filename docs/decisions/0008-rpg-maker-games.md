@@ -99,3 +99,36 @@ sent, which stopped Ruby's minor collections. Measured with
 the round trip fell to 1.4 ms, a key reached the window 3.4 ms after its
 frame started rather than 17.5, and the player's CPU fell from 41% to
 6%. At 3× fast-forward the game now holds 120 fps.
+
+Update, 2026-10-31: frames dropped in This Gym of Mine's later areas.
+Under the OpenGL renderer the hidden player uses, each of mkxp-z's draw
+calls has a high fixed cost: about 59 µs a `blt` and 230 µs a
+`draw_text`, whatever its length (20 and 31 µs under Metal, where reading
+a frame back took 3.6 ms rather than 0.27, so OpenGL stays). Essentials
+v18 draws with many small calls. Its `CustomTilemap` drew the map's
+ground into a bitmap a tile at a time, and every 10 frames, as water and
+flowers animate, drew each animated tile again: 27 ms on maps with much
+water (Breezee Dam, Windswept Farms, New Day Plain), longer than a whole
+40 fps frame, and 30 to 190 ms on entering a map or every 5 tiles walked.
+Messages took 4 to 9 `draw_text` calls a character, and windows and plain
+color planes a `blt` per tile of their skin: 30 to 48 ms as a battle
+animation or a window starts.
+
+The game's compatibility script (`tgom_compat.rb`, in the game's folder,
+not this repository) now has mkxp-z's own `Tilemap` draw the ground in a
+viewport of its own, just beneath the map's, which tints it after the
+tiles are laid as `CustomTilemap` did; draws each piece of text with its
+shadow once and keeps it (at most 1,024 pieces, 16 MB); fills color
+planes in one call; and tiles window skins by doubling. A map with still
+water, whose reflections show through the ground, keeps the old ground.
+Measured with a probe preload in a copy of the game, which starts a game
+unseen, walks every map and fights wild battles, frames over 8.3 ms (the
+budget at 3×) fell from 327 to 75 of 24,431 on the maps, and from 2.6% to
+0.13% of battle frames; the 99th percentile fell from 14.6 to 1.8 ms, and
+the player's work from 1.25 to 0.97 ms a frame. What stays slow is
+entering a map, behind its fade: Essentials' own `GC.start` (12 ms) and
+loading pictures. Screenshots of every map at noon, evening and midnight,
+and where maps meet, match pixel for pixel, but for a reflection the old
+ground let show where the probe stood the player over a cave's empty
+space; text is within 2/255, also under Metal. A save state saved and
+loaded, and 75,000 frames held memory flat.
