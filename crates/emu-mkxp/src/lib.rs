@@ -206,6 +206,13 @@ impl Mkxp {
         }
     }
 
+    /// Where the game's sound also goes as it comes, on the player's clock
+    /// rather than with each frame: a frame that loads a map can take a
+    /// tenth of a second, while the music plays on.
+    pub fn sound_tap(&self) -> audio::Tap {
+        self.sound.tap()
+    }
+
     /// Reads the frame the bridge sends next into the screen.
     fn read_frame(&mut self) {
         match self.link.get_mut().frame(&mut self.pixels) {

@@ -32,7 +32,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges, and the Game Boy Color's palettes for games made for the original Game Boy (SameBoy's table, MIT). Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
 | `emu-gba` | Game Boy Advance: memory map, wait states and the Game Pak prefetch buffer, PPU, APU with DMA FIFOs, DMA, timers, the interrupt controller, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
-| `emu-mkxp` | RPG Maker games, such as Pokémon Essentials fan games, which mkxp-z plays. Runs the game's own Mac player app, made hidden, in a process of its own, and talks to a bridge script in it over a Unix socket: frames and buttons a step at a time, and save states that are the game's own saves. Captures its sound through OpenAL Soft's WAV writer and a FIFO ([decision 0008](decisions/0008-rpg-maker-games.md)). |
+| `emu-mkxp` | RPG Maker games, such as Pokémon Essentials fan games, which mkxp-z plays. Runs the game's own Mac player app, made hidden, in a process of its own, and talks to a bridge script in it over a Unix socket: frames and buttons a step at a time, and save states that are the game's own saves. Captures its sound through OpenAL Soft's WAV writer and a FIFO, and hands it on as it comes. The player takes the app's scheduling role, so macOS's Game Mode does not throttle it ([decision 0008](decisions/0008-rpg-maker-games.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
 | `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
@@ -203,7 +203,10 @@ pub trait Debugger {
   deadlines closer or further apart. Sound stays in sync through
   a ring buffer and a resampler that nudges its ratio by up to ±0.5%
   ([decision 0003](decisions/0003-frame-pacing.md)). The `cpal` stream lives
-  on the UI thread; the emulation thread owns the producer end.
+  on the UI thread; the emulation thread owns the producer end, but for an
+  RPG Maker game, whose sound runs on its player's clock: the thread that
+  reads that sound owns it and plays the sound as it comes, at normal
+  speed, rather than after each frame (`Loaded::live_sound`).
 - Frames keep in step with the display's refreshes (`refresh.rs`): when
   a whole number of refreshes, or of frames to a refresh, is within 0.5%
   of the frame the speed asks for, frames last exactly that, and each

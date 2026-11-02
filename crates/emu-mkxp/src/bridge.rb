@@ -24,11 +24,56 @@ module DSEmulator
   # The size sent instead of a state's when there is none.
   NO_STATE = 0xFFFF_FFFF
 
+  # macOS gives the hidden player a scheduling role of its own, apart from
+  # ds-emulator's. While ds-emulator plays full screen, Game Mode makes it
+  # the focal game and throttles the hidden player as a game left in the
+  # background: its threads keep to the efficiency cores and their timers
+  # fire up to a tenth of a second late, so the game's sound came in bursts
+  # with gaps between. The player is the game ds-emulator shows, so it takes
+  # ds-emulator's role, every few frames, as macOS may change it again.
+  module Role
+    # From <sys/resource_private.h> and <sys/un.h>.
+    PRIO_DARWIN_ROLE = 6
+    SOL_LOCAL = 0
+    LOCAL_PEERPID = 2
+    # How often, in frames, the role is checked: a few times a second.
+    EVERY = 8
+
+    # Follows the role of the process at the other end of `link`.
+    def self.follow(link)
+      require "fiddle"
+      app = link.getsockopt(SOL_LOCAL, LOCAL_PEERPID).int
+      int = Fiddle::TYPE_INT
+      @get = Fiddle::Function.new(Fiddle::Handle::DEFAULT["getpriority"], [int, int], int)
+      @set = Fiddle::Function.new(Fiddle::Handle::DEFAULT["setpriority"], [int, int, int], int)
+      @app = app
+      @frames = 0
+      update
+    rescue StandardError, ScriptError => error
+      # Without Fiddle the game still plays, only slower under Game Mode.
+      $stderr.puts("[ds-emulator] the player cannot follow ds-emulator's priority: #{error.message}")
+    end
+
+    # Takes ds-emulator's role every EVERY frames, if it has changed.
+    def self.frame
+      return unless @get
+      @frames += 1
+      update if (@frames % EVERY).zero?
+    end
+
+    def self.update
+      role = @get.call(PRIO_DARWIN_ROLE, @app)
+      # A role is 0 to 7; -1 is an error, as when ds-emulator has gone.
+      @set.call(PRIO_DARWIN_ROLE, 0, role) if role >= 0 && @get.call(PRIO_DARWIN_ROLE, 0) != role
+    end
+  end
+
   @link = UNIXSocket.new(ENV.fetch("DS_EMULATOR_LINK"))
   # Room for a whole frame: the usual 8 KB sent it in a hundred pieces,
   # each waiting for ds-emulator to read the last.
   @link.setsockopt(Socket::SOL_SOCKET, Socket::SO_SNDBUF, 4 << 20)
   @held = 0
+  Role.follow(@link)
 
   class << self
     # Whether ds-emulator holds `button`, one of BUTTONS, this frame.
@@ -76,6 +121,7 @@ module DSEmulator
         @link.write(hello.pack("C4v4V"))
       end
       send_screen(screen)
+      Role.frame
       loop do
         kind, flags, buttons = read(4).unpack("CCv")
         case kind

@@ -14,7 +14,9 @@
 //! Pacing is a sleep to the next frame deadline, which fast-forward and
 //! slow motion move closer or further apart (see `speed.rs`). Sound stays
 //! in sync because the audio sink adjusts its resampling ratio to the
-//! buffer level (see `resample.rs`).
+//! buffer level (see `resample.rs`). An RPG Maker game's sound runs on its
+//! player's clock instead, so it plays as it comes, from the thread that
+//! reads it, while the game runs at normal speed (see `Loaded::live_sound`).
 //!
 //! After each frame is published, the core is serialized for rewind; a
 //! worker thread turns that into a compressed delta (see
@@ -81,6 +83,10 @@ pub struct Loaded {
     files: Vec<GameFiles>,
     /// Identifies the ROMs in save states.
     rom_crc32: u32,
+    /// Where the core's sound goes as it comes, for a core whose sound
+    /// runs on a clock of its own (an RPG Maker game's player): it plays
+    /// from there, not after each frame.
+    live_sound: Option<rpg_maker::audio::Tap>,
 }
 
 impl Loaded {
@@ -246,6 +252,7 @@ pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Load
         rom_paths: rom_paths.to_vec(),
         files: names,
         rom_crc32,
+        live_sound: None,
     })
 }
 
@@ -257,11 +264,13 @@ fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
         .join("ds-emulator")
         .join("RPG Maker");
     let core = rpg_maker::Mkxp::open(game, &players)?;
+    let live_sound = Some(core.sound_tap());
     Ok(Loaded {
         core: Box::new(core),
         rom_paths: vec![game.to_owned()],
         files: vec![GameFiles::of_folder(game)],
         rom_crc32: crc32fast::hash(game.as_os_str().as_encoded_bytes()),
+        live_sound,
     })
 }
 
@@ -482,6 +491,14 @@ impl Emulator {
         let latest = Arc::new(Latest::default());
         let players = loaded.core.info().players.max(1);
         let lock = Lock::new(loaded.core.info().frame_rate.frame_duration());
+        let sound_on = Arc::new(AtomicBool::new(true));
+        let audio = match (&loaded.live_sound, audio) {
+            (Some(tap), Some(sink)) => {
+                tap.listen(Box::new(sink.play_live(Arc::clone(&sound_on))));
+                None
+            }
+            (_, audio) => audio,
+        };
         let runner = Runner {
             flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
             backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
@@ -504,6 +521,7 @@ impl Emulator {
             events,
             latest: Arc::clone(&latest),
             audio,
+            sound_on,
         };
         let thread = thread::Builder::new()
             .name("emulation".to_owned())
@@ -630,7 +648,11 @@ struct Runner {
     writer: SaveWriter,
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
+    /// Where each frame's sound goes, unless the core's sound plays as it
+    /// comes (see [`Loaded::live_sound`]).
     audio: Option<AudioSink>,
+    /// Whether sound that plays as it comes should play now.
+    sound_on: Arc<AtomicBool>,
 }
 
 /// The debugger's state on the emulation thread.
@@ -696,7 +718,12 @@ impl Runner {
                     commands.try_recv()
                 };
                 match next {
-                    Ok(command) => self.apply(command),
+                    Ok(command) => {
+                        self.apply(command);
+                        // Before a pause waits for the next command.
+                        let on = self.speed == Speed::NORMAL && !self.paused && !self.rewinding;
+                        self.sound_on.store(on, Ordering::Relaxed);
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break 'running,
                 }
@@ -1682,6 +1709,7 @@ mod tests {
             files: vec![GameFiles::of(&rom_path)],
             rom_paths: vec![rom_path],
             rom_crc32: 0,
+            live_sound: None,
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -1742,6 +1770,7 @@ mod tests {
             files: vec![GameFiles::of(&PathBuf::from("/nonexistent/recorder.gba"))],
             rom_paths: vec![PathBuf::from("/nonexistent/recorder.gba")],
             rom_crc32: 0,
+            live_sound: None,
         };
         let (events, _) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), seen)
@@ -2001,6 +2030,7 @@ mod tests {
             files: vec![GameFiles::of(&PathBuf::from("/nonexistent/keypad.gba"))],
             rom_paths: vec![PathBuf::from("/nonexistent/keypad.gba")],
             rom_crc32: 0,
+            live_sound: None,
         };
         let (events, _events) = async_channel::unbounded();
         let emulator = Emulator::start(loaded, events, None);
@@ -2035,6 +2065,7 @@ mod tests {
             files: vec![GameFiles::of(&PathBuf::from("/nonexistent/debugged.gb"))],
             rom_paths: vec![PathBuf::from("/nonexistent/debugged.gb")],
             rom_crc32: 0,
+            live_sound: None,
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -2199,6 +2230,7 @@ mod tests {
             files: vec![GameFiles::of(&PathBuf::from("/nonexistent/patchable.gb"))],
             rom_paths: vec![PathBuf::from("/nonexistent/patchable.gb")],
             rom_crc32: 0,
+            live_sound: None,
         };
         let (events, _events) = async_channel::unbounded();
         let emulator = Emulator::start(loaded, events, None);
@@ -2673,6 +2705,7 @@ mod tests {
             files: vec![GameFiles::of(&dir.join("game.gba"))],
             rom_paths: vec![dir.join("game.gba")],
             rom_crc32: 0,
+            live_sound: None,
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
