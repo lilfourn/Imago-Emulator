@@ -12,7 +12,7 @@
 require "socket"
 
 module DSEmulator
-  VERSION = 2
+  VERSION = 3
   # The buttons, in the bit order of emu_core::Buttons.
   BUTTONS = %i[a b select start right left up down r l x y].freeze
   # ds-emulator's messages.
@@ -128,7 +128,8 @@ module DSEmulator
       unless @size
         @size = [screen.width, screen.height]
         hello = [*"DSEM".bytes, VERSION, *@size, Graphics.frame_rate, Process.pid]
-        @link.write(hello.pack("C4v4V"))
+        folder = save_folder
+        @link.write(hello.pack("C4v4V") + [folder.bytesize].pack("v") + folder)
       end
       send_screen(screen)
       Role.frame
@@ -157,6 +158,16 @@ module DSEmulator
     end
 
     private
+
+    # The folder mkxp-z keeps the game's own files in, as its saves, which
+    # ds-emulator checks before it puts the player back where they left
+    # off: never over a save made since. Empty if mkxp-z cannot say.
+    def save_folder
+      folder = System.data_directory.to_s.b
+      folder.bytesize < 0x10000 ? folder : "".b
+    rescue StandardError
+      "".b
+    end
 
     # `size` bytes from ds-emulator, or the end of the game if it has gone.
     def read(size)

@@ -27,6 +27,14 @@
 //! pausing, and written to disk on a thread of their own (see
 //! `save_writer.rs`). Should the emulation thread panic, it still writes
 //! them, and tells the UI the game has stopped.
+//!
+//! Each game's checkpoint, a save state in slot [`CHECKPOINT`], keeps where
+//! the player left it, with a record of the saves the game had then: the
+//! UI has it saved as the player leaves, and picked up as the game starts
+//! again, unless a save has changed since. An RPG Maker game's player can
+//! stop on an error in the game's scripts, and its game cannot always be
+//! saved, as in a battle, so its checkpoint is also saved every minute it
+//! plays (see [`CHECKPOINT_INTERVAL`]).
 
 use std::any::Any;
 use std::fs;
@@ -68,6 +76,16 @@ const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// Memory for rewind history: about a minute of Game Boy play.
 const REWIND_BUDGET_BYTES: usize = 64 << 20;
 
+/// The save-state slot that holds each game's checkpoint: where the
+/// player left it, picked up when the game next starts.
+pub const CHECKPOINT: u8 = 0;
+
+/// How often a game whose core saves only when asked (an RPG Maker game's)
+/// saves its checkpoint as it plays, and how soon it tries again when the
+/// game cannot be saved.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
+const CHECKPOINT_RETRY: Duration = Duration::from_secs(5);
+
 /// Why a game whose core saves only when asked (an RPG Maker game's) has
 /// no rewind.
 const NO_REWIND: &str = "No rewind: this game saves states only when you ask";
@@ -87,6 +105,9 @@ pub struct Loaded {
     /// runs on a clock of its own (an RPG Maker game's player): it plays
     /// from there, not after each frame.
     live_sound: Option<rpg_maker::audio::Tap>,
+    /// Where an RPG Maker game keeps the saves it makes itself, which a
+    /// checkpoint must never be picked up over once they change.
+    own_saves: rpg_maker::SaveFolders,
 }
 
 impl Loaded {
@@ -253,6 +274,7 @@ pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Load
         files: names,
         rom_crc32,
         live_sound: None,
+        own_saves: rpg_maker::SaveFolders::default(),
     })
 }
 
@@ -265,12 +287,14 @@ fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
         .join("RPG Maker");
     let core = rpg_maker::Mkxp::open(game, &players)?;
     let live_sound = Some(core.sound_tap());
+    let own_saves = core.save_folders();
     Ok(Loaded {
         core: Box::new(core),
         rom_paths: vec![game.to_owned()],
         files: vec![GameFiles::of_folder(game)],
         rom_crc32: crc32fast::hash(game.as_os_str().as_encoded_bytes()),
         live_sound,
+        own_saves,
     })
 }
 
@@ -703,6 +727,7 @@ impl Runner {
         let mut audio = Vec::new();
         let mut deadline = Instant::now();
         let mut last_flush = Instant::now();
+        let mut next_checkpoint = Instant::now() + CHECKPOINT_INTERVAL;
 
         'running: loop {
             let turn = Instant::now();
@@ -810,6 +835,16 @@ impl Runner {
             if last_flush.elapsed() >= BACKUP_FLUSH_INTERVAL {
                 self.flush_backup();
                 last_flush = Instant::now();
+            }
+
+            if !self.loaded.core.saves_every_frame() && Instant::now() >= next_checkpoint {
+                // Unsaid: the game cannot always be saved, as in a battle,
+                // and the checkpoint before stays until it can be.
+                let wait = match self.save_checkpoint(CHECKPOINT) {
+                    Ok(()) => CHECKPOINT_INTERVAL,
+                    Err(_) => CHECKPOINT_RETRY,
+                };
+                next_checkpoint = Instant::now() + wait;
             }
 
             let speed = if self.rewinding {
@@ -1416,46 +1451,50 @@ impl Runner {
     }
 
     /// Writes the battery saves and waits for them, then saves a state to
-    /// `slot` and records beside it the battery saves on disk, which
-    /// `load_checkpoint` checks. Nothing is saved unless every battery
-    /// save was written, and the record comes last: should the state not
-    /// be written, the one before keeps the record that matches it.
+    /// `slot` and records beside it the saves on disk (see
+    /// [`Runner::saves`]), which `load_checkpoint` checks. Nothing is
+    /// saved unless every battery save was written, and the record comes
+    /// last: should the state not be written, the one before keeps the
+    /// record that matches it.
     fn save_checkpoint(&mut self, slot: u8) -> anyhow::Result<()> {
-        // A game that saves only when asked saves itself.
-        if !self.loaded.core.saves_every_frame() {
-            return Ok(());
-        }
         // A record of older saves on disk would let a later start load
         // this state over them once they could be written again.
         ensure!(self.write_saves(), "the battery save could not be written");
         self.save_state(slot)?;
         let state = self.loaded.state_path(slot);
         let record = persist::saves_record_path(&state);
-        let saves = persist::saves_fingerprint(&self.backup_paths)
-            .context("cannot read the battery saves")?;
+        let saves =
+            persist::saves_fingerprint(&self.saves()).context("cannot read the game's saves")?;
         persist::write_atomic(&record, saves.as_bytes())
             .with_context(|| format!("cannot write {}", record.display()))
     }
 
-    /// Loads the state in `slot` if the battery saves on disk are those
-    /// its record says it was saved with. A state saved before records
-    /// were kept is loaded only if its battery saves are the same as the
-    /// game's now, and otherwise undone.
+    /// Loads the state in `slot` if the saves on disk are those its record
+    /// says it was saved with. A state saved before records were kept is
+    /// loaded only if its battery saves are the same as the game's now,
+    /// and otherwise undone; for a game that saves only when asked, which
+    /// cannot be undone so, it is left alone.
     fn load_checkpoint(&mut self, slot: u8) -> anyhow::Result<PickUp> {
         let state = self.loaded.state_path(slot);
-        if !state.exists() || !self.loaded.core.saves_every_frame() {
+        if !state.exists() {
             return Ok(PickUp::Empty);
         }
         let record = persist::saves_record_path(&state);
         match fs::read_to_string(&record) {
             Ok(recorded) => {
-                let saves = persist::saves_fingerprint(&self.backup_paths)
-                    .context("cannot read the battery saves")?;
+                let saves = persist::saves_fingerprint(&self.saves())
+                    .context("cannot read the game's saves")?;
                 if recorded != saves {
                     return Ok(PickUp::SavesChanged);
                 }
                 self.load_state(slot)?;
                 Ok(PickUp::Loaded)
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && !self.loaded.core.saves_every_frame() =>
+            {
+                Ok(PickUp::Empty)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let started = self.backups();
@@ -1473,6 +1512,14 @@ impl Runner {
             }
             Err(error) => Err(error).with_context(|| format!("cannot read {}", record.display())),
         }
+    }
+
+    /// The saves a checkpoint goes with: each cartridge's battery save,
+    /// and the saves an RPG Maker game makes itself.
+    fn saves(&self) -> Vec<PathBuf> {
+        let mut saves = self.backup_paths.clone();
+        saves.extend(self.loaded.own_saves.files());
+        saves
     }
 
     /// Each cartridge's battery save as it is now.
@@ -1539,6 +1586,7 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicU8;
     use std::time::Duration;
 
     use emu_core::{
@@ -1710,6 +1758,7 @@ mod tests {
             rom_paths: vec![rom_path],
             rom_crc32: 0,
             live_sound: None,
+            own_saves: rpg_maker::SaveFolders::default(),
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -1771,6 +1820,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/recorder.gba")],
             rom_crc32: 0,
             live_sound: None,
+            own_saves: rpg_maker::SaveFolders::default(),
         };
         let (events, _) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), seen)
@@ -2031,6 +2081,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/keypad.gba")],
             rom_crc32: 0,
             live_sound: None,
+            own_saves: rpg_maker::SaveFolders::default(),
         };
         let (events, _events) = async_channel::unbounded();
         let emulator = Emulator::start(loaded, events, None);
@@ -2066,6 +2117,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/debugged.gb")],
             rom_crc32: 0,
             live_sound: None,
+            own_saves: rpg_maker::SaveFolders::default(),
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -2231,6 +2283,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/patchable.gb")],
             rom_crc32: 0,
             live_sound: None,
+            own_saves: rpg_maker::SaveFolders::default(),
         };
         let (events, _events) = async_channel::unbounded();
         let emulator = Emulator::start(loaded, events, None);
@@ -2706,6 +2759,7 @@ mod tests {
             rom_paths: vec![dir.join("game.gba")],
             rom_crc32: 0,
             live_sound: None,
+            own_saves: rpg_maker::SaveFolders::default(),
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -2849,6 +2903,190 @@ mod tests {
                 .any(|event| matches!(event, Event::PickedUp(_) | Event::Notice(_))),
             "{said:?}"
         );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A game that saves only when asked, as an RPG Maker game's player
+    /// does: its state is its place, which it will not save while `busy`,
+    /// as in a battle.
+    struct Asked {
+        place: Arc<AtomicU8>,
+        busy: Arc<AtomicBool>,
+        frames: [Frame; 1],
+    }
+
+    impl Core for Asked {
+        fn info(&self) -> CoreInfo {
+            CoreInfo {
+                system: System::RpgMaker,
+                screens: &SCREENS,
+                touch_screen: None,
+                players: 1,
+                frame_rate: FrameRate::new(1000, 1),
+                audio_sample_rate: 48_000,
+                state_version: 1,
+            }
+        }
+
+        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {}
+
+        fn screens(&self) -> &[Frame] {
+            &self.frames
+        }
+
+        fn reset(&mut self) {}
+
+        fn save_state(&self, out: &mut Vec<u8>) {
+            self.try_save_state(out).ok();
+        }
+
+        fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
+            let [place]: [u8; 1] = state.try_into().map_err(|_| StateError::Truncated)?;
+            self.place.store(place, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn try_save_state(&self, out: &mut Vec<u8>) -> Result<(), String> {
+            if self.busy.load(Ordering::SeqCst) {
+                return Err("in a battle".to_owned());
+            }
+            out.push(self.place.load(Ordering::SeqCst));
+            Ok(())
+        }
+
+        fn saves_every_frame(&self) -> bool {
+            false
+        }
+    }
+
+    /// An [`Asked`] game in the folder `dir/game` at `place`, which keeps
+    /// the saves it makes itself in `dir/saves`.
+    fn start_asked(
+        dir: &Path,
+        place: u8,
+        busy: bool,
+    ) -> (
+        Emulator,
+        async_channel::Receiver<Event>,
+        Arc<AtomicU8>,
+        Arc<AtomicBool>,
+    ) {
+        let game = dir.join("game");
+        let (place, busy) = (
+            Arc::new(AtomicU8::new(place)),
+            Arc::new(AtomicBool::new(busy)),
+        );
+        let loaded = Loaded {
+            core: Box::new(Asked {
+                place: Arc::clone(&place),
+                busy: Arc::clone(&busy),
+                frames: [Frame::new(SCREENS[0])],
+            }),
+            files: vec![GameFiles::of_folder(&game)],
+            rom_paths: vec![game],
+            rom_crc32: 0,
+            live_sound: None,
+            own_saves: rpg_maker::SaveFolders::new(vec![dir.join("saves")]),
+        };
+        let (events, receiver) = async_channel::unbounded();
+        (Emulator::start(loaded, events, None), receiver, place, busy)
+    }
+
+    /// Starts an [`Asked`] game at place 0 and picks up its checkpoint,
+    /// returning whether it was picked up and the place it is at then.
+    fn pick_up_asked(dir: &Path) -> (bool, u8) {
+        let (emulator, events, place, _) = start_asked(dir, 0, false);
+        emulator.send(Command::LoadCheckpoint(CHECKPOINT));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let picked = loop {
+            match events.try_recv() {
+                Ok(Event::PickedUp(picked)) => break picked,
+                Ok(_) => {}
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "never picked up");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        };
+        drop(emulator);
+        (picked, place.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn a_game_that_saves_only_when_asked_is_picked_up_where_it_was_left() {
+        let dir = empty_dir("checkpoint-asked");
+        fs::create_dir_all(dir.join("saves")).expect("save folder");
+        fs::write(dir.join("saves/Game.rxdata"), b"saved in the game").expect("own save");
+        let (emulator, _events, _, _) = start_asked(&dir, 5, false);
+        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
+        drop(emulator);
+        assert!(dir.join("game.ss0").exists(), "the checkpoint");
+        let record = fs::read_to_string(dir.join("game.ss0.saves")).expect("its record");
+        assert!(record.contains("Game.rxdata "), "{record}");
+        assert_eq!(pick_up_asked(&dir), (true, 5));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_game_that_saves_only_when_asked_is_never_picked_up_over_a_save_it_made_since() {
+        let dir = empty_dir("checkpoint-asked-newer");
+        let saves = dir.join("saves");
+        fs::create_dir_all(&saves).expect("save folder");
+        fs::write(saves.join("Game.rxdata"), b"first").expect("own save");
+        let (emulator, _events, _, _) = start_asked(&dir, 5, false);
+        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
+        drop(emulator);
+        // Saved in the game since, as before a crash, or playing it on its
+        // own.
+        fs::write(saves.join("Game.rxdata"), b"second").expect("saved again");
+        assert_eq!(pick_up_asked(&dir), (false, 0));
+        // A save file of another name counts too.
+        fs::write(saves.join("Game.rxdata"), b"first").expect("as it was");
+        assert_eq!(pick_up_asked(&dir), (true, 5));
+        fs::write(saves.join("Save2.rxdata"), b"another").expect("another save");
+        assert_eq!(pick_up_asked(&dir), (false, 0));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_game_that_cannot_be_saved_now_keeps_the_checkpoint_before() {
+        let dir = empty_dir("checkpoint-asked-busy");
+        let (emulator, events, place, busy) = start_asked(&dir, 5, false);
+        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
+        // Its record is written last.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.join("game.ss0.saves").exists() {
+            assert!(Instant::now() < deadline, "no checkpoint");
+            thread::sleep(Duration::from_millis(1));
+        }
+        place.store(6, Ordering::SeqCst);
+        busy.store(true, Ordering::SeqCst);
+        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
+        let said = wait_for_notice(&events, "Could not save where you left off");
+        assert!(said.ends_with("in a battle"), "{said}");
+        drop(emulator);
+        assert_eq!(pick_up_asked(&dir), (true, 5));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_game_that_saves_only_when_asked_with_no_record_is_left_alone() {
+        let dir = empty_dir("checkpoint-asked-unrecorded");
+        let (emulator, _events, _, _) = start_asked(&dir, 5, false);
+        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
+        drop(emulator);
+        fs::remove_file(dir.join("game.ss0.saves")).expect("no record");
+        let (emulator, events, place, _) = start_asked(&dir, 0, false);
+        emulator.send(Command::LoadCheckpoint(CHECKPOINT));
+        emulator.send(Command::TogglePause);
+        wait_for_notice(&events, "Paused");
+        drop(emulator);
+        let said: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            !said.iter().any(|event| matches!(event, Event::PickedUp(_))),
+            "{said:?}"
+        );
+        assert_eq!(place.load(Ordering::SeqCst), 0);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

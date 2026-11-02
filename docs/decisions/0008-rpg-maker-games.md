@@ -47,8 +47,8 @@ an SDL window and event loop, as GPUI does.
    so it shows again rather than waiting for a box that is gone.
 5. **The core contract bends for it.** `Core::try_save_state` may refuse
    with a reason, `saves_every_frame` is false so the app neither rewinds
-   nor saves a state unasked, and `ended` says why the game stopped, which
-   the app shows.
+   nor saves a state unasked (until 2026-11-02: see the last update), and
+   `ended` says why the game stopped, which the app shows.
 6. **Each game's preload maps the buttons.** The bridge reports the DS
    buttons held (`DSEmulator.pressed?`); the game's compatibility script
    decides what each does, as Essentials replaces RGSS's input with its
@@ -175,3 +175,32 @@ game had stopped responding. The bridge now wraps the game's main script:
 an error writes its backtrace to the player's error log and quits the
 player at once, so ds-emulator says within a moment that the game stopped
 and why. Resets and the game's own exits pass through.
+
+Update, 2026-11-02, later: This Gym of Mine lost the player's place.
+Every other game keeps a checkpoint, a state in slot 0 saved as the player
+closes it, quits, opens another game or opens the game menu, and picked up
+when it next starts. An RPG Maker game skipped it, as one that "saves
+itself", so all it kept was what the player saved in the game's own menu.
+The player had never saved there. A crash in the game's scripts that day
+had already lost a session, and closing the app lost the next.
+
+Its checkpoint is now saved as every other game's is. The game cannot be
+saved everywhere, as in a battle, and its player can stop on an error, so
+the checkpoint is also saved every minute it plays, five seconds later
+again if the game could not be saved then. One costs about 1.5 ms in the
+player and 4 ms to write 0.7 MB, once a minute. A refusal keeps the
+checkpoint before. A checkpoint must never be picked up over a save the
+game made itself since, in the app before a crash or played on its own:
+its record lists the game's own saves, the files with RPG Maker's save
+extensions (`rxdata`, `rvdata`, `rvdata2`) directly in the game's folder
+and in the folder mkxp-z keeps its files in, which the bridge now says in
+its hello (`System.data_directory`; the link is version 3). If one has
+changed, the game starts at its title, where Continue loads it. A
+checkpoint with no record is left alone, as it cannot be undone as a
+cartridge's can.
+
+Checked through the emulation thread with a copy of the game that saves to
+a folder of its own: a new game's intro, played to the first map and
+closed mid-message, opened again at the same place and line rather than
+the title; the checkpoint was saved again during a minute's play; and with
+the game's own save changed, it started at the title.
