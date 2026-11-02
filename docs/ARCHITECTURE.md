@@ -345,6 +345,8 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Screenshot | next to the ROM, `game 2026-10-07 at 18.58.12.png` | 8-bit RGB PNG of the screens as the core drew them |
 | Recording | next to the ROM, `game 2026-10-07 at 18.58.12.mov` | QuickTime movie: Photo-JPEG video, 16-bit stereo PCM sound, see `emu-app/src/mov.rs` |
 | Unpacked game | `~/Library/Application Support/ds-emulator/Games/` | The ROM from a `.zip`, `.7z` or `.rar`, see `emu-app/src/archive.rs` |
+| Game from the store | `~/Library/Application Support/ds-emulator/Games/Store/<catalog>/<slug>/` | The game's ROM as its catalog has it, unpacked if it came in an archive, see `emu-app/src/store.rs` |
+| The store's catalogs and pictures | `~/Library/Caches/ds-emulator/store/` | Each catalog's JSON as fetched, and screenshots as PNGs named by a checksum of their URL |
 | Game made from a ROM-hack patch | `~/Library/Application Support/ds-emulator/Hacks/`, named after the patch | The patched ROM, see `emu-app/src/romhack.rs` |
 | An RPG Maker game's hidden player | `~/Library/Application Support/ds-emulator/RPG Maker/<CRC-32 of the folder's path>/Player.app` | A copy of the game's player app, signed ad hoc; the bridge script beside it, see `emu-mkxp/src/player.rs` |
 

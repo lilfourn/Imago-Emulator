@@ -65,6 +65,16 @@ pub fn unpack(archive: &Path) -> Result<Vec<PathBuf>, String> {
     unpack_into(archive, &folder, &patches_dir())
 }
 
+/// Unpacks the archive at `archive` as [`unpack`] does, but its games into
+/// `folder`.
+///
+/// # Errors
+///
+/// As [`unpack`].
+pub fn unpack_to(archive: &Path, folder: &Path) -> Result<Vec<PathBuf>, String> {
+    unpack_into(archive, folder, &patches_dir())
+}
+
 fn unpack_into(archive: &Path, folder: &Path, patches: &Path) -> Result<Vec<PathBuf>, String> {
     let unpacked = if has_extension(archive, &["zip"]) {
         unpack_zip(archive, folder, patches)

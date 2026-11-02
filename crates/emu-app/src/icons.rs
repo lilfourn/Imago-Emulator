@@ -18,15 +18,25 @@ pub const ADD: &str = "icons/add.svg";
 pub const BACK: &str = "icons/alt-arrow-left.svg";
 /// A wand: cheats.
 pub const CHEATS: &str = "icons/magic-stick.svg";
+/// A ticked circle: a game the library has.
+pub const CHECK: &str = "icons/check-circle.svg";
+/// An arrow into a tray: getting a game.
+pub const DOWNLOAD: &str = "icons/download.svg";
+/// A globe: a game's website.
+pub const GLOBE: &str = "icons/global.svg";
 /// A grid of four: the library.
 pub const LIBRARY: &str = "icons/widget.svg";
 pub const MAGNIFIER: &str = "icons/magnifer.svg";
 pub const PLAY: &str = "icons/play.svg";
+/// Two arrows chasing round: fetching anew.
+pub const REFRESH: &str = "icons/refresh.svg";
 /// An arrow coming round: starting over.
 pub const RESTART: &str = "icons/restart.svg";
 pub const SETTINGS: &str = "icons/settings.svg";
+/// A shopfront: the store.
+pub const STORE: &str = "icons/shop.svg";
 
-const FILES: [(&str, &[u8]); 8] = [
+const FILES: [(&str, &[u8]); 13] = [
     (ADD, include_bytes!("../../../assets/icons/add.svg")),
     (
         BACK,
@@ -36,17 +46,28 @@ const FILES: [(&str, &[u8]); 8] = [
         CHEATS,
         include_bytes!("../../../assets/icons/magic-stick.svg"),
     ),
+    (
+        CHECK,
+        include_bytes!("../../../assets/icons/check-circle.svg"),
+    ),
+    (
+        DOWNLOAD,
+        include_bytes!("../../../assets/icons/download.svg"),
+    ),
+    (GLOBE, include_bytes!("../../../assets/icons/global.svg")),
     (LIBRARY, include_bytes!("../../../assets/icons/widget.svg")),
     (
         MAGNIFIER,
         include_bytes!("../../../assets/icons/magnifer.svg"),
     ),
     (PLAY, include_bytes!("../../../assets/icons/play.svg")),
+    (REFRESH, include_bytes!("../../../assets/icons/refresh.svg")),
     (RESTART, include_bytes!("../../../assets/icons/restart.svg")),
     (
         SETTINGS,
         include_bytes!("../../../assets/icons/settings.svg"),
     ),
+    (STORE, include_bytes!("../../../assets/icons/shop.svg")),
 ];
 
 /// The icons, as GPUI's asset source.

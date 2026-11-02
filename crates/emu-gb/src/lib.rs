@@ -132,25 +132,26 @@ impl Gb {
     ///
     /// # Errors
     ///
-    /// Returns [`LoadError`] if the header checksum is wrong (Pan Docs,
-    /// "0x014D"), the cartridge type is not supported, or `media` has a
-    /// second-slot cartridge, which a Game Boy has no slot for.
+    /// A wrong header checksum (Pan Docs, "0x014D") is no bar. A boot ROM
+    /// given in `media` locks up on it, as on hardware; without one the
+    /// game starts, as in other emulators. Some homebrew, mostly demos
+    /// written on emulators in the 1990s, never set the checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError`] if the ROM is shorter than its header, the
+    /// cartridge type is not supported, or `media` has a second-slot
+    /// cartridge, which a Game Boy has no slot for.
     pub fn new(media: &Media<'_>) -> Result<Self, LoadError> {
         if media.second_slot.is_some() {
             return Err(LoadError::Unsupported("a second cartridge slot"));
         }
-        let header = media.rom.get(0x134..=0x14D).ok_or(LoadError::InvalidRom {
-            system: System::Gb,
-            reason: "shorter than the 0x150-byte header",
-        })?;
-        let (title_to_version, checksum) = header.split_at(header.len() - 1);
-        let computed = title_to_version
-            .iter()
-            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
-        if computed != checksum[0] {
+        // The cartridge reads its header up to 0x149; a tiny intro may end
+        // just after it.
+        if media.rom.len() < 0x14E {
             return Err(LoadError::InvalidRom {
                 system: System::Gb,
-                reason: "header checksum does not match",
+                reason: "shorter than the 0x150-byte header",
             });
         }
 
@@ -399,10 +400,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_bad_header_checksum() {
-        let mut rom = rom_with_program(&[]);
+    fn starts_a_game_with_a_bad_header_checksum() {
+        let mut rom = rom_with_program(&[0x18, 0xFE]);
         rom[0x14D] ^= 0xFF;
-        assert!(Gb::new(&Media::new(&rom)).is_err());
+        let mut gb = Gb::new(&Media::new(&rom)).expect("starts without a boot ROM");
+        gb.run_frame(&[Input::default()], &mut Vec::new());
+        assert!(
+            Gb::new(&Media::new(&rom[..0x14E])).is_ok(),
+            "ends after its checksum"
+        );
+        assert!(Gb::new(&Media::new(&rom[..0x14D])).is_err(), "too short");
     }
 
     #[test]

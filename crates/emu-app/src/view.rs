@@ -21,11 +21,12 @@ use crate::app::{
     AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
     EditCheats, FilterLcdGrid, FilterNone, FilterScale2x, FilterScale3x, FilterScanlines,
     InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState,
-    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, PreviousStateSlot, Reset, Resolution3d1x,
-    Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise,
-    RunScript, SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
-    TOP_BAR, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleKeyGuide,
-    ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion, ToggleWindowControls,
+    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore, PreviousStateSlot, Reset,
+    Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise,
+    RotateClockwise, RunScript, SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens,
+    SwitchPlayer, TOP_BAR, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen,
+    ToggleKeyGuide, ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion,
+    ToggleWindowControls,
 };
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
@@ -1430,6 +1431,16 @@ impl EmulatorView {
         .detach();
     }
 
+    /// Shows the store in the library's place, unless a game is running.
+    fn open_store(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_some() {
+            self.show_notice("Close the game with ⌘W to open the store", cx);
+            return;
+        }
+        self.library
+            .update(cx, |library, cx| library.open_store(cx));
+    }
+
     /// Asks for games, then adds them to the library without playing them.
     fn add_to_library(&mut self, _: &AddToLibrary, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -2340,6 +2351,7 @@ impl Render for EmulatorView {
             .text_color(rgb(0x00DD_DDDD))
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::add_to_library))
+            .on_action(cx.listener(|this, _: &OpenStore, _, cx| this.open_store(cx)))
             .on_action(cx.listener(|this, _: &CloseGame, window, cx| this.close_game(window, cx)))
             .on_action(cx.listener(Self::connect_link_cable))
             .on_action(cx.listener(Self::edit_cheats))
