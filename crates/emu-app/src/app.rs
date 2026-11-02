@@ -26,6 +26,7 @@ actions!(
         ToggleKeyGuide,
         OpenRom,
         AddToLibrary,
+        OpenStore,
         CloseGame,
         ConnectLinkCable,
         InsertGbaCartridge,
@@ -148,6 +149,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                 KeyBinding::new("cmd-alt-h", HideOtherApps, None),
                 KeyBinding::new("cmd-o", OpenRom, None),
                 KeyBinding::new("cmd-shift-a", AddToLibrary, None),
+                KeyBinding::new("cmd-shift-g", OpenStore, None),
                 KeyBinding::new("cmd-w", CloseGame, None),
                 // In the settings and debugger windows ⌘W closes the window,
                 // as in any Mac app; only the game's own window closes games.
@@ -344,6 +346,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Open ROM…", OpenRom),
                 MenuItem::action("Add Games to Library…", AddToLibrary),
+                MenuItem::action("Game Store", OpenStore),
                 MenuItem::action("Close Game", CloseGame),
                 MenuItem::action("Connect Second Console…", ConnectLinkCable),
                 MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),

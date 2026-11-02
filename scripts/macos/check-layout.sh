@@ -55,13 +55,34 @@ EOF
   done
 }
 
+# The store's catalogs, as if fetched just now so they are not fetched
+# again: made-up games whose screenshots can't be had, so each shows its
+# system's plate and nothing is downloaded.
+seed_store() {
+  local store="$home/Library/Caches/ds-emulator/store" entries=() n=0 platform title
+  mkdir -p $store
+  for platform title in GB "Tobu Tobu Girl" GBC "Sam Mallard and the Case of the Missing Swan" \
+      GBA "Ice Skater" GB "2048" GBC "Into the Blue" GBA "Butano Fighter" GB "Geometrix" \
+      GBC "Dangan GB" GBA "Goodboy Galaxy Demo" GB "Petris"; do
+    n=$((n + 1))
+    entries+=("{\"slug\": \"layout-$n\", \"title\": \"$title\", \"developer\": \"Developer $n\",
+      \"platform\": \"$platform\", \"typetag\": \"game\", \"basepath\": \"database-gb\",
+      \"firstadded_date\": \"2026-10-0${n:0:1}T00:00:00Z\", \"tags\": [\"Puzzle\"],
+      \"description\": \"A made-up game for the layout checks.\",
+      \"screenshots\": [\"https://store.invalid/$n.png\"],
+      \"files\": [{\"filename\": \"game.${(L)platform}\", \"playable\": true}]}")
+  done
+  print -r -- "{\"entries\": [${(j:,:)entries}]}" >$store/homebrew-hub.json
+  print -r -- '[]' >$store/universal-db.json
+}
+
 # State: what to open it with, then the keys and menu items to press there.
 # Library, search and empty are the library: seeded, searched for "po" and
 # empty. Game runs a test ROM with the key guide and the speed readout;
 # menu, cheats and restart are its game menu's pages; settings is the
-# settings window.
+# settings window; store and page are the store and a game's page in it.
 failed=0
-for state in ${=STATES:-empty library search settings game menu cheats restart}; do
+for state in ${=STATES:-empty library search settings game menu cheats restart store page}; do
   # The main window is the only one; its title names the game.
   rom=() steps=() window=main title=''
   case $state in
@@ -73,6 +94,8 @@ for state in ${=STATES:-empty library search settings game menu cheats restart};
     menu) seed library; rom=($game); steps=(key escape) ;;
     cheats) seed library; rom=($game); steps=(key escape key right key return) ;;
     restart) seed library; rom=($game); steps=(key escape key right key right key return) ;;
+    store) seed library; seed_store; steps=(press '=Game Store') ;;
+    page) seed library; seed_store; steps=(press '=Game Store' key return) ;;
   esac
   [[ -f $tools/desktop.pid ]] && kill $(<$tools/desktop.pid) 2>/dev/null && sleep 0.5
   front=$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true')

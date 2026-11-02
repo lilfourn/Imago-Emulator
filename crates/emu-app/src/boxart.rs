@@ -278,9 +278,23 @@ pub fn save_icon(cache: &Path, crc32: u32, pixels: &[u8]) -> io::Result<PathBuf>
 /// drops or times out part-way, or the server cannot be reached or
 /// answers with an error other than 404.
 fn download(url: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    fetch(url, 60)
+}
+
+/// Downloads `url` as [`download`] does, giving up after `max_seconds`.
+///
+/// # Errors
+///
+/// As [`download`].
+pub fn fetch(url: &str, max_seconds: u32) -> anyhow::Result<Option<Vec<u8>>> {
     let output = Command::new("curl")
         .args(["--silent", "--show-error", "--location", "--compressed"])
-        .args(["--connect-timeout", "10", "--max-time", "60"])
+        .args([
+            "--user-agent",
+            concat!("ds-emulator/", env!("CARGO_PKG_VERSION")),
+        ])
+        .args(["--connect-timeout", "10", "--max-time"])
+        .arg(max_seconds.to_string())
         .args(["--output", "-", "--write-out", "\n%{http_code}"])
         .arg(url)
         .output()
@@ -304,7 +318,7 @@ fn download(url: &str) -> anyhow::Result<Option<Vec<u8>>> {
 }
 
 /// Writes `bytes` to `path`, creating its folder.
-fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(folder) = path.parent() {
         fs::create_dir_all(folder)?;
     }
@@ -312,7 +326,7 @@ fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// `text` percent-encoded for a URL path segment.
-fn encode(text: &str) -> String {
+pub fn encode(text: &str) -> String {
     text.bytes()
         .map(|byte| {
             if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {

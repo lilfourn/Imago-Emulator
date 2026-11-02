@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use emu_cores::rpg_maker;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, EventEmitter, KeyDownEvent, LineFragment,
-    ObjectFit, ScrollHandle, SharedString, Task, Window, div, img, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb, rgba,
+    Animation, AnimationExt, AnyElement, App, Context, Entity, EventEmitter, KeyDownEvent,
+    LineFragment, ObjectFit, ScrollHandle, SharedString, Subscription, Task, Window, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
 };
 
 use crate::app::TOP_BAR;
@@ -30,8 +30,11 @@ use crate::library::{self, Game, Library};
 use crate::probe;
 use crate::rom_info;
 use crate::romhack::{self, MakeError};
+use crate::store_view::{StoreEvent, StoreView};
 
-use crate::theme::{ACCENT as CARET, BACKGROUND as TOP, INSET, MUTED as DIM, PANEL, TEXT};
+use crate::theme::{
+    ACCENT as CARET, BACKGROUND as TOP, INSET, MUTED as DIM, ON_ACCENT, PANEL, TEXT,
+};
 
 /// The background lightens a touch towards the foot of the window.
 const FOOT: u32 = 0x0016_181B;
@@ -40,11 +43,11 @@ const CHOSEN: u32 = 0xFFFF_FF1A;
 
 /// Room left of the header for the close, minimise and zoom buttons and
 /// a gap after them.
-const TRAFFIC_LIGHTS: f32 = 96.0;
+pub const TRAFFIC_LIGHTS: f32 = 96.0;
 /// Room right of the header's last button, which puts its icon's artwork
 /// as far from the window's right side as the close button is from the
 /// left.
-const HEADER_END: f32 = 8.0;
+pub const HEADER_END: f32 = 8.0;
 /// Space between the games, in logical pixels.
 const GAP: f32 = 12.0;
 /// Room around a game's box art and title, inside its tile.
@@ -102,6 +105,11 @@ pub struct LibraryView {
     /// Games looked up since launch, found or not, so a failed lookup is
     /// not retried until next launch.
     tried: HashSet<PathBuf>,
+    /// The store, once opened: kept, with what it has fetched, while the
+    /// library shows.
+    store: Option<(Entity<StoreView>, Subscription)>,
+    /// Whether the store shows in the library's place.
+    store_open: bool,
 }
 
 impl EventEmitter<LibraryEvent> for LibraryView {}
@@ -123,6 +131,8 @@ impl LibraryView {
             looking_up: None,
             databases: Arc::default(),
             tried: HashSet::new(),
+            store: None,
+            store_open: false,
         };
         view.refresh_covers();
         view.look_up(cx);
@@ -184,9 +194,67 @@ impl LibraryView {
         Some(game.title.clone())
     }
 
+    /// Shows the store in the library's place, opening it the first time.
+    pub fn open_store(&mut self, cx: &mut Context<Self>) {
+        let store = match &self.store {
+            Some((store, _)) => store.clone(),
+            None => {
+                let store = cx.new(StoreView::new);
+                let subscription = cx.subscribe(&store, Self::store_event);
+                self.store = Some((store.clone(), subscription));
+                store
+            }
+        };
+        let paths = self
+            .library
+            .games
+            .iter()
+            .map(|game| game.path.clone())
+            .collect();
+        store.update(cx, |store, cx| store.set_library(paths, cx));
+        self.store_open = true;
+        cx.notify();
+    }
+
+    fn store_event(&mut self, _: Entity<StoreView>, event: &StoreEvent, cx: &mut Context<Self>) {
+        match event {
+            StoreEvent::Close => {
+                self.store_open = false;
+                cx.notify();
+            }
+            StoreEvent::Added(games) => {
+                for game in games {
+                    self.library.add(game.clone());
+                }
+                self.selected = games.first().map(|game| game.path.clone());
+                self.save(cx);
+                self.refresh_covers();
+                if let [game] = games.as_slice() {
+                    cx.emit(LibraryEvent::Notice(format!(
+                        "Added {} to the library",
+                        game.title
+                    )));
+                } else {
+                    let count = games.len();
+                    cx.emit(LibraryEvent::Notice(format!(
+                        "Added {count} games to the library"
+                    )));
+                }
+                cx.notify();
+            }
+            StoreEvent::Play(path) => cx.emit(LibraryEvent::Play(path.clone())),
+            StoreEvent::Notice(text) => cx.emit(LibraryEvent::Notice(text.clone())),
+        }
+    }
+
     /// Handles a key while the library shows. Whether it was the
     /// library's.
     pub fn key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.store_open
+            && let Some((store, _)) = &self.store
+        {
+            return store.update(cx, |store, cx| store.key_down(event, cx));
+        }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
         match keystroke.key.as_str() {
@@ -380,6 +448,11 @@ impl LibraryView {
                     .children(probe::part("header.title")),
             )
             .child(
+                icons::button("store", icons::STORE)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_store(cx)))
+                    .children(probe::part("button:store")),
+            )
+            .child(
                 icons::button("settings", icons::SETTINGS)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::OpenSettings)))
                     .children(probe::part("button:settings")),
@@ -528,11 +601,12 @@ impl LibraryView {
             .into_any_element()
     }
 
-    fn empty(&self, window: &Window, cx: &App) -> AnyElement {
-        let (title, hint) = if self.library.games.is_empty() {
+    fn empty(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let none = self.library.games.is_empty();
+        let (title, hint) = if none {
             (
                 "No games yet".to_owned(),
-                "Add some with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, a .zip, .7z or .rar of one, a ROM-hack patch, or an RPG Maker game's folder, here.".to_owned(),
+                "Get free homebrew games from the store, add your own with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, a .zip, .7z or .rar of one, a ROM-hack patch, or an RPG Maker game's folder, here.".to_owned(),
             )
         } else {
             (
@@ -549,6 +623,27 @@ impl LibraryView {
             window,
             cx,
         );
+        let browse = none.then(|| {
+            div()
+                .id("browse-store")
+                .my_1()
+                .h(px(36.0))
+                .px(px(18.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_lg()
+                .cursor_pointer()
+                .bg(rgb(CARET))
+                .text_color(rgb(ON_ACCENT))
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .hover(|button| button.opacity(0.9))
+                .on_click(cx.listener(|this, _, _, cx| this.open_store(cx)))
+                .child(icons::icon(icons::STORE, 16.0, ON_ACCENT))
+                .child("Browse the Store")
+                .children(probe::part("button:browse-store"))
+        });
         div()
             .flex_1()
             .flex()
@@ -564,6 +659,8 @@ impl LibraryView {
                     .child(title)
                     .children(probe::part("empty.title")),
             )
+            // Before the hint, which a small window cuts short.
+            .children(browse)
             .child(
                 div()
                     .text_size(px(HINT_SIZE))
@@ -578,6 +675,11 @@ impl LibraryView {
 
 impl gpui::Render for LibraryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.store_open
+            && let Some((store, _)) = &self.store
+        {
+            return div().size_full().child(store.clone());
+        }
         let width = f32::from(window.viewport_size().width);
         let (columns, tile) = grid(width - 2.0 * INSET);
         self.columns = columns;
@@ -682,7 +784,7 @@ fn read_games(
 
 /// The game in the ROM at `path`, or the RPG Maker game there, with its DS
 /// icon or its player app's icon saved in `cache`.
-fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
+pub fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
     if let Some(folder) = rpg_maker::game_folder(path) {
         let game = Game::rpg_maker(&folder, rpg_maker::title(&folder));
         let player = rpg_maker::player_app(&folder);
