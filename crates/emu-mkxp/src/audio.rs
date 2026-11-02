@@ -2,8 +2,13 @@
 //! can write what it plays to a WAV file in place of a sound card. Here it
 //! writes to a named pipe, in real time, and a thread reads the pipe into a
 //! buffer that the core empties after each frame.
+//!
+//! The sound runs on the player's clock, not the frames': the game's music
+//! plays on while a frame takes a tenth of a second to load a map. So a
+//! [`Tap`] also hands it on as it comes, for an app to play at once.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -22,10 +27,44 @@ const MAX_WAITING: usize = SAMPLE_RATE as usize / 4;
 
 type Waiting = Arc<Mutex<VecDeque<StereoSample>>>;
 
+/// Takes the player's sound as it comes, a piece at a time, on the thread
+/// that reads it.
+pub type Listener = Box<dyn FnMut(&[StereoSample]) + Send>;
+
+/// Where the player's sound goes as it comes, besides the frames: see
+/// [`Tap::listen`].
+#[derive(Clone, Default)]
+pub struct Tap(Arc<Mutex<Option<Listener>>>);
+
+impl Tap {
+    /// Hands the player's sound to `listener` as it comes, from now on, in
+    /// place of any listener before. The frames still take it too.
+    pub fn listen(&self, listener: Listener) {
+        *lock(&self.0) = Some(listener);
+    }
+
+    /// Gives `samples`, just read, to the listener, if there is one.
+    fn hand_on(&self, samples: &[StereoSample]) {
+        if let Some(listener) = lock(&self.0).as_mut() {
+            listener(samples);
+        }
+    }
+}
+
+impl fmt::Debug for Tap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let listening = lock(&self.0).is_some();
+        f.debug_struct("Tap")
+            .field("listening", &listening)
+            .finish()
+    }
+}
+
 /// The player's sound, as it comes.
 #[derive(Debug)]
 pub struct Capture {
     waiting: Waiting,
+    tap: Tap,
     pipe: PathBuf,
 }
 
@@ -50,15 +89,17 @@ impl Capture {
         }
         fs::write(settings, openal_settings(pipe))?;
         let waiting = Waiting::default();
+        let tap = Tap::default();
         // The reader stops once the player closes the pipe.
         {
-            let (pipe, waiting) = (pipe.to_owned(), Arc::clone(&waiting));
+            let (pipe, waiting, tap) = (pipe.to_owned(), Arc::clone(&waiting), tap.clone());
             thread::Builder::new()
                 .name("game-sound".to_owned())
-                .spawn(move || read_pipe(&pipe, &waiting))?;
+                .spawn(move || read_pipe(&pipe, &waiting, &tap))?;
         }
         Ok(Self {
             waiting,
+            tap,
             pipe: pipe.to_owned(),
         })
     }
@@ -66,6 +107,11 @@ impl Capture {
     /// Moves the sound that has come since the last call to `out`.
     pub fn drain(&self, out: &mut Vec<StereoSample>) {
         out.extend(lock(&self.waiting).drain(..));
+    }
+
+    /// Where the sound also goes as it comes.
+    pub fn tap(&self) -> Tap {
+        self.tap.clone()
     }
 }
 
@@ -100,8 +146,9 @@ fn openal_settings(pipe: &Path) -> String {
     )
 }
 
-/// Reads `pipe` into `waiting` until the player closes it.
-fn read_pipe(pipe: &Path, waiting: &Waiting) {
+/// Reads `pipe` into `waiting`, and hands it on through `tap`, until the
+/// player closes it.
+fn read_pipe(pipe: &Path, waiting: &Waiting, tap: &Tap) {
     let Ok(file) = File::open(pipe) else {
         return;
     };
@@ -110,6 +157,7 @@ fn read_pipe(pipe: &Path, waiting: &Waiting) {
         return;
     }
     let mut bytes = vec![0; 4096];
+    let mut samples = Vec::with_capacity(bytes.len() / 4);
     // Bytes of a sample split between reads.
     let mut start = 0;
     loop {
@@ -119,16 +167,19 @@ fn read_pipe(pipe: &Path, waiting: &Waiting) {
         };
         let end = start + read;
         let whole = end / 4 * 4;
-        let mut queue = lock(waiting);
-        queue.extend(bytes[..whole].chunks_exact(4).map(|sample| {
+        samples.clear();
+        samples.extend(bytes[..whole].chunks_exact(4).map(|sample| {
             [
                 i16::from_le_bytes([sample[0], sample[1]]),
                 i16::from_le_bytes([sample[2], sample[3]]),
             ]
         }));
+        let mut queue = lock(waiting);
+        queue.extend(&samples);
         let excess = queue.len().saturating_sub(MAX_WAITING);
         queue.drain(..excess);
         drop(queue);
+        tap.hand_on(&samples);
         bytes.copy_within(whole..end, 0);
         start = end - whole;
     }
@@ -169,9 +220,9 @@ fn skip_wav_header(reader: &mut impl Read) -> io::Result<()> {
     }
 }
 
-/// The waiting sound, even if a reader panicked while holding it.
-fn lock(waiting: &Waiting) -> MutexGuard<'_, VecDeque<StereoSample>> {
-    waiting.lock().unwrap_or_else(PoisonError::into_inner)
+/// What `mutex` guards, even if a thread panicked while holding it.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -241,6 +292,37 @@ mod tests {
         assert_eq!(out, [[1, -1], [2, 3]]);
         drop(capture);
         assert!(!pipe.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_tap_hears_the_sound_as_it_comes_and_the_frames_still_get_it() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = crate::tests::temp_dir("tap");
+        let pipe = dir.join("sound.fifo");
+        let capture = Capture::start(&pipe, &dir.join("alsoft.conf")).expect("started");
+        let (heard, hearing) = mpsc::channel();
+        capture.tap().listen(Box::new(move |samples| {
+            heard.send(samples.to_vec()).expect("sent")
+        }));
+        let mut player = OpenOptions::new().write(true).open(&pipe).expect("pipe");
+        player.write_all(&wav_header(2, 16)).expect("header");
+        player.write_all(&[1, 0, 0xFF, 0xFF]).expect("a sample");
+        // Heard before the player writes more, or closes the pipe.
+        let first = hearing.recv_timeout(Duration::from_secs(5));
+        assert_eq!(first, Ok(vec![[1, -1]]));
+        player.write_all(&[2, 0, 3, 0]).expect("another");
+        assert_eq!(
+            hearing.recv_timeout(Duration::from_secs(5)),
+            Ok(vec![[2, 3]])
+        );
+        let mut out = Vec::new();
+        capture.drain(&mut out);
+        assert_eq!(out, [[1, -1], [2, 3]]);
+        drop(player);
+        drop(capture);
         fs::remove_dir_all(&dir).ok();
     }
 

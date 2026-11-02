@@ -6,6 +6,9 @@
 //! frame's samples into a lock-free ring buffer that the device callback
 //! drains. An empty buffer plays silence, so pausing needs no special case.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::Context as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use emu_core::StereoSample;
@@ -56,6 +59,38 @@ impl AudioSink {
     /// that much faster, so the buffer stays half full.
     pub fn set_speed(&mut self, speed: f64) {
         self.speed = speed;
+    }
+
+    /// Tops the buffer up to half full with silence, where rate control
+    /// keeps it, so sound starting now can arrive unevenly without the
+    /// buffer running dry.
+    fn prime(&mut self) {
+        let queued = self.capacity - self.producer.slots();
+        for _ in queued..self.capacity / 2 {
+            if self.producer.push([0.0; 2]).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Plays sound that comes on a clock of its own as it comes, rather
+    /// than with each frame, while `on` says it should: as an RPG Maker
+    /// game's player makes it, whose music plays on through a frame that
+    /// takes a tenth of a second to load a map. The sound arrives a
+    /// twentieth of a second at a time, so whenever it starts again the
+    /// buffer starts half full.
+    pub fn play_live(mut self, on: Arc<AtomicBool>) -> impl FnMut(&[StereoSample]) + Send {
+        let mut was_on = false;
+        move |samples| {
+            let is_on = on.load(Ordering::Relaxed);
+            if is_on {
+                if !was_on {
+                    self.prime();
+                }
+                self.push(samples);
+            }
+            was_on = is_on;
+        }
     }
 }
 
@@ -157,6 +192,54 @@ mod tests {
             }
         }
         1.0 - sink.producer.slots() as f64 / capacity as f64
+    }
+
+    #[test]
+    fn live_sound_plays_while_on_and_starts_half_full() {
+        const RATE: u32 = 48_000;
+        let capacity = (f64::from(RATE) * BUFFER_SECONDS) as usize;
+        let (producer, mut consumer) = rtrb::RingBuffer::new(capacity);
+        let sink = AudioSink {
+            producer,
+            resampler: Resampler::default(),
+            source_rate: RATE,
+            device_rate: RATE,
+            capacity,
+            speed: 1.0,
+            scratch: Vec::new(),
+        };
+        let on = Arc::new(AtomicBool::new(false));
+        let mut play = sink.play_live(Arc::clone(&on));
+        // As the player writes it: 1,024 samples, 21.3 ms, at a time.
+        let piece = vec![[1000_i16; 2]; 1024];
+        play(&piece);
+        assert_eq!(consumer.slots(), 0, "paused or fast-forwarding");
+        on.store(true, Ordering::Relaxed);
+        play(&piece);
+        assert_eq!(consumer.slots(), capacity / 2 + piece.len());
+        // The device takes 512 samples every 10.7 ms; the pieces keep up,
+        // a frame that stalls the game for a tenth of a second or not.
+        let mut dry = 0;
+        for _ in 0..1000 {
+            for _ in 0..2 {
+                dry += usize::from(consumer.slots() < 512);
+                for _ in 0..512 {
+                    consumer.pop().ok();
+                }
+            }
+            play(&piece);
+        }
+        assert_eq!(dry, 0);
+        // Off, the buffer plays out; on again, it starts half full again.
+        on.store(false, Ordering::Relaxed);
+        play(&piece);
+        while consumer.pop().is_ok() {}
+        on.store(true, Ordering::Relaxed);
+        play(&piece);
+        let silence = capacity / 2;
+        assert_eq!(consumer.slots(), silence + piece.len());
+        let first = consumer.pop().expect("primed");
+        assert_eq!(first, [0.0, 0.0]);
     }
 
     #[test]

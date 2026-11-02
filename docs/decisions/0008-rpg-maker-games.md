@@ -132,3 +132,34 @@ and where maps meet, match pixel for pixel, but for a reflection the old
 ground let show where the probe stood the player over a cave's empty
 space; text is within 2/255, also under Metal. A save state saved and
 loaded, and 75,000 frames held memory flat.
+
+Update, 2026-11-02: at normal speed This Gym of Mine showed 40 fps, where
+3× fast-forward showed 120, and its sound broke up. 40 fps is RPG Maker
+XP's own rate, each frame three refreshes of a 120 Hz display; the sound
+was the fault. While ds-emulator plays full screen, macOS's Game Mode
+makes it the focal game and throttles the hidden player, a game of its
+own to macOS (its `Info.plist` says so), as one left in the background:
+role 6, "Darwin background", priority 4, efficiency cores only, its timers
+held back. OpenAL Soft's WAV writer sleeps 5 ms between writes; held back,
+it woke every 50 to 100 ms and wrote all it owed at once, so the sound came
+in bursts of up to a tenth of a second, against a buffer that holds a
+tenth and keeps half. Replayed against that buffer, a 90 s walk through
+the maps had 8.7 s of silence and dropped 9.2 s of sound.
+`LSAppNapIsDisabled`, `NSAppSleepDisabled` and a user-initiated,
+latency-critical `NSProcessInfo` activity in the player did not stop it.
+A process may set the role of another of the same user, though, and one
+set back stays so. The bridge now takes ds-emulator's role, that of the
+process at the link's other end, every 8 frames, through Ruby's Fiddle;
+a demotion is undone within 0.2 s. With its role back under Game Mode,
+the player ran at priority 54 and its sound came every 21 ms, as stdio
+fills its 4 KB buffer.
+
+Even so, the sound reached the buffer only after each frame, and a
+frame that loads a map can take a third of a second while the music plays
+on: replayed, 0.1 s of silence and 0.4 s dropped a minute without Game
+Mode. The thread that reads the pipe now plays the sound as it comes
+(`audio::Tap`), at normal speed as before, and the buffer starts half
+full whenever sound starts again; replayed, nothing was lost. Frames
+still get their sound, for recordings. The game's mix peaked at −8 dBFS a
+second, −2.3 at the loudest, and never clipped, so OpenAL Soft's limiter
+never acted: its loudness is the game's own.
