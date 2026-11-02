@@ -41,6 +41,9 @@ own dumps. The app has:
 - GBC/GBA colour correction, and DS 3D at 2×, 3× or 4× resolution;
 - filters: LCD grid, scanlines, Scale2x and Scale3x;
 - screenshots, and video recording to QuickTime movies;
+- a store of free homebrew: 1,586 Game Boy, Game Boy Color, GBA and DS
+  games, demos, music carts and tools, each added to the library in one
+  click;
 - ROM hacks, from IPS, UPS, BPS and xdelta patches;
 - cheats;
 - Lua scripts that read and write memory, press buttons and draw over the
@@ -60,7 +63,8 @@ See the [roadmap](docs/ROADMAP.md).
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
 - [Scripting](docs/scripting.md): the Lua functions scripts can call
 - [Design system](docs/design-system.md): the app's layout rules, and the checks that hold it to them
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks
+- [Games we can't run](docs/research/games-we-cant-run.md): store games and homebrew for other systems that the cores can't run yet, with leads
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store
 
 ## Build and run
 
@@ -364,6 +368,49 @@ next to its ROM, so give the two ROMs different names: `pokemon.nds` and
 `pokemon.gba` in one folder would share `pokemon.sav`, and the app refuses
 to load them. Pal Park has not been tried yet; that needs GBA dumps.
 
+## Game store
+
+The store (the shopfront in the library's top bar, File > Game Store or
+⌘⇧G) offers free homebrew that its authors share: Game Boy, Game Boy
+Color and GBA games from gbdev's [Homebrew Hub](https://hh.gbdev.io), and
+DS games from [Universal-DB](https://db.universal-team.net). It never
+offers commercial games.
+
+Type to search titles, makers and genres. The filters narrow it to one
+system (Tab and ⇧Tab step through them) and to games, demos, music or
+tools. Each game has a page with its screenshots (← and →), what its
+catalog says of it, who made it and its licence. Get, on the page or on a
+game's tile, downloads the game and adds it to the library with its first
+screenshot as box art; a game the library has shows Play instead. Return
+opens a game's page and there gets or plays it; Escape goes back.
+
+Games go into `~/Library/Application Support/ds-emulator/Games/Store`, a
+folder for each, where their saves are kept. The catalogs are fetched once
+a day (the refresh button fetches them now), and screenshots as they come
+into view; both are cached in `~/Library/Caches/ds-emulator/store`.
+
+Only games seen to start in the app are offered. `scripts/store-compat.py`
+downloads every game in both catalogs and runs each one headless for 900
+frames. On 2026-11-02, 1,602 of 1,647 started, and the rest are left out.
+Games added to the catalogs since then are offered unchecked. The ones
+that don't start, with what stops each, and the 3DS and NES homebrew the
+app has no core for, are listed in
+[games we can't run](docs/research/games-we-cant-run.md), a backlog for
+the cores. Rerun it after changing a core:
+
+```sh
+python3 -I scripts/store-compat.py            # reruns only what changed
+python3 -I scripts/store-compat.py --report   # the verdicts so far
+python3 -I scripts/store-compat.py --backlog  # rewrite the backlog
+```
+
+The store never offers commercial games: Pokémon and other retail games
+play from your own cartridge dumps, and ROM hacks from patches applied to
+them.
+
+See [decision 0010](docs/decisions/0010-game-store.md) for the sources and
+why they were chosen.
+
 ## RPG Maker games
 
 Pokémon fan games made with Pokémon Essentials on RPG Maker XP play in the
@@ -563,6 +610,13 @@ will. Dump your own cartridges and system files from hardware you own. Don't
 open issues or pull requests that link to ROMs or BIOS files. Games, BIOS
 dumps and saves are git-ignored, and CI fails if one is committed. See the
 [legal policy](docs/PRD.md#9-legal-policy).
+
+The store downloads homebrew from the catalogs that host it, Homebrew Hub
+and Universal-DB, under each game's own terms, which its page shows. The
+project hosts no games itself. If you made a game in the store and want it
+out, ask its catalog: Homebrew Hub takes requests through its
+[database's issues](https://github.com/gbdev/database/issues) or at
+hh@gbdev.io.
 
 The Game Boy Color's palettes for original Game Boy games come from
 SameBoy's open-source boot ROM, copyright © 2015–2026 Lior Halphon, under
