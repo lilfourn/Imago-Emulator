@@ -163,3 +163,15 @@ full whenever sound starts again; replayed, nothing was lost. Frames
 still get their sound, for recordings. The game's mix peaked at −8 dBFS a
 second, −2.3 at the loudest, and never clipped, so OpenAL Soft's limiter
 never acted: its loudness is the game's own.
+
+Later that day: screens that "stopped taking buttons", as choosing a move
+to forget for a new one, had crashed. Ruby 3 rejects a `sprintf("%d%")`
+that Ruby 1.8 printed as it was, and Essentials' `using(window)` is
+shadowed by Ruby's own `Module#using` where `self` is a module. The game's
+compatibility script now fixes both. An error that escapes a game's
+scripts used to show in mkxp-z's message box, unseen in the hidden player,
+while ds-emulator held the last frame for 30 seconds and then said the
+game had stopped responding. The bridge now wraps the game's main script:
+an error writes its backtrace to the player's error log and quits the
+player at once, so ds-emulator says within a moment that the game stopped
+and why. Resets and the game's own exits pass through.

@@ -111,6 +111,16 @@ module DSEmulator
       frozen
     end
 
+    # Ends the game with `error`, which escaped its scripts: the backtrace,
+    # then the error, go to the error log, whose last line ds-emulator shows.
+    def crash(error)
+      lines = error.backtrace || []
+      lines.reverse_each { |line| $stderr.puts("  from #{line}") }
+      $stderr.puts("#{error.class}: #{error.message} (#{lines.first})")
+      $stderr.flush
+      Kernel.exit!(1)
+    end
+
     # Sends `screen`, or the frozen screen while there is one, and waits
     # for the next frame's buttons.
     def frame(screen)
@@ -262,3 +272,13 @@ module Kernel
     args.size <= 1 ? args.first : args
   end
 end
+
+# An error that escapes the game's scripts would show in mkxp-z's message
+# box, which waits unseen in the hidden player: ds-emulator's screen stood
+# still and took no buttons until it gave up on the game 30 seconds later.
+# The main script, which runs every scene, ends the player at once instead.
+# Its first line is kept, so backtraces keep their line numbers.
+main = $RGSS_SCRIPTS.find { |script| script[1] == "Main" } || $RGSS_SCRIPTS.last
+main[3] = "begin; #{main[3]}\nrescue Exception => error\n" \
+          "  raise if error.is_a?(SystemExit) || error.is_a?(Reset)\n" \
+          "  DSEmulator.crash(error)\nend\n"
