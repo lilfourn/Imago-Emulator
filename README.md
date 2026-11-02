@@ -64,6 +64,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [Scripting](docs/scripting.md): the Lua functions scripts can call
 - [Design system](docs/design-system.md): the app's layout rules, and the checks that hold it to them
 - [Games we can't run](docs/research/games-we-cant-run.md): store games and homebrew for other systems that the cores can't run yet, with leads
+- [Fan-made Pokémon games](docs/research/fan-games.md): famous ROM hacks, randomizers and PC fan games, what each needs, and the plan to run them all
 - [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store
 
 ## Build and run
