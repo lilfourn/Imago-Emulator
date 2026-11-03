@@ -192,6 +192,7 @@ pub fn databases_for(platform: Platform) -> &'static [Platform] {
         Platform::Gbc => &[Platform::Gbc, Platform::Gb],
         Platform::Gba => &[Platform::Gba],
         Platform::Nds => &[Platform::Nds],
+        Platform::N3ds => &[Platform::N3ds],
         Platform::RpgMaker => &[],
     }
 }

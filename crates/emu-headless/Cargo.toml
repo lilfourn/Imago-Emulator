@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 crc32fast.workspace = true
+emu-3ds.workspace = true
 emu-core.workspace = true
 emu-cores.workspace = true
 emu-script.workspace = true

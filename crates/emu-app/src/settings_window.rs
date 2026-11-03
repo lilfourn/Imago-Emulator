@@ -162,7 +162,7 @@ fn rows(settings: &Settings) -> Vec<Row> {
             |settings, backdrop| settings.backdrop = backdrop,
         ),
         Row::new(
-            "DS 3D",
+            "3D Resolution",
             (1..=4)
                 .map(|scale| (format!("{scale}×").into(), scale))
                 .collect(),
@@ -492,9 +492,9 @@ mod tests {
         assert_eq!(settings.layout.arrangement, Arrangement::Horizontal);
         // A 3D scale the row does not offer leaves none of it chosen.
         settings.resolution_3d = 8;
-        assert_eq!(row_named(&settings, "DS 3D").chosen, None);
+        assert_eq!(row_named(&settings, "3D Resolution").chosen, None);
         settings.resolution_3d = 2;
-        assert_eq!(row_named(&settings, "DS 3D").chosen, Some(1));
+        assert_eq!(row_named(&settings, "3D Resolution").chosen, Some(1));
     }
 
     /// The row called `name` for `settings`.

@@ -4,9 +4,9 @@
 //! ```toml
 //! [[game]]
 //! path = "/Users/me/ROMs/Minish Cap.gba"
-//! platform = "gba"           # "gb", "gbc", "gba", "nds" or "rpgmaker"
+//! platform = "gba"           # "gb", "gbc", "gba", "nds", "3ds" or "rpgmaker"
 //! crc32 = "ABCEBBB1"
-//! serial = "BZME"            # GBA and DS games only
+//! serial = "BZME"            # GBA, DS and 3DS games only
 //! title = "The Legend of Zelda: The Minish Cap"
 //! name = "Legend of Zelda, The - The Minish Cap (USA)"  # once looked up
 //! looked_up = true           # the game database has been asked
@@ -36,9 +36,11 @@ pub struct Game {
     /// The system it is for.
     pub platform: Platform,
     /// CRC-32 of the ROM. An RPG Maker game has none, so it is of its
-    /// folder's path.
+    /// folder's path; a 3DS game's is of parts of its file (see
+    /// `rom_info::read_3ds`).
     pub crc32: u32,
-    /// A GBA or DS game's four-letter game code.
+    /// A GBA or DS game's four-letter game code, or a 3DS game's product
+    /// code.
     pub serial: Option<String>,
     /// The title shown under its box art.
     pub title: String,

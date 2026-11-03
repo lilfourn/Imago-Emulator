@@ -44,13 +44,13 @@ pub struct Correction {
 
 impl Correction {
     /// The correction for `system`'s screen, or `None` if its colours need
-    /// none (the DS has a backlit screen, and RPG Maker games were made on
-    /// a computer's).
+    /// none (the DS and 3DS have backlit screens, and RPG Maker games were
+    /// made on a computer's).
     pub fn for_system(system: System) -> Option<Self> {
         match system {
             System::Gb => Some(Self::new(&GBC)),
             System::Gba => Some(Self::new(&GBA)),
-            System::Nds | System::RpgMaker => None,
+            System::Nds | System::N3ds | System::RpgMaker => None,
         }
     }
 

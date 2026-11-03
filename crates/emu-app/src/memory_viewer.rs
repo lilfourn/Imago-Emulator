@@ -54,13 +54,14 @@ const NDS: [Region; 8] = [
 ];
 
 /// The regions the editor offers for `system`: none for an RPG Maker
-/// game, which has no memory map.
+/// game, which has no memory map, nor for a 3DS game, whose memory is in
+/// its helper process.
 pub fn regions(system: System) -> &'static [Region] {
     match system {
         System::Gb => &GB,
         System::Gba => &GBA,
         System::Nds => &NDS,
-        System::RpgMaker => &[],
+        System::RpgMaker | System::N3ds => &[],
     }
 }
 
@@ -69,7 +70,7 @@ pub fn home(system: System) -> u32 {
     match system {
         System::Gb => 0xC000,
         System::Gba | System::Nds => 0x0200_0000,
-        System::RpgMaker => 0,
+        System::RpgMaker | System::N3ds => 0,
     }
 }
 
@@ -78,7 +79,7 @@ pub fn last_address(system: System) -> u32 {
     match system {
         System::Gb => 0xFFFF,
         System::Gba | System::Nds => u32::MAX,
-        System::RpgMaker => 0,
+        System::RpgMaker | System::N3ds => 0,
     }
 }
 

@@ -80,9 +80,9 @@ const REWIND_BUDGET_BYTES: usize = 64 << 20;
 /// player left it, picked up when the game next starts.
 pub const CHECKPOINT: u8 = 0;
 
-/// How often a game whose core saves only when asked (an RPG Maker game's)
-/// saves its checkpoint as it plays, and how soon it tries again when the
-/// game cannot be saved.
+/// How often a game whose core checkpoints while playing (an RPG Maker
+/// game's; see [`Core::checkpoints_while_playing`]) saves its checkpoint as
+/// it plays, and how soon it tries again when the game cannot be saved.
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 const CHECKPOINT_RETRY: Duration = Duration::from_secs(5);
 
@@ -105,9 +105,32 @@ pub struct Loaded {
     /// runs on a clock of its own (an RPG Maker game's player): it plays
     /// from there, not after each frame.
     live_sound: Option<rpg_maker::audio::Tap>,
-    /// Where an RPG Maker game keeps the saves it makes itself, which a
-    /// checkpoint must never be picked up over once they change.
-    own_saves: rpg_maker::SaveFolders,
+    /// Where an RPG Maker or 3DS game keeps the saves it makes itself,
+    /// which a checkpoint must never be picked up over once they change.
+    own_saves: OwnSaves,
+}
+
+/// The saves a game makes itself, outside the app's battery saves.
+#[derive(Debug, Clone, Default)]
+enum OwnSaves {
+    /// None: the game's saves are its battery saves, or it has none.
+    #[default]
+    None,
+    /// An RPG Maker game's save files.
+    RpgMaker(rpg_maker::SaveFolders),
+    /// A 3DS game's save data, on the core's emulated SD card.
+    ThreeDs(emu_3ds::SaveData),
+}
+
+impl OwnSaves {
+    /// The save files there are now.
+    fn files(&self) -> Vec<PathBuf> {
+        match self {
+            Self::None => Vec::new(),
+            Self::RpgMaker(folders) => folders.files(),
+            Self::ThreeDs(data) => data.files(),
+        }
+    }
 }
 
 impl Loaded {
@@ -185,7 +208,7 @@ fn read_rom(rom_path: &Path, backup_path: &Path) -> anyhow::Result<RomFile> {
     }
     let system = emu_cores::system_for_path(rom_path).with_context(|| {
         format!(
-            "{} is not a .gb, .gbc, .gba or .nds file, or an RPG Maker game",
+            "{} is not a .gb, .gbc, .gba, .nds or .3ds file, or an RPG Maker game",
             rom_path.display()
         )
     })?;
@@ -207,21 +230,30 @@ fn read_rom(rom_path: &Path, backup_path: &Path) -> anyhow::Result<RomFile> {
 /// Reads each ROM and battery save and powers on the right core: one
 /// game; a DS game with a GBA game, which goes in the DS's GBA slot; or two
 /// games for the same system joined by a link cable. An RPG Maker game's
-/// folder, or its player app, starts the game in its hidden player.
+/// folder, or its player app, starts the game in its hidden player, and a
+/// 3DS game starts in its helper process.
 ///
-/// Blocking file I/O, and an RPG Maker game takes a few seconds to start;
-/// call it off the UI thread.
+/// Blocking file I/O, an RPG Maker or 3DS game takes a few seconds to
+/// start, and the first 3DS game downloads the 3DS core; call it off the
+/// UI thread.
 ///
 /// # Errors
 ///
 /// Fails if a file cannot be read, its system cannot be identified, linked
-/// ROMs are for different systems, two games would share a battery save
-/// file, or the core rejects them.
+/// ROMs are for different systems, a 3DS game comes with another game,
+/// two games would share a battery save file, or the core rejects them.
 pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Loaded> {
     if let [path] = rom_paths
         && let Some(game) = rpg_maker::game_folder(path)
     {
         return load_rpg_maker(&game);
+    }
+    match rom_paths {
+        [path] if emu_3ds::is_game(path) => return load_3ds(path),
+        _ if rom_paths.iter().any(|path| emu_3ds::is_game(path)) => {
+            bail!("A 3DS game plays on its own: open it without another game")
+        }
+        _ => {}
     }
     let names: Vec<GameFiles> = rom_paths.iter().map(|rom| GameFiles::of(rom)).collect();
     let files = rom_paths
@@ -274,7 +306,7 @@ pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Load
         files: names,
         rom_crc32,
         live_sound: None,
-        own_saves: rpg_maker::SaveFolders::default(),
+        own_saves: OwnSaves::None,
     })
 }
 
@@ -287,7 +319,7 @@ fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
         .join("RPG Maker");
     let core = rpg_maker::Mkxp::open(game, &players)?;
     let live_sound = Some(core.sound_tap());
-    let own_saves = core.save_folders();
+    let own_saves = OwnSaves::RpgMaker(core.save_folders());
     Ok(Loaded {
         core: Box::new(core),
         rom_paths: vec![game.to_owned()],
@@ -295,6 +327,25 @@ fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
         rom_crc32: crc32fast::hash(game.as_os_str().as_encoded_bytes()),
         live_sound,
         own_saves,
+    })
+}
+
+/// Starts the 3DS game at `path` in a helper process, the app's own
+/// executable started again, downloading the 3DS core into its data
+/// folder first if it is not there yet.
+fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
+    let data = emu_3ds::data_dir().context("there is no folder to keep the 3DS core in")?;
+    let helper = std::env::current_exe().context("cannot find the app to start the 3DS core")?;
+    let rom_crc32 = emu_3ds::header::identity(path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let core = emu_3ds::ThreeDs::open(path, &data, &helper)?;
+    Ok(Loaded {
+        core: Box::new(core),
+        rom_paths: vec![path.to_owned()],
+        files: vec![GameFiles::of(path)],
+        rom_crc32,
+        live_sound: None,
+        own_saves: OwnSaves::ThreeDs(emu_3ds::SaveData::of(path, &data)),
     })
 }
 
@@ -403,7 +454,7 @@ pub enum Command {
     LoadCheckpoint(u8),
     /// A request from the debugger window.
     Debug(debugger::Command),
-    /// Draws 3D at this many times the native resolution (DS), showing
+    /// Draws 3D at this many times the native resolution (DS, 3DS), showing
     /// the change at once, even while paused.
     SetRenderScale(u32),
     /// Replaces a player's cheats: their ROM patches go to the core at
@@ -837,7 +888,7 @@ impl Runner {
                 last_flush = Instant::now();
             }
 
-            if !self.loaded.core.saves_every_frame() && Instant::now() >= next_checkpoint {
+            if self.loaded.core.checkpoints_while_playing() && Instant::now() >= next_checkpoint {
                 // Unsaid: the game cannot always be saved, as in a battle,
                 // and the checkpoint before stays until it can be.
                 let wait = match self.save_checkpoint(CHECKPOINT) {
@@ -1758,7 +1809,7 @@ mod tests {
             rom_paths: vec![rom_path],
             rom_crc32: 0,
             live_sound: None,
-            own_saves: rpg_maker::SaveFolders::default(),
+            own_saves: OwnSaves::None,
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -1820,7 +1871,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/recorder.gba")],
             rom_crc32: 0,
             live_sound: None,
-            own_saves: rpg_maker::SaveFolders::default(),
+            own_saves: OwnSaves::None,
         };
         let (events, _) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), seen)
@@ -2081,7 +2132,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/keypad.gba")],
             rom_crc32: 0,
             live_sound: None,
-            own_saves: rpg_maker::SaveFolders::default(),
+            own_saves: OwnSaves::None,
         };
         let (events, _events) = async_channel::unbounded();
         let emulator = Emulator::start(loaded, events, None);
@@ -2117,7 +2168,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/debugged.gb")],
             rom_crc32: 0,
             live_sound: None,
-            own_saves: rpg_maker::SaveFolders::default(),
+            own_saves: OwnSaves::None,
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -2283,7 +2334,7 @@ mod tests {
             rom_paths: vec![PathBuf::from("/nonexistent/patchable.gb")],
             rom_crc32: 0,
             live_sound: None,
-            own_saves: rpg_maker::SaveFolders::default(),
+            own_saves: OwnSaves::None,
         };
         let (events, _events) = async_channel::unbounded();
         let emulator = Emulator::start(loaded, events, None);
@@ -2601,6 +2652,24 @@ mod tests {
     }
 
     #[test]
+    fn a_3ds_game_with_another_game_is_refused() {
+        let (dir, paths) = rom_dir(
+            "3ds-paired",
+            &[("platinum.nds", &nds_rom()), ("Game.3ds", b"NCSD")],
+        );
+        for paths in [paths.clone(), paths.iter().rev().cloned().collect()] {
+            let error = load(&paths, DmgColors::Grey).err().expect("refused");
+            assert_eq!(
+                format!("{error:#}"),
+                "A 3DS game plays on its own: open it without another game"
+            );
+        }
+        let twice = [paths[1].clone(), paths[1].clone()];
+        assert!(load(&twice, DmgColors::Grey).is_err(), "nor with itself");
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
     fn two_ds_games_link_over_local_wireless() {
         let (dir, paths) = rom_dir(
             "wireless",
@@ -2759,7 +2828,7 @@ mod tests {
             rom_paths: vec![dir.join("game.gba")],
             rom_crc32: 0,
             live_sound: None,
-            own_saves: rpg_maker::SaveFolders::default(),
+            own_saves: OwnSaves::None,
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver)
@@ -2986,7 +3055,7 @@ mod tests {
             rom_paths: vec![game],
             rom_crc32: 0,
             live_sound: None,
-            own_saves: rpg_maker::SaveFolders::new(vec![dir.join("saves")]),
+            own_saves: OwnSaves::RpgMaker(rpg_maker::SaveFolders::new(vec![dir.join("saves")])),
         };
         let (events, receiver) = async_channel::unbounded();
         (Emulator::start(loaded, events, None), receiver, place, busy)

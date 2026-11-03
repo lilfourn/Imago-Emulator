@@ -98,6 +98,9 @@ fn make_into(
             file_name(&base)
         ))
     };
+    if emu_3ds::is_game(&base) {
+        return Err(failed(&"3DS games take no patches"));
+    }
     let Some(extension) = base
         .extension()
         .filter(|_| emu_cores::system_for_path(&base).is_some())
@@ -108,8 +111,13 @@ fn make_into(
     let rom = emu_patch::apply(&bytes, &source, archive::MAX_ROM as usize)
         .map_err(|error| failed(&error))?;
     let name = format!("{}.{}", stem(patch), extension.to_string_lossy());
-    archive::store(folder, Path::new(&name), crc32fast::hash(&rom), || Ok(rom))
-        .map_err(|error| failed(&error))
+    archive::store(
+        folder,
+        Path::new(&name),
+        crc32fast::hash(&rom),
+        rom.as_slice(),
+    )
+    .map_err(|error| failed(&error))
 }
 
 /// What to open from the files the user opened together, each path's
@@ -324,6 +332,12 @@ mod tests {
             error.ends_with("it is not a .gb, .gbc, .gba or .nds game"),
             "{error}"
         );
+        let cartridge = dir.join("Game.3ds");
+        fs::write(&cartridge, b"original").expect("cartridge");
+        let Err(MakeError::Failed(error)) = make_into(&patch, Some(&cartridge), &[], &hacks) else {
+            panic!("applied to a 3DS game");
+        };
+        assert!(error.ends_with("3DS games take no patches"), "{error}");
         assert!(!hacks.exists());
         fs::remove_dir_all(&dir).ok();
     }

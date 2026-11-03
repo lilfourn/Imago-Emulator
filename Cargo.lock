@@ -1616,6 +1616,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
+name = "emu-3ds"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "crc32fast",
+ "dirs 7.0.0",
+ "emu-core",
+ "libc",
+ "libloading",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "emu-app"
 version = "0.1.0"
 dependencies = [
@@ -1625,6 +1639,7 @@ dependencies = [
  "cpal",
  "crc32fast",
  "dirs 7.0.0",
+ "emu-3ds",
  "emu-cheats",
  "emu-core",
  "emu-cores",
@@ -1675,6 +1690,7 @@ dependencies = [
 name = "emu-cores"
 version = "0.1.0"
 dependencies = [
+ "emu-3ds",
  "emu-core",
  "emu-gb",
  "emu-gba",
@@ -1720,6 +1736,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crc32fast",
+ "emu-3ds",
  "emu-core",
  "emu-cores",
  "emu-script",

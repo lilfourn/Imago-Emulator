@@ -12,12 +12,12 @@ How the workspace fits together. The *why* behind the big choices lives in
       emu-patch ◄───┤  emu-state, emu-cheats, emu-script ◄─────┤
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
-                     ┌───────┼────────┬──────────┐
-                  emu-gb  emu-gba  emu-nds    emu-mkxp (RPG Maker games)
-                     │       ├────────┤          │
+                     ┌───────┼────────┬──────────┬──────────────┐
+                  emu-gb  emu-gba  emu-nds    emu-mkxp      emu-3ds
+                     │       ├────────┤     (RPG Maker)  (Azahar, 3DS)
                      │    emu-arm  emu-sched (as cores adopt it)
                      │    emu-gba-cart (the GBA cartridge)
-                     └───────┴────────┴──────────┘
+                     └───────┴────────┴──────────┴──────────────┘
                           emu-core
 ```
 
@@ -33,6 +33,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-gba` | Game Boy Advance: memory map, wait states and the Game Pak prefetch buffer, PPU, APU with DMA FIFOs, DMA, timers, the interrupt controller, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
 | `emu-mkxp` | RPG Maker games, such as Pokémon Essentials fan games, which mkxp-z plays. Runs the game's own Mac player app, made hidden, in a process of its own, and talks to a bridge script in it over a Unix socket: frames and buttons a step at a time, and save states that are the game's own saves. Captures its sound through OpenAL Soft's WAV writer and a FIFO, and hands it on as it comes. The player takes the app's scheduling role, so macOS's Game Mode does not throttle it ([decision 0008](decisions/0008-rpg-maker-games.md)). |
+| `emu-3ds` | Nintendo 3DS games on Azahar's libretro core, which it downloads at first use with MoltenVK, at pinned versions checked against pinned digests (`install.rs`). Runs the core in a helper process, the app's own executable started with `--3ds-helper` (`host.rs`): it gives the core a Vulkan device through MoltenVK and reads each frame back (`vulkan.rs`), cuts the picture into the two screens and answers the app a frame at a time over its stdin and stdout (`link.rs`). Reads game files' headers for titles and encryption (`header.rs`). The helper takes the app's scheduling role, as the RPG Maker player does ([decision 0011](decisions/0011-3ds-games.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
 | `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
@@ -104,6 +105,11 @@ pub trait Core: Send {
   when asked (`saves_every_frame` is false), so it has no rewind, and it
   refuses a state where the game cannot save, as in a battle. Its
   checkpoint is asked for as the player leaves and every minute it plays.
+  `emu-3ds` is the other: Azahar runs in another process on threads and a
+  clock of its own. Its states are the whole console, made anywhere but
+  in a few hundred milliseconds, so it has no rewind either, and its
+  checkpoint is asked for only as the player leaves
+  (`checkpoints_while_playing` is false).
 - **ROM patches** are configuration, like the ROM itself: a core keeps the
   set it was last given, applies it to every ROM read, leaves it out of
   save states and keeps it through `load_state` and `reset`.
@@ -351,6 +357,8 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | The store's catalogs and pictures | `~/Library/Caches/ds-emulator/store/` | Each catalog's JSON as fetched, and screenshots as PNGs named by a checksum of their URL |
 | Game made from a ROM-hack patch | `~/Library/Application Support/ds-emulator/Hacks/`, named after the patch | The patched ROM, see `emu-app/src/romhack.rs` |
 | An RPG Maker game's hidden player | `~/Library/Application Support/ds-emulator/RPG Maker/<CRC-32 of the folder's path>/Player.app` | A copy of the game's player app, signed ad hoc; the bridge script beside it, see `emu-mkxp/src/player.rs` |
+| The 3DS core and MoltenVK | `~/Library/Application Support/ds-emulator/3DS/azahar-<version>/`, `…/3DS/moltenvk-<version>/` | Azahar's libretro core and MoltenVK as their releases ship them, with their licences, see `emu-3ds/src/install.rs` |
+| The emulated 3DS's own files | `~/Library/Application Support/ds-emulator/3DS/Azahar/` | Azahar's NAND, SD card (where 3DS games keep their own saves) and shader caches; the helper's log is `3DS/helper.log` |
 
 Writes go to `name.tmp` first and are renamed over the target, except
 recordings, which are written as they go and indexed when they stop.

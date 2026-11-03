@@ -42,7 +42,7 @@ pub trait Core: Send {
     fn screens(&self) -> &[Frame];
 
     /// Draws 3D at `scale` times the native resolution in each direction,
-    /// for systems with a 3D engine (the DS): from the next frame,
+    /// for systems with a 3D engine (the DS and 3DS): from the next frame,
     /// [`Core::screens`] come out `scale` times wider and taller, 3D drawn
     /// at that resolution and everything else enlarged around it. 1 is
     /// the native resolution; cores clamp `scale` to what they support.
@@ -183,6 +183,16 @@ pub trait Core: Send {
     /// it plays, since the game cannot always be saved as it is left.
     fn saves_every_frame(&self) -> bool {
         true
+    }
+
+    /// Whether the frontend saves a checkpoint now and then while the game
+    /// plays, not only as the player leaves it. That is for a core whose
+    /// game can stop without warning and keeps no save of its own, as an
+    /// RPG Maker game's player stops on an error in the game's scripts. A
+    /// core whose states are slow to make, so that saving one would hitch
+    /// play and sound, and whose games save themselves, returns false.
+    fn checkpoints_while_playing(&self) -> bool {
+        !self.saves_every_frame()
     }
 
     /// Why the game cannot go on, for a core whose game runs in another

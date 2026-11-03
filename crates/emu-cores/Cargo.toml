@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+emu-3ds.workspace = true
 emu-core.workspace = true
 emu-gb.workspace = true
 emu-gba.workspace = true

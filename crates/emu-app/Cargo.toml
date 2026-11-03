@@ -17,6 +17,7 @@ chrono.workspace = true
 cpal.workspace = true
 crc32fast.workspace = true
 dirs.workspace = true
+emu-3ds.workspace = true
 emu-cheats.workspace = true
 emu-core.workspace = true
 emu-cores.workspace = true

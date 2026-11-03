@@ -61,13 +61,18 @@ pub fn groups(system: System, bindings: &Bindings) -> Vec<Vec<Entry>> {
     };
     let mut face = vec![(Button::A, "A"), (Button::B, "B")];
     // RPG Maker games take the DS's buttons.
-    if matches!(system, System::Nds | System::RpgMaker) {
+    if matches!(system, System::Nds | System::N3ds | System::RpgMaker) {
         face.extend([(Button::X, "X"), (Button::Y, "Y")]);
     }
-    let shoulders: &[(Button, &str)] = if system == System::Gb {
-        &[]
-    } else {
-        &[(Button::L, "L"), (Button::R, "R")]
+    let shoulders: &[(Button, &str)] = match system {
+        System::Gb => &[],
+        System::Gba | System::Nds | System::RpgMaker => &[(Button::L, "L"), (Button::R, "R")],
+        System::N3ds => &[
+            (Button::L, "L"),
+            (Button::R, "R"),
+            (Button::Zl, "ZL"),
+            (Button::Zr, "ZR"),
+        ],
     };
     let menu = vec![Entry {
         key: "esc".to_owned(),
@@ -301,6 +306,23 @@ mod tests {
         let gba = labels(&gba);
         assert_eq!(gba[2], [("Q", "L"), ("E", "R")]);
         assert_eq!(gba[1].len(), 2, "no X or Y on a GBA");
+        let ds = groups(System::Nds, &Bindings::default());
+        assert_eq!(labels(&ds)[2].len(), 2, "no ZL or ZR on a DS");
+    }
+
+    #[test]
+    fn a_3ds_game_shows_the_ds_s_buttons_and_zl_and_zr() {
+        let n3ds = groups(System::N3ds, &Bindings::default());
+        assert_eq!(
+            labels(&n3ds),
+            [
+                vec![("W", "↑"), ("A", "←"), ("S", "↓"), ("D", "→")],
+                vec![("K", "A"), ("J", "B"), ("I", "X"), ("U", "Y")],
+                vec![("Q", "L"), ("E", "R"), ("Z", "ZL"), ("C", "ZR")],
+                vec![("␣", "Start"), ("⌫", "Select")],
+                vec![("esc", "Menu")],
+            ]
+        );
     }
 
     #[test]

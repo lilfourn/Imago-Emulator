@@ -5,6 +5,8 @@
 A Game Boy, Game Boy Color, Game Boy Advance and Nintendo DS emulator for
 macOS, written in Rust with a [GPUI](https://gpui.rs) frontend. The goal is to
 play the Pokémon games of generations 1–5 from your own cartridge dumps.
+3DS games play too, on Azahar's core, which the app downloads the first
+time ([below](#3ds-games)).
 
 **Status: Phase 4 (Nintendo DS).** The DS core direct-boots retail games
 with an HLE BIOS. Pokémon White plays from power-on through a new game to
@@ -65,7 +67,8 @@ See the [roadmap](docs/ROADMAP.md).
 - [Design system](docs/design-system.md): the app's layout rules, and the checks that hold it to them
 - [Games we can't run](docs/research/games-we-cant-run.md): store games and homebrew for other systems that the cores can't run yet, with leads
 - [Fan-made Pokémon games](docs/research/fan-games.md): famous ROM hacks, randomizers and PC fan games, what each needs, and the plan to run them all
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store
+- [3DS games](docs/research/3ds.md): what hosting Azahar's core takes, what was measured, and what is left
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store, 3DS games
 
 ## Build and run
 
@@ -128,7 +131,7 @@ SPEED=normal FRONT=1 scripts/macos/bench.sh ~/Games/My\ Fan\ Game
 | Slow motion | Hold 1 | | | Swap screens / Quit | ⌘E / ⌘Q |
 | Rewind | Hold R | Left trigger | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
 | Blow into the microphone (DS) | Hold B | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
-| | | | | Full screen | ⌃⌘F |
+| ZL / ZR (3DS) | Z / C | Unbound; bind them in bindings.toml | | Full screen | ⌃⌘F |
 | | | | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Save screenshot | ⌘⇧S |
 | | | | | Start / stop recording | ⌘⇧R |
@@ -137,15 +140,17 @@ SPEED=normal FRONT=1 scripts/macos/bench.sh ~/Games/My\ Fan\ Game
 | | | | | Filter: none, LCD grid, scanlines, Scale2x, Scale3x | View > Filter |
 | | | | | Debugger | ⌘⇧D |
 | | | | | Step / step over / next frame (debugger) | ⌘⇧I / ⌘⇧O / ⌘⇧N |
-| | | | | 3D resolution (DS) | View > 3D Resolution |
+| | | | | 3D resolution (DS, 3DS) | View > 3D Resolution |
 | | | | | Original Game Boy games in colour or grey | View > Original Game Boy Games |
 | | | | | Computer's microphone on/off (DS) | Emulation > Use Microphone |
 | | | | | Fast-forward speed: 2×, 3×, 4× or unlimited | Emulation > Fast-Forward Speed |
 | | | | | Show / hide frame rate and speed | ⌘⌥F |
 
 The keys are laid out for playing on a keyboard: the left hand on W A S D
-with the shoulders on Q and E, the right hand on a square of four keys
-shaped like the DS face buttons, U and I (Y and X) above J and K (B and A).
+with the shoulders on Q and E and the 3DS's ZL and ZR on Z and C below
+them, the right hand on a square of four keys shaped like the DS face
+buttons, U and I (Y and X) above J and K (B and A). On a 3DS the D-pad's
+keys and the left stick also tilt the circle pad.
 
 Fast-forward runs at twice normal speed. Emulation > Fast-Forward Speed
 picks 2×, 3×, 4× or Unlimited, as fast as the computer goes; it is kept
@@ -429,6 +434,30 @@ A save state is the game's own save, made on the spot: anywhere but in a
 battle. Loading one restarts the game straight into it.
 There is no rewind, link play, cheats, debugger or memory for these games.
 
+## 3DS games
+
+3DS games play in the window on [Azahar](https://azahar-emu.org)'s
+libretro core ([decision 0011](docs/decisions/0011-3ds-games.md)). Open
+a `.3ds`, `.cci`, `.cxi` or `.3dsx` file (or Azahar's compressed `.zcci`,
+`.zcxi` or `.z3dsx`), drop it on the window, add it to the library, or open
+an archive holding one. The first time, the app downloads Azahar's core
+(GPL-3.0) and MoltenVK (Apache-2.0), about 67 MB, checks them against the
+digests it pins, and keeps them in
+`~/Library/Application Support/ds-emulator/3DS`; neither ships with the
+app. The game runs in a helper process, the app's own executable, and
+draws on the GPU through Vulkan on Metal, at the internal resolution View >
+3D Resolution sets.
+
+Games must be decrypted dumps of your own: the core refuses an encrypted
+one, and the app holds no keys. Installable titles (`.cia`) don't open.
+The controls are the app's own (see above), with the D-pad's keys also
+tilting the circle pad, ZL and ZR on Z and C, and the mouse on the bottom
+screen. Save states work anywhere and the app keeps where you left off,
+but there is no rewind, link play, cheats, debugger or memory viewer, and
+`.3dsx` homebrew has no save states (Azahar's core can't load them for a
+game without a title ID). A game's own saves live on the emulated SD
+card, in `3DS/Azahar`.
+
 ## ROM hacks
 
 A ROM hack comes as a patch for the game it was made from: `.ips`, `.ups`
@@ -597,6 +626,7 @@ commit's build.
 | `emu-gba` | Game Boy Advance core |
 | `emu-nds` | Nintendo DS core |
 | `emu-mkxp` | RPG Maker games, played by mkxp-z in a hidden process |
+| `emu-3ds` | 3DS games, on Azahar's libretro core in a helper process |
 | `emu-cheats` | Cheat list parsing and application |
 | `emu-patch` | ROM-hack patches: IPS, UPS, BPS and xdelta |
 | `emu-script` | Lua scripts, sandboxed, run between frames |
@@ -628,3 +658,10 @@ part on the work of the Independent JPEG Group.
 
 Scripts run on Lua 5.4, copyright © 1994–2026 Lua.org, PUC-Rio, built in
 through the `mlua` crate; both are under the MIT license.
+
+3DS games play on Azahar's libretro core (GPL-3.0) and MoltenVK
+(Apache-2.0), which the app downloads from their own releases when a 3DS
+game first opens; neither is part of this project or its builds. The
+libretro API's definitions in `emu-3ds` follow `libretro.h` and
+`libretro_vulkan.h`, copyright © 2010–2024 the RetroArch team, under the
+MIT license.

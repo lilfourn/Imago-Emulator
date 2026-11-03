@@ -1057,7 +1057,7 @@ fn encoding(bytes: &[u8], system: System, thumb: bool) -> String {
 /// Places to draw tiles from, by name and address.
 fn tile_bases(system: System) -> &'static [(&'static str, u32)] {
     match system {
-        System::Gb | System::RpgMaker => &[],
+        System::Gb | System::RpgMaker | System::N3ds => &[],
         System::Gba => &[("BG", 0x0600_0000), ("OBJ", 0x0601_0000)],
         System::Nds => &[
             ("A BG", 0x0600_0000),

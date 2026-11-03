@@ -1,6 +1,6 @@
 //! Settings kept between launches, so the app opens as it was left: the
 //! screen layout, fast-forward and slow motion and their speeds, the
-//! resolution of DS 3D, the video filter and colour correction, what
+//! resolution of DS and 3DS 3D, the video filter and colour correction, what
 //! fills the window around the screens, the save-state slot, and the
 //! window's place, size and controls.
 //!
@@ -21,7 +21,7 @@
 //! slow_motion_on = false  # left on with ⌘⇧F
 //!
 //! [video]
-//! resolution_3d = 2       # DS 3D at 1 to 8 times its own resolution
+//! resolution_3d = 2       # DS and 3DS 3D at 1 to 8 times its own resolution
 //! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
 //! show_fps = true        # the frame rate and speed in the window's corner
 //! backdrop = "ambient"    # around the screens: "ambient" (the game's colours, blurred) or "solid"
@@ -70,8 +70,8 @@ const ARRANGEMENTS: [(Arrangement, &str); 4] = [
     (Arrangement::Hybrid, "hybrid"),
 ];
 
-/// The highest DS 3D resolution, as a multiple of the native one: what the
-/// core draws at most.
+/// The highest 3D resolution, as a multiple of the native one: the most
+/// the DS core draws at. The 3DS core draws at up to 10 times.
 pub const MAX_RESOLUTION_3D: u32 = 8;
 
 /// Everything remembered between launches.
@@ -85,7 +85,7 @@ pub struct Settings {
     pub fast_forward_on: bool,
     /// Whether slow motion was left on.
     pub slow_motion_on: bool,
-    /// How many times its own resolution DS 3D is drawn at, 1 to
+    /// How many times its own resolution DS and 3DS 3D is drawn at, 1 to
     /// [`MAX_RESOLUTION_3D`] (see `Core::set_render_scale`).
     pub resolution_3d: u32,
     /// How the screens are filtered on their way to the window.

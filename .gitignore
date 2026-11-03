@@ -9,6 +9,18 @@
 *.nds
 *.dsi
 *.srl
+*.3ds
+*.cci
+*.cxi
+*.cia
+*.3dsx
+*.zcci
+*.zcxi
+*.z3dsx
+# 3DS DSP firmware and keys, dumped from a console.
+*.cdc
+aes_keys.txt
+seeddb.bin
 *.zip
 *.7z
 *.sav

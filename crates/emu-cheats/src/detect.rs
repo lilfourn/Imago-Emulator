@@ -78,6 +78,7 @@ pub(crate) fn guess(system: System, lines: &[(usize, &str)]) -> Result<Guess, (u
         System::Nds => Ok(Guess::Device(Device::ActionReplayDs)),
         System::Gba => gba_shape(&lengths).map_err(|message| (first, message)),
         System::RpgMaker => Err((first, "RPG Maker games take no cheat codes".to_owned())),
+        System::N3ds => Err((first, "3DS games take no cheat codes".to_owned())),
     }
 }
 

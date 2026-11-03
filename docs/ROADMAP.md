@@ -338,6 +338,12 @@ are done.
 - A libretro-host mode so the frontend can load existing cores (for example,
   an Azahar-derived 3DS core) and still provide its own layouts, bindings and
   save-state UI. Or contribute to Azahar directly.
+  ✅ **3DS:** Azahar's official libretro core runs in a helper process, with
+  Vulkan through MoltenVK, the app's layouts, bindings, states and
+  checkpoint (`emu-3ds`, [decision 0011](decisions/0011-3ds-games.md)).
+  Open a `.3ds`, `.cci`, `.cxi` or `.3dsx` file; the first one downloads
+  the core. Next: `.cia` titles, the store's 3DS homebrew, and an upstream
+  fix for loading states of games without a title ID.
 - For learning, write parts of a 3DS emulator (an ARM11 interpreter, a
   PICA200 shader interpreter) against homebrew. Do not plan to run X/Y or
   Sun/Moon on them.

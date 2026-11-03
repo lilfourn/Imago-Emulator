@@ -210,17 +210,28 @@ window, bindings and save states.
 
 ## Plan
 
-1. **Prototype Vulkan outside the app.** Extend the kit's `host.c`, or use
-   `ash`, with MoltenVK. Measure homebrew at 1× to 3×, and the read-back
-   time. If MoltenVK won't run the core, stop there and fall back to the
-   stopgap.
-2. **Build the `emu-libretro` helper and its `Core` in the app:** screens,
-   sound, buttons, STEP pacing, states and the checkpoint.
-3. **Add input:** the circle pad, ZL, ZR, Home and touch.
-4. **Wire up the library:** 3DS files, the encrypted check and the core
-   download.
-5. **Add 3DS homebrew to the store,** and run the compatibility sweep.
-6. **Write decision record 0011,** and update PRD section 4 and roadmap
-   Phase 5 to match.
+Update, 2026-11-03: steps 1 to 4 and 6 are done, in the `emu-3ds` crate
+([decision 0011](../decisions/0011-3ds-games.md)). The helper is the app's
+own executable, as `--3ds-helper`, rather than a binary of its own. The
+Vulkan path works: Craftus Reloaded's title ran at about 1,100 to 1,500
+fps unpaced, against 28 in software. Home is left out, since the core uses
+that button to swap screens. One finding is new: under Vulkan, a state
+can't be loaded for `.3dsx` homebrew, which has no title ID, because
+Azahar makes the rebuilt renderer's pipeline cache only for a title it
+can name. The helper refuses those states; this is worth reporting
+upstream.
+
+1. ~~**Prototype Vulkan outside the app.**~~ Done, with `ash` and
+   MoltenVK 1.4.2.
+2. ~~**Build the helper and its `Core` in the app.**~~ Done.
+3. ~~**Add input:** the circle pad, ZL, ZR and touch.~~ Done.
+4. ~~**Wire up the library:** 3DS files, the encrypted check and the core
+   download.~~ Done.
+5. **Add 3DS homebrew to the store,** and run the compatibility sweep. Also
+   open `.cia` homebrew by taking out its executable: an unencrypted
+   CIA's first content is a plain NCCH that the core opens, and 22 of the
+   store's 3DS games ship only a `.cia`.
+6. ~~**Write decision record 0011,** and update PRD section 4 and roadmap
+   Phase 5 to match.~~ Done.
 
 Testing a commercial game needs the player's own decrypted dump.

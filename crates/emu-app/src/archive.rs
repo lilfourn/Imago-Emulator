@@ -1,12 +1,12 @@
 //! Games downloaded as archives: `.zip` files, and `.7z` and `.rar`
 //! ones, which macOS's own `tar` (libarchive) unpacks. The ROMs inside
 //! are unpacked into the app's own games folder, where they and their
-//! saves stay after the download is deleted. ROM-hack patches inside are
-//! unpacked into a temporary folder, for [`crate::romhack`] to make their
-//! games from.
+//! saves stay after the download is deleted, written as they are read, as
+//! a 3DS game can be 4 GB. ROM-hack patches inside are unpacked into a
+//! temporary folder, for [`crate::romhack`] to make their games from.
 
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,6 +19,9 @@ use crate::romhack;
 /// The most a ROM unpacks to: a DS cartridge holds at most 512 MiB, so a
 /// bigger file is not a game. Patches are held to it too.
 pub const MAX_ROM: u64 = 512 << 20;
+
+/// The most a 3DS game unpacks to: a 3DS cartridge holds at most 4 GiB.
+pub const MAX_3DS_GAME: u64 = 4 << 30;
 
 /// The archives games come in, by extension.
 const ARCHIVES: [&str; 3] = ["zip", "7z", "rar"];
@@ -85,7 +88,7 @@ fn unpack_into(archive: &Path, folder: &Path, patches: &Path) -> Result<Vec<Path
         unpacked.map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
     if games.is_empty() {
         return Err(format!(
-            "{} holds no .gb, .gbc, .gba or .nds game, or patch for one",
+            "{} holds no .gb, .gbc, .gba, .nds or .3ds game, or patch for one",
             archive.display()
         ));
     }
@@ -98,6 +101,15 @@ fn unpack_into(archive: &Path, folder: &Path, patches: &Path) -> Result<Vec<Path
 fn wanted(inner: &Path) -> bool {
     !inner.starts_with("__MACOSX")
         && (emu_cores::system_for_path(inner).is_some() || romhack::is_patch(inner))
+}
+
+/// The most the game or patch called `name` unpacks to.
+fn size_cap(name: &Path) -> u64 {
+    if emu_3ds::is_game(name) {
+        MAX_3DS_GAME
+    } else {
+        MAX_ROM
+    }
 }
 
 fn unpack_zip(zip: &Path, folder: &Path, patches: &Path) -> io::Result<Vec<PathBuf>> {
@@ -115,8 +127,11 @@ fn unpack_zip(zip: &Path, folder: &Path, patches: &Path) -> io::Result<Vec<PathB
         let game = if romhack::is_patch(&name) {
             keep_patch(&read_capped(&mut entry, &name)?, patches, &name)?
         } else {
+            if entry.size() > size_cap(&name) {
+                return Err(too_big(&name));
+            }
             let crc32 = entry.crc32();
-            store(folder, &name, crc32, || read_capped(&mut entry, &name))?
+            store(folder, &name, crc32, &mut entry)?
         };
         games.push(game);
     }
@@ -149,12 +164,18 @@ fn unpack_with_tar(archive: &Path, folder: &Path, patches: &Path) -> io::Result<
         let Some(name) = inner.file_name().map(PathBuf::from) else {
             continue;
         };
-        let mut file = File::open(scratch.0.join(inner))?;
-        let bytes = read_capped(&mut file, &name)?;
+        let path = scratch.0.join(inner);
         let game = if romhack::is_patch(&name) {
-            keep_patch(&bytes, patches, &name)?
+            keep_patch(
+                &read_capped(&mut File::open(&path)?, &name)?,
+                patches,
+                &name,
+            )?
         } else {
-            store(folder, &name, crc32fast::hash(&bytes), || Ok(bytes))?
+            if fs::metadata(&path)?.len() > size_cap(&name) {
+                return Err(too_big(&name));
+            }
+            store(folder, &name, file_crc32(&path)?, File::open(&path)?)?
         };
         games.push(game);
     }
@@ -202,18 +223,56 @@ impl Drop for Scratch {
     }
 }
 
-/// All of `file`, which is called `name`, unless it is too big to be a
-/// game.
+/// All of `file`, a patch called `name`, unless it is too big to be one.
 fn read_capped(file: &mut impl Read, name: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(MAX_ROM + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_ROM {
-        return Err(io::Error::other(format!(
-            "{} is too big to be a game",
-            name.display()
-        )));
+        return Err(too_big(name));
     }
     Ok(bytes)
+}
+
+/// Why the file called `name` is not unpacked.
+fn too_big(name: &Path) -> io::Error {
+    io::Error::other(format!("{} is too big to be a game", name.display()))
+}
+
+/// The CRC-32 of the file at `path`, read a piece at a time.
+fn file_crc32(path: &Path) -> io::Result<u32> {
+    let mut file = File::open(path)?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = vec![0; 1 << 20];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return Ok(hasher.finalize()),
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Writes `contents`, the game called `name`, to `path` as it reads it,
+/// through a temporary file, so `path` is only ever the whole game. Stops
+/// past `cap` bytes, leaving nothing behind, as it is too big to be a game.
+fn write_capped(path: &Path, contents: impl Read, name: &Path, cap: u64) -> io::Result<()> {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    let written = File::create(&temporary).and_then(|mut file| {
+        let written = io::copy(&mut contents.take(cap + 1), &mut file)?;
+        if written > cap {
+            return Err(too_big(name));
+        }
+        file.flush()?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        fs::remove_file(&temporary).ok();
+        return Err(error);
+    }
+    fs::rename(&temporary, path)
 }
 
 /// Writes the patch `bytes` into `patches` as `name`, replacing any patch
@@ -225,17 +284,17 @@ fn keep_patch(bytes: &[u8], patches: &Path, name: &Path) -> io::Result<PathBuf> 
     Ok(path)
 }
 
-/// Writes the ROM whose CRC-32 is `crc32` into `folder` as `name`, with
-/// `read` giving its bytes, and returns its path. The same game written
-/// before is used as it is, and not read again; a different one of that
-/// name is left alone, as it may have saves beside it, and this one is
-/// numbered: `Game (2).gba`.
-pub fn store(
-    folder: &Path,
-    name: &Path,
-    crc32: u32,
-    read: impl FnOnce() -> io::Result<Vec<u8>>,
-) -> io::Result<PathBuf> {
+/// Writes the ROM whose CRC-32 is `crc32` into `folder` as `name`, read
+/// from `contents` as it is written, and returns its path. The same game
+/// written before is used as it is, and `contents` is not read; a
+/// different one of that name is left alone, as it may have saves beside
+/// it, and this one is numbered: `Game (2).gba`.
+///
+/// # Errors
+///
+/// Fails if a file cannot be read or written, or the game is bigger than
+/// a cartridge of its system holds.
+pub fn store(folder: &Path, name: &Path, crc32: u32, contents: impl Read) -> io::Result<PathBuf> {
     let stem = name.file_stem().unwrap_or_default().to_string_lossy();
     let extension = name.extension().unwrap_or_default().to_string_lossy();
     for number in 1.. {
@@ -244,14 +303,14 @@ pub fn store(
         } else {
             folder.join(format!("{stem} ({number}).{extension}"))
         };
-        match fs::read(&path) {
-            Ok(existing) if crc32fast::hash(&existing) == crc32 => return Ok(path),
+        match file_crc32(&path) {
+            Ok(existing) if existing == crc32 => return Ok(path),
             Ok(_) => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
         fs::create_dir_all(folder)?;
-        persist::write_atomic(&path, &read()?)?;
+        write_capped(&path, contents, name, size_cap(name))?;
         return Ok(path);
     }
     unreachable!("a free name is always found")
@@ -382,6 +441,46 @@ mod tests {
                 .unwrap_err()
                 .starts_with("Cannot unpack")
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unpacks_3ds_games_up_to_a_3ds_cartridge_s_size() {
+        let dir = temp_dir("unpack-3ds");
+        let (games, patches) = (dir.join("Games"), dir.join("Patches"));
+        let zip = zip_file(
+            &dir,
+            "Homebrew.zip",
+            &[
+                ("Homebrew/Homebrew.3dsx", b"3DSX"),
+                ("Homebrew/Game.cia", b"cia"),
+            ],
+        );
+        let unpacked = unpack_into(&zip, &games, &patches).expect("unpacks");
+        assert_eq!(unpacked, [games.join("Homebrew.3dsx")]);
+        assert_eq!(fs::read(&unpacked[0]).expect("unpacked"), b"3DSX");
+        let seven = seven_zip_file(&dir, "Cartridge.7z", &[("Cartridge.3ds", b"NCSD")]);
+        let unpacked = unpack_into(&seven, &games, &patches).expect("unpacks");
+        assert_eq!(unpacked, [games.join("Cartridge.3ds")]);
+
+        assert_eq!(size_cap(Path::new("Cartridge.3DS")), 4 << 30);
+        assert_eq!(size_cap(Path::new("Homebrew.z3dsx")), MAX_3DS_GAME);
+        assert_eq!(size_cap(Path::new("Platinum.nds")), MAX_ROM);
+        assert_eq!(size_cap(Path::new("Hack.bps")), MAX_ROM);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_game_too_big_for_its_cartridge_leaves_nothing_behind() {
+        let dir = temp_dir("unpack-too-big");
+        let path = dir.join("Game.3ds");
+        let name = Path::new("Game.3ds");
+        let error = write_capped(&path, &b"12345"[..], name, 4).expect_err("too big");
+        assert_eq!(error.to_string(), "Game.3ds is too big to be a game");
+        assert_eq!(fs::read_dir(&dir).expect("folder").count(), 0);
+        write_capped(&path, &b"1234"[..], name, 4).expect("just fits");
+        assert_eq!(fs::read(&path).expect("written"), b"1234");
+        assert_eq!(file_crc32(&path).expect("read"), crc32fast::hash(b"1234"));
         fs::remove_dir_all(&dir).ok();
     }
 
