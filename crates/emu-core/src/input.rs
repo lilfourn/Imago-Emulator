@@ -1,11 +1,11 @@
 use std::fmt;
 use std::str::FromStr;
 
-/// One physical button on a GB, GBA or DS.
+/// One physical button on a GB, GBA, DS or 3DS.
 ///
 /// The discriminants follow the GBA `KEYINPUT` register (bits 0 to 9), with
-/// the DS-only X and Y after them, so the GBA core can build `KEYINPUT`
-/// straight from [`Buttons::bits`].
+/// the DS's X and Y after them, so the GBA core can build `KEYINPUT`
+/// straight from [`Buttons::bits`], then the 3DS's ZL and ZR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Button {
@@ -33,11 +33,15 @@ pub enum Button {
     X = 10,
     /// Y (DS).
     Y = 11,
+    /// Left trigger (New 3DS).
+    Zl = 12,
+    /// Right trigger (New 3DS).
+    Zr = 13,
 }
 
 impl Button {
     /// Every button, in bit order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::A,
         Self::B,
         Self::Select,
@@ -50,6 +54,8 @@ impl Button {
         Self::L,
         Self::X,
         Self::Y,
+        Self::Zl,
+        Self::Zr,
     ];
 
     /// The lowercase name used in binding files and logs.
@@ -68,6 +74,8 @@ impl Button {
             Self::L => "l",
             Self::X => "x",
             Self::Y => "y",
+            Self::Zl => "zl",
+            Self::Zr => "zr",
         }
     }
 
@@ -144,13 +152,13 @@ impl FromIterator<Button> for Buttons {
     }
 }
 
-/// A touchscreen contact in bottom-screen pixels (DS only), with the origin
-/// at the top-left corner.
+/// A touchscreen contact in bottom-screen pixels (DS and 3DS), with the
+/// origin at the top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TouchPoint {
-    /// Column, `0..256`.
+    /// Column: `0..256` on a DS, `0..320` on a 3DS.
     pub x: u16,
-    /// Row, `0..192`.
+    /// Row: `0..192` on a DS, `0..240` on a 3DS.
     pub y: u16,
 }
 

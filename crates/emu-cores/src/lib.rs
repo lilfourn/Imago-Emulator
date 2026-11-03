@@ -3,7 +3,9 @@
 //! This is the only crate that knows every system crate, so frontends
 //! depend on it instead of on `emu-gb`, `emu-gba`, `emu-nds` and
 //! `emu-mkxp` directly. RPG Maker games are folders, not ROMs: they start
-//! through [`rpg_maker`], not [`create`].
+//! through [`rpg_maker`], not [`create`]. 3DS games, which can be 4 GB,
+//! are never read into memory either: they start with
+//! [`emu_3ds::ThreeDs::open`], which frontends call themselves.
 
 use std::path::Path;
 
@@ -14,8 +16,9 @@ pub use emu_mkxp as rpg_maker;
 
 /// File extensions this build recognises, and the system each belongs to.
 /// `.cgb` and `.agb` are older names for Game Boy Color and Game Boy
-/// Advance ROMs, the same files as `.gbc` and `.gba`.
-pub const ROM_EXTENSIONS: [(&str, System); 7] = [
+/// Advance ROMs, the same files as `.gbc` and `.gba`. The 3DS's are
+/// [`emu_3ds::EXTENSIONS`].
+pub const ROM_EXTENSIONS: [(&str, System); 14] = [
     ("gb", System::Gb),
     ("gbc", System::Gb),
     ("cgb", System::Gb),
@@ -23,6 +26,13 @@ pub const ROM_EXTENSIONS: [(&str, System); 7] = [
     ("agb", System::Gba),
     ("nds", System::Nds),
     ("srl", System::Nds),
+    ("3ds", System::N3ds),
+    ("cci", System::N3ds),
+    ("cxi", System::N3ds),
+    ("3dsx", System::N3ds),
+    ("zcci", System::N3ds),
+    ("zcxi", System::N3ds),
+    ("z3dsx", System::N3ds),
 ];
 
 /// The system a ROM file is for, judged by its extension.
@@ -43,6 +53,7 @@ pub const fn info(system: System) -> CoreInfo {
         System::Gba => emu_gba::INFO,
         System::Nds => emu_nds::INFO,
         System::RpgMaker => emu_mkxp::INFO,
+        System::N3ds => emu_3ds::INFO,
     }
 }
 
@@ -52,7 +63,7 @@ pub const fn info(system: System) -> CoreInfo {
 pub const fn second_slot(system: System) -> Option<System> {
     match system {
         System::Nds => Some(System::Gba),
-        System::Gb | System::Gba | System::RpgMaker => None,
+        System::Gb | System::Gba | System::RpgMaker | System::N3ds => None,
     }
 }
 
@@ -63,18 +74,23 @@ pub const fn second_slot(system: System) -> Option<System> {
 ///
 /// Returns the core's [`LoadError`] if it rejects the ROM, or a second-slot
 /// cartridge on a system without one. RPG Maker games have no ROM, so
-/// they are refused: they start with [`rpg_maker::Mkxp::open`].
+/// they are refused: they start with [`rpg_maker::Mkxp::open`]. So are 3DS
+/// games, which start from their file with [`emu_3ds::ThreeDs::open`].
 pub fn create(system: System, media: &Media<'_>) -> Result<Box<dyn Core>, LoadError> {
     Ok(match system {
         System::Gb => Box::new(emu_gb::Gb::new(media)?),
         System::Gba => Box::new(emu_gba::Gba::new(media)?),
         System::Nds => Box::new(emu_nds::Nds::new(media)?),
         System::RpgMaker => return Err(LoadError::Unsupported(NO_ROM)),
+        System::N3ds => return Err(LoadError::Unsupported(NO_3DS_ROM)),
     })
 }
 
 /// Why an RPG Maker game cannot start from a ROM.
 const NO_ROM: &str = "an RPG Maker game starts from its folder, not a ROM";
+
+/// Why a 3DS game cannot start from a ROM in memory.
+const NO_3DS_ROM: &str = "a 3DS game starts from its file, not a ROM in memory";
 
 /// Powers on `system` with one game per entry of `media`, joined by a
 /// link cable (Game Boy, Game Boy Advance) or in local wireless range of
@@ -83,13 +99,14 @@ const NO_ROM: &str = "an RPG Maker game starts from its folder, not a ROM";
 /// # Errors
 ///
 /// Returns the core's error if it rejects a ROM or the number of games.
-/// RPG Maker games do not link.
+/// RPG Maker and 3DS games do not link.
 pub fn create_linked(system: System, media: &[Media<'_>]) -> Result<Box<dyn Core>, LoadError> {
     Ok(match system {
         System::Gb => Box::new(emu_gb::Linked::new(media)?),
         System::Gba => Box::new(emu_gba::Linked::new(media)?),
         System::Nds => Box::new(emu_nds::Linked::new(media)?),
         System::RpgMaker => return Err(LoadError::Unsupported(NO_ROM)),
+        System::N3ds => return Err(LoadError::Unsupported(NO_3DS_ROM)),
     })
 }
 
@@ -108,8 +125,33 @@ mod tests {
             system_for_path(Path::new("platinum.nds")),
             Some(System::Nds)
         );
+        assert_eq!(system_for_path(Path::new("Game.3DS")), Some(System::N3ds));
+        assert_eq!(
+            system_for_path(Path::new("homebrew.3dsx")),
+            Some(System::N3ds)
+        );
+        assert_eq!(system_for_path(Path::new("game.cia")), None);
         assert_eq!(system_for_path(Path::new("notes.txt")), None);
         assert_eq!(system_for_path(Path::new("no_extension")), None);
+    }
+
+    #[test]
+    fn every_3ds_extension_is_a_3ds_game() {
+        for extension in emu_3ds::EXTENSIONS {
+            let path = Path::new("game").with_extension(extension);
+            assert_eq!(system_for_path(&path), Some(System::N3ds), "{extension}");
+        }
+        let n3ds = ROM_EXTENSIONS
+            .iter()
+            .filter(|(_, system)| *system == System::N3ds)
+            .count();
+        assert_eq!(n3ds, emu_3ds::EXTENSIONS.len());
+        assert_eq!(info(System::N3ds), emu_3ds::INFO);
+        assert_eq!(second_slot(System::N3ds), None);
+        assert!(matches!(
+            create(System::N3ds, &Media::new(&[0; 16])),
+            Err(LoadError::Unsupported(_))
+        ));
     }
 
     #[test]

@@ -2,13 +2,20 @@
 //! automation and trace diffing.
 //!
 //! ```text
-//! emu-headless [--system gb|gba|nds] [--frames N] [--start-time SECS] [--dump DIR] [--wav FILE]
-//!              [--script FILE.lua] [--work-dir DIR] ROM
+//! emu-headless [--system gb|gba|nds|3ds] [--frames N] [--start-time SECS] [--dump DIR]
+//!              [--wav FILE] [--script FILE.lua] [--work-dir DIR] ROM
 //! ```
 //!
 //! An RPG Maker game's folder plays in place of a ROM, in a hidden player
 //! of its own kept in `--work-dir` (by default
 //! `~/Library/Caches/emu-headless`), apart from the app's.
+//!
+//! A 3DS game plays on the 3DS core in a helper process, emu-headless
+//! started again. The core and the console's files are kept in
+//! `--work-dir`, by default the app's own
+//! (`~/Library/Application Support/ds-emulator/3DS`), and the core is
+//! downloaded there the first time. Should the helper stop, the run ends
+//! there with exit status 1, saying why.
 //!
 //! Output is plain `key=value` text, one line per screen:
 //!
@@ -33,8 +40,9 @@ use emu_core::debug::Stops;
 use emu_core::{Core, Frame, Input, Media, StereoSample, System};
 use emu_script::{Output, Script, StateRequest};
 
-const USAGE: &str = "usage: emu-headless [--system gb|gba|nds] [--frames N] [--start-time SECS] \
-                     [--dump DIR] [--wav FILE] [--script FILE.lua] [--work-dir DIR] ROM";
+const USAGE: &str = "usage: emu-headless [--system gb|gba|nds|3ds] [--frames N] \
+                     [--start-time SECS] [--dump DIR] [--wav FILE] [--script FILE.lua] \
+                     [--work-dir DIR] ROM";
 
 struct Args {
     rom: PathBuf,
@@ -48,6 +56,10 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    // A 3DS game's helper is this executable, started again.
+    if let Some(code) = emu_3ds::run_helper_if_asked() {
+        std::process::exit(code);
+    }
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(error) => {
@@ -112,12 +124,13 @@ fn run(args: &Args) -> anyhow::Result<()> {
         Some(path) => run_script(path, &mut *core, args, &mut audio, &mut out)?,
         None => {
             let inputs = vec![Input::default(); core.info().players.max(1)];
-            for _ in 0..args.frames {
+            for frame in 1..=args.frames {
                 let keep = audio.len();
                 core.run_frame(&inputs, &mut audio);
                 if args.wav.is_none() {
                     audio.truncate(keep);
                 }
+                still_running(&*core, frame)?;
             }
             args.frames
         }
@@ -144,8 +157,17 @@ fn run(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The system and a core playing the game `args` names: a ROM, or an RPG
-/// Maker game's folder.
+/// Fails, saying why, if the game has stopped, as a game in another
+/// process can, by frame `frame`.
+fn still_running(core: &dyn Core, frame: u64) -> anyhow::Result<()> {
+    match core.ended() {
+        Some(why) => bail!("the game stopped at frame {frame}: {why}"),
+        None => Ok(()),
+    }
+}
+
+/// The system and a core playing the game `args` names: a ROM, a 3DS
+/// game, or an RPG Maker game's folder.
 fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
     if let Some(game) = emu_cores::rpg_maker::game_folder(&args.rom) {
         let work_dir = match &args.work_dir {
@@ -166,6 +188,16 @@ fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
             )
         })?,
     };
+    if system == System::N3ds {
+        let data = match &args.work_dir {
+            Some(dir) => dir.clone(),
+            None => emu_3ds::data_dir()
+                .context("there is no folder to keep the 3DS core in; pass --work-dir")?,
+        };
+        let helper = std::env::current_exe().context("cannot find emu-headless to start again")?;
+        let core = emu_3ds::ThreeDs::open(&args.rom, &data, &helper)?;
+        return Ok((system, Box::new(core)));
+    }
     let rom = fs::read(&args.rom).with_context(|| format!("reading {}", args.rom.display()))?;
     let media = Media {
         start_time: args.start_time,
@@ -213,6 +245,7 @@ fn run_script(
         output = script.take_output();
         paused = slots.obey(&output, core, out)?;
         result?;
+        still_running(core, frames)?;
     }
     Ok(frames)
 }

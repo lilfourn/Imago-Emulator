@@ -112,8 +112,8 @@ come after the first's. Writes keep the low bits of `value`, so `-1` is all ones
 | `joypad.get([player])` | The buttons the last frame ran with, as a table: `{a = true, b = false, ...}`. |
 | `joypad.set(buttons [, player])` | Sets buttons for the next frame only: `true` presses one, `false` lets it go, whatever the player holds; buttons not named stay as the player has them. |
 
-The buttons are `a`, `b`, `x`, `y`, `l`, `r`, `up`, `down`, `left`,
-`right`, `start` and `select`, in any case. Call `joypad.set` every frame
+The buttons are `a`, `b`, `x`, `y`, `l`, `r`, `zl`, `zr` (3DS), `up`,
+`down`, `left`, `right`, `start` and `select`, in any case. Call `joypad.set` every frame
 a button should stay held. When one call both presses and releases a
 button, the release wins.
 

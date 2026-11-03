@@ -20,6 +20,7 @@ emu-nds = { path = "crates/emu-nds" }
 emu-psg = { path = "crates/emu-psg" }
 emu-cores = { path = "crates/emu-cores" }
 emu-mkxp = { path = "crates/emu-mkxp" }
+emu-3ds = { path = "crates/emu-3ds" }
 emu-cheats = { path = "crates/emu-cheats" }
 emu-patch = { path = "crates/emu-patch" }
 emu-script = { path = "crates/emu-script" }
@@ -90,6 +91,8 @@ opt-level = 2
 [profile.dev.package.emu-nds]
 opt-level = 2
 [profile.dev.package.emu-arm]
+opt-level = 2
+[profile.dev.package.emu-3ds]
 opt-level = 2
 
 [profile.release]

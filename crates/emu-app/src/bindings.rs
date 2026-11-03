@@ -212,11 +212,12 @@ pub struct Bindings {
 }
 
 /// Laid out for playing on a keyboard: the left hand on WASD and the
-/// shoulders either side of it, the right hand on a square of four keys in
-/// the DS face-button positions (Y and X on top, B and A below). The arrow
-/// keys steer too, Return presses A as well, as it confirms everywhere
-/// else, and B, for blow, blows into the microphone.
-const KEY_DEFAULTS: [(Held, &str); 21] = [
+/// shoulders either side of it, with the 3DS's ZL and ZR on Z and C below
+/// them, the right hand on a square of four keys in the DS face-button
+/// positions (Y and X on top, B and A below). The arrow keys steer too,
+/// Return presses A as well, as it confirms everywhere else, and B, for
+/// blow, blows into the microphone.
+const KEY_DEFAULTS: [(Held, &str); 23] = [
     (Held::Button(Button::Up), "w"),
     (Held::Button(Button::Left), "a"),
     (Held::Button(Button::Down), "s"),
@@ -232,6 +233,8 @@ const KEY_DEFAULTS: [(Held, &str); 21] = [
     (Held::Button(Button::A), "enter"),
     (Held::Button(Button::L), "q"),
     (Held::Button(Button::R), "e"),
+    (Held::Button(Button::Zl), "z"),
+    (Held::Button(Button::Zr), "c"),
     (Held::Button(Button::Start), "space"),
     (Held::Button(Button::Select), "backspace"),
     (Held::FastForward, "tab"),
@@ -242,7 +245,8 @@ const KEY_DEFAULTS: [(Held, &str); 21] = [
 
 /// Nintendo layout by position: A is the right face button, B the bottom.
 /// The right stick moves the touch cursor (see `gamepad.rs`); clicking
-/// either stick touches.
+/// either stick touches. The second triggers rewind and fast-forward, so
+/// the 3DS's ZL and ZR are left for the player to bind.
 const GAMEPAD_DEFAULTS: [(Held, &str); 20] = [
     (Held::Button(Button::A), "East"),
     (Held::Button(Button::B), "South"),
@@ -564,9 +568,13 @@ mod tests {
     #[test]
     fn defaults_cover_every_button_fast_forward_and_rewind() {
         let bindings = Bindings::default();
-        for map in [&bindings.keys, &bindings.gamepad] {
+        for (map, unbound) in [
+            (&bindings.keys, &[][..]),
+            (&bindings.gamepad, &[Button::Zl, Button::Zr][..]),
+        ] {
             for button in Button::ALL {
-                assert!(map.values().any(|held| *held == Held::Button(button)));
+                let bound = map.values().any(|held| *held == Held::Button(button));
+                assert_eq!(bound, !unbound.contains(&button), "{button}");
             }
             assert!(map.values().any(|held| *held == Held::FastForward));
             assert!(map.values().any(|held| *held == Held::Rewind));
@@ -615,6 +623,9 @@ mod tests {
         assert_eq!(key("backspace"), Some(Held::Button(Button::Select)));
         assert_eq!(key("q"), Some(Held::Button(Button::L)));
         assert_eq!(key("e"), Some(Held::Button(Button::R)));
+        // The 3DS's second shoulders, under the first.
+        assert_eq!(key("z"), Some(Held::Button(Button::Zl)));
+        assert_eq!(key("c"), Some(Held::Button(Button::Zr)));
         assert_eq!(key("tab"), Some(Held::FastForward));
         assert_eq!(key("r"), Some(Held::Rewind));
         assert_eq!(key("b"), Some(Held::Blow));

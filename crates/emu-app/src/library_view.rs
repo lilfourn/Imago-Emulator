@@ -606,7 +606,7 @@ impl LibraryView {
         let (title, hint) = if none {
             (
                 "No games yet".to_owned(),
-                "Get free homebrew games from the store, add your own with + or ⌘⇧A, or drop a .gb, .gbc, .gba or .nds file, a .zip, .7z or .rar of one, a ROM-hack patch, or an RPG Maker game's folder, here.".to_owned(),
+                "Get free homebrew games from the store, add your own with + or ⌘⇧A, or drop a .gb, .gbc, .gba, .nds or .3ds file, a .zip, .7z or .rar of one, a ROM-hack patch, or an RPG Maker game's folder, here.".to_owned(),
             )
         } else {
             (
@@ -783,8 +783,10 @@ fn read_games(
 }
 
 /// The game in the ROM at `path`, or the RPG Maker game there, with its DS
-/// icon or its player app's icon saved in `cache`.
+/// icon or its player app's icon saved in `cache`. A 3DS game's headers
+/// are read without reading the rest of its file.
 pub fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
+    let cannot_read = |error: std::io::Error| format!("Cannot read {}: {error}", path.display());
     if let Some(folder) = rpg_maker::game_folder(path) {
         let game = Game::rpg_maker(&folder, rpg_maker::title(&folder));
         let player = rpg_maker::player_app(&folder);
@@ -794,9 +796,19 @@ pub fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
         }
         return Ok(game);
     }
-    let rom = fs::read(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
-    let info = rom_info::read(path, &rom)
-        .ok_or_else(|| format!("{} is not a .gb, .gbc, .gba or .nds game", path.display()))?;
+    if emu_3ds::is_game(path) {
+        return Ok(Game::new(
+            path,
+            &rom_info::read_3ds(path).map_err(cannot_read)?,
+        ));
+    }
+    let rom = fs::read(path).map_err(cannot_read)?;
+    let info = rom_info::read(path, &rom).ok_or_else(|| {
+        format!(
+            "{} is not a .gb, .gbc, .gba, .nds or .3ds game",
+            path.display()
+        )
+    })?;
     if let (Some(cache), Some(icon)) = (cache, rom_info::nds_icon(&rom)) {
         // The icon is only a fallback for missing box art.
         boxart::save_icon(cache, info.crc32, &icon).ok();
@@ -903,6 +915,23 @@ mod tests {
         assert_eq!(moved(3, 7, 3, "down"), 6);
         assert_eq!(moved(4, 7, 3, "down"), 4);
         assert_eq!(moved(0, 0, 3, "right"), 0);
+    }
+
+    #[test]
+    fn a_3ds_game_is_read_from_its_headers_and_titled_by_its_file() {
+        let dir = std::env::temp_dir().join(format!("emu-app-read-3ds-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("Cool_Homebrew.3dsx");
+        let mut file = vec![0; 0x20];
+        file[0..4].copy_from_slice(b"3DSX");
+        file[4..6].copy_from_slice(&0x20_u16.to_le_bytes());
+        fs::write(&path, &file).expect("written");
+
+        let game = read_game(&path, None).expect("listed");
+        assert_eq!(game.platform, rom_info::Platform::N3ds);
+        assert_eq!(game.title, "Cool Homebrew");
+        assert_eq!(game.path, path);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

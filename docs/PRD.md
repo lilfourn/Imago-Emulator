@@ -60,8 +60,10 @@ recorded in [decisions/0001-rust-and-gpui.md](decisions/0001-rust-and-gpui.md):
 
 ## 4. Non-goals
 
-- 3DS and Switch cores. Gen 6–9 support, if it ever comes, means hosting an
-  existing core (Phase 5 of the roadmap), never writing one.
+- 3DS and Switch cores. Gen 6–9 support means hosting an existing core
+  (Phase 5 of the roadmap), never writing one. 3DS games run on Azahar's
+  libretro core, downloaded at first use and run in a helper process
+  ([decision 0011](decisions/0011-3ds-games.md)).
 - A JIT or dynamic recompiler. An interpreter runs GB, GBA and DS at full
   speed on M-series chips. Revisit only if the DS core measurably cannot.
 - DSi mode, the GBA e-Reader, the GBA Wireless Adapter and the Pokéwalker in
@@ -136,6 +138,16 @@ version 1, **P2** comes later. Milestones (M0–M16) are defined in
 | NDS-9 | 3D upscaling (N× internal resolution, or a Metal compute rasterizer). ✅ 1×–8× internal resolution on the CPU (`Core::set_render_scale`); the game still reads native 3D. | P1 · M16 |
 | NDS-10 | Local wireless between two instances (trades, battles). Microphone input or a "blow" button. ✅ microphone: a blow key and the computer's microphone, as loudness in `Input`. ✅ local wireless: the Wi-Fi chip, and two consoles on one clock ([decision 0007](decisions/0007-ds-local-wireless.md)); two Pokémon Whites trade in the Union Room. Battles, Platinum and HG/SS untried. | P2 · M16 |
 | NDS-11 | HG/SS infrared cartridge (Pokéwalker). | P2 |
+
+**Nintendo 3DS**, hosted rather than written ([decision 0011](decisions/0011-3ds-games.md)):
+
+| ID | Requirement | Priority |
+|---|---|---|
+| 3DS-1 | Play the player's own decrypted 3DS games and homebrew on Azahar's libretro core, downloaded at a pinned version and checked against a pinned digest, never shipped with the app. ✅ | P1 · Phase 5 |
+| 3DS-2 | Both screens in the app's layouts, the bottom one touched with the mouse; the app's bindings, with the D-pad also tilting the circle pad, and ZL and ZR. ✅ | P1 · Phase 5 |
+| 3DS-3 | The GPU renderer through MoltenVK, at 1×–10× internal resolution, falling back to software without Vulkan. ✅ | P1 · Phase 5 |
+| 3DS-4 | Save states from the core, and the checkpoint. ✅ (none for `.3dsx` homebrew under Vulkan: the core cannot load them) | P1 · Phase 5 |
+| 3DS-5 | Installable titles (`.cia`), cheats, and the 3DS homebrew in the store. | P2 |
 
 ### 6.3 Frontend (`emu-app`)
 
@@ -236,7 +248,7 @@ they are project policy, not legal advice.
 | Borrow checker vs. "everything points at the bus" designs | Slow progress on the first cores. | Each core owns its machine as one struct. The CPU borrows the bus per call (`cpu.step(&mut bus)`); no `Rc<RefCell<…>>` webs. |
 | Retrofitting determinism and save states | Rewind and netplay become impossible later. | The contract requires both from the first core. The scaffold's stub cores already save and load state. |
 | Motivation over a 2–3 year horizon | Project abandoned. | Every milestone ends with something playable or a test suite turning green. |
-| Legal | Takedown. | Section 9. Out of scope: 3DS, Switch, keys. |
+| Legal | Takedown. | Section 9. No keys, no decryption, no Switch; 3DS games only on a core the app downloads, never ships ([decision 0011](decisions/0011-3ds-games.md)). |
 
 ## 11. Open questions
 

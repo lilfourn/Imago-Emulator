@@ -1,6 +1,8 @@
 //! What a ROM's header says about the game, for the library: its system,
-//! title and game code, and a DS game's icon and banner title.
+//! title and game code, and a DS game's icon and banner title. A 3DS
+//! game's headers are read from its file, which can be 4 GB.
 
+use std::io;
 use std::path::Path;
 
 /// The system a game is for, as the library groups them. Game Boy Color
@@ -18,15 +20,18 @@ pub enum Platform {
     /// An RPG Maker game, such as a Pokémon fan game, which mkxp-z runs.
     /// It is a folder, not a ROM.
     RpgMaker,
+    /// Nintendo 3DS.
+    N3ds,
 }
 
 /// Each platform and its name in the library file.
-const TAGS: [(Platform, &str); 5] = [
+const TAGS: [(Platform, &str); 6] = [
     (Platform::Gb, "gb"),
     (Platform::Gbc, "gbc"),
     (Platform::Gba, "gba"),
     (Platform::Nds, "nds"),
     (Platform::RpgMaker, "rpgmaker"),
+    (Platform::N3ds, "3ds"),
 ];
 
 impl Platform {
@@ -52,6 +57,7 @@ impl Platform {
             Self::Gba => "GBA",
             Self::Nds => "DS",
             Self::RpgMaker => "RPG",
+            Self::N3ds => "3DS",
         }
     }
 
@@ -67,6 +73,7 @@ impl Platform {
             Self::Gbc => "Nintendo - Game Boy Color",
             Self::Gba => "Nintendo - Game Boy Advance",
             Self::Nds => "Nintendo - Nintendo DS",
+            Self::N3ds => "Nintendo - Nintendo 3DS",
             Self::RpgMaker => unreachable!("libretro lists no RPG Maker games"),
         }
     }
@@ -77,13 +84,16 @@ impl Platform {
 pub struct RomInfo {
     /// The handheld the game is for.
     pub platform: Platform,
-    /// CRC-32 of the whole file, as No-Intro lists it.
+    /// CRC-32 of the whole file, as No-Intro lists it; a 3DS game's is
+    /// the quicker one that identifies it in save states.
     pub crc32: u32,
-    /// The four-letter game code of GBA and DS games, such as `BZME`.
+    /// The four-letter game code of GBA and DS games, such as `BZME`, or
+    /// a 3DS game's product code, such as `CTR-P-AREE`.
     pub serial: Option<String>,
     /// The title in the header: capitals, at most 16 letters.
     pub header_title: Option<String>,
-    /// A DS game's English title from its banner, first line only.
+    /// A DS game's English title from its banner, first line only, or a
+    /// 3DS game's from its icon.
     pub banner_title: Option<String>,
 }
 
@@ -110,7 +120,7 @@ pub fn read(path: &Path, rom: &[u8]) -> Option<RomInfo> {
         Platform::Gbc => (ascii(rom, 0x134..0x143), None),
         Platform::Gba => (ascii(rom, 0xA0..0xAC), ascii(rom, 0xAC..0xB0)),
         Platform::Nds => (ascii(rom, 0x00..0x0C), ascii(rom, 0x0C..0x10)),
-        Platform::RpgMaker => return None,
+        Platform::RpgMaker | Platform::N3ds => return None,
     };
     Some(RomInfo {
         platform,
@@ -120,6 +130,29 @@ pub fn read(path: &Path, rom: &[u8]) -> Option<RomInfo> {
         banner_title: (platform == Platform::Nds)
             .then(|| banner_title(rom))
             .flatten(),
+    })
+}
+
+/// What the headers of the 3DS game at `path` say, read from the file
+/// without reading all of it. Its CRC-32 is the one that identifies it in
+/// save states ([`emu_3ds::header::identity`]), not the whole file's. A
+/// game whose title cannot be read, as an encrypted one's cannot, is
+/// titled from its file name; one the core will refuse is still listed,
+/// and says why when it is opened.
+///
+/// # Errors
+///
+/// Fails if the file cannot be read.
+pub fn read_3ds(path: &Path) -> io::Result<RomInfo> {
+    let crc32 = emu_3ds::header::identity(path)?;
+    let header = emu_3ds::header::read(path).ok();
+    let header = header.as_ref();
+    Ok(RomInfo {
+        platform: Platform::N3ds,
+        crc32,
+        serial: header.and_then(|header| header.product_code.clone()),
+        header_title: None,
+        banner_title: header.and_then(|header| header.title.clone()),
     })
 }
 
@@ -265,6 +298,25 @@ mod tests {
         assert_eq!(icon[0..4], [0, 0, 0, 0], "colour 0 is see-through");
         assert_eq!(icon[4..8], [0xFF, 0, 0, 0xFF]);
         assert_eq!(icon[icon.len() - 4..], [0xFF, 0, 0, 0xFF]);
+    }
+
+    #[test]
+    fn a_3ds_game_without_a_title_is_named_by_its_file() {
+        let dir = std::env::temp_dir().join(format!("emu-app-rom-info-3ds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("Homebrew.3dsx");
+        let mut file = vec![0; 0x20];
+        file[0..4].copy_from_slice(b"3DSX");
+        file[4..6].copy_from_slice(&0x20_u16.to_le_bytes());
+        std::fs::write(&path, &file).expect("written");
+
+        let info = read_3ds(&path).expect("a 3DS game");
+        assert_eq!(info.platform, Platform::N3ds);
+        assert_eq!(info.banner_title, None, "homebrew without an icon");
+        assert_eq!(info.serial, None);
+        assert_eq!(read(&path, &file), None, "not read as a ROM");
+        assert!(read_3ds(&dir.join("missing.3ds")).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

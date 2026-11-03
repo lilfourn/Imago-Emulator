@@ -1,10 +1,13 @@
-//! ds-emulator: a Game Boy, Game Boy Advance and Nintendo DS emulator for
-//! macOS, built on GPUI.
+//! ds-emulator: a Game Boy, Game Boy Advance, Nintendo DS and Nintendo 3DS
+//! emulator for macOS, built on GPUI.
 //!
 //! Usage: `ds-emulator [--script SCRIPT.lua] [ROM [LINKED_ROM | GBA_ROM]]`.
 //! Two Game Boy or Game Boy Advance ROMs start linked by a cable; a GBA ROM
 //! after a DS ROM goes in the DS's GBA slot. A Lua script runs alongside
 //! the first game to start.
+//!
+//! A 3DS game plays in a helper process: this executable, started again
+//! with `--3ds-helper` (see `emu_3ds::run_helper_if_asked`).
 
 mod ambient;
 mod app;
@@ -65,6 +68,10 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 fn main() {
+    // Before anything else: the helper must not start the app.
+    if let Some(code) = emu_3ds::run_helper_if_asked() {
+        std::process::exit(code);
+    }
     match parse_args(std::env::args_os().skip(1)) {
         Ok((roms, script)) => app::run(roms, script),
         Err(error) => {

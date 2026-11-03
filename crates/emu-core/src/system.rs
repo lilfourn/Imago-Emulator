@@ -14,14 +14,16 @@ pub enum System {
     Nds = 3,
     /// An RPG Maker game, which mkxp-z runs in a process of its own.
     RpgMaker = 4,
+    /// Nintendo 3DS, which Azahar's libretro core runs in a helper process.
+    N3ds = 5,
 }
 
 impl System {
     /// Every system.
-    pub const ALL: [Self; 4] = [Self::Gb, Self::Gba, Self::Nds, Self::RpgMaker];
+    pub const ALL: [Self; 5] = [Self::Gb, Self::Gba, Self::Nds, Self::RpgMaker, Self::N3ds];
 
     /// Short identifier used on the command line, in logs and in file
-    /// names: `gb`, `gba`, `nds` or `rpgmaker`.
+    /// names: `gb`, `gba`, `nds`, `rpgmaker` or `3ds`.
     #[must_use]
     pub const fn id(self) -> &'static str {
         match self {
@@ -29,6 +31,7 @@ impl System {
             Self::Gba => "gba",
             Self::Nds => "nds",
             Self::RpgMaker => "rpgmaker",
+            Self::N3ds => "3ds",
         }
     }
 
@@ -40,6 +43,7 @@ impl System {
             Self::Gba => "Game Boy Advance",
             Self::Nds => "Nintendo DS",
             Self::RpgMaker => "RPG Maker",
+            Self::N3ds => "Nintendo 3DS",
         }
     }
 
@@ -64,7 +68,7 @@ impl fmt::Display for System {
 
 /// A string that is not a [`System::id`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown system {0:?}; expected gb, gba, nds or rpgmaker")]
+#[error("unknown system {0:?}; expected gb, gba, nds, rpgmaker or 3ds")]
 pub struct ParseSystemError(String);
 
 impl FromStr for System {

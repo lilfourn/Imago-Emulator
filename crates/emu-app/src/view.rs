@@ -108,7 +108,7 @@ pub struct EmulatorView {
     settings_path: Option<PathBuf>,
     /// How fast fast-forward and slow motion run, from the settings file.
     speeds: Speeds,
-    /// How many times its own resolution DS 3D is drawn at.
+    /// How many times its own resolution DS and 3DS 3D is drawn at.
     resolution_3d: u32,
     /// The computer's microphone, while the user has it on: off at every
     /// launch.
@@ -493,7 +493,7 @@ impl EmulatorView {
             .map(|path| file_name(path))
             .collect::<Vec<_>>()
             .join(" + ");
-        self.show_notice(format!("Loading {name}…"), cx);
+        self.show_notice(loading_notice(&paths, &name), cx);
         let dmg_colors = self.dmg_colors;
         self.loading_games.clone_from(&paths);
         let load = cx
@@ -836,10 +836,9 @@ impl EmulatorView {
             }
             // Joins the game's starting notice, which may hold warnings.
             Event::PickedUp(loaded) => {
-                let own_save = self
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.info.system == System::RpgMaker);
+                let own_save = self.session.as_ref().is_some_and(|session| {
+                    matches!(session.info.system, System::RpgMaker | System::N3ds)
+                });
                 let picked = if loaded {
                     "Picked up where you left off"
                 } else if own_save {
@@ -1785,15 +1784,15 @@ impl EmulatorView {
         self.save_settings(cx);
     }
 
-    /// Draws DS 3D at `scale` times its own resolution and saves that for
-    /// next launch.
+    /// Draws DS and 3DS 3D at `scale` times its own resolution and saves
+    /// that for next launch.
     fn set_resolution_3d(&mut self, scale: u32, cx: &mut Context<Self>) {
         self.resolution_3d = scale;
         self.send(Command::SetRenderScale(scale));
         let message = match (scale, self.session.as_ref().map(|s| s.info.system)) {
             (1, _) => "3D at the native resolution".to_owned(),
-            (_, Some(System::Nds) | None) => format!("3D at {scale}× resolution"),
-            (_, Some(_)) => format!("3D at {scale}× resolution, for DS games"),
+            (_, Some(System::Nds | System::N3ds) | None) => format!("3D at {scale}× resolution"),
+            (_, Some(_)) => format!("3D at {scale}× resolution, for DS and 3DS games"),
         };
         self.show_notice(message, cx);
         self.save_settings(cx);
@@ -2939,6 +2938,22 @@ fn prepare(paths: Vec<PathBuf>, known: &[(u32, PathBuf)]) -> Result<Vec<PathBuf>
             let base = roms.first().map(PathBuf::as_path);
             Ok(vec![romhack::make(&patch, base, known)?])
         }
+    }
+}
+
+/// What to say while the games at `paths`, called `name`, load: that the
+/// 3DS core is being downloaded first, for a 3DS game the first time one
+/// is played, as that takes a while.
+fn loading_notice(paths: &[PathBuf], name: &str) -> String {
+    let downloading = matches!(paths, [path] if emu_3ds::is_game(path))
+        && emu_3ds::data_dir().is_some_and(|data| emu_3ds::install::installed(&data).is_none());
+    if downloading {
+        format!(
+            "Downloading the 3DS core, about {} MB, the first time only, then loading {name}…",
+            emu_3ds::install::DOWNLOAD_MB
+        )
+    } else {
+        format!("Loading {name}…")
     }
 }
 

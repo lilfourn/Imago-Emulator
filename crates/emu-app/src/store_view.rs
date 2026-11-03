@@ -1426,6 +1426,7 @@ fn platform_name(platform: Platform) -> &'static str {
         Platform::Gbc => "Game Boy Color",
         Platform::Gba => "Game Boy Advance",
         Platform::Nds => "Nintendo DS",
+        Platform::N3ds => "Nintendo 3DS",
         Platform::RpgMaker => "RPG Maker",
     }
 }
