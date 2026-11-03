@@ -70,8 +70,27 @@ fn play(game: &Path, frames: u64, out: Option<&Path>) -> Result<(), String> {
             .then_some(Button::A)
             .into_iter()
             .collect();
+        // DS_EMULATOR_3DS_TOUCH="FROM:TO:X:Y" touches the bottom screen at
+        // (X, Y) from frame FROM to frame TO.
+        let touch = std::env::var("DS_EMULATOR_3DS_TOUCH")
+            .ok()
+            .and_then(|spec| {
+                let parts: Vec<u64> = spec
+                    .split(':')
+                    .filter_map(|part| part.parse().ok())
+                    .collect();
+                let [from, to, x, y] = parts[..] else {
+                    return None;
+                };
+                let point = emu_core::TouchPoint {
+                    x: u16::try_from(x).ok()?,
+                    y: u16::try_from(y).ok()?,
+                };
+                (from..to).contains(&frame).then_some(point)
+            });
         let input = Input {
             buttons: held,
+            touch,
             ..Input::default()
         };
         audio.clear();
