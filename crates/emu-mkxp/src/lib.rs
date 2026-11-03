@@ -121,6 +121,46 @@ fn is_app(path: &Path) -> bool {
         && path.is_dir()
 }
 
+/// The extensions of RPG Maker XP's, VX's and VX Ace's save files.
+const SAVE_EXTENSIONS: [&str; 3] = ["rxdata", "rvdata", "rvdata2"];
+
+/// Where a game keeps the saves it makes itself: the folder mkxp-z gives it
+/// for its files, where Pokémon Essentials saves on a Mac, and the game's
+/// own folder, where RPG Maker's own save screens put `Save1.rxdata` and
+/// the like.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SaveFolders(Vec<PathBuf>);
+
+impl SaveFolders {
+    /// The saves in `folders`.
+    pub fn new(folders: Vec<PathBuf>) -> Self {
+        Self(folders)
+    }
+
+    /// The save files in the folders now, in order: those directly in each
+    /// folder with a save file's extension.
+    pub fn files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = self
+            .0
+            .iter()
+            .filter_map(|folder| fs::read_dir(folder).ok())
+            .flatten()
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| {
+                path.extension().is_some_and(|extension| {
+                    SAVE_EXTENSIONS
+                        .iter()
+                        .any(|save| extension.eq_ignore_ascii_case(save))
+                })
+            })
+            .filter(|path| path.is_file())
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+}
+
 /// The title in the `Game.ini` of the game in `folder`.
 pub fn title(folder: &Path) -> Option<String> {
     let ini = fs::read(folder.join("Game.ini")).ok()?;
@@ -146,6 +186,8 @@ pub struct Mkxp {
     /// The last frame's RGBA bytes, as the bridge sent them.
     pixels: Vec<u8>,
     sound: Capture,
+    /// Where the game keeps the saves it makes itself.
+    save_folders: SaveFolders,
     /// Whether the next frame restarts the game.
     reset: bool,
     ended: RefCell<Option<String>>,
@@ -184,6 +226,7 @@ impl Mkxp {
             Error::DidNotStart(why)
         })?;
         player.set_pid(hello.pid);
+        let save_folders = SaveFolders(hello.save_folder.iter().cloned().chain([game]).collect());
         let size = ScreenSize::new(hello.width, hello.height);
         let mut core = Self {
             info: CoreInfo {
@@ -196,6 +239,7 @@ impl Mkxp {
             screens: vec![Frame::new(size)],
             pixels: vec![0; hello.frame_bytes()],
             sound,
+            save_folders,
             reset: false,
             ended: RefCell::new(None),
         };
@@ -211,6 +255,12 @@ impl Mkxp {
     /// tenth of a second, while the music plays on.
     pub fn sound_tap(&self) -> audio::Tap {
         self.sound.tap()
+    }
+
+    /// Where the game keeps the saves it makes itself, which its save
+    /// states, made from the game as it plays, leave alone.
+    pub fn save_folders(&self) -> SaveFolders {
+        self.save_folders.clone()
     }
 
     /// Reads the frame the bridge sends next into the screen.
@@ -367,6 +417,38 @@ mod tests {
         assert_eq!(title(&game).as_deref(), Some("My Game"));
         fs::remove_dir_all(game.join("My Game.app")).expect("removed");
         assert_eq!(game_folder(&game), None, "no player app");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_files_are_those_with_rpg_makers_extensions_in_either_folder() {
+        let dir = temp_dir("saves");
+        let (data, game) = (dir.join("data"), dir.join("game"));
+        for folder in [&data, &game, &game.join("Data")] {
+            fs::create_dir_all(folder).expect("folder");
+        }
+        for file in [
+            data.join("Game.rxdata"),
+            data.join("errorlog.txt"),
+            data.join("Game.rxdata.bak"),
+            game.join("Save1.RXDATA"),
+            game.join("Save01.rvdata2"),
+            game.join("Game.ini"),
+            game.join("Data/Map001.rxdata"),
+        ] {
+            fs::write(file, b"x").expect("file");
+        }
+        fs::create_dir_all(game.join("Saves.rvdata")).expect("a folder, not a save");
+        let folders = SaveFolders(vec![data.clone(), game.clone(), dir.join("gone")]);
+        assert_eq!(
+            folders.files(),
+            [
+                data.join("Game.rxdata"),
+                game.join("Save01.rvdata2"),
+                game.join("Save1.RXDATA"),
+            ]
+        );
+        assert_eq!(SaveFolders::default().files(), Vec::<PathBuf>::new());
         fs::remove_dir_all(&dir).ok();
     }
 

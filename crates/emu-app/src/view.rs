@@ -41,7 +41,7 @@ use crate::controls::{Controls, HeldState};
 use crate::cursor::{self, Cursor};
 use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
-use crate::emulator::{self, Command, Emulator, Event, Loaded};
+use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Loaded};
 use crate::filter::Filter;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
@@ -84,10 +84,6 @@ const MOUSE: &str = "mouse:left";
 /// What every keyboard key's source name starts with, before the key's
 /// GPUI name.
 const KEY: &str = "key:";
-
-/// The save-state slot that holds each game's checkpoint: where the
-/// player left it, picked up when the game next starts.
-const CHECKPOINT: u8 = 0;
 
 /// The root view of the main window.
 pub struct EmulatorView {
@@ -840,8 +836,14 @@ impl EmulatorView {
             }
             // Joins the game's starting notice, which may hold warnings.
             Event::PickedUp(loaded) => {
+                let own_save = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.info.system == System::RpgMaker);
                 let picked = if loaded {
                     "Picked up where you left off"
+                } else if own_save {
+                    "The game's own save changed after you left off, so the game starts at its title"
                 } else {
                     "The battery save changed after you left off, so the game starts from it"
                 };

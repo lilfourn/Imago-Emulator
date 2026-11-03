@@ -177,9 +177,10 @@ pub trait Core: Send {
     }
 
     /// Whether [`Core::save_state`] is quick and always works, so it can
-    /// run every frame for rewind, and unasked when the player leaves, to
-    /// pick up there next time. A core whose game runs in another process
-    /// saves only when asked (see [`Core::try_save_state`]).
+    /// run every frame for rewind. A core whose game runs in another
+    /// process saves only when asked (see [`Core::try_save_state`]): when
+    /// the player leaves, to pick up there next time, and now and then as
+    /// it plays, since the game cannot always be saved as it is left.
     fn saves_every_frame(&self) -> bool {
         true
     }

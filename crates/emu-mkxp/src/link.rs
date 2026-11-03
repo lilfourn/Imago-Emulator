@@ -3,7 +3,9 @@
 //!
 //! 1. The bridge connects and says hello: `DSEM`, the protocol
 //!    [`VERSION`] (u16), the screen's width and height and the game's frame
-//!    rate (u16 each), and the player's process ID (u32).
+//!    rate (u16 each), the player's process ID (u32), and the folder mkxp-z
+//!    keeps the game's own files in, as its saves: its size (u16) and path,
+//!    in UTF-8, or 0 if the player cannot say.
 //! 2. It sends each frame once drawn: width × height pixels, each four
 //!    bytes in R, G, B, A order, top row first.
 //! 3. Between frames, ds-emulator sends messages of four bytes: a kind
@@ -22,12 +24,12 @@
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// The protocol's version, which the bridge says in its hello.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 /// The message that runs the next frame.
 pub const STEP: u8 = 0;
 /// The message that asks for a save state.
@@ -44,7 +46,7 @@ const MAX_STATE: u32 = 256 << 20;
 const MAGIC: &[u8; 4] = b"DSEM";
 
 /// What the bridge says first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     /// The screen's width, in pixels.
     pub width: u16,
@@ -54,6 +56,9 @@ pub struct Hello {
     pub frame_rate: u16,
     /// The player's process ID.
     pub pid: u32,
+    /// The folder mkxp-z keeps the game's own files in, such as its saves
+    /// (`System.data_directory`), if the player said.
+    pub save_folder: Option<PathBuf>,
 }
 
 /// Listens at `path` for the bridge, replacing whatever is there.
@@ -123,19 +128,27 @@ impl Link {
                 "the game's bridge speaks another version of the link",
             ));
         }
-        let hello = Hello {
-            width: word(6),
-            height: word(8),
-            frame_rate: word(10),
-            pid: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
-        };
-        if hello.width == 0 || hello.height == 0 {
+        if word(6) == 0 || word(8) == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "the game said its screen has no size",
             ));
         }
-        Ok(hello)
+        let mut size = [0; 2];
+        self.stream.read_exact(&mut size)?;
+        let mut folder = vec![0; usize::from(u16::from_le_bytes(size))];
+        self.stream.read_exact(&mut folder)?;
+        let save_folder = String::from_utf8(folder)
+            .ok()
+            .filter(|folder| !folder.is_empty())
+            .map(PathBuf::from);
+        Ok(Hello {
+            width: word(6),
+            height: word(8),
+            frame_rate: word(10),
+            pid: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            save_folder,
+        })
     }
 
     /// Reads the next frame into `pixels`, which holds exactly one.
@@ -220,11 +233,24 @@ mod tests {
 
     /// What the bridge sends first, as bridge.rb packs it.
     fn hello_bytes(width: u16, height: u16, frame_rate: u16, pid: u32) -> Vec<u8> {
+        hello_with_folder(width, height, frame_rate, pid, "")
+    }
+
+    fn hello_with_folder(
+        width: u16,
+        height: u16,
+        frame_rate: u16,
+        pid: u32,
+        folder: &str,
+    ) -> Vec<u8> {
         let mut bytes = MAGIC.to_vec();
+        let size = u16::try_from(folder.len()).expect("a short folder");
         for word in [VERSION, width, height, frame_rate] {
             bytes.extend(word.to_le_bytes());
         }
         bytes.extend(pid.to_le_bytes());
+        bytes.extend(size.to_le_bytes());
+        bytes.extend(folder.as_bytes());
         bytes
     }
 
@@ -232,8 +258,9 @@ mod tests {
     fn hellos_frames_and_answers_cross_the_link() {
         let (ours, mut bridge) = UnixStream::pair().expect("socket pair");
         let mut link = Link::new(ours);
+        let folder = "/Users/me/Library/Application Support/mkxp-z/Pokémon Game/";
         bridge
-            .write_all(&hello_bytes(2, 1, 40, 1234))
+            .write_all(&hello_with_folder(2, 1, 40, 1234, folder))
             .expect("hello");
         bridge.write_all(&[1, 2, 3, 4, 5, 6, 7, 8]).expect("frame");
         assert_eq!(
@@ -242,7 +269,8 @@ mod tests {
                 width: 2,
                 height: 1,
                 frame_rate: 40,
-                pid: 1234
+                pid: 1234,
+                save_folder: Some(PathBuf::from(folder)),
             }
         );
         let mut pixels = [0; 8];
@@ -280,17 +308,28 @@ mod tests {
     }
 
     #[test]
-    fn another_version_or_an_empty_screen_is_refused() {
+    fn a_player_that_cannot_say_where_it_saves_has_no_save_folder() {
         let (ours, mut bridge) = UnixStream::pair().expect("socket pair");
         let mut link = Link::new(ours);
+        bridge
+            .write_all(&hello_bytes(640, 480, 40, 7))
+            .expect("hello");
+        assert_eq!(link.hello().expect("read").save_folder, None);
+    }
+
+    #[test]
+    fn another_version_or_an_empty_screen_is_refused() {
         let mut old = hello_bytes(512, 384, 40, 1);
         old[4] = 9;
-        bridge.write_all(&old).expect("hello");
-        assert!(link.hello().is_err());
-        bridge
-            .write_all(&hello_bytes(0, 384, 40, 1))
-            .expect("hello");
-        assert!(link.hello().is_err());
+        for hello in [old, hello_bytes(0, 384, 40, 1)] {
+            let (ours, mut bridge) = UnixStream::pair().expect("socket pair");
+            let mut link = Link::new(ours);
+            bridge.write_all(&hello).expect("hello");
+            assert_eq!(
+                link.hello().map_err(|error| error.kind()).err(),
+                Some(io::ErrorKind::InvalidData)
+            );
+        }
     }
 
     #[test]

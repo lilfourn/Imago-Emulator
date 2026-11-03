@@ -72,7 +72,7 @@ pub trait Core: Send {
     fn memory(&self, region: MemoryRegion) -> Option<&[u8]>;
     fn debugger(&mut self) -> Option<&mut dyn Debugger>; // see "Debugging" below
     fn try_save_state(&self, out: &mut Vec<u8>) -> Result<(), String>; // save_state, or why not
-    fn saves_every_frame(&self) -> bool;               // false: no rewind or unasked states
+    fn saves_every_frame(&self) -> bool;               // false: no rewind, states only when asked
     fn ended(&self) -> Option<String>;                 // why a game in another process stopped
 }
 ```
@@ -102,7 +102,8 @@ pub trait Core: Send {
   frame-CRC tests depend on it. The one exception is `emu-mkxp`, whose game
   runs in another process: its states are the game's own saves, made only
   when asked (`saves_every_frame` is false), so it has no rewind, and it
-  refuses a state where the game cannot save, as in a battle.
+  refuses a state where the game cannot save, as in a battle. Its
+  checkpoint is asked for as the player leaves and every minute it plays.
 - **ROM patches** are configuration, like the ROM itself: a core keeps the
   set it was last given, applies it to every ROM read, leaves it out of
   save states and keeps it through `load_state` and `reset`.
@@ -338,6 +339,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 |---|---|---|
 | Battery save | next to the ROM, `game.sav` | Raw backup bytes in the de facto layout for the system |
 | Save state | next to the ROM, `game.ss1`; an RPG Maker game's next to its folder, `Game.ss1` | `emu-state` container |
+| Checkpoint: where the player left off, picked up when the game starts | slot 0 of the save states, `game.ss0`, with `game.ss0.saves` beside it | `emu-state` container; the record has a line per save the checkpoint goes with, each battery save and an RPG Maker game's own save files: the file's name and the CRC-32 of its bytes, or `none`. A checkpoint is picked up only while they are unchanged |
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
 | One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
