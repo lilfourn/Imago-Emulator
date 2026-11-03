@@ -43,14 +43,20 @@ title at 28.
    through its negotiation interface, and the core submits its own work
    under the queue's lock. After each frame the helper copies the image
    the core names into memory the CPU reads and waits for the copy, so
-   nothing is in flight between frames. A Mac without a usable Vulkan
-   device falls back to the software renderer.
+   nothing is in flight between frames. The core records its commands on
+   a worker thread: it hands that thread the frame's last commands and
+   names the image at once, and the thread submits them 50 to 80 µs
+   later. The copy waits for that submission (counted through the queue
+   lock), or it would read the frame before, a frame late. A Mac without
+   a usable Vulkan device falls back to the software renderer.
 4. **Two screens, as the DS's.** The core draws both screens into one
    picture, top over bottom; the helper cuts it into the 400×240 top
    screen and the 320×240 touch screen, so the app's layouts, touch,
    screenshots and recordings work as they do for the DS. View's 3D
    resolution sets Azahar's internal resolution, and the screens come
-   out that many times larger.
+   out that many times larger, up to 4×: every frame is read back and
+   sent to the app, 11 MB a frame at 4× and 44 MB at 8×, which would
+   not keep full speed.
 5. **The same controls.** The bindings are the app's, for every system:
    the D-pad's (WASD, the arrows, a gamepad's left stick) press the
    D-pad and tilt the circle pad all the way, so a game that moves with
@@ -86,7 +92,13 @@ title at 28.
 - No rewind, link play, cheats, debugger or memory viewer, and Lua
   scripts can press buttons and save states but read no memory.
 - A game's own saves are the core's: they live in its NAND and SD card in
-  `3DS/Azahar`, whatever the app does with states.
+  `3DS/Azahar`, whatever the app does with states. A checkpoint is not
+  picked up once the game's save data (`title/<id>/data/` on the SD card)
+  has changed since; saves a game keeps in extra data (extdata) are not
+  watched.
+- The helper's log is `3DS/helper.log`, and the start before's is kept as
+  `helper.previous.log`. Once the helper stops, the game ends with why,
+  and nothing more is asked of it.
 - Homebrew that plays sound through the DSP needs the DSP firmware a
   console dumps (`sdmc:/3ds/dspfirm.cdc`); commercial games carry their
   own.

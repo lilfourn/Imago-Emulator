@@ -24,6 +24,12 @@ use crate::vulkan::Gpu;
 const PICTURE: (u32, u32) = (400, 480);
 /// Where the bottom screen starts in the picture at 1×.
 const BOTTOM_AT: (u32, u32) = (40, 240);
+/// The highest internal resolution the helper asks for, as a multiple of
+/// the native one. The core goes to 10×, but every frame is read back and
+/// sent to the app: at 4× that is 11 MB a frame, and the link measured
+/// about 250 frames a second there, so 4× keeps room for a heavy game at
+/// full speed; 8× (44 MB a frame) would not keep 60.
+const MAX_SCALE: u32 = 4;
 /// How many frames a game may take to show its first.
 const STARTUP_FRAMES: usize = 10;
 /// Why `.3dsx` homebrew has no save states on the GPU. Azahar's core
@@ -31,7 +37,7 @@ const STARTUP_FRAMES: usize = 10;
 /// Vulkan pipeline cache only for a game with a title ID; without one, the
 /// next frame crashes (Azahar 2126.2). A state saved could never be
 /// loaded, so none is made.
-const NO_HOMEBREW_STATES: &str = "Save states don't work for this homebrew game: Azahar's core can't load them for a game without a title ID";
+pub(crate) const NO_HOMEBREW_STATES: &str = "Save states don't work for this homebrew game: Azahar's core can't load them for a game without a title ID";
 
 /// Which of the core's renderers draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,8 +151,9 @@ struct Shared {
     /// The size of the hardware renderer's frame, when it drew one this
     /// run.
     gpu_frame: Option<(u32, u32)>,
-    /// Whether the core showed a frame this run, new or repeated.
-    showed: bool,
+    /// Whether the core drew a frame this run, rather than repeating the
+    /// last or showing none, as it does while no game is loaded.
+    drew: bool,
     /// This frame's sound, interleaved.
     audio: Vec<i16>,
     /// The last message the core showed, which says why it refused a game.
@@ -173,7 +180,7 @@ static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(|| {
         picture: Picture::default(),
         fresh: false,
         gpu_frame: None,
-        showed: false,
+        drew: false,
         audio: Vec::new(),
         message: None,
         options: HashMap::new(),
@@ -295,7 +302,10 @@ fn serve(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> io::Result<(
                     .get(..4)
                     .and_then(|bytes| bytes.try_into().ok())
                     .map_or(1, u32::from_le_bytes);
-                set_option("citra_resolution_factor", &scale.clamp(1, 10).to_string());
+                set_option(
+                    "citra_resolution_factor",
+                    &scale.clamp(1, MAX_SCALE).to_string(),
+                );
                 link::write_message(&mut out, link::DONE, &[])?;
             }
             _ => break,
@@ -472,7 +482,8 @@ impl Session {
 
     /// Runs one frame with `pad` held, leaving its picture in `picture`
     /// (the last one again if the core repeated it) and its sound in
-    /// [`Shared::audio`]. Returns whether the core showed a frame at all.
+    /// [`Shared::audio`]. Returns whether the core drew a frame: one that
+    /// does not load the game it was given repeats an empty one forever.
     fn run(&mut self, pad: Pad) -> Result<bool, String> {
         {
             let mut shared = shared();
@@ -480,13 +491,13 @@ impl Session {
             shared.audio.clear();
             shared.gpu_frame = None;
             shared.fresh = false;
-            shared.showed = false;
+            shared.drew = false;
         }
         // SAFETY: the game is loaded; the callbacks take SHARED's lock
         // themselves.
         unsafe { (self.api.run)() };
         let mut shared = shared();
-        let showed = shared.showed;
+        let drew = shared.drew;
         if let (Some((width, height)), Some(gpu)) = (shared.gpu_frame, &mut self.gpu) {
             drop(shared);
             gpu.read_frame(width, height, &mut self.picture)
@@ -494,7 +505,7 @@ impl Session {
         } else if shared.fresh {
             std::mem::swap(&mut self.picture, &mut shared.picture);
         }
-        Ok(showed)
+        Ok(drew)
     }
 
     /// Sends the last frame's screens and sound.
@@ -778,7 +789,9 @@ unsafe fn note_message(shared: &mut Shared, text: *const c_char) {
     let text = unsafe { CStr::from_ptr(text) }
         .to_string_lossy()
         .into_owned();
-    eprintln!("3DS core says: {text}");
+    // eprintln! panics if the log cannot be written; this runs inside the
+    // core's callback, where a panic cannot unwind.
+    let _ = writeln!(io::stderr(), "3DS core says: {text}");
     shared.message = Some(text);
 }
 
@@ -791,14 +804,16 @@ unsafe extern "C" fn video_refresh(
     pitch: usize,
 ) {
     let mut shared = shared();
-    shared.showed = true;
     if data == lr::HW_FRAME_BUFFER_VALID {
         shared.gpu_frame = Some((width, height));
+        shared.drew = true;
         return;
     }
-    if data.is_null() || pitch < width as usize * 4 {
+    // Nothing may panic here, as a panic cannot unwind into the core.
+    if data.is_null() || width == 0 || height == 0 || pitch < width as usize * 4 {
         return;
     }
+    shared.drew = true;
     shared.fresh = true;
     shared.picture.resize(width, height);
     for (y, row) in shared

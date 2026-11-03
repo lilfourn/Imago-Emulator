@@ -63,11 +63,14 @@ pub fn data_dir() -> Option<PathBuf> {
 
 /// Where the core keeps one game's own saves: the save data Azahar gives
 /// the title on the emulated SD card,
-/// `Azahar/sdmc/Nintendo 3DS/<ID0>/<ID1>/title/<high>/<low>/`. The app
+/// `Azahar/sdmc/Nintendo 3DS/<ID0>/<ID1>/title/<high>/<low>/data/` (beside
+/// `content/`, an installed title's own files, which are not saves). The
+/// app
 /// fingerprints these files beside a checkpoint, so that a checkpoint is
 /// never picked up over a save the game made since (see
 /// `docs/decisions/0011-3ds-games.md`). Homebrew without a title ID keeps
-/// its files where it likes, so it has none.
+/// its files where it likes, so it has none. Saves in extra data (extdata),
+/// which some games keep beside their save data, are not counted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SaveData {
     /// `Azahar/sdmc/Nintendo 3DS` in the data folder.
@@ -106,7 +109,7 @@ impl SaveData {
         // one of each, but any will do.
         let mut files: Vec<PathBuf> = subfolders(&self.sd)
             .flat_map(|id0| subfolders(&id0).collect::<Vec<_>>())
-            .map(|id1| id1.join("title").join(high).join(low))
+            .map(|id1| id1.join("title").join(high).join(low).join("data"))
             .flat_map(|folder| files_under(&folder))
             .collect();
         files.sort();
@@ -285,7 +288,7 @@ impl Core for ThreeDs {
     }
 
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>) {
-        if self.ended.is_some() {
+        if self.ended().is_some() {
             return;
         }
         let input = inputs.first().copied().unwrap_or_default();
@@ -328,18 +331,23 @@ impl Core for ThreeDs {
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        if self.ended.is_some() {
+        if self.ended().is_some() {
             return Err(StateError::Malformed("the game has stopped"));
         }
-        self.link
-            .get_mut()
-            .load_state(state)
-            .map_err(|_| StateError::Malformed("the 3DS core could not load it"))
+        self.link.get_mut().load_state(state).map_err(|why| {
+            // StateError carries only fixed words: keep the one reason the
+            // player can act on.
+            StateError::Malformed(if why == host::NO_HOMEBREW_STATES {
+                host::NO_HOMEBREW_STATES
+            } else {
+                "the 3DS core could not load it"
+            })
+        })
     }
 
     fn try_save_state(&self, out: &mut Vec<u8>) -> Result<(), String> {
-        if let Some(why) = &self.ended {
-            return Err(why.clone());
+        if let Some(why) = self.ended() {
+            return Err(why);
         }
         self.link.borrow_mut().save_state(out)
     }
@@ -355,7 +363,9 @@ impl Core for ThreeDs {
     }
 
     fn ended(&self) -> Option<String> {
-        self.ended.clone()
+        self.ended
+            .clone()
+            .or_else(|| self.link.borrow().dead().map(str::to_owned))
     }
 }
 
@@ -388,7 +398,8 @@ mod tests {
         let ids = root.join("Azahar/sdmc/Nintendo 3DS/0000/1111");
         let mine = ids.join("title/00040000/0011c400/data/00000001");
         let other = ids.join("title/00040000/00055d00/data/00000001");
-        for folder in [&mine, &other] {
+        let content = ids.join("title/00040000/0011c400/content");
+        for folder in [&mine, &other, &content] {
             std::fs::create_dir_all(folder).unwrap();
             std::fs::write(folder.join("main"), b"save").unwrap();
         }

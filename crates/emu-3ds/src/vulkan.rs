@@ -21,6 +21,9 @@ use crate::libretro::{self as lr, VulkanImage, VulkanInterface, VulkanNegotiatio
 
 /// How long the copy of a frame may take before the GPU counts as hung.
 const COPY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for the core to submit a frame it has named: three
+/// frames, far beyond the tens of microseconds it takes.
+const SUBMIT_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Loads MoltenVK and finds a GPU, to choose the renderer before the core
 /// loads the game. Returns the GPU's name.
@@ -110,6 +113,22 @@ struct Handle {
     /// Command buffers the core asked the frontend to submit with the
     /// frame.
     commands: Mutex<Vec<vk::CommandBuffer>>,
+    /// How many times the core has submitted work to the queue, and how
+    /// many it had when it last named an image.
+    progress: Mutex<Progress>,
+    /// Signalled whenever the core submits.
+    submitted: Condvar,
+}
+
+/// The core's submissions, counted for [`Gpu::read_frame`]. The core
+/// records its commands on a worker thread of its own: it hands the
+/// frame's last commands to that thread and names the frame's image at
+/// once, and the thread submits them tens of microseconds later. The copy
+/// must come after that submission, or it reads the frame before.
+#[derive(Default)]
+struct Progress {
+    submits: u64,
+    at_image: Option<u64>,
 }
 
 impl Handle {
@@ -142,6 +161,11 @@ unsafe extern "C" fn set_image(
     // SAFETY: see above.
     let (handle, image) = unsafe { (Handle::from(handle), *image) };
     *handle.image.lock().unwrap_or_else(PoisonError::into_inner) = Some(image);
+    let mut progress = handle
+        .progress
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    progress.at_image = Some(progress.submits);
 }
 
 unsafe extern "C" fn get_sync_index(_handle: *mut c_void) -> u32 {
@@ -185,7 +209,16 @@ unsafe extern "C" fn lock_queue(handle: *mut c_void) {
 
 unsafe extern "C" fn unlock_queue(handle: *mut c_void) {
     // SAFETY: see above.
-    unsafe { Handle::from(handle) }.queue.unlock();
+    let handle = unsafe { Handle::from(handle) };
+    // Only the core comes here: the helper's own copy takes the lock
+    // directly, so it is not counted.
+    handle
+        .progress
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .submits += 1;
+    handle.submitted.notify_all();
+    handle.queue.unlock();
 }
 
 /// The core never waits on this semaphore; the frame is consumed by the
@@ -214,6 +247,9 @@ pub struct Gpu {
     commands: vk::CommandBuffer,
     fence: vk::Fence,
     readback: Option<Readback>,
+    /// Whether the log has said once that a frame came without its
+    /// submission.
+    warned_late: std::cell::Cell<bool>,
     /// Shared with the core through [`lr::VulkanInterface::handle`], and
     /// the interface itself: both kept for the life of the process, as
     /// the core's threads may hold them to the end.
@@ -327,6 +363,7 @@ impl Gpu {
             commands,
             fence,
             readback: None,
+            warned_late: std::cell::Cell::new(false),
             handle,
             interface,
         }))
@@ -454,6 +491,7 @@ impl Gpu {
                 .end_command_buffer(self.commands)
                 .map_err(|error| error.to_string())?;
 
+            self.wait_for_the_frame();
             let mut all = extra;
             all.push(self.commands);
             let submit = vk::SubmitInfo::default().command_buffers(&all);
@@ -492,6 +530,31 @@ impl Gpu {
             *pixel = 0xFF00_0000 | u32::from(red) << 16 | u32::from(b) << 8 | u32::from(blue);
         }
         Ok(())
+    }
+
+    /// Waits until the core has submitted the work it handed its worker
+    /// thread before naming this frame's image: one submission after
+    /// `set_image`, which comes within a few dozen microseconds. Gives up
+    /// after [`SUBMIT_TIMEOUT`], reading what is there, so a core that
+    /// submitted first cannot stall the game.
+    fn wait_for_the_frame(&self) {
+        let progress = self
+            .handle
+            .progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(at) = progress.at_image else {
+            return;
+        };
+        let (mut progress, waited) = self
+            .handle
+            .submitted
+            .wait_timeout_while(progress, SUBMIT_TIMEOUT, |progress| progress.submits <= at)
+            .unwrap_or_else(PoisonError::into_inner);
+        progress.at_image = None;
+        if waited.timed_out() && !self.warned_late.replace(true) {
+            eprintln!("3DS helper: the core named a frame and submitted nothing after it");
+        }
     }
 
     /// A readback buffer of at least `bytes`, made or grown as needed.

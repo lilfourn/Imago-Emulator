@@ -25,7 +25,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -144,7 +144,9 @@ pub fn read_message(input: &mut impl Read, payload: &mut Vec<u8>) -> io::Result<
     if length > MAX_MESSAGE {
         return Err(io::Error::other(format!("a message of {length} bytes")));
     }
-    payload.clear();
+    // A buffer handed back from an earlier message is reused as it is: the
+    // read fills every byte, so only growth needs zeroing.
+    payload.truncate(length as usize);
     payload.resize(length as usize, 0);
     input.read_exact(payload)?;
     Ok(Some(head[0]))
@@ -211,8 +213,14 @@ pub struct Client {
     child: Option<Child>,
     to_helper: BufWriter<ChildStdin>,
     answers: Receiver<Answer>,
+    /// Frames' buffers, handed back to the reading thread to fill again,
+    /// so a frame of several megabytes is not allocated each time.
+    spare: Sender<Vec<u8>>,
     /// Where the helper's own messages go, named when it stops.
     log: PathBuf,
+    /// Why the helper stopped, once it has: every request after fails with
+    /// it, as an answer that came late would belong to the wrong request.
+    dead: Option<String>,
 }
 
 impl Client {
@@ -226,6 +234,9 @@ impl Client {
         let start = |why: io::Error| OpenError::Start(why.to_string());
         std::fs::create_dir_all(data).map_err(start)?;
         let log = data.join("helper.log");
+        // The last start's log stays beside it, for when that one stopped
+        // and the player tries again.
+        let _ = std::fs::rename(&log, data.join("helper.previous.log"));
         let stderr = File::create(&log).map_err(start)?;
         let mut command = Command::new(helper);
         command
@@ -248,12 +259,13 @@ impl Client {
             return Err(OpenError::Start("its pipes were not made".to_owned()));
         };
         let (sender, answers) = mpsc::channel();
+        let (spare, spares) = mpsc::channel::<Vec<u8>>();
         thread::Builder::new()
             .name("3DS helper link".to_owned())
             .spawn(move || {
                 let mut from_helper = BufReader::with_capacity(1 << 20, stdout);
                 loop {
-                    let mut payload = Vec::new();
+                    let mut payload = spares.try_recv().unwrap_or_default();
                     let answer = match read_message(&mut from_helper, &mut payload) {
                         Ok(Some(kind)) => Answer::Message(kind, payload),
                         Ok(None) => Answer::Gone("it closed the link".to_owned()),
@@ -270,7 +282,9 @@ impl Client {
             child: Some(child),
             to_helper: BufWriter::with_capacity(64 << 10, stdin),
             answers,
+            spare,
             log,
+            dead: None,
         };
         match client.answer(STARTUP_TIMEOUT) {
             Ok((HELLO, payload)) if payload.get(..2) == Some(&VERSION.to_le_bytes()[..]) => {
@@ -294,7 +308,16 @@ impl Client {
         audio: &mut Vec<StereoSample>,
     ) -> Result<(), String> {
         let payload = self.ask(RUN, &pad.encode(), FRAME)?;
-        decode_frame(&payload, screens, audio)
+        let decoded = decode_frame(&payload, screens, audio);
+        // The reading thread has gone if this fails, which the next
+        // request finds out.
+        let _ = self.spare.send(payload);
+        decoded.map_err(|why| self.ended(Stopped::Gone(why)))
+    }
+
+    /// Why the helper stopped, once it has.
+    pub fn dead(&self) -> Option<&str> {
+        self.dead.as_deref()
     }
 
     /// Asks for a save state, which replaces `out`'s contents.
@@ -350,6 +373,9 @@ impl Client {
     }
 
     fn send(&mut self, kind: u8, payload: &[u8]) -> Result<(), String> {
+        if let Some(why) = &self.dead {
+            return Err(why.clone());
+        }
         write_message(&mut self.to_helper, kind, &[payload])
             .map_err(|error| self.ended(Stopped::Gone(error.to_string())))
     }
@@ -370,15 +396,17 @@ impl Client {
         }
     }
 
-    /// Words for the player once the helper has stopped.
-    fn ended(&self, stopped: Stopped) -> String {
-        match stopped {
+    /// Notes that the helper has stopped, and returns why in words for
+    /// the player.
+    fn ended(&mut self, stopped: Stopped) -> String {
+        let why = match stopped {
             Stopped::Failed(why) => why,
             Stopped::Gone(why) => format!(
                 "The 3DS core stopped ({why}). Its log is {}.",
                 self.log.display()
             ),
-        }
+        };
+        self.dead.get_or_insert(why).clone()
     }
 }
 
@@ -418,6 +446,54 @@ impl Drop for Client {
 mod tests {
     use super::*;
     use emu_core::rgb;
+
+    /// A helper that says hello in this protocol's version, then exits.
+    fn helper_that_dies(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let [low, high] = VERSION.to_le_bytes();
+        let script = dir.join("helper.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '\\001\\002\\000\\000\\000\\{low:03o}\\{high:03o}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[test]
+    fn once_the_helper_has_gone_every_request_fails_with_why() {
+        let dir = std::env::temp_dir().join(format!("emu-3ds-link-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("helper.log"), "the last start").unwrap();
+        let parts = Parts {
+            core: dir.join("core.dylib"),
+            moltenvk: dir.join("moltenvk.dylib"),
+        };
+        let mut client =
+            Client::start(&helper_that_dies(&dir), &dir.join("game.3ds"), &dir, &parts)
+                .expect("the helper said hello");
+        let mut screens = crate::SCREENS.map(Frame::new);
+        let why = client
+            .run(Pad::default(), &mut screens, &mut Vec::new())
+            .expect_err("the helper has gone");
+        assert!(why.starts_with("The 3DS core stopped"), "{why}");
+        assert_eq!(client.dead(), Some(why.as_str()));
+        assert_eq!(
+            client.reset(),
+            Err(why.clone()),
+            "no request goes out after"
+        );
+        assert_eq!(client.save_state(&mut Vec::new()), Err(why));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("helper.previous.log")).unwrap(),
+            "the last start",
+            "the last start's log is kept"
+        );
+        drop(client);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn pads_round_trip() {
