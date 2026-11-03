@@ -198,7 +198,28 @@ pub const ICON_SIZE: u32 = 32;
 /// A DS game's 32×32 banner icon as RGBA pixels, row by row, with colour
 /// 0 transparent.
 pub fn nds_icon(rom: &[u8]) -> Option<Vec<u8>> {
-    let banner = banner(rom)?;
+    icon_in_banner(banner(rom)?)
+}
+
+/// The banner icon of the DS ROM at `path`, as [`nds_icon`] gives it,
+/// reading only the header and the banner rather than the whole ROM.
+pub fn nds_icon_in_file(path: &Path) -> Option<Vec<u8>> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0; 0x6C];
+    file.read_exact(&mut header).ok()?;
+    let offset = u32::from_le_bytes(header[0x68..0x6C].try_into().ok()?);
+    if offset == 0 {
+        return None;
+    }
+    let mut banner = vec![0; 0x840];
+    file.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+    file.read_exact(&mut banner).ok()?;
+    icon_in_banner(&banner)
+}
+
+/// The icon in a DS banner, as [`nds_icon`] gives it.
+fn icon_in_banner(banner: &[u8]) -> Option<Vec<u8>> {
     let bitmap = banner.get(0x20..0x220)?;
     let palette: Vec<[u8; 4]> = banner
         .get(0x220..0x240)?
@@ -298,6 +319,28 @@ mod tests {
         assert_eq!(icon[0..4], [0, 0, 0, 0], "colour 0 is see-through");
         assert_eq!(icon[4..8], [0xFF, 0, 0, 0xFF]);
         assert_eq!(icon[icon.len() - 4..], [0xFF, 0, 0, 0xFF]);
+    }
+
+    #[test]
+    fn a_ds_icon_is_read_from_the_file_without_the_rest_of_the_rom() {
+        let dir = std::env::temp_dir().join(format!("emu-app-icon-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("mkds.nds");
+        let rom = nds_rom("Mario Kart DS");
+        std::fs::write(&path, &rom).expect("written");
+        assert_eq!(nds_icon_in_file(&path), nds_icon(&rom));
+        assert!(nds_icon_in_file(&path).is_some());
+
+        // No banner, a banner past the end, and no file have no icon.
+        let mut bare = rom.clone();
+        bare[0x68..0x6C].fill(0);
+        std::fs::write(&path, &bare).expect("written");
+        assert_eq!(nds_icon_in_file(&path), None);
+        bare[0x68..0x6C].copy_from_slice(&0x10_0000_u32.to_le_bytes());
+        std::fs::write(&path, &bare).expect("written");
+        assert_eq!(nds_icon_in_file(&path), None);
+        assert_eq!(nds_icon_in_file(&dir.join("gone.nds")), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

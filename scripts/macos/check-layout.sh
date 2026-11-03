@@ -38,7 +38,20 @@ y = 80.0
 width = 540.0
 height = 800.0
 EOF
+  # libretro's lists of box art, cached and naming nothing, so no game's
+  # title finds one and nothing is downloaded.
+  local listings="$home/Library/Caches/ds-emulator/listings" system
+  mkdir -p $listings
+  for system in "Game Boy" "Game Boy Color" "Game Boy Advance" "Nintendo DS"; do
+    for folder in Named_Boxarts Named_Titles; do
+      print "none.png" >"$listings/Nintendo - $system - $folder.txt"
+    done
+  done
   [[ $1 == empty ]] && return
+  # The first game was played, so the library leads with it.
+  rm -rf /tmp/ds-emulator-layout-games
+  mkdir -p /tmp/ds-emulator-layout-games
+  touch /tmp/ds-emulator-layout-games/1.ss0
   local n=0 platform name
   for platform name in gba "Golden Sun" gb "Pokémon Red Version" nds "Pokémon White Version" \
       gba "The Legend of Zelda: The Minish Cap" gbc "Pokémon Crystal Version" gba "Advance Wars"; do
@@ -94,8 +107,8 @@ for state in ${=STATES:-empty library search settings game menu cheats restart s
     menu) seed library; rom=($game); steps=(key escape) ;;
     cheats) seed library; rom=($game); steps=(key escape key right key return) ;;
     restart) seed library; rom=($game); steps=(key escape key right key right key return) ;;
-    store) seed library; seed_store; steps=(press '=Game Store') ;;
-    page) seed library; seed_store; steps=(press '=Game Store' key return) ;;
+    store) seed library; seed_store; steps=(key cmd-shift-g) ;;
+    page) seed library; seed_store; steps=(key cmd-shift-g key return) ;;
   esac
   [[ -f $tools/desktop.pid ]] && kill $(<$tools/desktop.pid) 2>/dev/null && sleep 0.5
   front=$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true')

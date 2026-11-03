@@ -374,9 +374,26 @@ next to its ROM, so give the two ROMs different names: `pokemon.nds` and
 `pokemon.gba` in one folder would share `pokemon.sav`, and the app refuses
 to load them. Pal Park has not been tried yet; that needs GBA dumps.
 
+## Library
+
+While no game runs, the window shows the library: the game you played last,
+large, with where you left it and Resume, then every game you have added,
+by its box art. Type to search; Tab and ⇧Tab show one system at a time.
+A click chooses a game, and a double click, its play button or Return
+plays it; ⌘⌫ takes it out of the library.
+
+Every game has a picture. Box art, or failing that the title screen, comes
+from libretro's thumbnails, by the game's No-Intro name or else by its
+title among the pictures libretro lists: from thumbnails.libretro.com or,
+when that is down, its mirror on GitHub. Pictures are kept in
+`~/Library/Caches/ds-emulator` and fetched again if macOS clears it. A game
+libretro has no picture of shows the screen where you left it (saved
+beside its checkpoint as `game.ss0.png`), or its DS or RPG Maker icon, or a
+plate in its system's colour with its title.
+
 ## Game store
 
-The store (the shopfront in the library's top bar, File > Game Store or
+The store (the Store tab in the library's top bar, File > Game Store or
 ⌘⇧G) offers free homebrew that its authors share: Game Boy, Game Boy
 Color and GBA games from gbdev's [Homebrew Hub](https://hh.gbdev.io), and
 DS games from [Universal-DB](https://db.universal-team.net). It never

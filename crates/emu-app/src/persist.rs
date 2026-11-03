@@ -160,6 +160,15 @@ pub fn saves_record_path(state: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// The picture beside the save state at `state` of the screen as it was
+/// saved, which the library shows where the game was left off:
+/// `game.ss0.png`.
+pub fn state_picture_path(state: &Path) -> PathBuf {
+    let mut path = state.as_os_str().to_owned();
+    path.push(".png");
+    PathBuf::from(path)
+}
+
 /// What the battery saves at `saves` hold now, a line each: the file's
 /// name and the CRC-32 of its bytes, or `none` if there is no file. Two
 /// readings are equal only while every file is unchanged.

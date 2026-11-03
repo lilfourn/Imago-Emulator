@@ -60,6 +60,7 @@ mod store_view;
 mod theme;
 mod trace;
 mod turbo;
+mod ui;
 mod video;
 mod view;
 mod window_chrome;

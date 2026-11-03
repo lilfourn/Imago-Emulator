@@ -2,9 +2,17 @@
 //! databases, and its box art from thumbnails.libretro.com, both kept in
 //! the cache folder. Downloads go through `curl`, which macOS has.
 //!
+//! A game gets a picture whenever libretro has one: its box art by its
+//! No-Intro name or by its title among the pictures libretro lists, or
+//! else its title screen. Should the thumbnail server fail, pictures come
+//! from libretro-thumbnails on GitHub instead (the lists come only from
+//! the server, and are kept a month). Pictures the cache loses, as when
+//! macOS clears it, are fetched again, and DS icons and RPG Maker players'
+//! icons made again.
+//!
 //! Everything here blocks; run it off the UI thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,17 +20,26 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 
+use crate::app_icon;
 use crate::game_db::{self, GameDb};
 use crate::library::Game;
 use crate::persist;
-use crate::rom_info::{ICON_SIZE, Platform};
+use crate::rom_info::{self, ICON_SIZE, Platform};
 
 const DATABASES: &str =
     "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro";
 const THUMBNAILS: &str = "https://thumbnails.libretro.com";
+/// The same pictures, one repository a system, named as
+/// [`Platform::libretro_name`] with `_` for each space.
+const MIRROR: &str = "https://raw.githubusercontent.com/libretro-thumbnails";
+
+/// libretro's folders of pictures: box art, and title screens.
+const BOX_ART: &str = "Named_Boxarts";
+const TITLE_SCREENS: &str = "Named_Titles";
 
 /// How many times bigger than its 32 pixels a DS icon is saved, so it
 /// stays sharp when the library scales it up.
@@ -84,12 +101,14 @@ pub type Databases = Mutex<HashMap<Platform, Arc<GameDb>>>;
 const WORKERS: usize = 8;
 
 /// Looks up each of `games`, [`WORKERS`] at a time: its No-Intro name in
-/// the databases for its platform and its box art, downloaded to
-/// [`art_path`] unless already there. Calls `found` with each game and
-/// its name, if a database knows it, as soon as that game is done.
+/// the databases for its platform, unless it was looked up before, and a
+/// picture of it (see [`find_art`]), downloaded to [`art_path`] unless
+/// already there; and makes its icon again if the cache lost it. Calls
+/// `found` with each game and its name, if a database knows it, as soon
+/// as that game is done.
 ///
 /// Databases missing from `databases` are downloaded first, all at once.
-/// A game whose database or box art cannot be downloaded gets an error,
+/// A game whose database or picture cannot be downloaded gets an error,
 /// so it can be looked up again later.
 pub fn look_up_all(
     cache: &Path,
@@ -101,6 +120,7 @@ pub fn look_up_all(
     let have = known(databases);
     let mut missing: Vec<Platform> = games
         .iter()
+        .filter(|game| !game.looked_up)
         .flat_map(|game| databases_for(game.platform))
         .filter(|platform| !have.contains_key(platform))
         .copied()
@@ -139,10 +159,32 @@ pub fn look_up_all(
     });
 }
 
-/// Looks `game` up in `databases`, failing with the reason in `failures`
-/// if one it needs is missing.
+/// Looks `game` up in `databases`, unless it was looked up before, and
+/// finds its picture and icon if the cache has none. Fails with the
+/// reason in `failures` if a database it needs is missing.
 fn look_up(
     cache: &Path,
+    game: &Game,
+    databases: &HashMap<Platform, Arc<GameDb>>,
+    failures: &HashMap<Platform, String>,
+) -> anyhow::Result<Option<String>> {
+    let name = if game.looked_up {
+        game.name.clone()
+    } else {
+        name_in_databases(game, databases, failures)?
+    };
+    restore_icon(cache, game);
+    if !is_png(&art_path(cache, game.crc32)) {
+        // A picture that can't be had now is looked for again at the next
+        // launch, as the game still has none; the name found stands.
+        find_art(cache, game, name.as_deref()).ok();
+    }
+    Ok(name)
+}
+
+/// The No-Intro name of `game` in the first of `databases` for its
+/// platform that knows it.
+fn name_in_databases(
     game: &Game,
     databases: &HashMap<Platform, Arc<GameDb>>,
     failures: &HashMap<Platform, String>,
@@ -155,13 +197,169 @@ fn look_up(
             }
         };
         if let Some(name) = name_in(db, game) {
-            if !is_png(&art_path(cache, game.crc32)) {
-                download_art(cache, platform, &name, game.crc32)?;
-            }
             return Ok(Some(name));
         }
     }
     Ok(None)
+}
+
+/// Downloads a picture of `game` to [`art_path`], the first there is of:
+/// its box art by its No-Intro `name`, if it has one; the box art libretro
+/// lists under the game's title, or its name's; and its title screen by
+/// its name. Whether one was found. An RPG Maker game has none.
+///
+/// Only names libretro's lists of pictures hold are downloaded, so a game
+/// libretro has no picture of costs nothing once the lists are kept. A
+/// list that can't be had is no help in matching titles, and every name a
+/// picture may have is tried instead.
+///
+/// # Errors
+///
+/// Fails if neither the thumbnail server nor its mirror can be reached.
+pub fn find_art(cache: &Path, game: &Game, name: Option<&str>) -> anyhow::Result<bool> {
+    let platforms = databases_for(game.platform);
+    let by_name = |folder: &str| -> anyhow::Result<bool> {
+        let Some(name) = name else {
+            return Ok(false);
+        };
+        for &platform in platforms {
+            let listed: Option<HashSet<String>> = listing(cache, platform, folder)
+                .ok()
+                .map(|files| files.into_iter().collect());
+            let files = game_db::thumbnail_names(name);
+            let files = files
+                .iter()
+                .filter(|file| listed.as_ref().is_none_or(|listed| listed.contains(*file)));
+            for file in files {
+                if let Some(bytes) = picture(platform, folder, file)? {
+                    save_art(cache, game.crc32, &bytes)?;
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    };
+    if by_name(BOX_ART)? {
+        return Ok(true);
+    }
+    let mut keys = vec![game_db::title_key(&game.title)];
+    keys.extend(name.map(game_db::title_key));
+    keys.retain(|key| !key.is_empty());
+    for &platform in platforms.iter().filter(|_| !keys.is_empty()) {
+        let Ok(listed) = listing(cache, platform, BOX_ART) else {
+            continue;
+        };
+        let same_title = listed.iter().map(String::as_str).filter(|file| {
+            let stem = file.strip_suffix(".png").unwrap_or(file);
+            keys.contains(&game_db::title_key(stem))
+        });
+        let Some(file) = game_db::likeliest(same_title) else {
+            continue;
+        };
+        if let Some(bytes) = picture(platform, BOX_ART, file)? {
+            save_art(cache, game.crc32, &bytes)?;
+            return Ok(true);
+        }
+    }
+    by_name(TITLE_SCREENS)
+}
+
+/// How long a list of libretro's pictures is kept before it is fetched
+/// again, for the pictures added since.
+const LISTING_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The file names of the pictures in libretro's `folder` for `platform`,
+/// from the thumbnail server's listing of it, kept in `cache` for
+/// [`LISTING_AGE`], and kept longer should the server fail.
+///
+/// # Errors
+///
+/// Fails if the listing is not cached and cannot be downloaded.
+fn listing(cache: &Path, platform: Platform, folder: &str) -> anyhow::Result<Vec<String>> {
+    let name = platform.libretro_name();
+    let path = cache
+        .join("listings")
+        .join(format!("{name} - {folder}.txt"));
+    let kept = fs::read_to_string(&path)
+        .ok()
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>());
+    let fresh = fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < LISTING_AGE);
+    if let Some(kept) = &kept
+        && fresh
+    {
+        return Ok(kept.clone());
+    }
+    let fetched = (|| {
+        let url = format!("{THUMBNAILS}/{}/{folder}/", encode(name));
+        let Some(page) = fetch(&url, 120)? else {
+            bail!("libretro lists no {folder} for {name}");
+        };
+        let files = linked_pictures(&String::from_utf8_lossy(&page));
+        if files.is_empty() {
+            bail!("libretro's list of {folder} for {name} came down empty or garbled");
+        }
+        write(&path, files.join("\n").as_bytes())?;
+        Ok(files)
+    })();
+    match (fetched, kept) {
+        (Ok(files), _) => Ok(files),
+        (Err(_), Some(kept)) => Ok(kept),
+        (Err(error), None) => Err(error),
+    }
+}
+
+/// The PNG files a folder listing's page links to, by name.
+fn linked_pictures(page: &str) -> Vec<String> {
+    page.split("href=\"")
+        .skip(1)
+        .filter_map(|rest| decode(&rest[..rest.find('"')?]))
+        .filter(|file| file.ends_with(".png") && !file.contains('/'))
+        .collect()
+}
+
+/// `link`, percent-encoded and HTML-escaped, as plain text.
+fn decode(link: &str) -> Option<String> {
+    let link = link.replace("&amp;", "&");
+    let mut bytes = Vec::with_capacity(link.len());
+    let mut rest = link.as_bytes();
+    while let Some((&byte, after)) = rest.split_first() {
+        if byte == b'%' && after.len() >= 2 {
+            let hex = std::str::from_utf8(&after[..2]).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &after[2..];
+        } else {
+            bytes.push(byte);
+            rest = after;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Makes the icon of `game` again if the cache lost it: a DS game's from
+/// its ROM's banner, an RPG Maker game's from its player app.
+fn restore_icon(cache: &Path, game: &Game) {
+    let path = icon_path(cache, game.crc32);
+    if path.exists() {
+        return;
+    }
+    match game.platform {
+        Platform::Nds => {
+            if let Some(icon) = rom_info::nds_icon_in_file(&game.path) {
+                save_icon(cache, game.crc32, &icon).ok();
+            }
+        }
+        Platform::RpgMaker => {
+            if let Some(player) = emu_cores::rpg_maker::player_app(&game.path) {
+                app_icon::save(&player, &path).ok();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The databases, even if a lookup panicked while holding them.
@@ -197,36 +395,36 @@ pub fn databases_for(platform: Platform) -> &'static [Platform] {
     }
 }
 
-/// Downloads the box art of the `platform` game called `name` to
-/// [`art_path`], trying each file name it may have. Whether any was found.
+/// The picture `file` in libretro's `folder` of `platform` pictures, from
+/// the thumbnail server or, should it fail, its mirror on GitHub; `None`
+/// if there is none.
 ///
 /// # Errors
 ///
-/// Fails if the thumbnail server cannot be reached.
-pub fn download_art(
-    cache: &Path,
-    platform: Platform,
-    name: &str,
-    crc32: u32,
-) -> anyhow::Result<bool> {
-    let folder = format!(
-        "{THUMBNAILS}/{}/Named_Boxarts",
-        encode(platform.libretro_name())
-    );
-    let path = art_path(cache, crc32);
-    for file in game_db::thumbnail_names(name) {
-        let url = format!("{folder}/{}", encode(&file));
-        if let Some(bytes) = download(&url)? {
-            // A page in place of the picture would hide the DS icon for
-            // good.
-            if !bytes.starts_with(PNG_SIGNATURE) {
-                bail!("{url} is not a PNG");
-            }
-            write(&path, &bytes)?;
-            return Ok(true);
-        }
+/// Fails if neither can be reached, or the server sends something other
+/// than a PNG: a page in its place would hide the DS icon for good.
+fn picture(platform: Platform, folder: &str, file: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    let system = platform.libretro_name();
+    let url = format!("{THUMBNAILS}/{}/{folder}/{}", encode(system), encode(file));
+    let bytes = download(&url).or_else(|error| {
+        let repository = system.replace(' ', "_");
+        let mirror = format!(
+            "{MIRROR}/{}/master/{folder}/{}",
+            encode(&repository),
+            encode(file)
+        );
+        download(&mirror).map_err(|_| error)
+    })?;
+    match bytes {
+        Some(bytes) if !bytes.starts_with(PNG_SIGNATURE) => bail!("{url} is not a PNG"),
+        found => Ok(found),
     }
-    Ok(false)
+}
+
+/// Keeps `bytes`, a PNG, as the picture of the game with checksum
+/// `crc32`.
+fn save_art(cache: &Path, crc32: u32, bytes: &[u8]) -> io::Result<()> {
+    write(&art_path(cache, crc32), bytes)
 }
 
 /// What every PNG file starts with.
@@ -351,6 +549,26 @@ mod tests {
             "Nintendo%20-%20Game%20Boy%20%28USA%2C%20Europe%29.png"
         );
         assert_eq!(encode("Pokémon"), "Pok%C3%A9mon");
+    }
+
+    #[test]
+    fn a_folder_listing_gives_the_pictures_it_links_to() {
+        let page = r#"<tr><td><a href="/Nintendo%20-%20Nintendo%20DS/">Parent Directory</a></td></tr>
+<tr><td><a href="'Chou'%20Kowai%20Hanashi%20DS%20(Japan).png">'Chou' Kowai Hanashi DS (Japan).png</a></td></tr>
+<tr><td><a href="Mario%20_%20Luigi%20-%20Partners%20in%20Time%20(USA).png">x</a></td></tr>
+<tr><td><a href="Tom%20&amp;%20Jerry%20(USA).png">x</a></td></tr>
+<tr><td><a href="?C=N;O=D">Name</a></td></tr>"#;
+        assert_eq!(
+            linked_pictures(page),
+            [
+                "'Chou' Kowai Hanashi DS (Japan).png",
+                "Mario _ Luigi - Partners in Time (USA).png",
+                "Tom & Jerry (USA).png",
+            ]
+        );
+        assert_eq!(decode("Pok%C3%A9mon").as_deref(), Some("Pokémon"));
+        assert_eq!(decode("100%"), Some("100%".to_owned()));
+        assert_eq!(decode("%ZZ"), None);
     }
 
     #[test]

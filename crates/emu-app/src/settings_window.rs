@@ -19,7 +19,7 @@ use crate::filter::Filter;
 use crate::layout::{Arrangement, GAPS, HINGE_GAP, Rotation};
 use crate::probe;
 use crate::settings::Settings;
-use crate::theme::{ACCENT, BACKGROUND, MUTED as DIM, ON_ACCENT, PANEL, TEXT, with_alpha};
+use crate::theme::{ACCENT, BACKGROUND, MUTED as DIM, PANEL, TEXT, with_alpha};
 use crate::view::EmulatorView;
 
 /// Size of the window's words, in logical pixels.
@@ -262,8 +262,9 @@ impl SettingsWindow {
                 .py(px(3.0))
                 .rounded(px(CHOICE_RADIUS))
                 .cursor_pointer()
+                // White, as the library's and the store's chosen filters are.
                 .when(chosen, |button| {
-                    button.bg(rgb(ACCENT)).text_color(rgb(ON_ACCENT))
+                    button.bg(rgb(TEXT)).text_color(rgb(BACKGROUND))
                 })
                 .when(!chosen, |button| {
                     button.hover(|button| button.bg(rgb(0x0033_3333)))

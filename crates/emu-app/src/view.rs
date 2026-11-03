@@ -862,6 +862,7 @@ impl EmulatorView {
             Event::Stopped(text) => {
                 self.show_notice(text, cx);
                 self.notice_timer = None;
+                self.library.update(cx, |library, cx| library.refresh(cx));
             }
         }
     }
@@ -1551,6 +1552,7 @@ impl EmulatorView {
         self.keep_for_start(stopped);
         let erased = remove_if_present(&checkpoint)
             .and_then(|()| remove_if_present(&persist::saves_record_path(&checkpoint)))
+            .and_then(|()| remove_if_present(&persist::state_picture_path(&checkpoint)))
             .and_then(|()| persist::set_aside(&save));
         // Said once the game is running again, after the loading notice.
         let said = match erased {
@@ -1637,6 +1639,8 @@ impl EmulatorView {
         if let Some(said) = self.stop(window) {
             self.show_notice(said, cx);
         }
+        // The game just left goes first, with where it was left.
+        self.library.update(cx, |library, cx| library.refresh(cx));
         window.set_window_title("ds-emulator");
         cx.notify();
     }
@@ -2605,7 +2609,10 @@ impl Render for EmulatorView {
         {
             root = root.child(recording_mark());
         }
+        // Only over a game: the last game's reading would otherwise stay
+        // over the library, as the readout's timer stops with the game.
         if self.show_fps
+            && self.session.is_some()
             && let Some(readout) = &self.speed_readout
         {
             root = root.child(speed_readout(readout.clone(), footer));
