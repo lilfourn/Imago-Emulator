@@ -10,9 +10,11 @@
 //! title = "The Legend of Zelda: The Minish Cap"
 //! name = "Legend of Zelda, The - The Minish Cap (USA)"  # once looked up
 //! looked_up = true           # the game database has been asked
+//! play_time = 4520           # seconds played, once it has been
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,9 @@ pub struct Game {
     /// Whether the game database has been asked about the game, found or
     /// not, so it is asked once.
     pub looked_up: bool,
+    /// How long it has been played, counted since play time was first
+    /// kept (see [`PlayClock`]).
+    pub play_time: Duration,
 }
 
 impl Game {
@@ -73,6 +78,7 @@ impl Game {
             title,
             name: None,
             looked_up: false,
+            play_time: Duration::ZERO,
         }
     }
 
@@ -105,6 +111,7 @@ impl Game {
             title: title.unwrap_or_else(name),
             name: None,
             looked_up: true,
+            play_time: Duration::ZERO,
         }
     }
 
@@ -128,7 +135,8 @@ pub struct Library {
 
 impl Library {
     /// Adds `game`, or replaces the game at the same path. A replaced game
-    /// keeps what the database said of it while the ROM is unchanged.
+    /// keeps what the database said of it while the ROM is unchanged, and
+    /// how long it has been played.
     pub fn add(&mut self, mut game: Game) {
         match self.games.iter_mut().find(|known| known.path == game.path) {
             Some(known) => {
@@ -137,6 +145,7 @@ impl Library {
                     game.name.clone_from(&known.name);
                     game.looked_up = true;
                 }
+                game.play_time = game.play_time.max(known.play_time);
                 *known = game;
             }
             None => self.games.push(game),
@@ -148,9 +157,29 @@ impl Library {
         self.games.iter().any(|game| game.path == path)
     }
 
-    /// Takes the game at `path` out of the library.
-    pub fn remove(&mut self, path: &Path) {
-        self.games.retain(|game| game.path != path);
+    /// Takes the game at `path` out of the library: what it was and where,
+    /// to put it back with [`Library::restore`].
+    pub fn remove(&mut self, path: &Path) -> Option<(usize, Game)> {
+        let at = self.games.iter().position(|game| game.path == path)?;
+        Some((at, self.games.remove(at)))
+    }
+
+    /// Puts back a game taken out `at` that place, unless it has been
+    /// added again since.
+    pub fn restore(&mut self, at: usize, game: Game) {
+        if !self.contains(&game.path) {
+            self.games.insert(at.min(self.games.len()), game);
+        }
+    }
+
+    /// Adds `time` to how long the game at `path` has been played. Whether
+    /// the library has it.
+    pub fn add_play_time(&mut self, path: &Path, time: Duration) -> bool {
+        let Some(game) = self.games.iter_mut().find(|game| game.path == path) else {
+            return false;
+        };
+        game.play_time += time;
+        true
     }
 
     /// The games for `platform` (all of them for `None`) whose titles hold
@@ -190,6 +219,7 @@ impl Library {
                     title: entry.title,
                     name: entry.name,
                     looked_up: entry.looked_up,
+                    play_time: Duration::from_secs(entry.play_time),
                 })
             })
             .collect::<Result<_, LibraryError>>()?;
@@ -210,6 +240,7 @@ impl Library {
                     title: game.title.clone(),
                     name: game.name.clone(),
                     looked_up: game.looked_up,
+                    play_time: game.play_time.as_secs(),
                 })
                 .collect(),
         };
@@ -264,6 +295,43 @@ struct GameEntry {
     name: Option<String>,
     #[serde(default)]
     looked_up: bool,
+    /// Seconds played.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    play_time: u64,
+}
+
+/// Whether no time was played: serde passes it by reference.
+fn is_zero(seconds: &u64) -> bool {
+    *seconds == 0
+}
+
+/// Counts how long a game is played: the time between the frames it
+/// shows, so a paused game, or one under the game menu, which shows none,
+/// adds no time while it waits.
+#[derive(Debug, Clone, Default)]
+pub struct PlayClock {
+    last_frame: Option<Instant>,
+    played: Duration,
+}
+
+impl PlayClock {
+    /// The longest gap between two frames that counts as play: longer
+    /// gaps are pauses, of which only this much counts.
+    const MOST: Duration = Duration::from_millis(500);
+
+    /// Counts a frame shown `now`.
+    pub fn frame(&mut self, now: Instant) {
+        if let Some(last) = self.last_frame {
+            self.played += now.saturating_duration_since(last).min(Self::MOST);
+        }
+        self.last_frame = Some(now);
+    }
+
+    /// The time played since last taken, which starts the count again.
+    pub fn take(&mut self) -> Duration {
+        self.last_frame = None;
+        std::mem::take(&mut self.played)
+    }
 }
 
 /// Where `game` was left off: the save state of its checkpoint, which it
@@ -405,6 +473,64 @@ mod tests {
         assert!(text.contains("crc32 = \"ABCEBBB1\""), "{text}");
         assert!(text.contains("platform = \"nds\""), "{text}");
         assert_eq!(Library::from_toml(&text), Ok(library));
+    }
+
+    #[test]
+    fn play_time_is_kept_in_whole_seconds_and_survives_adding_again() {
+        let path = Path::new("/roms/tetris.gb");
+        let mut library = Library::default();
+        library.add(Game::new(path, &info(Platform::Gb, 7)));
+        let unplayed = library.to_toml();
+        assert!(!unplayed.contains("play_time"), "{unplayed}");
+        assert!(library.add_play_time(path, Duration::from_millis(90_400)));
+        assert!(!library.add_play_time(Path::new("/roms/other.gb"), Duration::from_secs(1)));
+        let text = library.to_toml();
+        assert!(text.contains("play_time = 90"), "{text}");
+        let read = Library::from_toml(&text).expect("reads");
+        assert_eq!(read.games[0].play_time, Duration::from_secs(90));
+        // Added again, as by the store, it keeps its time.
+        library.add(Game::new(path, &info(Platform::Gb, 7)));
+        assert_eq!(library.games[0].play_time, Duration::from_millis(90_400));
+    }
+
+    #[test]
+    fn a_removed_game_goes_back_where_it_was() {
+        let mut library = Library::default();
+        for name in ["a.gb", "b.gb", "c.gb"] {
+            library.add(Game::new(Path::new(name), &info(Platform::Gb, 1)));
+        }
+        let (at, game) = library.remove(Path::new("b.gb")).expect("was there");
+        assert_eq!(at, 1);
+        assert!(library.remove(Path::new("b.gb")).is_none());
+        library.restore(at, game.clone());
+        let paths: Vec<&Path> = library
+            .games
+            .iter()
+            .map(|game| game.path.as_path())
+            .collect();
+        assert_eq!(paths, ["a.gb", "b.gb", "c.gb"].map(Path::new));
+        library.restore(at, game);
+        assert_eq!(library.games.len(), 3, "a game is never in twice");
+    }
+
+    #[test]
+    fn the_play_clock_counts_frames_and_not_pauses() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut clock = PlayClock::default();
+        for frame in 0..=60 {
+            clock.frame(at(frame * 1000 / 60));
+        }
+        // Paused for a minute, then a frame.
+        clock.frame(at(61_000));
+        assert_eq!(clock.take(), Duration::from_millis(1500));
+        assert_eq!(clock.take(), Duration::ZERO, "taken once");
+        clock.frame(at(70_000));
+        assert_eq!(
+            clock.take(),
+            Duration::ZERO,
+            "a first frame starts the count"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
-    BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent,
+    App, BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent,
     KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ObjectFit, PathPromptOptions, RenderImage, SharedString, Subscription, Task, Window,
     WindowBounds, WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
@@ -19,14 +19,14 @@ use gpui::{
 use crate::ambient::{self, Backdrop};
 use crate::app::{
     AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
-    EditCheats, FilterLcdGrid, FilterNone, FilterScale2x, FilterScale3x, FilterScanlines,
+    EditCheats, FilterLcdGrid, FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, GameInfo,
     InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState,
-    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore, PreviousStateSlot, Reset,
-    Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise,
-    RotateClockwise, RunScript, SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens,
-    SwitchPlayer, TOP_BAR, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen,
-    ToggleKeyGuide, ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion,
-    ToggleWindowControls,
+    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore, PreviousStateSlot,
+    RemoveFromLibrary, Reset, Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x,
+    RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot, SaveState, ShowDebugger,
+    StopScript, SwapScreens, SwitchPlayer, TOP_BAR, ToggleColorCorrection, ToggleFastForward,
+    ToggleFullScreen, ToggleKeyGuide, ToggleMicrophone, TogglePause, ToggleRecording,
+    ToggleSlowMotion, ToggleWindowControls,
 };
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
@@ -240,6 +240,8 @@ struct Session {
     taken_at: Option<Instant>,
     /// Redraws the backdrop's fade once frames stop coming.
     fade_wake: Option<Task<()>>,
+    /// How long the game has been played since the library last heard.
+    play: library::PlayClock,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
 }
@@ -308,13 +310,14 @@ impl EmulatorView {
             // place not yet saved is saved here, and the game's checkpoint:
             // the emulation thread writes it, and the battery saves, before
             // it stops as the view goes.
-            cx.on_release(|this, _| {
+            cx.on_release(|this, cx| {
                 if this.place_save.take().is_some()
                     && let Some(path) = &this.settings_path
                 {
                     this.settings().save(path).ok();
                 }
                 this.save_checkpoint();
+                this.record_play_time(cx);
             }),
             // Stop the emulation thread on quit so the battery save is flushed.
             cx.on_app_quit(|this, cx| {
@@ -322,6 +325,7 @@ impl EmulatorView {
                     this.save_settings(cx);
                 }
                 this.save_checkpoint();
+                this.record_play_time(cx);
                 this.session = None;
                 async {}
             }),
@@ -485,7 +489,7 @@ impl EmulatorView {
         });
         if reopening {
             self.save_checkpoint();
-            let stopped = self.stop(window);
+            let stopped = self.stop(window, cx);
             self.keep_for_start(stopped);
         }
         let name = paths
@@ -561,7 +565,7 @@ impl EmulatorView {
     fn start(&mut self, loaded: Loaded, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         // Stop the previous game first so its battery save is flushed.
         self.save_checkpoint();
-        let stopped = self.stop(window);
+        let stopped = self.stop(window, cx);
         let info = loaded.info();
         let (audio_output, audio_sink, no_sound) = match audio::open(info.audio_sample_rate) {
             Ok((output, sink)) => (Some(output), Some(sink), None),
@@ -620,6 +624,7 @@ impl EmulatorView {
             display: None,
             taken_at: None,
             fade_wake: None,
+            play: library::PlayClock::default(),
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
@@ -794,11 +799,12 @@ impl EmulatorView {
     /// Stops the game, if one runs, and closes its menu. Returns what the
     /// emulation thread said as it stopped, such as a battery save it
     /// could not write, for the caller to show.
-    fn stop(&mut self, window: &mut Window) -> Option<String> {
+    fn stop(&mut self, window: &mut Window, cx: &mut App) -> Option<String> {
         // A preview still loading belongs to the game stopping.
         self.slot_preview_task = None;
         self.linked_side_by_side = false;
         self.menu = None;
+        self.record_play_time(cx);
         let mut session = self.session.take()?;
         let images = session.images.drain(..).flatten();
         let ambient = session.ambient.take().map(|glow| glow.image);
@@ -813,6 +819,21 @@ impl EmulatorView {
         (!said.is_empty()).then(|| said.join(" · "))
     }
 
+    /// Adds the time the running game has been played to each player's
+    /// game in the library.
+    fn record_play_time(&mut self, cx: &mut App) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let played = session.play.take();
+        if played.is_zero() {
+            return;
+        }
+        let paths = session.player_rom_paths.clone();
+        self.library
+            .update(cx, |library, cx| library.add_play_time(&paths, played, cx));
+    }
+
     /// Keeps `note` to show with the next game's start, after whatever
     /// shows meanwhile.
     fn keep_for_start(&mut self, note: Option<String>) {
@@ -824,6 +845,9 @@ impl EmulatorView {
     fn handle(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Frame => {
+                if let Some(session) = &mut self.session {
+                    session.play.frame(Instant::now());
+                }
                 self.listen();
                 cx.notify();
             }
@@ -1548,7 +1572,7 @@ impl EmulatorView {
         let save = session.player_files_of(self.active_player).backup();
         let checkpoint = session.state_path(CHECKPOINT);
         // Stopping writes the battery saves, so the save is set aside after.
-        let stopped = self.stop(window);
+        let stopped = self.stop(window, cx);
         self.keep_for_start(stopped);
         let erased = remove_if_present(&checkpoint)
             .and_then(|()| remove_if_present(&persist::saves_record_path(&checkpoint)))
@@ -1636,7 +1660,7 @@ impl EmulatorView {
             return;
         }
         self.save_checkpoint();
-        if let Some(said) = self.stop(window) {
+        if let Some(said) = self.stop(window, cx) {
             self.show_notice(said, cx);
         }
         // The game just left goes first, with where it was left.
@@ -2357,6 +2381,19 @@ impl Render for EmulatorView {
             .on_action(cx.listener(Self::open_rom))
             .on_action(cx.listener(Self::add_to_library))
             .on_action(cx.listener(|this, _: &OpenStore, _, cx| this.open_store(cx)))
+            // The library's own: nothing while a game runs.
+            .on_action(cx.listener(|this, _: &GameInfo, _, cx| {
+                if this.session.is_none() {
+                    this.library
+                        .update(cx, |library, cx| library.toggle_chosen_menu(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RemoveFromLibrary, _, cx| {
+                if this.session.is_none() {
+                    this.library
+                        .update(cx, |library, cx| library.remove_chosen(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseGame, window, cx| this.close_game(window, cx)))
             .on_action(cx.listener(Self::connect_link_cable))
             .on_action(cx.listener(Self::edit_cheats))

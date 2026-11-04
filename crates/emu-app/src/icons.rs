@@ -18,6 +18,8 @@ pub const ADD: &str = "icons/add.svg";
 pub const BACK: &str = "icons/alt-arrow-left.svg";
 /// A wand: cheats.
 pub const CHEATS: &str = "icons/magic-stick.svg";
+/// A folder: where a game's file is.
+pub const FOLDER: &str = "icons/folder.svg";
 /// A ticked circle: a game the library has.
 pub const CHECK: &str = "icons/check-circle.svg";
 /// An arrow into a tray: getting a game.
@@ -35,8 +37,10 @@ pub const RESTART: &str = "icons/restart.svg";
 pub const SETTINGS: &str = "icons/settings.svg";
 /// A shopfront: the store.
 pub const STORE: &str = "icons/shop.svg";
+/// A bin: taking a game out of the library.
+pub const TRASH: &str = "icons/trash-bin-minimalistic.svg";
 
-const FILES: [(&str, &[u8]); 13] = [
+const FILES: [(&str, &[u8]); 15] = [
     (ADD, include_bytes!("../../../assets/icons/add.svg")),
     (
         BACK,
@@ -54,6 +58,7 @@ const FILES: [(&str, &[u8]); 13] = [
         DOWNLOAD,
         include_bytes!("../../../assets/icons/download.svg"),
     ),
+    (FOLDER, include_bytes!("../../../assets/icons/folder.svg")),
     (GLOBE, include_bytes!("../../../assets/icons/global.svg")),
     (LIBRARY, include_bytes!("../../../assets/icons/widget.svg")),
     (
@@ -68,6 +73,10 @@ const FILES: [(&str, &[u8]); 13] = [
         include_bytes!("../../../assets/icons/settings.svg"),
     ),
     (STORE, include_bytes!("../../../assets/icons/shop.svg")),
+    (
+        TRASH,
+        include_bytes!("../../../assets/icons/trash-bin-minimalistic.svg"),
+    ),
 ];
 
 /// The icons, as GPUI's asset source.

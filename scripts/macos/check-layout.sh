@@ -91,17 +91,19 @@ seed_store() {
 
 # State: what to open it with, then the keys and menu items to press there.
 # Library, search and empty are the library: seeded, searched for "po" and
-# empty. Game runs a test ROM with the key guide and the speed readout;
-# menu, cheats and restart are its game menu's pages; settings is the
-# settings window; store and page are the store and a game's page in it.
+# empty; context is the chosen game's menu, opened with ⌘I. Game
+# runs a test ROM with the key guide and the speed readout; menu, cheats and
+# restart are its game menu's pages; settings is the settings window; store
+# and page are the store and a game's page in it.
 failed=0
-for state in ${=STATES:-empty library search settings game menu cheats restart store page}; do
+for state in ${=STATES:-empty library search context settings game menu cheats restart store page}; do
   # The main window is the only one; its title names the game.
   rom=() steps=() window=main title=''
   case $state in
     empty) seed empty ;;
     library) seed library ;;
     search) seed library; steps=(key p key o) ;;
+    context) seed library; steps=(key cmd-i) ;;
     settings) seed library; steps=(press '=Settings…'); window=settings title=Settings ;;
     game) seed library; rom=($game) ;;
     menu) seed library; rom=($game); steps=(key escape) ;;
@@ -127,8 +129,9 @@ for state in ${=STATES:-empty library search settings game menu cheats restart s
   for _ in {1..20}; do [[ -s $out/probe/$window.tsv ]] && break; sleep 0.2; done
   for size in default minimum; do
     if [[ $size == minimum ]]; then
-      # Settings is one size.
-      [[ $window == settings ]] && continue
+      # Settings is one size. A game's menu is taller than the smallest
+      # window.
+      [[ $window == settings || $state == context ]] && continue
       $ax $pid size 256 192 >/dev/null
     fi
     $ax $pid place $title >/dev/null
