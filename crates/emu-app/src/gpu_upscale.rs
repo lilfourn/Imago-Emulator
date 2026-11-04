@@ -19,6 +19,23 @@ use emu_core::Frame;
 
 pub use imp::{Gpu, GpuDevice};
 
+/// One screen to upscale: `frame`, with `cell` of its pixels to a console
+/// pixel, enlarged by `method` to `width` × `height`.
+#[derive(Debug, Clone, Copy)]
+pub struct Request<'a> {
+    /// The screen as the core drew it, colour corrected and turned.
+    pub frame: &'a Frame,
+    /// How it is enlarged.
+    pub method: Method,
+    /// The frame's pixels to a console pixel along each side: more than 1
+    /// for a DS drawing 3D larger.
+    pub cell: u32,
+    /// The output's width in device pixels.
+    pub width: u32,
+    /// The output's height in device pixels.
+    pub height: u32,
+}
+
 /// How a frame is enlarged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -72,18 +89,23 @@ mod imp {
         MTLFXSpatialScalerDescriptor,
     };
 
-    use super::{Bgra, Frame, GpuError, Method};
+    #[cfg(test)]
+    use super::Frame;
+    use super::{Bgra, GpuError, Method, Request};
 
     /// The shaders, compiled from source when the GPU is first used, as
     /// GPUI's are, so building needs no Metal toolchain.
-    const SHADERS: &str = include_str!("shaders/omniscale.metal");
+    const SHADERS: &str = concat!(
+        include_str!("shaders/omniscale.metal"),
+        include_str!("shaders/beside_3d.metal")
+    );
 
     /// The largest side of a texture on Apple GPUs.
     const MAX_SIDE: u32 = 16_384;
 
-    /// How many sizes of upscale stay ready: two screens, and the sizes a
+    /// How many sizes of upscale stay ready: a few screens, and the sizes a
     /// window passes through while resized.
-    const KEPT: usize = 4;
+    const KEPT: usize = 8;
 
     /// Threads per threadgroup along each side.
     const GROUP_SIDE: usize = 16;
@@ -94,6 +116,9 @@ mod imp {
         device: Retained<ProtocolObject<dyn MTLDevice>>,
         queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
         omniscale: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+        split_cells: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+        near_3d: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+        beside_3d: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
         metal_fx: bool,
     }
 
@@ -105,12 +130,28 @@ mod imp {
         jobs: Vec<Job>,
     }
 
-    /// One size of upscale: the frame's size, the output's and how.
+    /// One size of upscale: which of a frame's screens, how, the frame's
+    /// size and pixels to a console pixel, and the output's size. Screens
+    /// upscaled together each have their own textures.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct Key {
+        slot: usize,
         method: Method,
+        cell: u32,
         input: (u32, u32),
         output: (u32, u32),
+    }
+
+    impl Key {
+        /// Whether this is Pixel Art beside larger 3D.
+        fn beside_3d(self) -> bool {
+            self.method == Method::PixelArt && self.cell > 1
+        }
+
+        /// The console pixels' size: the frame's over the cell.
+        fn console(self) -> (u32, u32) {
+            (self.input.0 / self.cell, self.input.1 / self.cell)
+        }
     }
 
     /// What one size of upscale needs, kept for the next frame of the size.
@@ -122,8 +163,14 @@ mod imp {
         output: Retained<ProtocolObject<dyn MTLTexture>>,
         /// The upscaled frame copied where the CPU can read it.
         readback: Retained<ProtocolObject<dyn MTLBuffer>>,
-        /// MetalFX's scaler, for [`Method::Smooth`].
+        /// MetalFX's scaler: for [`Method::Smooth`], and for the 3D beside
+        /// Pixel Art when the output is larger than the frame.
         scaler: Option<Retained<ProtocolObject<dyn MTLFXSpatialScaler>>>,
+        /// Beside larger 3D: the console pixels, alpha 0 where 3D added
+        /// detail (`split_cells`), then alpha 0 near it (`near_3d`).
+        console: Option<[Retained<ProtocolObject<dyn MTLTexture>>; 2]>,
+        /// Beside larger 3D: the frame enlarged by `scaler`.
+        smooth: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     }
 
     impl GpuDevice {
@@ -141,12 +188,20 @@ mod imp {
             let library = device
                 .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
                 .map_err(|error| setup(&error.localizedDescription().to_string()))?;
-            let function = library
-                .newFunctionWithName(&NSString::from_str("omniscale"))
-                .ok_or_else(|| setup("no omniscale kernel"))?;
-            let omniscale = device
-                .newComputePipelineStateWithFunction_error(&function)
-                .map_err(|error| setup(&error.localizedDescription().to_string()))?;
+            let kernel = |name: &str| {
+                let function = library
+                    .newFunctionWithName(&NSString::from_str(name))
+                    .ok_or_else(|| setup(&format!("no {name} kernel")))?;
+                device
+                    .newComputePipelineStateWithFunction_error(&function)
+                    .map_err(|error| setup(&error.localizedDescription().to_string()))
+            };
+            let (omniscale, split_cells, near_3d, beside_3d) = (
+                kernel("omniscale")?,
+                kernel("split_cells")?,
+                kernel("near_3d")?,
+                kernel("beside_3d")?,
+            );
             // SAFETY: asks whether `device`, a live Metal device, can run
             // MetalFX; reads nothing else.
             let metal_fx = unsafe { MTLFXSpatialScalerDescriptor::supportsDevice(&device) };
@@ -154,6 +209,9 @@ mod imp {
                 device,
                 queue,
                 omniscale,
+                split_cells,
+                near_3d,
+                beside_3d,
                 metal_fx,
             })
         }
@@ -168,7 +226,38 @@ mod imp {
             }
         }
 
-        /// `frame` enlarged to `width` × `height` by `method`, as BGRA bytes.
+        /// `frame` enlarged to `width` × `height` by `method`, as BGRA bytes:
+        /// [`Gpu::upscale_all`] with one screen.
+        ///
+        /// # Errors
+        ///
+        /// As [`Gpu::upscale_all`].
+        #[cfg(test)]
+        pub fn upscale(
+            &mut self,
+            frame: &Frame,
+            method: Method,
+            cell: u32,
+            width: u32,
+            height: u32,
+        ) -> Result<Bgra, GpuError> {
+            let request = Request {
+                frame,
+                method,
+                cell,
+                width,
+                height,
+            };
+            let mut images = self.upscale_all(&[request])?;
+            Ok(images.remove(0))
+        }
+
+        /// Each request's screen enlarged, as BGRA bytes, in order. They go
+        /// to the GPU in one command buffer, waited for once: the wait, not
+        /// the work, is most of an upscale's time, so a frame's screens
+        /// share it. A frame drawn with 3D `cell` times larger than the
+        /// console's pixels gets Pixel Art only where 3D added no detail
+        /// (`beside_3d.metal`).
         ///
         /// # Errors
         ///
@@ -176,45 +265,62 @@ mod imp {
         /// [`GpuError::NoMetalFx`] for [`Method::Smooth`] on a GPU without
         /// MetalFX, and [`GpuError::Setup`] or [`GpuError::Failed`] if Metal
         /// fails.
-        pub fn upscale(
-            &mut self,
-            frame: &Frame,
-            method: Method,
-            width: u32,
-            height: u32,
-        ) -> Result<Bgra, GpuError> {
-            if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
-                return Err(GpuError::Size(width, height));
+        pub fn upscale_all(&mut self, requests: &[Request<'_>]) -> Result<Vec<Bgra>, GpuError> {
+            let mut keys = Vec::with_capacity(requests.len());
+            for (slot, request) in requests.iter().enumerate() {
+                let (width, height) = (request.width, request.height);
+                if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
+                    return Err(GpuError::Size(width, height));
+                }
+                if request.method == Method::Smooth && !self.device.metal_fx {
+                    return Err(GpuError::NoMetalFx);
+                }
+                let size = request.frame.size();
+                let input = (u32::from(size.width), u32::from(size.height));
+                // A frame that is not whole squares of `cell` is taken as it
+                // is.
+                let cell = request.cell;
+                let whole = cell > 1 && input.0 % cell == 0 && input.1 % cell == 0;
+                keys.push(Key {
+                    slot,
+                    method: request.method,
+                    cell: if whole { cell } else { 1 },
+                    input,
+                    output: (width, height),
+                });
             }
-            if method == Method::Smooth && !self.device.metal_fx {
-                return Err(GpuError::NoMetalFx);
+            for &key in &keys {
+                self.make_ready(key, &keys)?;
             }
-            let size = frame.size();
-            let key = Key {
-                method,
-                input: (u32::from(size.width), u32::from(size.height)),
-                output: (width, height),
-            };
-            self.make_ready(key)?;
-            let job = self.jobs.last().expect("make_ready leaves the job last");
-            let (input, output) = (to_size(key.input), to_size(key.output));
+            let jobs: Vec<&Job> = keys
+                .iter()
+                .map(|key| {
+                    self.jobs
+                        .iter()
+                        .find(|job| job.key == *key)
+                        .expect("make_ready keeps every job of the batch")
+                })
+                .collect();
 
-            let pixels = frame.pixels();
-            // SAFETY: `pixels` holds `width * height` pixels of 4 bytes, BGRA
-            // in memory, which is the texture's format and the region given,
-            // one row of `width * 4` bytes after another. The texture is in
-            // shared memory, and no command buffer is using it: each
-            // `upscale` waits for its own before returning.
-            unsafe {
-                job.input.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                    MTLRegion {
-                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                        size: input,
-                    },
-                    0,
-                    NonNull::from(pixels).cast::<c_void>(),
-                    input.width * 4,
-                );
+            for (job, request) in jobs.iter().zip(requests) {
+                let input = to_size(job.key.input);
+                let pixels = request.frame.pixels();
+                // SAFETY: `pixels` holds `width * height` pixels of 4 bytes,
+                // BGRA in memory, which is the texture's format and the region
+                // given, one row of `width * 4` bytes after another. The
+                // texture is in shared memory, and no command buffer is using
+                // it: each `upscale_all` waits for its own before returning.
+                unsafe {
+                    job.input.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                        MTLRegion {
+                            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                            size: input,
+                        },
+                        0,
+                        NonNull::from(pixels).cast::<c_void>(),
+                        input.width * 4,
+                    );
+                }
             }
 
             let commands = self
@@ -222,49 +328,100 @@ mod imp {
                 .queue
                 .commandBuffer()
                 .ok_or_else(|| setup("no command buffer"))?;
-            match &job.scaler {
-                Some(scaler) => {
-                    // SAFETY: the scaler was made for exactly these textures'
-                    // sizes, format and usage, and both live until the
-                    // command buffer is done, which `upscale` waits for.
-                    unsafe {
-                        scaler.setColorTexture(Some(&job.input));
-                        scaler.setOutputTexture(Some(&job.output));
-                        scaler.setInputContentWidth(input.width);
-                        scaler.setInputContentHeight(input.height);
-                        scaler.encodeToCommandBuffer(&commands);
-                    }
+            for job in &jobs {
+                self.encode(&commands, job)?;
+            }
+            commands.commit();
+            commands.waitUntilCompleted();
+            if commands.status() != MTLCommandBufferStatus::Completed {
+                let why = commands.error().map_or_else(
+                    || "unknown error".to_owned(),
+                    |error| error.localizedDescription().to_string(),
+                );
+                return Err(GpuError::Failed(why));
+            }
+            Ok(jobs
+                .iter()
+                .map(|job| {
+                    let output = to_size(job.key.output);
+                    let length = output.width * output.height * 4;
+                    // SAFETY: `readback` is a shared buffer of `length` bytes,
+                    // which the finished command buffer wrote; nothing writes
+                    // it until the next `upscale_all`, and the slice is copied
+                    // out at once.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            job.readback.contents().as_ptr().cast::<u8>(),
+                            length,
+                        )
+                    };
+                    bytes.to_vec()
+                })
+                .collect())
+        }
+
+        /// Encodes `job`'s passes into `commands`: its upscale, then the copy
+        /// of the output where the CPU can read it.
+        fn encode(
+            &self,
+            commands: &ProtocolObject<dyn MTLCommandBuffer>,
+            job: &Job,
+        ) -> Result<(), GpuError> {
+            let key = job.key;
+            let (input, output) = (to_size(key.input), to_size(key.output));
+            match (key.method, &job.console) {
+                (Method::Smooth, _) => {
+                    let scaler = job.scaler.as_ref().expect("Smooth jobs have a scaler");
+                    encode_metal_fx(commands, scaler, &job.input, &job.output, input);
                 }
-                None => {
-                    let encoder = commands
-                        .computeCommandEncoder()
-                        .ok_or_else(|| setup("no compute encoder"))?;
-                    encoder.setComputePipelineState(&self.device.omniscale);
-                    // SAFETY: indices 0 and 1 are the kernel's `source`
-                    // (read) and `target` (write) textures, which these are
-                    // made for, and both outlive the command buffer.
-                    unsafe {
-                        encoder.setTexture_atIndex(Some(&job.input), 0);
-                        encoder.setTexture_atIndex(Some(&job.output), 1);
-                    }
-                    encoder.dispatchThreads_threadsPerThreadgroup(
+                (Method::PixelArt, Some([split, console])) => {
+                    let console_size = to_size(key.console());
+                    dispatch(
+                        commands,
+                        &self.device.split_cells,
+                        &[&job.input, split],
+                        Some(key.cell),
+                        console_size,
+                    )?;
+                    dispatch(
+                        commands,
+                        &self.device.near_3d,
+                        &[split, console],
+                        None,
+                        console_size,
+                    )?;
+                    // The 3D's part, smooth: MetalFX's enlargement, or the
+                    // frame itself, sampled, where that is about as large.
+                    let smooth = match (&job.scaler, &job.smooth) {
+                        (Some(scaler), Some(smooth)) => {
+                            encode_metal_fx(commands, scaler, &job.input, smooth, input);
+                            smooth
+                        }
+                        _ => &job.input,
+                    };
+                    dispatch(
+                        commands,
+                        &self.device.beside_3d,
+                        &[console, smooth, &job.output],
+                        None,
                         output,
-                        MTLSize {
-                            width: GROUP_SIDE,
-                            height: GROUP_SIDE,
-                            depth: 1,
-                        },
-                    );
-                    encoder.endEncoding();
+                    )?;
                 }
+                (Method::PixelArt, None) => dispatch(
+                    commands,
+                    &self.device.omniscale,
+                    &[&job.input, &job.output],
+                    None,
+                    output,
+                )?,
             }
             let blit = commands
                 .blitCommandEncoder()
                 .ok_or_else(|| setup("no blit encoder"))?;
             let row = output.width * 4;
-            // SAFETY: copies the whole output texture, `output` in size,
-            // into `readback`, which was made `row * height` bytes long for
-            // this key; the texture has one slice and one level.
+            // SAFETY: copies the whole output texture, `output` in size, into
+            // `readback`, which was made `row * height` bytes long for this
+            // key; the texture has one slice and one level.
             unsafe {
                 blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
                     &job.output,
@@ -279,23 +436,7 @@ mod imp {
                 );
             }
             blit.endEncoding();
-            commands.commit();
-            commands.waitUntilCompleted();
-            if commands.status() != MTLCommandBufferStatus::Completed {
-                let why = commands.error().map_or_else(
-                    || "unknown error".to_owned(),
-                    |error| error.localizedDescription().to_string(),
-                );
-                return Err(GpuError::Failed(why));
-            }
-            let length = row * output.height;
-            // SAFETY: `readback` is a shared buffer of `length` bytes, which
-            // the finished command buffer wrote; nothing writes it until the
-            // next `upscale`, and the slice is copied out at once.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(job.readback.contents().as_ptr().cast::<u8>(), length)
-            };
-            Ok(bytes.to_vec())
+            Ok(())
         }
 
         /// The output sizes kept ready, the most recent last.
@@ -305,37 +446,49 @@ mod imp {
         }
 
         /// Puts the job for `key` last in `jobs`, the most recent, making it
-        /// if it is not kept.
-        fn make_ready(&mut self, key: Key) -> Result<(), GpuError> {
+        /// if it is not kept. Past [`KEPT`], the oldest job goes, unless it is
+        /// one of `batch`'s.
+        fn make_ready(&mut self, key: Key, batch: &[Key]) -> Result<(), GpuError> {
             if let Some(index) = self.jobs.iter().position(|job| job.key == key) {
                 let job = self.jobs.remove(index);
                 self.jobs.push(job);
-            } else {
-                let job = self.make_job(key)?;
-                if self.jobs.len() == KEPT {
-                    self.jobs.remove(0);
-                }
-                self.jobs.push(job);
+                return Ok(());
             }
+            let job = self.make_job(key)?;
+            if self.jobs.len() >= KEPT
+                && let Some(oldest) = self.jobs.iter().position(|job| !batch.contains(&job.key))
+            {
+                self.jobs.remove(oldest);
+            }
+            self.jobs.push(job);
             Ok(())
         }
 
         /// The textures, buffer and scaler `key` needs.
         fn make_job(&self, key: Key) -> Result<Job, GpuError> {
             let (input, output) = (to_size(key.input), to_size(key.output));
-            let (scaler, input_usage, output_usage) = match key.method {
-                Method::PixelArt => (
-                    None,
-                    MTLTextureUsage::ShaderRead,
-                    MTLTextureUsage::ShaderWrite,
-                ),
-                Method::Smooth => {
-                    let scaler = self.metal_fx_scaler(input, output)?;
-                    // SAFETY: reads two properties of a live scaler.
-                    let usages =
-                        unsafe { (scaler.colorTextureUsage(), scaler.outputTextureUsage()) };
-                    (Some(scaler), usages.0, usages.1)
-                }
+            let read = MTLTextureUsage::ShaderRead;
+            let write = MTLTextureUsage::ShaderWrite;
+            // MetalFX for Smooth, and for 3D beside Pixel Art if it enlarges
+            // by a quarter or more; by less, sampling the frame looks the
+            // same for less work.
+            let enlarges =
+                4 * output.width >= 5 * input.width && 4 * output.height >= 5 * input.height;
+            let metal_fx = match key.method {
+                Method::Smooth => true,
+                Method::PixelArt => key.beside_3d() && enlarges && self.device.metal_fx,
+            };
+            let scaler = metal_fx
+                .then(|| self.metal_fx_scaler(input, output))
+                .transpose()?;
+            // SAFETY: reads two properties of a live scaler.
+            let usages = scaler
+                .as_ref()
+                .map(|scaler| unsafe { (scaler.colorTextureUsage(), scaler.outputTextureUsage()) });
+            let (input_usage, smooth_usage) = usages.unwrap_or((read, write));
+            let output_usage = match key.method {
+                Method::Smooth => smooth_usage,
+                Method::PixelArt => write,
             };
             let readback = self
                 .device
@@ -345,12 +498,31 @@ mod imp {
                     MTLResourceOptions::StorageModeShared,
                 )
                 .ok_or_else(|| setup("no readback buffer"))?;
+            let (console, smooth) = if key.beside_3d() {
+                let console = || {
+                    self.texture(
+                        to_size(key.console()),
+                        read | write,
+                        MTLStorageMode::Private,
+                    )
+                };
+                let console = [console()?, console()?];
+                let smooth = scaler
+                    .as_ref()
+                    .map(|_| self.texture(output, smooth_usage | read, MTLStorageMode::Private))
+                    .transpose()?;
+                (Some(console), smooth)
+            } else {
+                (None, None)
+            };
             Ok(Job {
                 key,
-                input: self.texture(input, input_usage, MTLStorageMode::Shared)?,
+                input: self.texture(input, input_usage | read, MTLStorageMode::Shared)?,
                 output: self.texture(output, output_usage, MTLStorageMode::Private)?,
                 readback,
                 scaler,
+                console,
+                smooth,
             })
         }
 
@@ -417,11 +589,70 @@ mod imp {
     fn setup(why: &str) -> GpuError {
         GpuError::Setup(why.to_owned())
     }
+
+    /// Runs `pipeline` over `grid`, one thread per pixel, with `textures`
+    /// at indices 0, 1, … and `cell`, if given, as buffer 0.
+    fn dispatch(
+        commands: &ProtocolObject<dyn MTLCommandBuffer>,
+        pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+        textures: &[&ProtocolObject<dyn MTLTexture>],
+        cell: Option<u32>,
+        grid: MTLSize,
+    ) -> Result<(), GpuError> {
+        let encoder = commands
+            .computeCommandEncoder()
+            .ok_or_else(|| setup("no compute encoder"))?;
+        encoder.setComputePipelineState(pipeline);
+        for (index, texture) in textures.iter().enumerate() {
+            // SAFETY: the kernels take their textures at these indices, in
+            // this order, with the access each was made for, and each
+            // outlives the command buffer, which `upscale` waits for.
+            unsafe { encoder.setTexture_atIndex(Some(texture), index) };
+        }
+        if let Some(cell) = cell {
+            // SAFETY: Metal copies the 4 bytes of `cell`, the kernel's
+            // `constant uint &cell [[buffer(0)]]`, before this returns.
+            unsafe {
+                encoder.setBytes_length_atIndex(NonNull::from(&cell).cast::<c_void>(), 4, 0);
+            }
+        }
+        encoder.dispatchThreads_threadsPerThreadgroup(
+            grid,
+            MTLSize {
+                width: GROUP_SIDE,
+                height: GROUP_SIDE,
+                depth: 1,
+            },
+        );
+        encoder.endEncoding();
+        Ok(())
+    }
+
+    /// Encodes MetalFX's `scaler`, made for these textures' sizes, from
+    /// `input` (`size`, all of it the picture) to `output`.
+    fn encode_metal_fx(
+        commands: &ProtocolObject<dyn MTLCommandBuffer>,
+        scaler: &ProtocolObject<dyn MTLFXSpatialScaler>,
+        input: &ProtocolObject<dyn MTLTexture>,
+        output: &ProtocolObject<dyn MTLTexture>,
+        size: MTLSize,
+    ) {
+        // SAFETY: the scaler was made for exactly these textures' sizes,
+        // format and usage, and both live until the command buffer is
+        // done, which `upscale` waits for.
+        unsafe {
+            scaler.setColorTexture(Some(input));
+            scaler.setOutputTexture(Some(output));
+            scaler.setInputContentWidth(size.width);
+            scaler.setInputContentHeight(size.height);
+            scaler.encodeToCommandBuffer(commands);
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use super::{Bgra, Frame, GpuError, Method};
+    use super::{Bgra, GpuError, Request};
 
     /// No GPU upscaling away from macOS: the picture stays on the CPU path.
     pub struct GpuDevice;
@@ -443,13 +674,7 @@ mod imp {
         }
 
         /// Never called: there is no device to make a [`Gpu`] on.
-        pub fn upscale(
-            &mut self,
-            _frame: &Frame,
-            _method: Method,
-            _width: u32,
-            _height: u32,
-        ) -> Result<Bgra, GpuError> {
+        pub fn upscale_all(&mut self, _requests: &[Request<'_>]) -> Result<Vec<Bgra>, GpuError> {
             Err(GpuError::NoDevice)
         }
     }
@@ -483,7 +708,7 @@ mod tests {
         for method in [Method::PixelArt, Method::Smooth] {
             for (width, height) in [(80, 60), (123, 77), (16 * 13, 12 * 13)] {
                 let bytes = gpu
-                    .upscale(&frame, method, width, height)
+                    .upscale(&frame, method, 1, width, height)
                     .expect("upscaled");
                 assert_eq!(bytes.len(), (width * height * 4) as usize);
                 for (x, y) in [(0, 0), (width / 2, height / 2), (width - 1, height - 1)] {
@@ -513,7 +738,7 @@ mod tests {
         let scale = 8;
         let side = 8 * scale;
         let bytes = gpu
-            .upscale(&frame, Method::PixelArt, side, side)
+            .upscale(&frame, Method::PixelArt, 1, side, side)
             .expect("upscaled");
         let green = |x: u32, y: u32| pixel(&bytes, side, x, y)[1];
         // Away from the edge, pixels keep their colour.
@@ -531,15 +756,143 @@ mod tests {
         );
     }
 
+    /// `frame` with each pixel spread over a square of `cell`, as the DS
+    /// enlarges what is not 3D.
+    fn enlarged(frame: &Frame, cell: u16) -> Frame {
+        let size = frame.size();
+        let width = usize::from(size.width);
+        let cell = usize::from(cell);
+        let source = frame.pixels();
+        let side = |length: u16| u16::try_from(usize::from(length) * cell).expect("small");
+        let mut out = Frame::new(ScreenSize::new(side(size.width), side(size.height)));
+        for (y, row) in out.rows_mut().enumerate() {
+            for (x, pixel) in row.iter_mut().enumerate() {
+                *pixel = source[y / cell * width + x / cell];
+            }
+        }
+        out
+    }
+
+    /// A black staircase on white, one pixel a step.
+    fn staircase(side: u16) -> Frame {
+        let mut frame = Frame::new(ScreenSize::new(side, side));
+        for (y, row) in frame.rows_mut().enumerate() {
+            for (x, pixel) in row.iter_mut().enumerate() {
+                *pixel = if x <= y {
+                    rgb(0, 0, 0)
+                } else {
+                    rgb(255, 255, 255)
+                };
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn a_larger_frame_without_3d_detail_gets_pixel_art_from_its_console_pixels() {
+        let Some(mut gpu) = gpu() else { return };
+        let native = staircase(16);
+        let side = 16 * 5;
+        let direct = gpu
+            .upscale(&native, Method::PixelArt, 1, side, side)
+            .expect("upscaled");
+        let beside = gpu
+            .upscale(&enlarged(&native, 4), Method::PixelArt, 4, side, side)
+            .expect("upscaled");
+        let most = direct
+            .iter()
+            .zip(&beside)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max();
+        assert!(most.is_some_and(|most| most <= 1), "{most:?}");
+    }
+
+    #[test]
+    fn squares_with_3d_detail_keep_it() {
+        let Some(mut gpu) = gpu() else { return };
+        let grey = rgb(128, 128, 128);
+        let mut native = Frame::new(ScreenSize::new(16, 12));
+        native.pixels_mut().fill(grey);
+        let mut large = enlarged(&native, 4);
+        // One console pixel's square, (8, 6), white above and black below:
+        // detail the console's own pixel cannot hold.
+        let width = 16 * 4;
+        for y in 24..28 {
+            for x in 32..36 {
+                large.pixels_mut()[y * width + x] = if y < 26 {
+                    rgb(255, 255, 255)
+                } else {
+                    rgb(0, 0, 0)
+                };
+            }
+        }
+        // Enlarged (through MetalFX) and shrunk (sampled), the square keeps
+        // a light top and a dark bottom; far from it, the grey stays.
+        for scale in [8, 3] {
+            let (out_width, out_height) = (16 * scale, 12 * scale);
+            let bytes = gpu
+                .upscale(&large, Method::PixelArt, 4, out_width, out_height)
+                .expect("upscaled");
+            let green = |x: u32, y: u32| pixel(&bytes, out_width, x, y)[1];
+            let (left, top) = (8 * scale, 6 * scale);
+            let middle = left + scale / 2;
+            assert!(
+                green(middle, top + scale / 5) > 180,
+                "light top at {scale}×"
+            );
+            assert!(
+                green(middle, top + scale * 4 / 5) < 80,
+                "dark bottom at {scale}×"
+            );
+            assert!(green(1, 1).abs_diff(128) <= 2, "grey far away at {scale}×");
+        }
+    }
+
+    #[test]
+    fn screens_upscaled_together_stay_apart() {
+        let Some(mut gpu) = gpu() else { return };
+        let (mut light, mut dark) = (
+            Frame::new(ScreenSize::new(16, 12)),
+            Frame::new(ScreenSize::new(16, 12)),
+        );
+        light.pixels_mut().fill(rgb(240, 240, 240));
+        dark.pixels_mut().fill(rgb(10, 10, 10));
+        let request = |frame| Request {
+            frame,
+            method: Method::PixelArt,
+            cell: 1,
+            width: 64,
+            height: 48,
+        };
+        let images = gpu
+            .upscale_all(&[request(&light), request(&dark)])
+            .expect("upscaled");
+        assert_eq!(pixel(&images[0], 64, 30, 20)[1], 240);
+        assert_eq!(pixel(&images[1], 64, 30, 20)[1], 10);
+        assert_eq!(gpu.kept_outputs(), [(64, 48), (64, 48)]);
+    }
+
     #[test]
     fn sizes_are_kept_and_reused() {
         let Some(mut gpu) = gpu() else { return };
         let frame = Frame::new(ScreenSize::new(10, 10));
-        for side in [20, 30, 40, 50, 60, 20] {
-            gpu.upscale(&frame, Method::PixelArt, side, side)
+        for side in [20, 30, 40, 50, 60, 70, 80, 90, 100, 20] {
+            gpu.upscale(&frame, Method::PixelArt, 1, side, side)
                 .expect("upscaled");
         }
-        assert_eq!(gpu.kept_outputs(), [(40, 40), (50, 50), (60, 60), (20, 20)]);
+        assert_eq!(
+            gpu.kept_outputs(),
+            [
+                (40, 40),
+                (50, 50),
+                (60, 60),
+                (70, 70),
+                (80, 80),
+                (90, 90),
+                (100, 100),
+                (20, 20)
+            ]
+        );
     }
 
     #[test]
@@ -547,11 +900,11 @@ mod tests {
         let Some(mut gpu) = gpu() else { return };
         let frame = Frame::new(ScreenSize::new(4, 4));
         assert_eq!(
-            gpu.upscale(&frame, Method::PixelArt, 0, 10),
+            gpu.upscale(&frame, Method::PixelArt, 1, 0, 10),
             Err(GpuError::Size(0, 10))
         );
         assert_eq!(
-            gpu.upscale(&frame, Method::Smooth, 20_000, 10),
+            gpu.upscale(&frame, Method::Smooth, 1, 20_000, 10),
             Err(GpuError::Size(20_000, 10))
         );
     }

@@ -21,7 +21,7 @@
 //! slow_motion_on = false  # left on with ⌘⇧F
 //!
 //! [video]
-//! resolution_3d = 2       # DS and 3DS 3D at 1 to 8 times its own resolution
+//! resolution_3d = "auto"  # DS and 3DS 3D as large as the screens are shown, or 1 to 8 times
 //! picture = "auto"       # "auto", "sharp-pixels", "pixel-art", "smooth", "lcd-grid" or "scanlines"
 //! show_fps = true        # the frame rate and speed in the window's corner
 //! backdrop = "ambient"    # around the screens: "ambient" (the game's colours, blurred) or "solid"
@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use crate::ambient::Backdrop;
 use crate::layout::{Arrangement, Layout, Rotation};
 use crate::persist;
-use crate::picture::Picture;
+use crate::picture::{Picture, Resolution3d};
 use crate::slots::STATE_SLOTS;
 use crate::speed::{MIN_RATE, Rate, Speed, Speeds};
 
@@ -84,9 +84,10 @@ pub struct Settings {
     pub fast_forward_on: bool,
     /// Whether slow motion was left on.
     pub slow_motion_on: bool,
-    /// How many times its own resolution DS and 3DS 3D is drawn at, 1 to
-    /// [`MAX_RESOLUTION_3D`] (see `Core::set_render_scale`).
-    pub resolution_3d: u32,
+    /// How many times its own resolution DS and 3DS 3D is drawn at: as
+    /// large as the screens are shown, or 1 to [`MAX_RESOLUTION_3D`] (see
+    /// `Core::set_render_scale`).
+    pub resolution_3d: Resolution3d,
     /// How the screens look: upscaled, as sharp pixels, or shaded
     /// (View > Picture).
     pub picture: Picture,
@@ -135,7 +136,7 @@ impl Default for Settings {
             speed: Speeds::default(),
             fast_forward_on: false,
             slow_motion_on: false,
-            resolution_3d: 1,
+            resolution_3d: Resolution3d::MatchDisplay,
             picture: Picture::Auto,
             show_fps: false,
             backdrop: Backdrop::Ambient,
@@ -289,10 +290,27 @@ fn dmg_colors_from_name(name: &str) -> Option<DmgColors> {
     }
 }
 
+/// `resolution_3d` in the file: `"auto"` or a number of times.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+enum ResolutionValue {
+    Times(u32),
+    Named(String),
+}
+
+impl From<Resolution3d> for ResolutionValue {
+    fn from(resolution: Resolution3d) -> Self {
+        match resolution {
+            Resolution3d::MatchDisplay => Self::Named("auto".to_owned()),
+            Resolution3d::Times(scale) => Self::Times(scale),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct VideoSection {
-    resolution_3d: u32,
+    resolution_3d: ResolutionValue,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     picture: Option<String>,
     /// Before View > Picture, the screens' filter: read, so that an old
@@ -313,7 +331,7 @@ impl Default for VideoSection {
 impl From<&Settings> for VideoSection {
     fn from(settings: &Settings) -> Self {
         Self {
-            resolution_3d: settings.resolution_3d,
+            resolution_3d: settings.resolution_3d.into(),
             picture: Some(settings.picture.name().to_owned()),
             filter: None,
             show_fps: settings.show_fps,
@@ -439,10 +457,21 @@ impl Settings {
     pub fn from_toml(text: &str) -> Result<Self, SettingsError> {
         let file: SettingsFile =
             toml::from_str(text).map_err(|error| SettingsError::Syntax(error.to_string()))?;
-        let resolution_3d = file.video.resolution_3d;
-        if !(1..=MAX_RESOLUTION_3D).contains(&resolution_3d) {
-            return Err(SettingsError::UnsupportedResolution(resolution_3d));
-        }
+        // Files from before View > Picture still name a filter. Their 1×
+        // 3D was the old default, not a choice: upscaling is on until the
+        // player turns it off, so they start on Match Display.
+        let old_file = file.video.filter.is_some();
+        let resolution_3d = match file.video.resolution_3d {
+            ResolutionValue::Named(name) if name == "auto" => Resolution3d::MatchDisplay,
+            ResolutionValue::Named(name) => return Err(SettingsError::UnknownResolution(name)),
+            ResolutionValue::Times(1) if old_file => Resolution3d::MatchDisplay,
+            ResolutionValue::Times(scale) if (1..=MAX_RESOLUTION_3D).contains(&scale) => {
+                Resolution3d::Times(scale)
+            }
+            ResolutionValue::Times(scale) => {
+                return Err(SettingsError::UnsupportedResolution(scale));
+            }
+        };
         let picture = match (file.video.picture, file.video.filter) {
             (Some(name), _) => {
                 Picture::from_name(&name).ok_or(SettingsError::UnknownPicture(name))?
@@ -563,6 +592,9 @@ pub enum SettingsError {
     /// The save-state slot is not 1 to [`STATE_SLOTS`].
     #[error("unknown save-state slot {0} in settings; use 1 to {max}", max = STATE_SLOTS)]
     UnknownStateSlot(u8),
+    /// The 3D resolution is a word other than "auto".
+    #[error("unknown 3D resolution {0:?} in settings; use \"auto\" or 1 to {max}", max = MAX_RESOLUTION_3D)]
+    UnknownResolution(String),
     /// The 3D resolution is not 1 to [`MAX_RESOLUTION_3D`] times.
     #[error("unsupported 3D resolution {0}x in settings; use 1 to {max}", max = MAX_RESOLUTION_3D)]
     UnsupportedResolution(u32),
@@ -598,7 +630,7 @@ mod tests {
             },
             fast_forward_on: true,
             slow_motion_on: true,
-            resolution_3d: 4,
+            resolution_3d: Resolution3d::Times(4),
             picture: Picture::Scanlines,
             show_fps: true,
             backdrop: Backdrop::Solid,
@@ -746,16 +778,48 @@ mod tests {
     }
 
     #[test]
-    fn the_3d_resolution_is_1_to_8_times() {
-        let settings = Settings::from_toml("[video]\nresolution_3d = 3\n").expect("valid file");
-        assert_eq!(settings.resolution_3d, 3);
-        assert_eq!(Settings::from_toml("").map(|s| s.resolution_3d), Ok(1));
+    fn the_3d_resolution_matches_the_display_or_is_1_to_8_times() {
+        let resolution = |text: &str| Settings::from_toml(text).map(|s| s.resolution_3d);
+        assert_eq!(
+            resolution("[video]\nresolution_3d = 3\n"),
+            Ok(Resolution3d::Times(3))
+        );
+        assert_eq!(
+            resolution("[video]\nresolution_3d = 1\n"),
+            Ok(Resolution3d::Times(1))
+        );
+        assert_eq!(
+            resolution("[video]\nresolution_3d = \"auto\"\n"),
+            Ok(Resolution3d::MatchDisplay)
+        );
+        assert_eq!(resolution(""), Ok(Resolution3d::MatchDisplay));
         for wrong in [0, 9] {
             assert_eq!(
                 Settings::from_toml(&format!("[video]\nresolution_3d = {wrong}\n")),
                 Err(SettingsError::UnsupportedResolution(wrong))
             );
         }
+        assert_eq!(
+            resolution("[video]\nresolution_3d = \"max\"\n"),
+            Err(SettingsError::UnknownResolution("max".to_owned()))
+        );
+        let saved = Settings::default().to_toml();
+        assert!(saved.contains("resolution_3d = \"auto\""), "{saved}");
+    }
+
+    #[test]
+    fn files_from_before_the_upscaler_start_with_3d_matching_the_display() {
+        let resolution = |text: &str| Settings::from_toml(text).map(|s| s.resolution_3d);
+        // The old app wrote every key, so its 1× was the default, not a
+        // choice; a larger one was chosen and stays.
+        assert_eq!(
+            resolution("[video]\nresolution_3d = 1\nfilter = \"none\"\n"),
+            Ok(Resolution3d::MatchDisplay)
+        );
+        assert_eq!(
+            resolution("[video]\nresolution_3d = 2\nfilter = \"none\"\n"),
+            Ok(Resolution3d::Times(2))
+        );
     }
 
     #[test]

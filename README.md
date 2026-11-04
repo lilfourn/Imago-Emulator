@@ -191,16 +191,20 @@ line between pixels, as on the handhelds' screens; **Scanlines** darkens
 the bottom of each row, as on a CRT. Both need at least two of your
 display's pixels to each console pixel, and show nothing in a smaller
 window. Everything applies after colour correction and turns with the
-screens. DS frames drawn at a higher 3D resolution get Smooth for now,
-as Pixel Art would smear their 3D. On a Mac without Metal, Scale2x and
+screens. With DS 3D drawn larger, Pixel Art works on the 2D only (menus,
+text, sprites, the touch screen): wherever the 3D added detail, the
+larger 3D is drawn smooth instead. On a Mac without Metal, Scale2x and
 Scale3x stand in for Pixel Art. xBRZ is not offered: its code is GPL-3.0,
 which the project doesn't take (see the
 [legal policy](docs/PRD.md#9-legal-policy)).
 
-View > 3D Resolution draws DS 3D at 2×, 3× or 4× its own resolution
-(`resolution_3d` under `[video]` in settings.toml goes up to 8): polygon
-edges, textures and shading come out smooth, and the 2D layers around
-them stay pixel for pixel. The game still sees native 3D wherever it reads
+View > 3D Resolution draws DS and 3DS 3D larger than its own resolution:
+polygon edges, textures and shading come out smooth, and the 2D layers
+around them stay pixel for pixel. **Match Display**, the default, draws it
+about as large as the screens are shown on your display, up to 4×, and
+changes only when the window, display or layout does; the upscaler covers
+the rest. Or pick Native (1×), 2×, 3×, 4×, 6× or 8× (`resolution_3d` under
+`[video]` in settings.toml: `"auto"` or 1 to 8). The game still sees native 3D wherever it reads
 it back, so emulation and save states are the same at every resolution.
 States hold only native frames, so the first frame after loading one, and
 the frames rewind steps back through, show 3D at the native resolution.

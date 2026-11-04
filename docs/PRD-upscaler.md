@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Phase 1 built (2026-11-04); phases 2–4 to do |
+| Status | Phase 1 and most of phase 2 built (2026-11-04); UP-12, UP-14 and phases 3–4 to do |
 | Date | 2026-11-04 |
 | Owner | Luke Fournier |
 | Research | [research/upscaling.md](research/upscaling.md) |
@@ -193,7 +193,17 @@ committed.
 
 Upscaling the composed frame would run the pixel-art scaler over smooth
 3D and smear it. melonDS filters 2D before composing it with 3D, and so
-should we:
+should we.
+
+**Built (2026-11-04), without the core's help:** the frame itself says
+where 3D added detail. Everything but the larger 3D is enlarged as
+squares, so a console pixel whose square is all one colour carries no 3D
+detail. On the GPU, the frame is split into console pixels, those within
+two console pixels of detail are drawn from the larger frame, smooth, and
+the rest get OmniScale (`shaders/beside_3d.metal`). That does points 1
+and 2 below in one, needs no mask from `emu-nds`, and works the same for a 3DS game
+with Pixel Art chosen. A flat part of the 3D gets OmniScale, which draws flat colour the
+same. The plan, kept for reference:
 
 1. **Per screen, per frame (P1).** The core reports whether each screen
    showed 3D this frame. A screen that did not is upscaled from its
@@ -307,7 +317,7 @@ is wanted, **P2** comes later. Phases are in section 9.
 | UP-2 | Pixel Art mode: the bake-off's winner (6.2), rendering straight to any output size, with diagonals and curves rebuilt and 5–8 px text still legible. ✅ OmniScale (UQ-2). | P0 · 1 |
 | UP-3 | Smooth mode: MetalFX spatial scaler, to any output size. ✅ | P0 · 1 |
 | UP-4 | Sharp Pixels, LCD Grid and Scanlines produce what today's CPU path produces, to within ±1 per channel. ✅ the CPU path, unchanged. | P0 · 1 |
-| UP-5 | Auto picks per system as in 6.3. It is the default; the default for 3D resolution is Match Display. ✅ for the picture; Match Display is phase 2. | P0 · 1–2 |
+| UP-5 | Auto picks per system as in 6.3. It is the default; the default for 3D resolution is Match Display. ✅ both: Auto picture (phase 1) and Match Display 3D (phase 2). | P0 · 1–2 |
 | UP-6 | Without a Metal device, or if the video stage fails to start, today's CPU path runs, and a notice says so once. ✅ Scale2x and Scale3x stand in for Pixel Art, and a notice says why. | P0 · 1 |
 | UP-7 | View > Picture, View > 3D Resolution, the settings window rows and the settings file keys of 6.7, with old `filter` values migrated. ✅ View > Picture, its settings window row and `picture`, with old `filter` values migrated; View > 3D Resolution is phase 2. | P0 · 1 |
 | UP-8 | Shaders are ported only from MIT, BSD, zlib, MPL-2.0 or Apache sources, keep their licence headers, and compile from source at run time. ✅ OmniScale from SameBoy (Expat), its notice kept. | P0 · 1 |
@@ -330,10 +340,10 @@ is wanted, **P2** comes later. Phases are in section 9.
 
 | ID | Requirement | Priority · Phase |
 |---|---|---|
-| UP-10 | Match Display for DS and 3DS 3D: the smallest whole factor at least the largest target's device pixels per console pixel, within the system's cap. Recomputed only when targets change, never during play. | P0 · 2 |
-| UP-11 | DS menus and the settings window offer 1–8× (the core's range). | P0 · 2 |
+| UP-10 | Match Display for DS and 3DS 3D: the smallest whole factor at least the largest target's device pixels per console pixel, within the system's cap. Recomputed only when targets change, never during play. ✅ capped at 4× for both (UQ-4); rounds up unless a quarter or less above a whole number; old files' 1× becomes Match Display. | P0 · 2 |
+| UP-11 | DS menus and the settings window offer 1–8× (the core's range). ✅ Match Display, 1×, 2×, 3×, 4×, 6×, 8×. | P0 · 2 |
 | UP-12 | The DS's larger 3D is drawn only for frames the window will show. The 3D the game reads and the frame CRCs stay the same. | P1 · 2 |
-| UP-13 | DS 2D beside upscaled 3D gets Pixel Art: per screen when no 3D showed, and per pixel through a 3D mask (6.4). | P1 · 2 |
+| UP-13 | DS 2D beside upscaled 3D gets Pixel Art: per screen when no 3D showed, and per pixel through a 3D mask (6.4). ✅ found from the frame on the GPU, not a core mask (6.4); both screens in one GPU submit, 1.6 ms a frame in Platinum at 4×. | P1 · 2 |
 | UP-14 | 3DS texture filter option (6.5), off by default, with the `xBRZ freescale` value sent for xBRZ. | P1 · 2 |
 | UP-15 | 3DS frames through shared memory, and the 3DS cap raised to at least 8× while holding full speed at that scale. | P1 · 3 |
 | UP-16 | Zero-copy drawing through a GPUI BGRA surface, if UP-S5's budget leaves the external display below its full size at 1× speed. | P1 · 3 |
@@ -398,7 +408,8 @@ Acceptance tests:
    upload at the largest targets and set UP-S5's budget.
 2. **3D that follows the display.** UP-10 to UP-14: Match Display, the
    DS's 1–8× in menus, larger 3D only for shown frames, DS 2D beside 3D,
-   the 3DS texture filter.
+   the 3DS texture filter. ✅ UP-10, UP-11 and UP-13 (2026-11-04). Left:
+   UP-12, UP-14.
 3. **Bigger and cheaper.** UP-15 and UP-16: 3DS shared memory and a
    higher cap; zero-copy drawing if phase 1's measurements call for it.
 4. **Later.** UP-17 to UP-22.
@@ -423,6 +434,6 @@ Acceptance tests:
 | UQ-1 | ~~Should Auto (upscaled) be the default for existing players, or should they opt in?~~ On by default, decided by the owner (2026-11-04): every player starts upscaled and turns it off from View > Picture. Settings files from before View > Picture start on Auto too, whatever filter they had. | Phase 1 |
 | UQ-2 | ~~Which Pixel Art algorithm wins the bake-off: OmniScale, ScaleFX or MMPX?~~ OmniScale for phase 1: it draws straight to any size in one pass, and on the GB test image it rounded the eyes, straightened the nose's diagonal and kept text and large blocks crisp. ScaleFX and MMPX were not ported; compare them on real games if Pixel Art falls short. | Phase 1 |
 | UQ-3 | ~~One View > Picture menu, or keep View > Filter and add View > Upscaling?~~ One View > Picture menu, built. | Phase 1 |
-| UQ-4 | What cap should Match Display use for DS 3D, given 3× fast-forward? | Phase 2 |
+| UQ-4 | ~~What cap should Match Display use for DS 3D, given 3× fast-forward?~~ 4×, for the DS and the 3DS: the DS ran at 2.7× full speed with 4× 3D (White's bedroom, headless), close to the 3× fast-forward the owner keeps on, and 4× is the most the 3DS helper reads back. Revisit with UP-12 and the pacing benchmarks. | Phase 2 |
 | UQ-5 | For zero copy, patch GPUI 0.2.2, or move to a Zed revision that has BGRA surfaces once they merge? That would also bring the `CAMetalDisplayLink` pacing fix (PRD Q2). | Phase 3 |
 | UQ-6 | Should RPG Maker games whose art is drawn at twice its pixel size get Pixel Art at the art's own pixel size, without spoiling their text? | Phase 4 |

@@ -1,6 +1,7 @@
 //! The main window: draws the running game's screens and turns keyboard,
 //! gamepad, mouse and file events into emulator commands.
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,10 +24,11 @@ use crate::app::{
     LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore,
     PictureAuto, PictureLcdGrid, PicturePixelArt, PictureScanlines, PictureSharpPixels,
     PictureSmooth, PreviousStateSlot, Randomize, RemoveFromLibrary, Reset, Resolution3d1x,
-    Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise,
-    RunScript, SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
-    TOP_BAR, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMicrophone,
-    TogglePause, ToggleRecording, ToggleSlowMotion, ToggleWindowControls,
+    Resolution3d2x, Resolution3d3x, Resolution3d4x, Resolution3d6x, Resolution3d8x,
+    Resolution3dMatchDisplay, RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot,
+    SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer, TOP_BAR, ToggleColorCorrection,
+    ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause, ToggleRecording,
+    ToggleSlowMotion, ToggleWindowControls,
 };
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
@@ -45,7 +47,7 @@ use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Loaded};
 use crate::filter::Filter;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
-use crate::gpu_upscale::{Gpu, GpuDevice, GpuError, Method};
+use crate::gpu_upscale::{Gpu, GpuDevice, GpuError, Method, Request};
 use crate::key_guide;
 use crate::key_routes::{KeyRoutes, Route};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
@@ -54,7 +56,7 @@ use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist::{self, GameFiles};
-use crate::picture::{self, Look, Picture};
+use crate::picture::{self, Look, Picture, Resolution3d};
 use crate::probe;
 use crate::randomize_window::{self, RandomizeWindow};
 use crate::romhack::{self, MakeError};
@@ -113,7 +115,7 @@ pub struct EmulatorView {
     /// How fast fast-forward and slow motion run, from the settings file.
     speeds: Speeds,
     /// How many times its own resolution DS and 3DS 3D is drawn at.
-    resolution_3d: u32,
+    resolution_3d: Resolution3d,
     /// The computer's microphone, while the user has it on: off at every
     /// launch.
     microphone: Option<(Microphone, Loudness)>,
@@ -238,6 +240,8 @@ struct Session {
     recording: bool,
     /// Per placement: the image drawn there and what it shows.
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
+    /// The 3D resolution last sent to the core.
+    render_scale: u32,
     /// The ambient backdrop, while it is shown.
     ambient: Option<Glow>,
     /// The display whose refresh the emulation thread was last told of,
@@ -278,21 +282,28 @@ enum Upscaler {
 }
 
 impl Upscaler {
-    /// `frame` upscaled by `method` to `width` × `height`, or `None` while
-    /// the GPU is starting or once it is off.
+    /// An image of each request's screen, upscaled together, or `None`
+    /// while the GPU is starting or once it is off.
     ///
     /// # Errors
     ///
     /// The [`GpuError`] that turned it off, once.
-    fn image(
+    fn images(
         &mut self,
-        frame: &Frame,
-        method: Method,
-        (width, height): (u32, u32),
-    ) -> Result<Option<Arc<RenderImage>>, GpuError> {
+        requests: &[Request<'_>],
+    ) -> Result<Option<Vec<Arc<RenderImage>>>, GpuError> {
         match self {
-            Self::Ready(gpu) => match gpu.upscale(frame, method, width, height) {
-                Ok(bgra) => Ok(Some(video::bgra_image(width, height, bgra))),
+            Self::Ready(_) if requests.is_empty() => Ok(Some(Vec::new())),
+            Self::Ready(gpu) => match gpu.upscale_all(requests) {
+                Ok(images) => Ok(Some(
+                    requests
+                        .iter()
+                        .zip(images)
+                        .map(|(request, bgra)| {
+                            video::bgra_image(request.width, request.height, bgra)
+                        })
+                        .collect(),
+                )),
                 Err(error) => {
                     *self = Self::Off(None);
                     Err(error)
@@ -658,7 +669,21 @@ impl EmulatorView {
         let player_rom_paths = loaded.player_rom_paths().to_vec();
         let files = loaded.files().to_vec();
         let emulator = Emulator::start(loaded, events, audio_sink);
-        emulator.send(Command::SetRenderScale(self.resolution_3d));
+        // As the window lays the game out now; drawing it corrects this if
+        // its screens come out another size.
+        let viewport = window.viewport_size();
+        let placements = self.shown_layout().place_consoles(
+            info.screens,
+            consoles(&info),
+            (f32::from(viewport.width), f32::from(viewport.height)),
+        );
+        let render_scale = render_scale(
+            self.resolution_3d,
+            &info,
+            &placements,
+            window.scale_factor(),
+        );
+        emulator.send(Command::SetRenderScale(render_scale));
         // Pick up where the player left off, unless a battery save has
         // changed since: the emulation thread checks.
         emulator.send(Command::LoadCheckpoint(CHECKPOINT));
@@ -699,6 +724,7 @@ impl EmulatorView {
             correction: Correction::for_system(info.system),
             recording: false,
             images: Vec::new(),
+            render_scale,
             ambient: None,
             display: None,
             taken_at: None,
@@ -1906,18 +1932,28 @@ impl EmulatorView {
         self.save_settings(cx);
     }
 
-    /// Draws DS and 3DS 3D at `scale` times its own resolution and saves
-    /// that for next launch.
-    fn set_resolution_3d(&mut self, scale: u32, cx: &mut Context<Self>) {
-        self.resolution_3d = scale;
-        self.send(Command::SetRenderScale(scale));
-        let message = match (scale, self.session.as_ref().map(|s| s.info.system)) {
-            (1, _) => "3D at the native resolution".to_owned(),
-            (_, Some(System::Nds | System::N3ds) | None) => format!("3D at {scale}× resolution"),
-            (_, Some(_)) => format!("3D at {scale}× resolution, for DS and 3DS games"),
+    /// Draws DS and 3DS 3D at `resolution` from now on, and saves that for
+    /// next launch. The next draw sends the core the scale it comes to.
+    fn set_resolution_3d(&mut self, resolution: Resolution3d, cx: &mut Context<Self>) {
+        self.resolution_3d = resolution;
+        let three_d = matches!(
+            self.session.as_ref().map(|session| session.info.system),
+            Some(System::Nds | System::N3ds) | None
+        );
+        let mut message = match resolution {
+            Resolution3d::MatchDisplay => format!(
+                "3D resolution matches the display, up to {}×",
+                picture::MATCH_DISPLAY_CAP
+            ),
+            Resolution3d::Times(1) => "3D at the native resolution".to_owned(),
+            Resolution3d::Times(scale) => format!("3D at {scale}× resolution"),
         };
+        if !three_d {
+            message.push_str(", for DS and 3DS games");
+        }
         self.show_notice(message, cx);
         self.save_settings(cx);
+        cx.notify();
     }
 
     /// Starts or stops listening to the computer's microphone for DS games.
@@ -2436,13 +2472,15 @@ impl Session {
             })
             .collect();
         let drawn = picture::within_budget(&targets, picture::MAX_UPSCALED_PIXELS);
-        let mut failed = None;
-        for (((slot, placement), &target), &size) in self
+
+        // The screens to draw again, each frame colour corrected and turned.
+        let mut redraws = Vec::new();
+        for (index, ((slot, placement), &target)) in self
             .images
             .iter_mut()
             .zip(placements)
             .zip(&targets)
-            .zip(&drawn)
+            .enumerate()
         {
             let Some(frame) = self.frames.get(placement.screen) else {
                 continue;
@@ -2463,37 +2501,71 @@ impl Session {
             // to each console pixel.
             let native = self.info.screens.get(placement.screen);
             let cell = native.map_or(1, |native| frame.size().width / native.width.max(1));
-            let corrected = correction.map(|correction| correction.frame(frame));
-            let frame = corrected.as_ref().unwrap_or(frame);
-            let turned =
-                (key.rotation != Rotation::Upright).then(|| video::turn(frame, key.rotation));
-            let frame = turned.as_ref().unwrap_or(frame);
+            let mut frame = Cow::Borrowed(frame);
+            if let Some(correction) = correction {
+                frame = Cow::Owned(correction.frame(&frame));
+            }
+            if key.rotation != Rotation::Upright {
+                frame = Cow::Owned(video::turn(&frame, key.rotation));
+            }
+            redraws.push((index, key, frame, cell));
+        }
 
-            // Pixel Art would smear larger 3D, already smooth: until the
-            // DS says which pixels are 3D (PRD UP-13), those frames are
-            // enlarged smoothly. Only enlargements go to the GPU.
-            let method = match look {
-                Look::Upscaled(Method::PixelArt) if cell <= 1 => Some(Method::PixelArt),
-                Look::Upscaled(_) => Some(Method::Smooth),
-                _ => None,
-            };
-            let shown = frame.size();
-            let enlarges = size.0 > u32::from(shown.width) && size.1 > u32::from(shown.height);
-            let upscaled = method.filter(|_| enlarges).and_then(|method| {
-                upscaler.image(frame, method, size).unwrap_or_else(|error| {
-                    failed = Some(error);
-                    None
-                })
-            });
+        // Upscaled together on the GPU: only enlargements, of the console's
+        // pixels for Pixel Art, which on a frame with larger 3D works on the
+        // parts the 3D left alone, or of the frame itself for Smooth.
+        let requests: Vec<(usize, Request<'_>)> = redraws
+            .iter()
+            .enumerate()
+            .filter_map(|(at, (index, key, frame, cell))| {
+                let Look::Upscaled(method) = key.look else {
+                    return None;
+                };
+                let shown = frame.size();
+                let cell = (*cell).max(1);
+                let base = match method {
+                    Method::PixelArt => (shown.width / cell, shown.height / cell),
+                    Method::Smooth => (shown.width, shown.height),
+                };
+                let (width, height) = drawn[*index];
+                let enlarges = width > u32::from(base.0) && height > u32::from(base.1);
+                enlarges.then_some((
+                    at,
+                    Request {
+                        frame,
+                        method,
+                        cell: u32::from(cell),
+                        width,
+                        height,
+                    },
+                ))
+            })
+            .collect();
+        let gpu_requests: Vec<Request<'_>> = requests.iter().map(|(_, request)| *request).collect();
+        let mut failed = None;
+        let mut upscaled: Vec<Option<Arc<RenderImage>>> = vec![None; redraws.len()];
+        match upscaler.images(&gpu_requests) {
+            Ok(Some(images)) => {
+                for ((at, _), image) in requests.iter().zip(images) {
+                    upscaled[*at] = Some(image);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => failed = Some(error),
+        }
+
+        // The rest on the CPU: filtered, then enlarged by a whole factor.
+        for ((index, key, frame, cell), upscaled) in redraws.into_iter().zip(upscaled) {
             let image = upscaled.unwrap_or_else(|| {
+                let width = frame.size().width;
                 let factor =
-                    video::prescale_factor(shown.width, placement.rect.width, scale_factor);
-                let filter = cpu_filter(look, factor, upscaler.is_off());
+                    video::prescale_factor(width, placements[index].rect.width, scale_factor);
+                let filter = cpu_filter(key.look, factor, upscaler.is_off());
                 let (filtered, factor) =
-                    filter.apply(frame, factor, usize::from(cell), key.rotation);
+                    filter.apply(&frame, factor, usize::from(cell), key.rotation);
                 video::render_image(&filtered, factor)
             });
-            *slot = Some((key, image));
+            self.images[index] = Some((key, image));
         }
         failed
     }
@@ -2665,17 +2737,26 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleWindowControls, _, cx| {
                 this.set_window_controls(!this.window_controls, cx);
             }))
+            .on_action(cx.listener(|this, _: &Resolution3dMatchDisplay, _, cx| {
+                this.set_resolution_3d(Resolution3d::MatchDisplay, cx);
+            }))
             .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
-                this.set_resolution_3d(1, cx);
+                this.set_resolution_3d(Resolution3d::Times(1), cx);
             }))
             .on_action(cx.listener(|this, _: &Resolution3d2x, _, cx| {
-                this.set_resolution_3d(2, cx);
+                this.set_resolution_3d(Resolution3d::Times(2), cx);
             }))
             .on_action(cx.listener(|this, _: &Resolution3d3x, _, cx| {
-                this.set_resolution_3d(3, cx);
+                this.set_resolution_3d(Resolution3d::Times(3), cx);
             }))
             .on_action(cx.listener(|this, _: &Resolution3d4x, _, cx| {
-                this.set_resolution_3d(4, cx);
+                this.set_resolution_3d(Resolution3d::Times(4), cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d6x, _, cx| {
+                this.set_resolution_3d(Resolution3d::Times(6), cx);
+            }))
+            .on_action(cx.listener(|this, _: &Resolution3d8x, _, cx| {
+                this.set_resolution_3d(Resolution3d::Times(8), cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleMicrophone, _, cx| {
                 this.toggle_microphone(cx);
@@ -2764,6 +2845,17 @@ impl Render for EmulatorView {
                     ..placement
                 })
                 .collect();
+            // 3D as large as the screens are now shown, for Match Display.
+            let scale = render_scale(
+                self.resolution_3d,
+                &session.info,
+                &self.placements,
+                scale_factor,
+            );
+            if scale != session.render_scale {
+                session.render_scale = scale;
+                session.emulator.send(Command::SetRenderScale(scale));
+            }
             // Frames keep in step with the refreshes of the display the
             // window is on.
             let display = window.display(cx).map(|display| display.id());
@@ -3183,6 +3275,30 @@ fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
 /// How many consoles a session shows side by side, each laid out on its
 /// own: one, or each player's for linked systems with several screens
 /// each (two DSes). Single-screen consoles share one layout instead.
+/// The 3D resolution to draw `info`'s game at: the one chosen, or for
+/// Match Display, as large as `placements` show its screens on a display
+/// of `scale_factor` device pixels to a logical one. Systems without 3D
+/// stay at 1.
+fn render_scale(
+    resolution: Resolution3d,
+    info: &CoreInfo,
+    placements: &[Placement],
+    scale_factor: f32,
+) -> u32 {
+    match resolution {
+        Resolution3d::Times(scale) => scale,
+        Resolution3d::MatchDisplay if matches!(info.system, System::Nds | System::N3ds) => {
+            picture::matched_resolution(placements.iter().filter_map(|placement| {
+                let native = info.screens.get(placement.screen)?;
+                let rect = placement.rect;
+                let target = picture::device_size(rect.width, rect.height, scale_factor);
+                Some((target, placement.rotation.turn_size(*native)))
+            }))
+        }
+        Resolution3d::MatchDisplay => 1,
+    }
+}
+
 fn consoles(info: &CoreInfo) -> usize {
     let players = info.players.max(1);
     if info.screens.len() > players {
