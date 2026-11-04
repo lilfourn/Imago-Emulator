@@ -22,6 +22,7 @@ emu-3ds.workspace = true
 emu-cheats.workspace = true
 emu-core.workspace = true
 emu-cores.workspace = true
+emu-guide.workspace = true
 emu-patch.workspace = true
 emu-script.workspace = true
 emu-state.workspace = true

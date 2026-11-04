@@ -1,0 +1,17 @@
+[package]
+name = "emu-guide"
+description = "Guide, the chat about the game being played: OpenRouter sign-in, its key, and its API, through curl."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The versions emu-app already uses.
+base64 = "0.22"
+serde_json = "1"
+sha2 = "0.10"
+thiserror.workspace = true
+
+[lints]
+workspace = true

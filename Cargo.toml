@@ -24,6 +24,7 @@ emu-3ds = { path = "crates/emu-3ds" }
 emu-cheats = { path = "crates/emu-cheats" }
 emu-patch = { path = "crates/emu-patch" }
 emu-script = { path = "crates/emu-script" }
+emu-guide = { path = "crates/emu-guide" }
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

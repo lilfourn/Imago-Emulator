@@ -43,6 +43,7 @@ mod memory_viewer;
 mod meter;
 mod microphone;
 mod mov;
+mod openrouter;
 mod persist;
 mod picture;
 mod probe;
