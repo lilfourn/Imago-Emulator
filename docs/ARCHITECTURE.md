@@ -366,7 +366,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | The randomizer | `~/Library/Application Support/ds-emulator/Randomizer/upr-fvx-<version>/` | FVX's Mac release as it ships, with its own Java, see `emu-app/src/randomizer.rs` |
 | An RPG Maker game's hidden player | `~/Library/Application Support/ds-emulator/RPG Maker/<CRC-32 of the folder's path>/Player.app` | A copy of the game's player app, signed ad hoc; the bridge script beside it, see `emu-mkxp/src/player.rs` |
 | The 3DS core and MoltenVK | `~/Library/Application Support/ds-emulator/3DS/azahar-<version>/`, `…/3DS/moltenvk-<version>/` | Azahar's libretro core and MoltenVK as their releases ship them, with their licences, see `emu-3ds/src/install.rs` |
-| The emulated 3DS's own files | `~/Library/Application Support/ds-emulator/3DS/Azahar/` | Azahar's NAND, SD card (where 3DS games keep their own saves, in `title/<id>/data/` and `extdata/<id>/`) and shader caches; the helper's log is `3DS/helper.log` |
+| The emulated 3DS's own files | `~/Library/Application Support/ds-emulator/3DS/Azahar/` | Azahar's NAND, SD card (where 3DS games keep their own saves, in `title/<id>/data/` and `extdata/<id>/`) and shader caches; the helper's log is `3DS/helper.log`, and `3DS/helper.lock` keeps a second helper off these files until the first has quit |
 
 Writes go to `name.tmp` first and are renamed over the target, except
 recordings, which are written as they go and indexed when they stop.

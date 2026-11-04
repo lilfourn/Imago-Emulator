@@ -12,6 +12,7 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use emu_core::ScreenSize;
 
@@ -240,6 +241,40 @@ pub fn run_helper_if_asked() -> Option<i32> {
     unsafe { libc::_exit(code) }
 }
 
+/// How long a helper waits for the one before it to let go of the
+/// console's files: beyond the two seconds the app gives a helper to quit
+/// before ending it.
+const CONSOLE_WAIT: Duration = Duration::from_secs(5);
+
+/// Waits for any helper still running on the console's files in `data` to
+/// exit, and holds them until this one does: `helper.lock`, which the
+/// system lets go of as the process ends. A game that is started over, or
+/// closed and opened again at once, starts a helper while the last is
+/// still closing, and two cores on one emulated NAND and SD card could
+/// each write over the other's files. Starts anyway after
+/// [`CONSOLE_WAIT`], or if the lock cannot be had at all.
+fn take_console(data: &Path) -> Option<File> {
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(data.join("helper.lock"))
+        .ok()?;
+    let deadline = Instant::now() + CONSOLE_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                eprintln!("3DS helper: another helper still has the console's files");
+                return None;
+            }
+        }
+    }
+}
+
 /// Takes the protocol's end of stdout, and sends what anything else in the
 /// process prints there (the core, MoltenVK) to stderr, the helper's log,
 /// so it cannot break the link.
@@ -276,6 +311,8 @@ pub(crate) fn interactive_thread() {
 /// or goes.
 fn serve(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> io::Result<()> {
     interactive_thread();
+    // Held until the process ends.
+    let _console = take_console(data);
     let mut out = BufWriter::with_capacity(1 << 20, take_stdout()?);
     let mut requests = BufReader::new(io::stdin().lock());
     let mut session = match Session::start(core, moltenvk, game, data) {
@@ -956,6 +993,25 @@ mod tests {
         let (top, bottom) = split(&odd, &mut bytes);
         assert_eq!((top, bottom), (crate::SCREENS[0], crate::SCREENS[1]));
         assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn a_helper_waits_for_the_last_to_let_go_of_the_console() {
+        let dir = std::env::temp_dir().join(format!("emu-3ds-console-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let last = take_console(&dir).expect("the files are free");
+        let started = Instant::now();
+        let letting_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(last);
+        });
+        let next = take_console(&dir);
+        assert!(next.is_some(), "taken once the last let go");
+        assert!(started.elapsed() >= Duration::from_millis(200), "waited");
+        letting_go.join().unwrap();
+        drop(next);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

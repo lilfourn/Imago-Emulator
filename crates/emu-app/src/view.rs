@@ -1577,12 +1577,14 @@ impl EmulatorView {
     /// again. Other cartridges, such as a GBA game in a DS's slot or the
     /// other player's game, keep theirs. The battery save is kept as
     /// `game.sav.bak`, or `.bak2` and so on, never replacing an earlier
-    /// one, in case it was a mistake.
+    /// one, in case it was a mistake; so are the folders a 3DS game keeps
+    /// its own save in.
     fn start_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let roms = session.rom_paths.clone();
+        let rom = roms.get(self.active_player).cloned();
         let save = session.player_files_of(self.active_player).backup();
         let checkpoint = session.state_path(CHECKPOINT);
         // Stopping writes the battery saves, so the save is set aside after.
@@ -1591,11 +1593,22 @@ impl EmulatorView {
         let erased = remove_if_present(&checkpoint)
             .and_then(|()| remove_if_present(&persist::saves_record_path(&checkpoint)))
             .and_then(|()| remove_if_present(&persist::state_picture_path(&checkpoint)))
-            .and_then(|()| persist::set_aside(&save));
+            .and_then(|()| persist::set_aside(&save))
+            .and_then(|kept| {
+                // A 3DS game's own save is on the core's SD card.
+                let own = rom
+                    .as_deref()
+                    .map_or(Ok(Vec::new()), emulator::set_aside_own_saves)?;
+                Ok((kept, own))
+            });
         // Said once the game is running again, after the loading notice.
         let said = match erased {
-            Ok(Some(kept)) => Some(format!("Your old save is kept as {}", file_name(&kept))),
-            Ok(None) => None,
+            Ok((Some(kept), _)) => Some(format!("Your old save is kept as {}", file_name(&kept))),
+            Ok((None, own)) if !own.is_empty() => Some(
+                "Your old save is kept on the 3DS's SD card, in folders renamed to end in .bak"
+                    .to_owned(),
+            ),
+            Ok((None, _)) => None,
             Err(error) => Some(format!("Cannot erase progress: {error}")),
         };
         self.keep_for_start(said);

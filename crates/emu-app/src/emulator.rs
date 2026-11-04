@@ -356,6 +356,27 @@ fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
     })
 }
 
+/// Sets aside the saves the game at `rom` keeps outside its battery save,
+/// so that it starts from the very beginning: a 3DS game's save data and
+/// extdata on the core's emulated SD card, each folder renamed beside
+/// itself to `.bak`, or `.bak2` and so on, never replacing an earlier one.
+/// Returns where they went; none for other games.
+///
+/// # Errors
+///
+/// Fails if a folder cannot be renamed; those set aside before stay so.
+pub fn set_aside_own_saves(rom: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let Some(data) = emu_3ds::data_dir().filter(|_| emu_3ds::is_game(rom)) else {
+        return Ok(Vec::new());
+    };
+    let folders = emu_3ds::SaveData::of(rom, &data).folders();
+    let mut kept = Vec::new();
+    for folder in folders {
+        kept.extend(persist::set_aside(&folder)?);
+    }
+    Ok(kept)
+}
+
 /// The file the 3DS core opens for the game at `path`: the game itself,
 /// or for an installable title, the executable it holds, written into the
 /// games folder.

@@ -218,3 +218,32 @@ frames over 16.7 ms and 34–45 ms over in all, and the game started in about
 froze for 7.9 s in all before, the longest 1.96 s, and 1.7 s after, the
 longest 0.25 s. States still saved and loaded, which rebuilds the core's
 renderer and its pipeline cache.
+
+## Update, 2026-11-04: saves, checked end to end
+
+Pokémon Omega Ruby's own saves were checked from the game's Save menu on,
+in the helper and in the release app with a home folder of its own:
+- The game makes its save data (`title/00040000/0011c400/data/`) and
+  extdata (`extdata/00000000/000011C5/`) on first start, and Save writes
+  them at once: a save made just before the helper was killed with
+  `kill -9` was whole, and the game continued from it on the next start.
+  The app watches those four files, so a checkpoint goes with them.
+- Closing the game saves its checkpoint (a 13.6 MB state), and opening it
+  again picks it up; after a newer in-game save, the checkpoint is left
+  alone and the game continues from its own save.
+- The helper closes a game in under 0.1 s, well within the two seconds
+  the app gives it.
+
+Two things were fixed:
+1. **Start Over now starts a 3DS game over.** It removed the checkpoint
+   and set aside a battery save a 3DS game doesn't have, so the game
+   carried on from its own save. It now sets aside the game's save data
+   and extdata folders too (`emulator::set_aside_own_saves`), renamed to
+   end in `.bak`, never replacing an earlier one, and the game begins
+   anew.
+2. **One helper on the console's files at a time.** A game that is
+   started over, or closed and opened again at once, starts a helper
+   while the last may still be closing. Each helper now holds
+   `3DS/helper.lock` for as long as it runs and waits up to 5 s for the
+   last to let go, so two cores never write the same emulated NAND and SD
+   card.
