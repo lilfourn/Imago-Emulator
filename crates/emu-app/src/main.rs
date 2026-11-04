@@ -34,6 +34,7 @@ mod key_guide;
 mod key_routes;
 mod latch;
 mod layout;
+mod leftovers;
 mod library;
 mod library_view;
 mod memory_viewer;
