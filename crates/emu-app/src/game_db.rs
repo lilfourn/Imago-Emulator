@@ -89,6 +89,44 @@ impl GameDb {
     }
 }
 
+/// The likeliest of `names`, No-Intro names of releases of one game, to be
+/// the one meant, as [`GameDb::by_title`] picks.
+pub fn likeliest<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    names.into_iter().min_by_key(|name| preference(name))
+}
+
+/// What tells one game's title from another's: lower case, without
+/// accents, tags or punctuation, and with the article in front, so a ROM's
+/// own `"Pokémon: White Version"` and No-Intro's
+/// `"Pokemon - White Version (USA, Europe)"` are both
+/// `"pokemon white version"`.
+pub fn title_key(title: &str) -> String {
+    let mut key = String::new();
+    for c in display_title(title).chars().flat_map(char::to_lowercase) {
+        let c = unaccented(c);
+        if c.is_alphanumeric() {
+            key.push(c);
+        } else if !key.is_empty() && !key.ends_with(' ') {
+            key.push(' ');
+        }
+    }
+    key.trim_end().to_owned()
+}
+
+/// `c` without its accent, for the accented letters game titles use.
+fn unaccented(c: char) -> char {
+    match c {
+        'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+        'è' | 'é' | 'ê' | 'ë' => 'e',
+        'ì' | 'í' | 'î' | 'ï' => 'i',
+        'ò' | 'ó' | 'ô' | 'ö' | 'õ' => 'o',
+        'ù' | 'ú' | 'û' | 'ü' => 'u',
+        'ñ' => 'n',
+        'ç' => 'c',
+        _ => c,
+    }
+}
+
 /// How unlikely release `name` is to be the one meant, lowest first: by
 /// region, with unofficial and unfinished releases last.
 fn preference(name: &str) -> usize {
@@ -261,6 +299,41 @@ game (
         );
         assert_eq!(display_title("Metroid Fusion (USA)"), "Metroid Fusion");
         assert_eq!(display_title("Tetris [b1]"), "Tetris");
+    }
+
+    #[test]
+    fn titles_match_whatever_their_accents_tags_and_punctuation() {
+        let key = title_key("Pokemon - White Version (USA, Europe) (NDSi Enhanced)");
+        assert_eq!(key, "pokemon white version");
+        assert_eq!(title_key("Pokémon: White Version"), key);
+        assert_eq!(
+            title_key("Legend of Zelda, The - The Minish Cap (USA)"),
+            title_key("The Legend of Zelda: The Minish Cap")
+        );
+        assert_eq!(
+            title_key("Mario _ Luigi - Superstar Saga (USA)"),
+            title_key("Mario & Luigi: Superstar Saga")
+        );
+        assert_ne!(
+            title_key("Pokemon Platinum Redux"),
+            title_key("Pokemon Platinum")
+        );
+        assert_eq!(title_key("!!!"), "");
+    }
+
+    #[test]
+    fn the_likeliest_release_is_the_usa_one_then_world_then_europe() {
+        let names = [
+            "Tetris (Japan)",
+            "Tetris (Europe) (Beta)",
+            "Tetris (World) (Rev 1)",
+        ];
+        assert_eq!(likeliest(names), Some("Tetris (World) (Rev 1)"));
+        assert_eq!(
+            likeliest(["Tetris (USA)", "Tetris (World)"]),
+            Some("Tetris (USA)")
+        );
+        assert_eq!(likeliest([]), None);
     }
 
     #[test]

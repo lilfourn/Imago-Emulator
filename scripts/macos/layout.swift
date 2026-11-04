@@ -131,14 +131,14 @@ func ink(in rect: CGRect, on: RGB? = nil, tolerance: Int = 24) -> CGRect? {
 /// gap. A label's first letter is a capital or a digit, so this spans its
 /// cap height, from which text is centred: descenders and accents don't
 /// count.
-func firstGlyph(in rect: CGRect, on: RGB? = nil) -> CGRect? {
+func firstGlyph(in rect: CGRect, on: RGB? = nil, tolerance: Int = 24) -> CGRect? {
     let back = on ?? background(rect)
-    guard let all = ink(in: rect, on: back) else { return nil }
+    guard let all = ink(in: rect, on: back, tolerance: tolerance) else { return nil }
     var x = all.minX
-    while x < all.maxX, ink(in: CGRect(x: x, y: all.minY, width: step, height: all.height), on: back) != nil {
+    while x < all.maxX, ink(in: CGRect(x: x, y: all.minY, width: step, height: all.height), on: back, tolerance: tolerance) != nil {
         x += step
     }
-    return ink(in: CGRect(x: all.minX, y: all.minY, width: x - all.minX, height: all.height), on: back)
+    return ink(in: CGRect(x: all.minX, y: all.minY, width: x - all.minX, height: all.height), on: back, tolerance: tolerance)
 }
 /// The lines of text inked in `rect`, top to bottom, split at blank rows.
 func lines(in rect: CGRect) -> [CGRect] {
@@ -238,6 +238,10 @@ if !screensShown {
 // 2. Buttons: their glyph or label is centred in them. An icon is centred
 //    by its ink; a label across by its ink and down by its first letter's.
 for (name, box) in parts("button:") {
+    // A button scrolled out of the window's view, or of the grid's, shows
+    // nothing.
+    if box.maxY > win.height || box.minY < 0 { continue }
+    if let grid = part("grid"), box.minY >= grid.minY, !grid.insetBy(dx: -1, dy: -1).contains(box) { continue }
     let back = background(box)
     guard let glyphs = ink(in: box.insetBy(dx: 1, dy: 1), on: back) else {
         check(false, "\(name) button shows something"); continue
@@ -259,6 +263,22 @@ if let close = closeButton, let lights = ink(in: close.insetBy(dx: -2, dy: -2)) 
     let midline = lights.midY
     if let bar = part("header.title"), let letter = firstGlyph(in: bar) {
         even("top bar title sits on the traffic lights' midline", letter.midY, midline, ("title", "lights"), textTolerance)
+    }
+    // The tabs between the library and the store: each label centred on
+    // its pill, and on the traffic lights' midline.
+    for (name, tab) in parts("tab:") {
+        let back = background(tab)
+        // In from the pill's round ends, whose corners are the track's
+        // colour, and clear of its anti-aliased top and bottom edges. Only
+        // strong ink counts: the title bar's edge effect shades an inactive
+        // window's chosen pill from top to bottom.
+        let inside = tab.insetBy(dx: tab.height / 2, dy: 2)
+        guard let glyphs = ink(in: inside, on: back, tolerance: 80),
+              let letter = firstGlyph(in: inside, on: back, tolerance: 80) else {
+            check(false, "\(name) tab shows its name"); continue
+        }
+        even("\(name) tab's name is centred across it", glyphs.midX, tab.midX, ("name", "tab"), textTolerance)
+        even("\(name) tab's name sits on the traffic lights' midline", letter.midY, midline, ("name", "lights"), textTolerance)
     }
     let icons = parts("button:").filter { $0.1.maxY <= 44 }.compactMap { name, box in ink(in: box.insetBy(dx: 1, dy: 1)).map { (name, $0) } }
     for (name, glyph) in icons {
@@ -308,9 +328,9 @@ if let field = part("field:search") {
     }
 }
 
-// 5. The games: the grid's sides mirror each other once they fill a row, a
-//    game without box art has its system centred on its plate, and each
-//    title is centred under its game.
+// 5. The games: the grid's sides mirror each other once they fill a row,
+//    each game's picture sits as far in from its tile's sides as from its
+//    top, and its title starts where the picture does and fits its box.
 let tiles = gameTiles
 if let first = tiles.first?.1 {
     let row = tiles.map { $0.1 }.filter { abs($0.minY - first.minY) < 1 }
@@ -319,20 +339,23 @@ if let first = tiles.first?.1 {
     }
 }
 for (index, tile) in tiles.prefix(6) {
-    if let art = part("tile.art:\(index)") {
-        let plateRect = plate(at: CGPoint(x: art.minX + 4, y: art.maxY - 4))
-        if plateRect.width < art.width + 1, plateRect.width > art.width / 2,
-           let glyphs = ink(in: plateRect.insetBy(dx: 2, dy: 2)), let letter = firstGlyph(in: plateRect.insetBy(dx: 2, dy: 2)) {
-            centered("game \(index)'s system", plateRect, CGRect(x: glyphs.minX, y: letter.minY, width: glyphs.width, height: letter.height),
-                     across: textTolerance, down: textTolerance)
-        }
+    guard let art = part("tile.art:\(index)") else { continue }
+    even("game \(index)'s picture is inset evenly", art.minX - tile.minX, tile.maxX - art.maxX, ("left", "right"))
+    even("game \(index)'s picture is as far from the sides as the top", art.minX - tile.minX, art.minY - tile.minY, ("side", "top"))
+    if let titleBox = part("tile.title:\(index)"), let line = lines(in: titleBox).first {
+        even("game \(index)'s title starts where its picture does", line.minX, art.minX, ("title", "picture"), textTolerance)
+        check(line.maxX < titleBox.maxX - 0.5,
+              "game \(index)'s title fits its box", "ink to \(f(line.maxX)), box to \(f(titleBox.maxX))")
     }
-    if let titleBox = part("tile.title:\(index)") {
-        for (number, line) in lines(in: titleBox).enumerated() {
-            even("game \(index)'s title line \(number + 1) is centred under it", line.midX, tile.midX, ("line", "game"), textTolerance)
-            check(line.minX > titleBox.minX + 0.5 && line.maxX < titleBox.maxX - 0.5,
-                  "game \(index)'s title line \(number + 1) fits its box", "ink from \(f(line.minX)) to \(f(line.maxX)), box from \(f(titleBox.minX)) to \(f(titleBox.maxX))")
-        }
+}
+
+// The game last played: as far in as everything else, its words as far
+// in from its side as from its foot.
+if let hero = part("hero") {
+    even("the last-played game's sides mirror each other", hero.minX, win.width - hero.maxX, ("left", "right"))
+    even("the last-played game is inset as far as the search field", hero.minX, edgeClearance, ("banner", "inset"))
+    if let resume = part("button:resume"), let title = part("hero.title"), let letter = firstGlyph(in: title) {
+        even("the last-played game's words are as far in as its button is up", letter.minX - hero.minX, hero.maxY - resume.maxY, ("side", "foot"), textTolerance)
     }
 }
 

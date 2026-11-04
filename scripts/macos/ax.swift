@@ -100,13 +100,23 @@ case "key":
         "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38,
         "k": 40, "n": 45, "m": 46,
     ]
-    guard let code = codes[args[3]] else { print("unknown key \(args[3])"); exit(1) }
-    // A private source and no flags, so a modifier the user holds can't
-    // turn W into ⌘W.
+    // A key may follow modifiers, as in cmd-shift-g: menus can't be pressed
+    // once the app has sat behind other windows, but their shortcuts work.
+    var parts = args[3].split(separator: "-").map(String.init)
+    let key = parts.removeLast()
+    let modifiers: [String: CGEventFlags] = ["cmd": .maskCommand, "shift": .maskShift, "alt": .maskAlternate, "ctrl": .maskControl]
+    var flags: CGEventFlags = []
+    for part in parts {
+        guard let flag = modifiers[part] else { print("unknown modifier \(part)"); exit(1) }
+        flags.insert(flag)
+    }
+    guard let code = codes[key] else { print("unknown key \(key)"); exit(1) }
+    // A private source and only the flags asked for, so a modifier the
+    // user holds can't turn W into ⌘W.
     let source = CGEventSource(stateID: .privateState)
     for down in [true, false] {
         let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)!
-        event.flags = []
+        event.flags = flags
         event.postToPid(pid)
         usleep(30_000)
     }

@@ -1513,6 +1513,17 @@ impl Runner {
         ensure!(self.write_saves(), "the battery save could not be written");
         self.save_state(slot)?;
         let state = self.loaded.state_path(slot);
+        // The library's picture of where the game was left: the first
+        // screen, a DS's top one. It shows behind the game last played,
+        // and in place of box art libretro doesn't have.
+        // Not save data, so written without waiting for the disk.
+        if let Some(screen) = self.loaded.core.screens().first() {
+            let picture = persist::state_picture_path(&state);
+            let unfinished = picture.with_extension("png.tmp");
+            fs::write(&unfinished, capture::encode_png(screen))
+                .and_then(|()| fs::rename(&unfinished, &picture))
+                .ok();
+        }
         let record = persist::saves_record_path(&state);
         let saves =
             persist::saves_fingerprint(&self.saves()).context("cannot read the game's saves")?;

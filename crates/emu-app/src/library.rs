@@ -266,6 +266,19 @@ struct GameEntry {
     looked_up: bool,
 }
 
+/// Where `game` was left off: the save state of its checkpoint, which it
+/// picks up from when it next starts, next to its ROM or folder. Its
+/// time is when the game was last played, and the picture beside it
+/// ([`persist::state_picture_path`]) shows where.
+pub fn checkpoint_path(game: &Game) -> PathBuf {
+    let files = if game.platform == Platform::RpgMaker {
+        persist::GameFiles::of_folder(&game.path)
+    } else {
+        persist::GameFiles::of(&game.path)
+    };
+    files.state(crate::emulator::CHECKPOINT, false)
+}
+
 /// Where the library file lives, next to the settings, e.g.
 /// `~/Library/Application Support/ds-emulator/library.toml` on macOS.
 pub fn default_path() -> Option<PathBuf> {
@@ -392,6 +405,14 @@ mod tests {
         assert!(text.contains("crc32 = \"ABCEBBB1\""), "{text}");
         assert!(text.contains("platform = \"nds\""), "{text}");
         assert_eq!(Library::from_toml(&text), Ok(library));
+    }
+
+    #[test]
+    fn a_games_checkpoint_sits_beside_its_rom_or_folder() {
+        let rom = Game::new(Path::new("/games/Golden Sun.gba"), &info(Platform::Gba, 1));
+        assert_eq!(checkpoint_path(&rom), Path::new("/games/Golden Sun.ss0"));
+        let folder = Game::rpg_maker(Path::new("/games/Fan.Game"), None);
+        assert_eq!(checkpoint_path(&folder), Path::new("/games/Fan.Game.ss0"));
     }
 
     #[test]

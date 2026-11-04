@@ -10,10 +10,14 @@ to `scripts/macos/layout.swift`.
 
 - **One inset.** Content sits `theme::INSET` (16pt) in from the window's
   sides, as far as the close button. Nothing but the screens comes closer.
-- **The top bar mirrors the traffic lights.** It is 40pt tall. Its title
-  and icons sit on the traffic lights' midline (20pt down). Its last
+- **The top bar mirrors the traffic lights.** It is 40pt tall. Its title,
+  tabs and icons sit on the traffic lights' midline (20pt down). Its last
   icon's artwork ends as far from the right side as the close button starts
   from the left.
+- **Tabs go between the library and the store** (`ui.rs`), left in the top
+  bar after the traffic lights; a window under 320pt wide shows their icons
+  instead of their names. A game's page in the store adds a back button
+  before them.
 - **Icons are Solar (Linear)** (`crates/emu-app/src/icons.rs`): 24-unit
   artwork with 1.5-unit strokes, drawn at 16pt in 28pt buttons, 14pt in
   fields and 20pt on the game menu's tiles. Never a font glyph standing in
@@ -24,15 +28,25 @@ to `scripts/macos/layout.swift`.
   (GPUI places text by its advance, not its ink). Text is centred down by its
   capitals, not its line, so descenders don't count.
 - **A leading icon is inset as far from the side as from the top and bottom.**
-- **Wrapped, centred text breaks its own lines** (`centred_lines` in
+- **Wrapped, centred text breaks its own lines** (`broken_lines` in
   `library_view.rs`). GPUI centres a line it wraps with the space it broke
   at, half a space off centre.
-- **Text never runs out of its box.** A title too long for two lines ends in
+- **Text never runs out of its box.** A title too long for its lines ends in
   an ellipsis.
 - **Nested corners share a centre.** An inner radius is the outer one less
   the gap between them.
-- **Colour carries meaning.** The accent marks what is chosen or what to
-  press; red marks only the action that destroys something.
+- **Rounded boxes cover their own corners.** GPUI clips what is in a box to
+  its bounds, not its rounded corners, so a picture that fills one (the
+  last-played game's) is covered at the corners by a band in the colour
+  behind it (`corners` in `library_view.rs`).
+- **Colour carries meaning.** The accent marks what to press (Resume,
+  Play, Get) and where the caret is; the chosen tab, filter or setting is a
+  white pill with dark type; the chosen game sits on a lighter tile. Red
+  marks only the action that destroys something.
+- **Every game has a picture.** Its box art; or else the screen where it
+  was left; or else a plate in its system's colour (`theme::tint`) with its
+  icon or title. A game's title starts where its picture does, on one line
+  with its system under it, as in the store.
 - **A form is centred as one block.** Settings' names end on one line and
   their choices start on the next, and the two together are centred in the
   window.

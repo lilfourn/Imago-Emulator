@@ -1,9 +1,15 @@
-//! The library: what the main window shows while no game runs. Each game
-//! the user has added or played, as box art over its title, narrowed to
-//! what the user types.
+//! The library: what the main window shows while no game runs. The game
+//! last played, large, to pick up where it was left; then each game the
+//! user has added or played, as its box art over its title, narrowed to
+//! one system and to what the user types.
 //!
-//! Keyboard first: typing searches, the arrow keys choose a game, Return
-//! plays it and ⌘⌫ takes the game out of the library.
+//! Every game has a picture: its box art or title screen if libretro has
+//! one (see `boxart.rs`), or else the screen where it was left off, or a
+//! plate in its system's colour with its icon or title.
+//!
+//! Keyboard first: typing searches, the arrow keys choose a game, Tab and
+//! ⇧Tab change system, Return plays the chosen game and ⌘⌫ takes it out of
+//! the library. A click chooses a game and a double click plays it.
 //! The view only shows and edits the library; it asks the main window,
 //! through [`LibraryEvent`], to play a game, add games or open settings.
 
@@ -12,13 +18,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use emu_cores::rpg_maker;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, Entity, EventEmitter, KeyDownEvent,
-    LineFragment, ObjectFit, ScrollHandle, SharedString, Subscription, Task, Window, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
+    Animation, AnimationExt, AnyElement, App, Context, Entity, EventEmitter, ImageFormat,
+    KeyDownEvent, LineFragment, ObjectFit, ScrollHandle, SharedString, Subscription, Task, Window,
+    div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
 };
 
 use crate::app::TOP_BAR;
@@ -27,19 +33,20 @@ use crate::archive;
 use crate::boxart;
 use crate::icons;
 use crate::library::{self, Game, Library};
+use crate::persist;
 use crate::probe;
-use crate::rom_info;
+use crate::rom_info::{self, Platform};
 use crate::romhack::{self, MakeError};
-use crate::store_view::{StoreEvent, StoreView};
+use crate::store_view::{StoreEvent, StoreView, platform_name};
+use crate::ui::{self, Section};
 
 use crate::theme::{
-    ACCENT as CARET, BACKGROUND as TOP, INSET, MUTED as DIM, ON_ACCENT, PANEL, TEXT,
+    ACCENT as CARET, BACKGROUND as TOP, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL,
+    TEXT, tint, with_alpha,
 };
 
 /// The background lightens a touch towards the foot of the window.
 const FOOT: u32 = 0x0016_181B;
-/// Behind the chosen game.
-const CHOSEN: u32 = 0xFFFF_FF1A;
 
 /// Room left of the header for the close, minimise and zoom buttons and
 /// a gap after them.
@@ -50,13 +57,30 @@ pub const TRAFFIC_LIGHTS: f32 = 96.0;
 pub const HEADER_END: f32 = 8.0;
 /// Space between the games, in logical pixels.
 const GAP: f32 = 12.0;
-/// Room around a game's box art and title, inside its tile.
-const TILE_PADDING: f32 = 4.0;
+/// Room around a game's picture and words, inside its tile, as in the
+/// store.
+const TILE_PADDING: f32 = 6.0;
 /// The narrowest a game's tile gets before the grid drops a column.
-const MIN_TILE: f32 = 116.0;
-/// Size and line height of a game's title.
-const TITLE_SIZE: f32 = 12.0;
-const TITLE_LINE: f32 = 16.0;
+const MIN_TILE: f32 = 120.0;
+/// Line heights of a tile's title and the line under it.
+const TITLE_LINE: f32 = 18.0;
+const DETAIL_LINE: f32 = 16.0;
+/// Corners of a picture, and of a plate standing in for one.
+const ART_RADIUS: f32 = 8.0;
+/// The tallest and shortest the last-played game's banner gets, and its
+/// height for its width between.
+const HERO_MAX: f32 = 232.0;
+const HERO_MIN: f32 = 156.0;
+const HERO_SHAPE: f32 = 0.44;
+const HERO_RADIUS: f32 = 14.0;
+/// The shortest window that shows the last-played game: one that has room
+/// for games under it.
+const ROOM_FOR_HERO: f32 = 3.0 * HERO_MIN;
+/// The least room its words get beside its box art; with less, they get
+/// the whole width.
+const HERO_WORDS: f32 = 220.0;
+/// Side of the play button over a chosen game's picture.
+const PLAY_BUTTON: f32 = 30.0;
 /// Height of the search field, and room around its magnifier. The
 /// magnifier's artwork sits about as far inside its 14 pixels as the field's
 /// edge is thick, so it is as far from the field's side as from its top and
@@ -80,6 +104,21 @@ pub enum LibraryEvent {
     Notice(String),
 }
 
+/// What the library has to show a game by, besides its title.
+#[derive(Debug, Clone, Default)]
+struct Pictures {
+    /// Its box art, or title screen, on disk.
+    art: Option<PathBuf>,
+    /// Its DS icon, or its RPG Maker player's icon, on disk.
+    icon: Option<PathBuf>,
+    /// The screen where it was left off, read in: GPUI keeps a picture
+    /// loaded from a path for good, and this one changes each time the
+    /// game is played.
+    left_at: Option<Arc<gpui::Image>>,
+    /// When it was last played.
+    played: Option<SystemTime>,
+}
+
 /// The library's view.
 pub struct LibraryView {
     library: Library,
@@ -87,18 +126,26 @@ pub struct LibraryView {
     path: Option<PathBuf>,
     /// Where box art is kept, if there is a cache folder.
     cache: Option<PathBuf>,
-    /// Each game's box art or icon on disk, by ROM checksum.
-    covers: HashMap<u32, PathBuf>,
+    /// Each game's pictures and when it was played, by its path.
+    pictures: HashMap<PathBuf, Pictures>,
+    /// While [`Self::refresh`] reads them.
+    refreshing: Option<Task<()>>,
+    /// The system shown, `None` for all of them.
+    platform: Option<Platform>,
     query: String,
     /// Whether the search field has the caret: clicked or typed into,
     /// until Escape leaves it.
     searching: bool,
     /// The chosen game, by its ROM's path, so it stays chosen as titles
-    /// are looked up and the games sort anew. The first shown if none is.
+    /// are looked up and the games sort anew. If none is, the game last
+    /// played, or the first shown (see [`Self::chosen_at`]).
     selected: Option<PathBuf>,
     /// How many games fit across, as last drawn.
     columns: usize,
     scroll: ScrollHandle,
+    /// How many of what scrolls come before the grid's first row, as last
+    /// drawn: the last-played game, the system filter and the grid's title.
+    lead: usize,
     looking_up: Option<Task<()>>,
     /// Game databases parsed since launch.
     databases: Arc<boxart::Databases>,
@@ -122,20 +169,33 @@ impl LibraryView {
             library,
             path,
             cache: boxart::cache_dir(),
-            covers: HashMap::new(),
+            pictures: HashMap::new(),
+            refreshing: None,
+            platform: None,
             query: String::new(),
             searching: false,
             selected: None,
             columns: 1,
             scroll: ScrollHandle::new(),
+            lead: 0,
             looking_up: None,
             databases: Arc::default(),
             tried: HashSet::new(),
             store: None,
             store_open: false,
         };
-        view.refresh_covers();
-        view.look_up(cx);
+        // Box art and icons, in the cache, are read at once, so the games
+        // don't open on plates that their pictures replace a moment later.
+        // Where each was left, beside its ROM on what may be a slow disk,
+        // comes after.
+        let cache = view.cache.clone();
+        view.pictures = view
+            .library
+            .games
+            .iter()
+            .map(|game| (game.path.clone(), cached_pictures(cache.as_deref(), game)))
+            .collect();
+        view.refresh(cx);
         view
     }
 
@@ -172,8 +232,7 @@ impl LibraryView {
                     }
                 }
                 this.save(cx);
-                this.refresh_covers();
-                this.look_up(cx);
+                this.refresh(cx);
                 cx.notify();
             })
             .ok();
@@ -228,7 +287,7 @@ impl LibraryView {
                 }
                 self.selected = games.first().map(|game| game.path.clone());
                 self.save(cx);
-                self.refresh_covers();
+                self.refresh(cx);
                 if let [game] = games.as_slice() {
                     cx.emit(LibraryEvent::Notice(format!(
                         "Added {} to the library",
@@ -276,16 +335,31 @@ impl LibraryView {
             "enter" if event.is_held => {}
             "enter" => {
                 let shown = self.shown();
-                if let Some(game) = shown.get(position(&shown, self.selected.as_deref())) {
+                if let Some(game) = shown.get(self.chosen_at(&shown)) {
                     cx.emit(LibraryEvent::Play(game.path.clone()));
                 }
             }
             key @ ("left" | "right" | "up" | "down") => {
                 let shown = self.shown();
-                let at = position(&shown, self.selected.as_deref());
+                let at = self.chosen_at(&shown);
                 let at = moved(at, shown.len(), self.columns, key);
                 self.selected = shown.get(at).map(|game| game.path.clone());
-                self.scroll.scroll_to_item(at);
+                self.scroll
+                    .scroll_to_item(self.lead + at / self.columns.max(1));
+            }
+            // Tab and ⇧Tab go through the systems, as in the store.
+            "tab" => {
+                let choices = self.platform_choices();
+                let Some(at) = choices.iter().position(|&choice| choice == self.platform) else {
+                    return false;
+                };
+                let count = choices.len();
+                let next = if modifiers.shift {
+                    (at + count - 1) % count
+                } else {
+                    (at + 1) % count
+                };
+                self.set_platform(choices[next], cx);
             }
             _ => match &keystroke.key_char {
                 Some(text) if text.chars().all(|c| !c.is_control()) => {
@@ -302,14 +376,28 @@ impl LibraryView {
 
     /// The games shown, in order.
     fn shown(&self) -> Vec<&Game> {
-        self.library.find(&self.query, None)
+        self.library.find(&self.query, self.platform)
+    }
+
+    /// Where the chosen game is among `shown`: the one chosen, or else the
+    /// one last played unless the user is searching, or else the first.
+    fn chosen_at(&self, shown: &[&Game]) -> usize {
+        let chosen = self
+            .selected
+            .as_deref()
+            .filter(|selected| shown.iter().any(|game| game.path == *selected));
+        let recent = || {
+            let recent = self.recent().filter(|_| self.query.is_empty())?;
+            Some(recent.path.as_path())
+        };
+        position(shown, chosen.or_else(recent))
     }
 
     /// Takes the chosen game out of the library, choosing the game that
     /// takes its place.
     fn remove_selected(&mut self, cx: &mut Context<Self>) {
         let shown = self.shown();
-        let at = position(&shown, self.selected.as_deref());
+        let at = self.chosen_at(&shown);
         let Some(path) = shown.get(at).map(|game| game.path.clone()) else {
             return;
         };
@@ -330,33 +418,74 @@ impl LibraryView {
         }
     }
 
-    /// Finds each game's box art, or failing that its DS icon, on disk.
-    fn refresh_covers(&mut self) {
-        let Some(cache) = &self.cache else {
-            return;
-        };
-        self.covers = self
-            .library
-            .games
-            .iter()
-            .filter_map(|game| Some((game.crc32, cover_on_disk(cache, game.crc32)?)))
-            .collect();
+    /// Reads each game's pictures, and when it was played, off the UI
+    /// thread; then looks up the games that need it. Called as the library
+    /// opens, as games are added and as a game is left.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let games = self.library.games.clone();
+        let cache = self.cache.clone();
+        let read = cx.background_executor().spawn(async move {
+            games
+                .iter()
+                .map(|game| (game.path.clone(), pictures_on_disk(cache.as_deref(), game)))
+                .collect::<HashMap<_, _>>()
+        });
+        self.refreshing = Some(cx.spawn(async move |this, cx| {
+            let read = read.await;
+            this.update(cx, |this, cx| {
+                let recent = this.recent().map(|game| game.path.clone());
+                let mut pictures = HashMap::new();
+                for (path, mut fresh) in read {
+                    if let Some(old) = this.pictures.remove(&path) {
+                        // Found while the files were read.
+                        fresh.art = fresh.art.or(old.art);
+                        fresh.icon = fresh.icon.or(old.icon);
+                        // GPUI keeps every picture it has drawn until told.
+                        if let Some(old) = old.left_at
+                            && fresh
+                                .left_at
+                                .as_ref()
+                                .is_none_or(|new| new.bytes() != old.bytes())
+                        {
+                            gpui::ImageSource::Image(old).remove_asset(cx);
+                        }
+                    }
+                    pictures.insert(path, fresh);
+                }
+                this.pictures = pictures;
+                // A game played since, as one just left, is chosen.
+                if this.recent().map(|game| &game.path) != recent.as_ref() {
+                    this.selected = None;
+                }
+                this.refreshing = None;
+                this.look_up(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
-    /// Looks up the games not yet looked up, off the UI thread, unless
-    /// that is already under way. Each game's title and box art show as
-    /// soon as it is found.
+    /// Looks up, off the UI thread, unless that is already under way, the
+    /// games not yet looked up and those whose box art the cache has lost
+    /// or never had, once each a launch. Each game's title and picture
+    /// show as soon as it is found.
     fn look_up(&mut self, cx: &mut Context<Self>) {
         let Some(cache) = self.cache.clone() else {
             return;
         };
-        let pending: Vec<Game> = self
+        let mut pending: Vec<Game> = self
             .library
             .games
             .iter()
-            .filter(|game| !game.looked_up && !self.tried.contains(&game.path))
+            .filter(|game| {
+                let pictures = self.pictures.get(&game.path);
+                let missing = pictures.is_none_or(|pictures| pictures.art.is_none());
+                (!game.looked_up || missing) && !self.tried.contains(&game.path)
+            })
             .cloned()
             .collect();
+        // Games just added first, before those whose pictures went missing.
+        pending.sort_by_key(|game| game.looked_up);
         if self.looking_up.is_some() || pending.is_empty() {
             return;
         }
@@ -408,28 +537,30 @@ impl LibraryView {
         name: anyhow::Result<Option<String>>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let name = match name {
-            Ok(name) => name,
-            Err(error) => return Some(format!("{error:#}")),
-        };
         let game = self
             .library
             .games
             .iter_mut()
             .find(|game| game.path == path && game.crc32 == crc32)?;
+        let name = match name {
+            Ok(name) => name,
+            // Said only of a game being added: one whose picture the
+            // cache lost keeps its plate quietly until the next launch.
+            Err(error) => return (!game.looked_up).then(|| format!("{error:#}")),
+        };
         game.found(name);
-        if let Some(cover) = self
-            .cache
-            .as_deref()
-            .and_then(|cache| cover_on_disk(cache, crc32))
-        {
-            self.covers.insert(crc32, cover);
+        if let Some(cache) = self.cache.as_deref() {
+            let pictures = self.pictures.entry(path.to_owned()).or_default();
+            let art = boxart::art_path(cache, crc32);
+            pictures.art = boxart::is_png(&art).then_some(art);
+            let icon = boxart::icon_path(cache, crc32);
+            pictures.icon = icon.exists().then_some(icon);
         }
         cx.notify();
         None
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         div()
             .h(px(TOP_BAR))
             .flex_none()
@@ -439,19 +570,12 @@ impl LibraryView {
             .pr(px(HEADER_END))
             .gap_1()
             .children(probe::part("header"))
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(rgb(TEXT))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Library")
-                    .children(probe::part("header.title")),
-            )
-            .child(
-                icons::button("store", icons::STORE)
-                    .on_click(cx.listener(|this, _, _, cx| this.open_store(cx)))
-                    .children(probe::part("button:store")),
-            )
+            .child(ui::tabs([
+                ui::tab(Section::Library, Section::Library, window),
+                ui::tab(Section::Store, Section::Library, window)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_store(cx))),
+            ]))
+            .child(div().flex_1())
             .child(
                 icons::button("settings", icons::SETTINGS)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::OpenSettings)))
@@ -467,7 +591,12 @@ impl LibraryView {
 
     fn search_field(&self, cx: &mut Context<Self>) -> AnyElement {
         let text = if self.query.is_empty() {
-            div().text_color(rgb(DIM)).child("Search: just type")
+            let placeholder = match self.library.games.len() {
+                0 => "Search: just type".to_owned(),
+                1 => "Search 1 game: just type".to_owned(),
+                count => format!("Search {count} games: just type"),
+            };
+            div().text_color(rgb(DIM)).child(placeholder)
         } else {
             div()
                 .text_color(rgb(TEXT))
@@ -497,15 +626,16 @@ impl LibraryView {
             .gap_2()
             .px(px(SEARCH_PADDING))
             .rounded_lg()
-            .bg(rgba(0xFFFF_FF12))
+            .bg(rgb(PANEL))
             .border_1()
             .border_color(rgba(if self.searching {
-                CARET << 8 | 0xAA
+                with_alpha(CARET, 0xAA)
             } else {
-                0x0000_0000
+                with_alpha(LINE, 0xFF)
             }))
             .cursor_text()
             .text_sm()
+            .overflow_hidden()
             .on_click(cx.listener(|this, _, _, cx| {
                 this.searching = true;
                 cx.notify();
@@ -522,6 +652,7 @@ impl LibraryView {
                     .flex()
                     .items_center()
                     .gap(px(1.0))
+                    .whitespace_nowrap()
                     .children(caret_before)
                     .child(text)
                     .children(caret_after)
@@ -534,69 +665,370 @@ impl LibraryView {
             .into_any_element()
     }
 
+    /// The game last played, if any has been.
+    fn recent(&self) -> Option<&Game> {
+        self.library
+            .games
+            .iter()
+            .filter_map(|game| Some((self.pictures.get(&game.path)?.played?, game)))
+            .max_by_key(|(played, _)| *played)
+            .map(|(_, game)| game)
+    }
+
+    /// The game last played, `width` wide: where it was left, its title,
+    /// when it was played and a button to pick it up again.
+    fn hero(&self, game: &Game, width: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let pictures = self.pictures.get(&game.path).cloned().unwrap_or_default();
+        let height = (width * HERO_SHAPE).clamp(HERO_MIN, HERO_MAX);
+        let (light, dark) = tint(game.platform);
+        let backdrop = pictures.left_at.as_ref().map(|left_at| {
+            img(left_at.clone())
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+        });
+        // Without a picture of where it was left, its box art or icon
+        // stands beside the words.
+        let side = height - 2.0 * INSET;
+        let roomy = width - 3.0 * INSET - side >= HERO_WORDS;
+        let beside = (backdrop.is_none() && roomy)
+            .then(|| pictures.art.clone().or_else(|| pictures.icon.clone()))
+            .flatten()
+            .map(|art| {
+                div()
+                    .absolute()
+                    .top(px(INSET))
+                    .right(px(INSET))
+                    .size(px(side))
+                    .child(
+                        img(art)
+                            .size_full()
+                            .object_fit(ObjectFit::Contain)
+                            .rounded(px(ART_RADIUS)),
+                    )
+            });
+        let words = width - 2.0 * INSET - if beside.is_some() { side + INSET } else { 0.0 };
+        let detail = match pictures.played {
+            Some(played) => format!(
+                "{} · Played {}",
+                platform_name(game.platform),
+                ago(played, SystemTime::now())
+            ),
+            None => platform_name(game.platform).to_owned(),
+        };
+        let path = game.path.clone();
+        let resume = div()
+            .id("resume")
+            .flex_none()
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .pl(px(12.0))
+            .pr(px(16.0))
+            .rounded_full()
+            .cursor_pointer()
+            .bg(rgb(CARET))
+            .text_color(rgb(ON_ACCENT))
+            .text_size(px(13.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .hover(|button| button.opacity(0.9))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.selected = Some(path.clone());
+                cx.emit(LibraryEvent::Play(path.clone()));
+            }))
+            .child(icons::icon(icons::PLAY, 14.0, ON_ACCENT))
+            .child("Resume")
+            .children(probe::part("button:resume"));
+        let soft = |text: &str, size: f32, weight| ui::fit(text, words, size, weight, window, cx);
+        div()
+            .id("hero")
+            .relative()
+            .mx(px(INSET))
+            .mb(px(16.0))
+            .h(px(height))
+            .flex_none()
+            .rounded(px(HERO_RADIUS))
+            .overflow_hidden()
+            .bg(linear_gradient(
+                135.0,
+                linear_color_stop(rgb(light), 0.0),
+                linear_color_stop(rgb(dark), 1.0),
+            ))
+            .children(backdrop)
+            // Darker towards the foot and the left, under the words.
+            .child(div().absolute().inset_0().bg(linear_gradient(
+                180.0,
+                linear_color_stop(rgba(0x0000_0000), 0.2),
+                linear_color_stop(rgba(0x0000_00E0), 1.0),
+            )))
+            .child(div().absolute().inset_0().bg(linear_gradient(
+                90.0,
+                linear_color_stop(rgba(0x0000_0080), 0.0),
+                linear_color_stop(rgba(0x0000_0000), 0.7),
+            )))
+            .children(beside)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(INSET))
+                    .bottom(px(INSET))
+                    .w(px(words))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(0xFFFF_FFB3))
+                            .child("CONTINUE PLAYING"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(20.0))
+                            .line_height(px(26.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x00FF_FFFF))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(soft(&game.title, 20.0, gpui::FontWeight::SEMIBOLD))
+                            .children(probe::part("hero.title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgba(0xFFFF_FFB3))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(soft(&detail, 12.0, gpui::FontWeight::NORMAL)),
+                    )
+                    .child(div().mt(px(12.0)).flex().child(resume)),
+            )
+            // A hairline over the picture, so a dark one keeps its edge.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(HERO_RADIUS))
+                    .border_1()
+                    .border_color(rgba(with_alpha(TEXT, 0x18))),
+            )
+            .child(corners(HERO_RADIUS, TOP))
+            .children(probe::part("hero"))
+            .into_any_element()
+    }
+
+    /// The systems the library has games for, newest first.
+    fn platforms(&self) -> Vec<Platform> {
+        let mut platforms: Vec<Platform> = Vec::new();
+        for game in &self.library.games {
+            if !platforms.contains(&game.platform) {
+                platforms.push(game.platform);
+            }
+        }
+        const ORDER: [&str; 6] = ["3ds", "nds", "gba", "gbc", "gb", "rpgmaker"];
+        platforms.sort_by_key(|platform| ORDER.iter().position(|tag| *tag == platform.tag()));
+        platforms
+    }
+
+    /// The choices of system to show: all of them, then each the library
+    /// has games for. None if it has games for only one.
+    fn platform_choices(&self) -> Vec<Option<Platform>> {
+        let platforms = self.platforms();
+        if platforms.len() < 2 {
+            return Vec::new();
+        }
+        std::iter::once(None)
+            .chain(platforms.into_iter().map(Some))
+            .collect()
+    }
+
+    /// Shows only `platform`'s games, or all for `None`, from the top.
+    fn set_platform(&mut self, platform: Option<Platform>, cx: &mut Context<Self>) {
+        self.platform = platform;
+        self.selected = None;
+        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        cx.notify();
+    }
+
+    /// The system filter, if the library has games for more than one.
+    fn filters(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let choices = self.platform_choices();
+        if choices.is_empty() {
+            return None;
+        }
+        let choices = choices
+            .into_iter()
+            .enumerate()
+            .map(|(at, platform)| {
+                let label = platform.map_or("All", Platform::label);
+                ui::choice(("platform", at), label, self.platform == platform)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_platform(platform, cx)))
+                    .children(probe::part(format!("segment:platform.{at}")))
+            })
+            .collect();
+        Some(
+            div()
+                .mx(px(INSET))
+                .mb(px(14.0))
+                .flex_none()
+                .flex()
+                .text_xs()
+                .child(ui::track("platform", choices))
+                .into_any_element(),
+        )
+    }
+
+    /// What the grid shows, over it, and how many.
+    fn section_title(&self, count: usize) -> AnyElement {
+        let title = if self.query.is_empty() {
+            self.platform.map_or("All Games", platform_name)
+        } else {
+            "Results"
+        };
+        let count = match count {
+            1 => "1 game".to_owned(),
+            count => format!("{count} games"),
+        };
+        div()
+            .mx(px(INSET))
+            .mb(px(8.0))
+            .flex_none()
+            .flex()
+            .items_end()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT))
+                    .child(title)
+                    .children(probe::part("section.title")),
+            )
+            .child(
+                div()
+                    .pb(px(1.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(DIM))
+                    .child(count),
+            )
+            .into_any_element()
+    }
+
     fn tile(
         &self,
         index: usize,
         game: &Game,
         width: f32,
+        chosen: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chosen = self.selected.as_ref() == Some(&game.path);
         let inner = width - 2.0 * TILE_PADDING;
-        let title = centred_lines(&game.title, inner, TITLE_SIZE, 2, window, cx);
         let path = game.path.clone();
-        let art = match self.covers.get(&game.crc32) {
-            Some(cover) => img(cover.clone())
-                .size_full()
-                .object_fit(ObjectFit::Contain)
-                .into_any_element(),
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .bg(rgb(PANEL))
-                .text_size(px(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(rgb(DIM))
-                .child(game.platform.label())
-                .into_any_element(),
-        };
+        let play = game.path.clone();
+        let art = cover(game, self.pictures.get(&game.path), inner, window, cx);
+        // The play button shows on the chosen game and under the pointer.
+        let button = div()
+            .absolute()
+            .bottom(px(8.0))
+            .right(px(8.0))
+            .when(!chosen, |corner| {
+                corner
+                    .opacity(0.0)
+                    .group_hover("game", |corner| corner.opacity(1.0))
+            })
+            .child(
+                div()
+                    .id(("play", index))
+                    .size(px(PLAY_BUTTON))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .bg(rgb(CARET))
+                    .shadow_md()
+                    .hover(|button| button.opacity(0.9))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.selected = Some(play.clone());
+                        cx.emit(LibraryEvent::Play(play.clone()));
+                    }))
+                    .child(icons::icon(icons::PLAY, 14.0, ON_ACCENT))
+                    .children(chosen.then(|| probe::part("button:play")).flatten()),
+            );
+        // A point short, so an ellipsis stays inside the tile.
+        let line =
+            |text: &str, size: f32, weight| ui::fit(text, inner - 1.0, size, weight, window, cx);
         div()
             .id(("game", index))
+            .group("game")
             .w(px(width))
+            .flex_none()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(6.0))
             .p(px(TILE_PADDING))
             .rounded_lg()
             .cursor_pointer()
             .when(chosen, |tile| tile.bg(rgba(CHOSEN)))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .when(!chosen, |tile| tile.hover(|tile| tile.bg(rgba(HOVER))))
+            // A click chooses the game; a second plays it.
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 this.selected = Some(path.clone());
-                cx.emit(LibraryEvent::Play(path.clone()));
+                if event.click_count() >= 2 {
+                    cx.emit(LibraryEvent::Play(path.clone()));
+                }
+                cx.notify();
             }))
             .children(probe::part(format!("tile:{index}")))
             .child(
                 div()
+                    .relative()
                     .w_full()
                     .h(px(inner))
-                    .flex()
-                    .items_end()
                     .child(art)
+                    .child(button)
                     .children(probe::part(format!("tile.art:{index}"))),
             )
+            // In a row, as GPUI cuts text short to fit the width it is
+            // measured at, and a column measures it before it has one.
             .child(
-                div()
-                    .h(px(2.0 * TITLE_LINE))
-                    .text_size(px(TITLE_SIZE))
-                    .line_height(px(TITLE_LINE))
-                    .text_center()
-                    .text_color(rgb(if chosen { 0x00FF_FFFF } else { TEXT }))
-                    .child(title)
-                    .children(probe::part(format!("tile.title:{index}"))),
+                div().w_full().flex().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(TITLE_LINE))
+                                .text_size(px(13.0))
+                                .line_height(px(TITLE_LINE))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgb(TEXT))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(line(&game.title, 13.0, gpui::FontWeight::MEDIUM))
+                                .children(probe::part(format!("tile.title:{index}"))),
+                        )
+                        .child(
+                            div()
+                                .h(px(DETAIL_LINE))
+                                .text_size(px(11.0))
+                                .line_height(px(DETAIL_LINE))
+                                .text_color(rgb(DIM))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(line(
+                                    platform_name(game.platform),
+                                    11.0,
+                                    gpui::FontWeight::NORMAL,
+                                )),
+                        ),
+                ),
             )
             .into_any_element()
     }
@@ -615,34 +1047,82 @@ impl LibraryView {
             )
         };
         let room = f32::from(window.viewport_size().width) - 2.0 * INSET;
-        let hint = centred_lines(
+        let hint = broken_lines(
             &hint,
             room.min(HINT_WIDTH),
             HINT_SIZE,
+            gpui::FontWeight::NORMAL,
             usize::MAX,
             window,
             cx,
         );
-        let browse = none.then(|| {
+        // Only in a window with room for it over the buttons and hint.
+        let tall = f32::from(window.viewport_size().height) >= 400.0;
+        let badge = tall.then(|| {
             div()
-                .id("browse-store")
-                .my_1()
-                .h(px(36.0))
-                .px(px(18.0))
+                .size(px(56.0))
+                .mb_2()
                 .flex()
                 .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(PANEL))
+                .border_1()
+                .border_color(rgb(LINE))
+                .child(icons::icon(
+                    if none {
+                        icons::LIBRARY
+                    } else {
+                        icons::MAGNIFIER
+                    },
+                    24.0,
+                    DIM,
+                ))
+        });
+        let buttons = none.then(|| {
+            let button = |id: &'static str| {
+                div()
+                    .id(id)
+                    .h(px(36.0))
+                    .px(px(18.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .children(probe::part(format!("button:{id}")))
+            };
+            div()
+                .my_1()
+                .flex()
+                .flex_wrap()
+                .justify_center()
                 .gap_2()
-                .rounded_lg()
-                .cursor_pointer()
-                .bg(rgb(CARET))
-                .text_color(rgb(ON_ACCENT))
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .hover(|button| button.opacity(0.9))
-                .on_click(cx.listener(|this, _, _, cx| this.open_store(cx)))
-                .child(icons::icon(icons::STORE, 16.0, ON_ACCENT))
-                .child("Browse the Store")
-                .children(probe::part("button:browse-store"))
+                .child(
+                    button("browse-store")
+                        .bg(rgb(CARET))
+                        .text_color(rgb(ON_ACCENT))
+                        .hover(|button| button.opacity(0.9))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_store(cx)))
+                        .child(icons::icon(icons::STORE, 16.0, ON_ACCENT))
+                        .child("Browse the Store"),
+                )
+                // Only where there is room for both.
+                .when(tall, |buttons| {
+                    buttons.child(
+                        button("add-games")
+                            .bg(rgb(PANEL))
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .text_color(rgb(TEXT))
+                            .hover(|button| button.bg(rgb(LINE)))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::AddGames)))
+                            .child(icons::icon(icons::ADD, 16.0, TEXT))
+                            .child("Add Games"),
+                    )
+                })
         });
         div()
             .flex_1()
@@ -652,15 +1132,18 @@ impl LibraryView {
             .justify_center()
             .gap_2()
             .px(px(INSET))
+            .pb(px(TOP_BAR))
+            .children(badge)
             .child(
                 div()
                     .text_xl()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT))
                     .child(title)
                     .children(probe::part("empty.title")),
             )
             // Before the hint, which a small window cuts short.
-            .children(browse)
+            .children(buttons)
             .child(
                 div()
                     .text_size(px(HINT_SIZE))
@@ -683,8 +1166,13 @@ impl gpui::Render for LibraryView {
         let width = f32::from(window.viewport_size().width);
         let (columns, tile) = grid(width - 2.0 * INSET);
         self.columns = columns;
+        // A system the library no longer has games for, or the only one
+        // left, is no filter: show them all.
+        if !self.platform_choices().contains(&self.platform) {
+            self.platform = None;
+        }
         let shown = self.shown();
-        let at = position(&shown, self.selected.as_deref());
+        let at = self.chosen_at(&shown);
         let selected = shown.get(at).map(|game| game.path.clone());
         let games: Vec<Game> = shown.into_iter().cloned().collect();
         // The game drawn as chosen is the one chosen, wherever titles
@@ -700,15 +1188,43 @@ impl gpui::Render for LibraryView {
                 linear_color_stop(rgb(TOP), 0.3),
                 linear_color_stop(rgb(FOOT), 1.0),
             ))
-            .child(self.header(cx))
+            .child(self.header(window, cx))
             .child(self.search_field(cx));
         if games.is_empty() {
             return root.child(self.empty(window, cx));
         }
-        let tiles: Vec<AnyElement> = games
-            .iter()
+        // The game last played leads, unless the user is looking for
+        // something else or the window is too short to show more.
+        let tall = f32::from(window.viewport_size().height) >= ROOM_FOR_HERO;
+        let hero = (tall && self.query.is_empty() && self.platform.is_none())
+            .then(|| self.recent().cloned())
+            .flatten()
+            .map(|game| self.hero(&game, width - 2.0 * INSET, window, cx));
+        let mut lead: Vec<AnyElement> = hero.into_iter().collect();
+        lead.extend(self.filters(cx));
+        lead.push(self.section_title(games.len()));
+        self.lead = lead.len();
+        let rows: Vec<AnyElement> = games
+            .chunks(columns)
             .enumerate()
-            .map(|(index, game)| self.tile(index, game, tile, window, cx))
+            .map(|(row, chunk)| {
+                let tiles: Vec<AnyElement> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(column, game)| {
+                        let index = row * columns + column;
+                        self.tile(index, game, tile, index == at, window, cx)
+                    })
+                    .collect();
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(GAP))
+                    .px(px(INSET))
+                    .pb(px(GAP))
+                    .children(tiles)
+                    .into_any_element()
+            })
             .collect();
         root.child(
             div()
@@ -718,26 +1234,183 @@ impl gpui::Render for LibraryView {
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
                 .flex()
-                .flex_wrap()
-                .content_start()
-                .gap(px(GAP))
-                .px(px(INSET))
-                .pb(px(INSET))
-                .children(tiles)
+                .flex_col()
+                .pb(px(INSET - GAP))
+                .children(lead)
+                .children(rows)
                 .children(probe::part("grid")),
         )
     }
 }
 
-/// The box art of the ROM with checksum `crc32` in `cache`, or failing
-/// that, or if the art is not a picture, its DS icon.
-fn cover_on_disk(cache: &Path, crc32: u32) -> Option<PathBuf> {
-    let art = boxart::art_path(cache, crc32);
-    let icon = boxart::icon_path(cache, crc32);
-    if boxart::is_png(&art) {
-        Some(art)
-    } else {
-        icon.exists().then_some(icon)
+/// The box art and icon of `game` in `cache`.
+fn cached_pictures(cache: Option<&Path>, game: &Game) -> Pictures {
+    let art = cache
+        .map(|cache| boxart::art_path(cache, game.crc32))
+        .filter(|art| boxart::is_png(art));
+    let icon = cache
+        .map(|cache| boxart::icon_path(cache, game.crc32))
+        .filter(|icon| icon.exists());
+    Pictures {
+        art,
+        icon,
+        ..Pictures::default()
+    }
+}
+
+/// The pictures of `game` on disk, with `cache` holding its box art and
+/// icon, and when it was last played.
+fn pictures_on_disk(cache: Option<&Path>, game: &Game) -> Pictures {
+    let Pictures { art, icon, .. } = cached_pictures(cache, game);
+    let checkpoint = library::checkpoint_path(game);
+    let played = fs::metadata(&checkpoint)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    let left_at = played
+        .and_then(|_| fs::read(persist::state_picture_path(&checkpoint)).ok())
+        .map(|bytes| Arc::new(gpui::Image::from_bytes(ImageFormat::Png, bytes)));
+    Pictures {
+        art,
+        icon,
+        left_at,
+        played,
+    }
+}
+
+/// The picture of `game` filling a square `side` wide: its box art; or
+/// else the screen where it was left off; or else a plate in its system's
+/// colour with its icon, or its title.
+fn cover(
+    game: &Game,
+    pictures: Option<&Pictures>,
+    side: f32,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let pictures = pictures.cloned().unwrap_or_default();
+    if let Some(art) = pictures.art {
+        return img(art)
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .rounded(px(ART_RADIUS))
+            .into_any_element();
+    }
+    if let Some(left_at) = pictures.left_at {
+        return img(left_at)
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .rounded(px(ART_RADIUS))
+            .into_any_element();
+    }
+    let (light, dark) = tint(game.platform);
+    let middle = match pictures.icon {
+        Some(icon) => div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                img(icon)
+                    .size(px(side * 0.46))
+                    .object_fit(ObjectFit::Contain),
+            ),
+        None => {
+            // Under the system's name, clear of the play button that shows
+            // in the bottom corner of a chosen game.
+            let title = broken_lines(
+                &game.title,
+                side - 2.0 * PLATE_PADDING,
+                PLATE_TITLE,
+                gpui::FontWeight::SEMIBOLD,
+                3,
+                window,
+                cx,
+            );
+            div()
+                .absolute()
+                .left(px(PLATE_PADDING))
+                .right(px(PLATE_PADDING))
+                .top(px(PLATE_PADDING + PLATE_LABEL + 8.0))
+                .text_size(px(PLATE_TITLE))
+                .line_height(px(PLATE_TITLE + 4.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(0x00FF_FFFF))
+                .child(title)
+        }
+    };
+    div()
+        .relative()
+        .size_full()
+        .rounded(px(ART_RADIUS))
+        .overflow_hidden()
+        .bg(linear_gradient(
+            135.0,
+            linear_color_stop(rgb(light), 0.0),
+            linear_color_stop(rgb(dark), 1.0),
+        ))
+        .border_1()
+        .border_color(rgba(with_alpha(TEXT, 0x14)))
+        .child(middle)
+        .child(
+            div()
+                .absolute()
+                .top(px(PLATE_PADDING))
+                .left(px(PLATE_PADDING))
+                .h(px(PLATE_LABEL))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .rounded(px(5.0))
+                .bg(rgba(0x0000_0047))
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgba(0xFFFF_FFD9))
+                .child(game.platform.label()),
+        )
+        .into_any_element()
+}
+
+/// What spills past the rounded corners of the box it is in, `radius`
+/// round, covered over in `colour`, the colour behind the box: GPUI clips
+/// what is in a box to its bounds, not its corners. A band round the box
+/// whose inner edge is the box's rounded edge.
+fn corners(radius: f32, colour: u32) -> gpui::Div {
+    const BAND: f32 = 8.0;
+    div()
+        .absolute()
+        .top(px(-BAND))
+        .left(px(-BAND))
+        .right(px(-BAND))
+        .bottom(px(-BAND))
+        .rounded(px(radius + BAND))
+        .border_8()
+        .border_color(rgb(colour))
+}
+
+/// Room inside a plate standing in for a picture, and the size of the
+/// title on it.
+const PLATE_PADDING: f32 = 10.0;
+const PLATE_TITLE: f32 = 14.0;
+/// Height of the system's name in a plate's corner.
+const PLATE_LABEL: f32 = 18.0;
+
+/// How long before `now` `then` was, in words: `"just now"`, `"5 min
+/// ago"`, `"yesterday"`.
+fn ago(then: SystemTime, now: SystemTime) -> String {
+    let seconds = now.duration_since(then).map_or(0, |gone| gone.as_secs());
+    let (minute, hour, day) = (60, 60 * 60, 24 * 60 * 60);
+    match seconds {
+        s if s < minute => "just now".to_owned(),
+        s if s < hour => format!("{} min ago", s / minute),
+        s if s < 2 * hour => "1 hour ago".to_owned(),
+        s if s < day => format!("{} hours ago", s / hour),
+        s if s < 2 * day => "yesterday".to_owned(),
+        s if s < 7 * day => format!("{} days ago", s / day),
+        s if s < 14 * day => "last week".to_owned(),
+        s if s < 60 * day => format!("{} weeks ago", s / (7 * day)),
+        s if s < 365 * day => format!("{} months ago", s / (30 * day)),
+        _ => "over a year ago".to_owned(),
     }
 }
 
@@ -821,19 +1494,22 @@ pub fn read_game(path: &Path, cache: Option<&Path>) -> Result<Game, String> {
 }
 
 /// `text` broken into lines no wider than `width` logical pixels at
-/// `font_size`, at most `max_lines` of them, the last cut short with an
-/// ellipsis if need be. GPUI centres a line it wraps by its width up to the
-/// next line, which takes in the space it broke at and leaves the line half
-/// a space off centre; lines broken here are each centred on their own.
-fn centred_lines(
+/// `font_size` and `weight`, at most `max_lines` of them, the last cut
+/// short with an ellipsis if need be. GPUI centres a line it wraps by its
+/// width up to the next line, which takes in the space it broke at and
+/// leaves the line half a space off centre; lines broken here are each
+/// centred on their own.
+fn broken_lines(
     text: &str,
     width: f32,
     font_size: f32,
+    weight: gpui::FontWeight,
     max_lines: usize,
     window: &Window,
     cx: &App,
 ) -> SharedString {
-    let font = window.text_style().font();
+    let mut font = window.text_style().font();
+    font.weight = weight;
     let mut wrapper = cx.text_system().line_wrapper(font, px(font_size));
     let mut lines: Vec<String> = Vec::new();
     let mut rest = text.trim();
@@ -956,5 +1632,63 @@ mod tests {
         let gone = Path::new("Removed.gba");
         assert_eq!(position(&library.find("", None), Some(gone)), 0);
         assert_eq!(position(&[], Some(chosen)), 0);
+    }
+
+    #[test]
+    fn a_games_pictures_and_last_play_are_read_from_disk() {
+        let dir = std::env::temp_dir().join(format!("emu-app-pictures-{}", std::process::id()));
+        let cache = dir.join("cache");
+        fs::create_dir_all(&cache).expect("temp dir");
+        let info = rom_info::RomInfo {
+            platform: rom_info::Platform::Gba,
+            crc32: 0x1234,
+            serial: None,
+            header_title: None,
+            banner_title: None,
+        };
+        let game = Game::new(&dir.join("Golden Sun.gba"), &info);
+
+        // Never played, nor looked up.
+        let pictures = pictures_on_disk(Some(&cache), &game);
+        assert!(pictures.art.is_none() && pictures.icon.is_none());
+        assert!(pictures.played.is_none() && pictures.left_at.is_none());
+
+        let png = b"\x89PNG\r\n\x1a\n";
+        boxart::write(&boxart::art_path(&cache, 0x1234), png).expect("art");
+        boxart::write(&boxart::icon_path(&cache, 0x1234), png).expect("icon");
+        let checkpoint = library::checkpoint_path(&game);
+        fs::write(&checkpoint, b"state").expect("checkpoint");
+        fs::write(persist::state_picture_path(&checkpoint), png).expect("picture");
+        let pictures = pictures_on_disk(Some(&cache), &game);
+        assert_eq!(pictures.art, Some(boxart::art_path(&cache, 0x1234)));
+        assert_eq!(pictures.icon, Some(boxart::icon_path(&cache, 0x1234)));
+        assert!(pictures.played.is_some());
+        assert_eq!(
+            pictures.left_at.map(|picture| picture.bytes().len()),
+            Some(8)
+        );
+
+        // Without a cache folder, the game still has where it was left.
+        let pictures = pictures_on_disk(None, &game);
+        assert!(pictures.art.is_none() && pictures.left_at.is_some());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn how_long_ago_reads_as_words() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(400 * 24 * 60 * 60);
+        let ago_by = |seconds: u64| ago(now - Duration::from_secs(seconds), now);
+        assert_eq!(ago_by(5), "just now");
+        assert_eq!(ago_by(5 * 60), "5 min ago");
+        assert_eq!(ago_by(90 * 60), "1 hour ago");
+        assert_eq!(ago_by(3 * 60 * 60), "3 hours ago");
+        assert_eq!(ago_by(30 * 60 * 60), "yesterday");
+        assert_eq!(ago_by(3 * 24 * 60 * 60), "3 days ago");
+        assert_eq!(ago_by(10 * 24 * 60 * 60), "last week");
+        assert_eq!(ago_by(21 * 24 * 60 * 60), "3 weeks ago");
+        assert_eq!(ago_by(90 * 24 * 60 * 60), "3 months ago");
+        assert_eq!(ago_by(380 * 24 * 60 * 60), "over a year ago");
+        // A clock set back since reads as just now.
+        assert_eq!(ago(now + Duration::from_secs(60), now), "just now");
     }
 }

@@ -36,13 +36,13 @@ use crate::probe;
 use crate::rom_info::Platform;
 use crate::store::{self, Kind, Offer};
 use crate::theme::{
-    ACCENT, BACKGROUND, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT, with_alpha,
+    ACCENT, BACKGROUND, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT,
+    with_alpha,
 };
+use crate::ui::{self, Section, choice, fit, track};
 
 /// The background lightens a touch towards the foot, as the library's does.
 const FOOT: u32 = 0x0016_181B;
-/// Behind the chosen game.
-const CHOSEN: u32 = 0xFFFF_FF1A;
 /// Space between the games.
 const GAP: f32 = 12.0;
 /// Room around a game's cover and words, inside its tile.
@@ -61,11 +61,6 @@ const PILL: f32 = 22.0;
 /// library's.
 const SEARCH_HEIGHT: f32 = 32.0;
 const SEARCH_PADDING: f32 = 8.0;
-/// The segmented filters: room around and inside each choice.
-const TRACK_PADDING: f32 = 2.0;
-const TRACK_RADIUS: f32 = 8.0;
-const CHOICE_RADIUS: f32 = TRACK_RADIUS - TRACK_PADDING - 1.0;
-const CHOICE_PADDING: f32 = 10.0;
 /// Widest a game's page gets.
 const PAGE_WIDTH: f32 = 640.0;
 /// Tallest a game's screenshot gets on its page.
@@ -559,7 +554,7 @@ impl StoreView {
         true
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let refreshing = self.loading.is_some();
         div()
             .h(px(TOP_BAR))
@@ -567,46 +562,49 @@ impl StoreView {
             .flex()
             .items_center()
             .pl(px(TRAFFIC_LIGHTS))
-            .pr(px(HEADER_END))
+            // The refresh icon's artwork reaches further out in its box than
+            // the library's add icon, which `HEADER_END` is set by.
+            .pr(px(HEADER_END + 1.5))
             .gap_1()
             .children(probe::part("header"))
-            .child(
-                icons::button("back", icons::BACK)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.page.take().is_none() {
-                            cx.emit(StoreEvent::Close);
-                        }
+            // A game's page goes back to the grid; the tabs go between the
+            // store and the library.
+            .when(self.page.is_some(), |bar| {
+                bar.child(
+                    icons::button("back", icons::BACK)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = None;
+                            cx.notify();
+                        }))
+                        .children(probe::part("button:back")),
+                )
+            })
+            .child(ui::tabs([
+                ui::tab(Section::Library, Section::Store, window)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(StoreEvent::Close))),
+                ui::tab(Section::Store, Section::Store, window).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.page = None;
                         cx.notify();
-                    }))
-                    .children(probe::part("button:back")),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
+                    },
+                )),
+            ]))
+            .child(div().flex_1().flex().items_center().pl_2().gap_2().when(
+                refreshing && !self.offers.is_empty(),
+                |bar| {
+                    bar.child(
                         div()
-                            .text_color(rgb(TEXT))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Store")
-                            .children(probe::part("header.title")),
+                            .text_xs()
+                            .text_color(rgb(DIM))
+                            .child("Updating…")
+                            .with_animation(
+                                "updating",
+                                Animation::new(Duration::from_millis(1400)).repeat(),
+                                |text, delta| text.opacity(0.45 + 0.55 * pulse(delta)),
+                            ),
                     )
-                    .when(refreshing && !self.offers.is_empty(), |bar| {
-                        bar.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(DIM))
-                                .child("Updating…")
-                                .with_animation(
-                                    "updating",
-                                    Animation::new(Duration::from_millis(1400)).repeat(),
-                                    |text, delta| text.opacity(0.45 + 0.55 * pulse(delta)),
-                                ),
-                        )
-                    }),
-            )
+                },
+            ))
             .child(
                 icons::button("refresh", icons::REFRESH)
                     .on_click(cx.listener(|this, _, _, cx| this.load(true, cx)))
@@ -1279,7 +1277,7 @@ impl gpui::Render for StoreView {
                 linear_color_stop(rgb(BACKGROUND), 0.3),
                 linear_color_stop(rgb(FOOT), 1.0),
             ))
-            .child(self.header(cx));
+            .child(self.header(window, cx));
         if let Some((index, shot)) = self.page {
             return root.child(self.page(index, shot, window, cx));
         }
@@ -1351,7 +1349,12 @@ fn cover(picture: Option<&Picture>, platform: Platform, width: f32, height: f32)
         .border_color(rgb(LINE));
     match picture {
         Some(Picture::Ready(path)) => plate
-            .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain))
+            .child(
+                img(path.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .rounded(px(5.0)),
+            )
             .into_any_element(),
         _ => plate
             .text_size(px(13.0))
@@ -1362,65 +1365,8 @@ fn cover(picture: Option<&Picture>, platform: Platform, width: f32, height: f32)
     }
 }
 
-/// A segmented control called `name` holding `choices`.
-fn track(name: &'static str, choices: Vec<gpui::Stateful<gpui::Div>>) -> AnyElement {
-    div()
-        .flex()
-        .gap(px(TRACK_PADDING))
-        .p(px(TRACK_PADDING))
-        .rounded(px(TRACK_RADIUS))
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(LINE))
-        .children(choices)
-        .children(probe::bordered_part(format!("track:{name}"), 1.0))
-        .into_any_element()
-}
-
-/// One choice in a [`track`], filled with the accent if `chosen`.
-fn choice(
-    id: (&'static str, usize),
-    label: &'static str,
-    chosen: bool,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .px(px(CHOICE_PADDING))
-        .py(px(3.0))
-        .rounded(px(CHOICE_RADIUS))
-        .cursor_pointer()
-        .whitespace_nowrap()
-        .when(chosen, |button| {
-            button.bg(rgb(ACCENT)).text_color(rgb(ON_ACCENT))
-        })
-        .when(!chosen, |button| {
-            button
-                .text_color(rgb(TEXT))
-                .hover(|button| button.bg(rgb(0x0033_3333)))
-        })
-        .child(label)
-}
-
-/// `text` cut short with an ellipsis to fit `width` logical pixels at
-/// `size` and `weight`. GPUI's own truncation cuts text at the width it
-/// was first measured at, which in a list is none.
-fn fit(
-    text: &str,
-    width: f32,
-    size: f32,
-    weight: gpui::FontWeight,
-    window: &Window,
-    cx: &gpui::App,
-) -> SharedString {
-    let mut font = window.text_style().font();
-    font.weight = weight;
-    let mut wrapper = cx.text_system().line_wrapper(font, px(size));
-    let line = wrapper.truncate_line(text.to_owned().into(), px(width), "…", &mut Vec::new());
-    line.replace(" …", "…").into()
-}
-
 /// A system's full name, for a game's page.
-fn platform_name(platform: Platform) -> &'static str {
+pub fn platform_name(platform: Platform) -> &'static str {
     match platform {
         Platform::Gb => "Game Boy",
         Platform::Gbc => "Game Boy Color",
