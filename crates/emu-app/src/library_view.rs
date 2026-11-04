@@ -38,6 +38,7 @@ use crate::app_icon;
 use crate::archive;
 use crate::boxart;
 use crate::icons;
+use crate::leftovers;
 use crate::library::{self, Game, Library};
 use crate::persist;
 use crate::probe;
@@ -309,14 +310,32 @@ pub struct LibraryView {
     /// How many tiles of games being added came before the games, as last
     /// drawn.
     adding_shown: usize,
+    /// Removes what adding games has under way when the app quits.
+    _quit: Subscription,
 }
 
 impl EventEmitter<LibraryEvent> for LibraryView {}
 
 impl LibraryView {
     /// A view of `library`, saved to `path`, which starts finding box art
-    /// for games that have none.
+    /// for games that have none, and removes what adding games left behind
+    /// when an app quit or crashed during it.
     pub fn new(library: Library, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+        let folders: Vec<PathBuf> = [archive::games_dir(), romhack::hacks_dir()]
+            .into_iter()
+            .flatten()
+            .collect();
+        cx.background_executor()
+            .spawn(async move {
+                let freed = leftovers::remove_left_behind(&folders);
+                if freed > 0 {
+                    eprintln!(
+                        "ds-emulator: removed {} MB that unfinished unpacking left behind",
+                        freed.div_ceil(1 << 20)
+                    );
+                }
+            })
+            .detach();
         let mut view = Self {
             library,
             path,
@@ -342,6 +361,10 @@ impl LibraryView {
             next_adding: 0,
             adding_redraws: None,
             adding_shown: 0,
+            _quit: cx.on_app_quit(|_, _| {
+                leftovers::remove_own();
+                async {}
+            }),
         };
         // Box art and icons, in the cache, are read at once, so the games
         // don't open on plates that their pictures replace a moment later.

@@ -365,6 +365,16 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 
 Writes go to `name.tmp` first and are renamed over the target, except
 recordings, which are written as they go and indexed when they stop.
+Games unpacked or patched go to `name.partial` instead, locked while
+they are written. A `.7z` or `.rar` is unpacked into
+`$TMPDIR/ds-emulator-unpack-<pid>-<n>/`, and a store download into
+`$TMPDIR/ds-emulator-store-<pid>-<n>/`, each locked by a
+`.ds-emulator-lock` file inside while in use. The unpacked game is
+moved, not copied, into `Games/`. The app removes its own on quit. At
+launch, it removes any folder or `.partial` that no running app holds,
+killing any `tar` still writing into it. It also removes `.tmp` files in
+`Games/` and `Hacks/`, and patches in `$TMPDIR/ds-emulator-patches/`,
+once they are an hour old. See `emu-app/src/leftovers.rs`.
 
 ## Save-state container
 

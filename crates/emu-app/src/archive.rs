@@ -5,18 +5,20 @@
 //! a 3DS game can be 4 GB. ROM-hack patches inside are unpacked into a
 //! temporary folder, for [`crate::romhack`] to make their games from.
 //! How far an unpacking has got is told through a [`Progress`], as a big
-//! 3DS game takes most of a minute.
+//! 3DS game takes most of a minute. What an unpacking cut short leaves is
+//! removed (see [`crate::leftovers`]).
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write as _};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use zip::ZipArchive;
 
+use crate::leftovers::{self, Unfinished, WorkFolder};
 use crate::persist;
 use crate::romhack;
 
@@ -39,7 +41,7 @@ pub fn games_dir() -> Option<PathBuf> {
 /// Where patches unpacked from archives are kept until their games are
 /// made.
 fn patches_dir() -> PathBuf {
-    std::env::temp_dir().join("ds-emulator-patches")
+    std::env::temp_dir().join(leftovers::PATCHES)
 }
 
 /// How often the files `tar` writes are measured while it unpacks.
@@ -228,23 +230,24 @@ fn unpack_zip(
 
 /// Unpacks a `.7z` or `.rar` file with `/usr/bin/tar`, which on macOS is
 /// libarchive's `bsdtar`: it reads both, and by default writes nothing
-/// outside the folder it is given. It unpacks everything into a scratch
-/// folder, from which the games and patches are taken in name order.
-/// How far it has got is the size of what it has written so far, out of
-/// the size of what the archive lists.
+/// outside the folder it is given. It unpacks everything into a work
+/// folder, from which the games are moved, and the patches taken, in name
+/// order. How far it has got is the size of what it has written so far,
+/// out of the size of what the archive lists.
 fn unpack_with_tar(
     archive: &Path,
     folder: &Path,
     patches: &Path,
     progress: &Progress,
 ) -> io::Result<Vec<PathBuf>> {
-    let scratch = Scratch::new()?;
+    let work = WorkFolder::new("unpack")?;
+    let scratch = work.path();
     progress.start(listed_size(archive));
     let mut tar = Command::new("/usr/bin/tar")
         .arg("-xf")
         .arg(archive)
         .arg("-C")
-        .arg(&scratch.0)
+        .arg(scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -262,7 +265,7 @@ fn unpack_with_tar(
         match tar.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                progress.set(folder_size(&scratch.0));
+                progress.set(folder_size(scratch));
                 thread::sleep(MEASURE_EVERY);
             }
             Err(error) => {
@@ -278,16 +281,16 @@ fn unpack_with_tar(
         let said = said.trim().trim_start_matches("tar: ");
         return Err(io::Error::other(said.to_owned()));
     }
-    progress.set(folder_size(&scratch.0));
+    progress.set(folder_size(scratch));
     let mut files = Vec::new();
-    find_files(&scratch.0, &scratch.0, &mut files)?;
+    find_files(scratch, scratch, &mut files)?;
     files.sort();
     let mut games = Vec::new();
     for inner in files.iter().filter(|inner| wanted(inner)) {
         let Some(name) = inner.file_name().map(PathBuf::from) else {
             continue;
         };
-        let path = scratch.0.join(inner);
+        let path = scratch.join(inner);
         let game = if romhack::is_patch(&name) {
             keep_patch(
                 &read_capped(&mut File::open(&path)?, &name)?,
@@ -298,7 +301,7 @@ fn unpack_with_tar(
             if fs::metadata(&path)?.len() > size_cap(&name) {
                 return Err(too_big(&name));
             }
-            store(folder, &name, file_crc32(&path)?, File::open(&path)?)?
+            store_unpacked(folder, &name, &path)?
         };
         games.push(game);
     }
@@ -359,30 +362,6 @@ fn find_files(root: &Path, folder: &Path, files: &mut Vec<PathBuf>) -> io::Resul
     Ok(())
 }
 
-/// A new, empty temporary folder, removed with everything in it when
-/// dropped.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> io::Result<Self> {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let number = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "ds-emulator-unpack-{}-{number}",
-            std::process::id()
-        ));
-        fs::remove_dir_all(&path).ok();
-        fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).ok();
-    }
-}
-
 /// All of `file`, a patch called `name`, unless it is too big to be one.
 fn read_capped(file: &mut impl Read, name: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -414,25 +393,32 @@ pub fn file_crc32(path: &Path) -> io::Result<u32> {
 }
 
 /// Writes `contents`, the game called `name`, to `path` as it reads it,
-/// through a temporary file, so `path` is only ever the whole game. Stops
-/// past `cap` bytes, leaving nothing behind, as it is too big to be a game.
+/// through a `….partial` file, so `path` is only ever the whole game.
+/// Stops past `cap` bytes, leaving nothing behind, as it is too big to be
+/// a game.
 fn write_capped(path: &Path, contents: impl Read, name: &Path, cap: u64) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    let written = File::create(&temporary).and_then(|mut file| {
-        let written = io::copy(&mut contents.take(cap + 1), &mut file)?;
-        if written > cap {
-            return Err(too_big(name));
-        }
-        file.flush()?;
-        file.sync_all()
-    });
-    if let Err(error) = written {
-        fs::remove_file(&temporary).ok();
-        return Err(error);
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(leftovers::PARTIAL);
+    let mut unfinished = Unfinished::create(Path::new(&partial))?;
+    let written = io::copy(&mut contents.take(cap + 1), unfinished.file())?;
+    if written > cap {
+        return Err(too_big(name));
     }
-    fs::rename(&temporary, path)
+    unfinished.file().sync_all()?;
+    unfinished.finish(path)
+}
+
+/// Moves the file at `from`, the game called `name`, to `path` once it is
+/// all on disk, so `path` is only ever the whole game; or copies it, if
+/// `path` is on another disk.
+fn move_capped(from: &Path, path: &Path, name: &Path) -> io::Result<()> {
+    File::open(from)?.sync_all()?;
+    match fs::rename(from, path) {
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            write_capped(path, File::open(from)?, name, size_cap(name))
+        }
+        moved => moved,
+    }
 }
 
 /// Writes the patch `bytes` into `patches` as `name`, replacing any patch
@@ -455,6 +441,29 @@ fn keep_patch(bytes: &[u8], patches: &Path, name: &Path) -> io::Result<PathBuf> 
 /// Fails if a file cannot be read or written, or the game is bigger than
 /// a cartridge of its system holds.
 pub fn store(folder: &Path, name: &Path, crc32: u32, contents: impl Read) -> io::Result<PathBuf> {
+    store_with(folder, name, crc32, |path| {
+        write_capped(path, contents, name, size_cap(name))
+    })
+}
+
+/// Moves the game called `name`, unpacked at `unpacked`, into `folder` as
+/// [`store`] writes one: the same game there before is used, and
+/// `unpacked` left where it is.
+fn store_unpacked(folder: &Path, name: &Path, unpacked: &Path) -> io::Result<PathBuf> {
+    store_with(folder, name, file_crc32(unpacked)?, |path| {
+        move_capped(unpacked, path, name)
+    })
+}
+
+/// Puts the ROM whose CRC-32 is `crc32` into `folder` as `name`, or as a
+/// numbered name if a different game has that one, with `put`, and
+/// returns its path; or returns that of the same game put there before.
+fn store_with(
+    folder: &Path,
+    name: &Path,
+    crc32: u32,
+    put: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
     let stem = name.file_stem().unwrap_or_default().to_string_lossy();
     let extension = name.extension().unwrap_or_default().to_string_lossy();
     for number in 1.. {
@@ -470,7 +479,7 @@ pub fn store(folder: &Path, name: &Path, crc32: u32, contents: impl Read) -> io:
             Err(error) => return Err(error),
         }
         fs::create_dir_all(folder)?;
-        write_capped(&path, contents, name, size_cap(name))?;
+        put(&path)?;
         return Ok(path);
     }
     unreachable!("a free name is always found")

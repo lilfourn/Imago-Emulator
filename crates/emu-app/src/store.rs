@@ -24,7 +24,6 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, bail};
@@ -32,6 +31,7 @@ use serde_json::Value;
 
 use crate::archive;
 use crate::boxart;
+use crate::leftovers::WorkFolder;
 use crate::rom_info::Platform;
 
 /// Homebrew Hub's API and files.
@@ -767,16 +767,18 @@ pub fn install(offer: &Offer, games: &Path) -> Result<Vec<PathBuf>, String> {
     // Some catalog entries are ZIP files named like the ROM inside.
     let zipped = is_zip(&bytes) && !archive::is_archive(&path);
     if archive::is_archive(&path) || zipped {
-        let scratch = scratch_dir();
+        let scratch = WorkFolder::new("store")
+            .map_err(|error| format!("Cannot keep {}: {error}", offer.title))?;
         let download = if zipped {
-            scratch.join(path.with_extension("zip").file_name().unwrap_or_default())
+            let zip = path.with_extension("zip");
+            scratch.path().join(zip.file_name().unwrap_or_default())
         } else {
-            scratch.join(&offer.file)
+            scratch.path().join(&offer.file)
         };
         let unpacked = boxart::write(&download, &bytes)
             .map_err(|error| format!("Cannot keep {}: {error}", offer.title))
             .and_then(|()| archive::unpack_to(&download, &folder));
-        fs::remove_dir_all(&scratch).ok();
+        drop(scratch);
         let games = unpacked.map_err(|_| format!("{} holds no game the app plays", offer.title))?;
         return Ok(match offer.platform {
             Platform::N3ds => best_3ds_game(games),
@@ -817,13 +819,6 @@ fn best_3ds_game(mut games: Vec<PathBuf>) -> Vec<PathBuf> {
 /// Whether `bytes` are a ZIP file, by how it starts.
 fn is_zip(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK\x03\x04")
-}
-
-/// A new temporary folder for one download.
-fn scratch_dir() -> PathBuf {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let number = NEXT.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("ds-emulator-store-{}-{number}", std::process::id()))
 }
 
 /// Where the picture at `url` is kept, as a PNG, in the cache folder
