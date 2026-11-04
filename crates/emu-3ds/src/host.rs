@@ -69,6 +69,8 @@ fn options(renderer: Renderer) -> HashMap<String, CString> {
     [
         ("citra_graphics_api", api),
         ("citra_resolution_factor", "1"),
+        // The app sends the filter its picture calls for (TEXTURES).
+        ("citra_texture_filter", "none"),
         // Vertices are shaded on the CPU, by the core's shader JIT. On the
         // GPU, every new pipeline also compiles the game's own vertex
         // shader, and a game waits for each the first time it draws
@@ -368,6 +370,19 @@ fn serve(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> io::Result<(
                     "citra_resolution_factor",
                     &scale.clamp(1, MAX_SCALE).to_string(),
                 );
+                link::write_message(&mut out, link::DONE, &[])?;
+            }
+            link::TEXTURES => {
+                // Only the filters that work through Vulkan, by the names
+                // the core checks for (Azahar 2126.2's menu offers "xBRZ",
+                // but the core only knows "xBRZ freescale", and Anime4K is
+                // OpenGL's alone).
+                let filter = std::str::from_utf8(&payload).unwrap_or("none");
+                let filter = match filter {
+                    "ScaleForce" | "MMPX" => filter,
+                    _ => "none",
+                };
+                set_option("citra_texture_filter", filter);
                 link::write_message(&mut out, link::DONE, &[])?;
             }
             _ => break,

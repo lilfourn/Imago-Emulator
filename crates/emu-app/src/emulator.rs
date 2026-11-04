@@ -497,6 +497,8 @@ pub enum Command {
     /// Draws 3D at this many times the native resolution (DS, 3DS), showing
     /// the change at once, even while paused.
     SetRenderScale(u32),
+    /// Enlarges the game's own textures so, for cores that can (the 3DS).
+    SetTextureUpscaling(emu_core::TextureUpscaling),
     /// Replaces a player's cheats: their ROM patches go to the core at
     /// once, and the rest run after every frame.
     SetCheats {
@@ -1070,6 +1072,9 @@ impl Runner {
             Command::SetRenderScale(scale) => {
                 self.loaded.core.set_render_scale(scale);
                 self.publish();
+            }
+            Command::SetTextureUpscaling(upscaling) => {
+                self.loaded.core.set_texture_upscaling(upscaling);
             }
             Command::SetCheats { player, cheats } => {
                 if let Some(slot) = self.cheats.get_mut(player) {

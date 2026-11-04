@@ -86,6 +86,19 @@ impl fmt::Debug for Frame {
     }
 }
 
+/// How a core that draws on a GPU of its own (the 3DS) enlarges the game's
+/// textures: the frontend's picture, carried into the game's own drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureUpscaling {
+    /// Textures as the game made them.
+    #[default]
+    Off,
+    /// Smoothly, for painted and rendered art.
+    Smooth,
+    /// With pixel art's edges kept.
+    PixelArt,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

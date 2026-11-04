@@ -11,6 +11,7 @@
 //! | [`LOAD`] | a state | [`DONE`] or [`REFUSED`] |
 //! | [`RESET`] | none | [`DONE`] |
 //! | [`SCALE`] | the internal resolution, 1 to 10 (u32) | [`DONE`] |
+//! | [`TEXTURES`] | the core's texture filter, in UTF-8: `none`, `ScaleForce` or `MMPX` | [`DONE`] |
 //! | [`QUIT`] | none | none: the helper exits |
 //!
 //! The helper starts by saying [`HELLO`]: the protocol's [`VERSION`]
@@ -34,7 +35,7 @@ use emu_core::{Frame, ScreenSize, StereoSample};
 use crate::{HELPER_FLAG, OpenError, install::Parts};
 
 /// The protocol's version, which the helper says in its hello.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// Runs a frame with the pad held.
 pub const RUN: u8 = 1;
@@ -48,6 +49,8 @@ pub const RESET: u8 = 4;
 pub const SCALE: u8 = 5;
 /// Asks the helper to exit.
 pub const QUIT: u8 = 6;
+/// Sets the texture filter.
+pub const TEXTURES: u8 = 7;
 
 /// The helper is ready.
 pub const HELLO: u8 = 1;
@@ -360,6 +363,11 @@ impl Client {
     /// Sets the internal resolution to `scale` times native.
     pub fn set_scale(&mut self, scale: u32) -> Result<(), String> {
         self.ask(SCALE, &scale.to_le_bytes(), DONE).map(drop)
+    }
+
+    /// Sets the core's texture filter, by its name in the core's options.
+    pub fn set_texture_filter(&mut self, filter: &str) -> Result<(), String> {
+        self.ask(TEXTURES, filter.as_bytes(), DONE).map(drop)
     }
 
     /// Sends a request and waits for its answer, which must be `expected`.
