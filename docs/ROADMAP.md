@@ -380,4 +380,5 @@ are done.
 | Filters (LCD grid, scanlines, Scale2x/3x), screenshots, video recording | UI-4, UI-14 | Phase 4 ✅ |
 | Lua scripting: File > Run Script…, `--script`, headless | UI-14 | Phase 4 ✅ |
 | ROM-hack patches (IPS, UPS, BPS, xdelta); `.7z` and `.rar` games | UI-15 | Frontend ✅ |
+| Upscaler: View > Picture, Pixel Art and Smooth on the GPU at every display's resolution | UI-17 | Upscaler phase 1 ✅ |
 | xBRZ, slang presets, achievements | UI-4, UI-14 | Later |

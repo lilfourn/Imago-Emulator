@@ -1,19 +1,21 @@
 //! Video filters: CPU passes from one frame to another, run after colour
 //! correction and rotation and before a frame becomes a GPUI image
 //! ([decision 0005](../../../docs/decisions/0005-video-filters-on-the-cpu.md)).
+//! They draw View > Picture's Sharp Pixels, LCD Grid and Scanlines; the
+//! upscalers run on the GPU (`gpu_upscale`).
 //!
 //! Two kinds:
 //! - **Shading** (LCD grid, scanlines) enlarges each pixel to the block of
 //!   device pixels it covers on screen and darkens parts of the block, so
 //!   it needs at least two device pixels per console pixel to show.
 //! - **Pixel-art scalers** (Scale2x, Scale3x) round off the staircase edges
-//!   of sprites and text at two or three times the size. They work on
-//!   console pixels, so they skip frames already enlarged by DS 3D
-//!   upscaling, whose 3D is smooth anyway.
+//!   of sprites and text at two or three times the size. They stand in for
+//!   the Pixel Art upscaler on a Mac without Metal. They work on console
+//!   pixels, so they skip frames already enlarged by DS 3D upscaling,
+//!   whose 3D is smooth anyway.
 //!
-//! xBRZ would be the higher-quality scaler, but its code is GPL-3.0 and the
-//! project reuses only MIT, BSD and MPL-2.0 code (PRD section 9). Scale2x
-//! and Scale3x are written here from their published rules.
+//! Scale2x and Scale3x are written here from their published rules; the
+//! reference code is GPL, which the project does not reuse (PRD section 9).
 
 use std::borrow::Cow;
 
@@ -21,7 +23,7 @@ use emu_core::{Frame, ScreenSize};
 
 use crate::layout::Rotation;
 
-/// A look for the screens, chosen from View > Filter.
+/// A CPU pass over the screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
     /// Pixels as they are.
@@ -36,15 +38,6 @@ pub enum Filter {
     /// Three times the size, with diagonal edges filled in.
     Scale3x,
 }
-
-/// Each filter and its name in the settings file.
-const NAMES: [(Filter, &str); 5] = [
-    (Filter::None, "none"),
-    (Filter::LcdGrid, "lcd-grid"),
-    (Filter::Scanlines, "scanlines"),
-    (Filter::Scale2x, "scale2x"),
-    (Filter::Scale3x, "scale3x"),
-];
 
 /// Brightness of an LCD grid line, in 256ths, by how many device pixels
 /// one console pixel covers: the thin lines of a large cell are darker so
@@ -65,33 +58,6 @@ const SCANLINE_GAP: u16 = 140;
 const SCANLINE_BEAM: u16 = 272;
 
 impl Filter {
-    /// The filter's name in the settings file.
-    pub fn name(self) -> &'static str {
-        NAMES
-            .iter()
-            .find(|(filter, _)| *filter == self)
-            .map_or("none", |(_, name)| name)
-    }
-
-    /// The filter with this name in the settings file.
-    pub fn from_name(name: &str) -> Option<Self> {
-        NAMES
-            .iter()
-            .find(|(_, known)| *known == name)
-            .map(|(filter, _)| *filter)
-    }
-
-    /// The filter as the View menu names it.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::LcdGrid => "LCD grid",
-            Self::Scanlines => "Scanlines",
-            Self::Scale2x => "Scale2x",
-            Self::Scale3x => "Scale3x",
-        }
-    }
-
     /// `frame`, already turned by `rotation`, filtered for drawing with
     /// each of its pixels `factor` device pixels wide. A frame at a higher
     /// 3D resolution has `cell` of its pixels to each console pixel.
@@ -347,15 +313,6 @@ mod tests {
         let mut frame = Frame::new(ScreenSize::new(width, height));
         frame.pixels_mut().copy_from_slice(pixels);
         frame
-    }
-
-    #[test]
-    fn names_round_trip() {
-        for (filter, name) in NAMES {
-            assert_eq!(filter.name(), name);
-            assert_eq!(Filter::from_name(name), Some(filter));
-        }
-        assert_eq!(Filter::from_name("xbrz"), None);
     }
 
     #[test]

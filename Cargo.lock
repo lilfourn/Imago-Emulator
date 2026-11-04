@@ -1657,6 +1657,8 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "objc2-metal",
+ "objc2-metal-fx",
  "png 0.18.1",
  "raw-window-handle",
  "rtrb",
@@ -4222,6 +4224,17 @@ dependencies = [
  "block2",
  "objc2",
  "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-metal-fx"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2db6f3a9d3b07481d9e5884f592aff6fd3f99e155423d1d1af3977e77a90ea0e"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
 ]
 
 [[package]]

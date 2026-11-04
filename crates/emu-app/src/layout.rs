@@ -198,6 +198,24 @@ impl Rect {
         (self.x..self.x + self.width).contains(&point.0)
             && (self.y..self.y + self.height).contains(&point.1)
     }
+
+    /// The rectangle with its edges moved to the nearest device pixel, on
+    /// a display of `scale_factor` device pixels to a logical one. An
+    /// image as many device pixels across is then drawn one to one, not
+    /// resampled half a pixel off.
+    pub fn snapped(self, scale_factor: f32) -> Self {
+        if scale_factor.is_nan() || scale_factor <= 0.0 {
+            return self;
+        }
+        let snap = |edge: f32| (edge * scale_factor).round() / scale_factor;
+        let (left, top) = (snap(self.x), snap(self.y));
+        Self {
+            x: left,
+            y: top,
+            width: snap(self.x + self.width) - left,
+            height: snap(self.y + self.height) - top,
+        }
+    }
 }
 
 /// One screen's position in the window. A screen can be placed more than
@@ -874,5 +892,38 @@ mod tests {
         assert_eq!(next_gap(90.0), 0.0);
         // A gap set by hand moves to the next preset up.
         assert_eq!(next_gap(30.0), 48.0);
+    }
+
+    #[test]
+    fn snapped_rects_lie_on_device_pixels() {
+        let rect = Rect {
+            x: 10.3,
+            y: 0.74,
+            width: 654.6,
+            height: 490.9,
+        };
+        // On a 1× display edges move to whole points; on Retina to halves.
+        for (scale, expected) in [
+            (1.0, (10.0, 1.0, 655.0, 491.0)),
+            (2.0, (10.5, 0.5, 654.5, 491.0)),
+        ] {
+            let snapped = rect.snapped(scale);
+            let got = (snapped.x, snapped.y, snapped.width, snapped.height);
+            assert_eq!(got, expected, "at {scale}×");
+            for edge in [snapped.x, snapped.y, snapped.width, snapped.height] {
+                assert_eq!((edge * scale).fract(), 0.0, "{edge} at {scale}×");
+            }
+        }
+        // Screens side by side stay edge to edge.
+        let left = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.3,
+            height: 10.0,
+        };
+        let right = Rect { x: 100.3, ..left };
+        let (left, right) = (left.snapped(2.0), right.snapped(2.0));
+        assert_eq!(left.x + left.width, right.x);
+        assert_eq!(rect.snapped(0.0), rect);
     }
 }

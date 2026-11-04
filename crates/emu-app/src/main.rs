@@ -29,6 +29,8 @@ mod filter;
 mod game_db;
 mod game_menu;
 mod gamepad;
+#[allow(unsafe_code)]
+mod gpu_upscale;
 mod icons;
 mod key_guide;
 mod key_routes;
@@ -42,6 +44,7 @@ mod meter;
 mod microphone;
 mod mov;
 mod persist;
+mod picture;
 mod probe;
 #[allow(unsafe_code)]
 mod qos;

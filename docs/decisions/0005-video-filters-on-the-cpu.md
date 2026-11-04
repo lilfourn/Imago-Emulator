@@ -1,6 +1,9 @@
 # 0005 — Video filters run on the CPU; DS upscaling belongs to the core
 
-- Status: accepted (settles PRD open question Q3)
+- Status: accepted (settles PRD open question Q3); point 1 revisited by
+  [decision 0013](0013-upscaling-on-the-gpu.md), which puts the upscalers
+  on the GPU. The LCD grid, scanlines and the sharp pre-scale stay on the
+  CPU.
 - Date: 2026-10-05; accepted 2026-10-07, when the filters were built this
   way
 - Deciders: Claude, for Luke Fournier's review

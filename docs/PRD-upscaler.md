@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Status | Draft 0.1 |
+| Status | Phase 1 built (2026-11-04); phases 2–4 to do |
 | Date | 2026-11-04 |
 | Owner | Luke Fournier |
 | Research | [research/upscaling.md](research/upscaling.md) |
-| Related | [PRD.md](PRD.md) UI-3, UI-4, NDS-9, 3DS-3 · [decision 0005](decisions/0005-video-filters-on-the-cpu.md) (revisited here) · [decision 0011](decisions/0011-3ds-games.md) |
+| Related | [PRD.md](PRD.md) UI-3, UI-4, NDS-9, 3DS-3, UI-17 · [decision 0005](decisions/0005-video-filters-on-the-cpu.md) (revisited) · [decision 0011](decisions/0011-3ds-games.md) · [decision 0013](decisions/0013-upscaling-on-the-gpu.md) |
 
 ## 1. Summary
 
@@ -134,6 +134,13 @@ to device pixels
   The view sends targets to the video stage when they change: a resize,
   full screen, a move to another display, or a layout, rotation, gap or
   swap change.
+- **Built differently in phase 1:** the upscale runs where the CPU path
+  ran, in the window's render as it takes a new frame
+  (`Session::refresh_images`), not as frames are published. It took
+  1.1–1.4 ms a frame for a GB screen or two DS screens at about
+  1.5 million pixels in all, against 0.15 ms for sharp pixels. The two
+  points below remain the plan if the pacing benchmarks (section 8) show
+  frames missing their refresh.
 - **The video stage runs as frames are published, not in `render()`,**
   on a thread at the window's quality of service (`qos.rs`), as the
   emulation thread runs.
@@ -256,9 +263,9 @@ So:
 - **The settings window's Video section** gets the same two rows. The
   3D Resolution row today offers only 1–4×.
 - **Settings file:** `[video] picture = "auto"` and
-  `resolution_3d = "auto"` or `1`–`8`. Old `filter` values still load:
-  `scale2x` and `scale3x` become Pixel Art, `lcd-grid` and `scanlines`
-  stay, and `none` becomes Auto.
+  `resolution_3d = "auto"` or `1`–`8`. Files with an old `filter` still
+  load, on Auto whatever the filter was: upscaling is on until the player
+  turns it off (UQ-1).
 - Nothing is added to the game screen or the Escape menu (the owner keeps
   in-game chrome off the screens).
 
@@ -296,28 +303,28 @@ is wanted, **P2** comes later. Phases are in section 9.
 
 | ID | Requirement | Priority · Phase |
 |---|---|---|
-| UP-1 | A Metal video stage in `emu-app` that colour corrects, turns, upscales and shades each published frame into one BGRA image per placement, at that placement's exact size in device pixels. | P0 · 1 |
-| UP-2 | Pixel Art mode: the bake-off's winner (6.2), rendering straight to any output size, with diagonals and curves rebuilt and 5–8 px text still legible. | P0 · 1 |
-| UP-3 | Smooth mode: MetalFX spatial scaler, to any output size. | P0 · 1 |
-| UP-4 | Sharp Pixels, LCD Grid and Scanlines produce what today's CPU path produces, to within ±1 per channel. | P0 · 1 |
-| UP-5 | Auto picks per system as in 6.3. It is the default; the default for 3D resolution is Match Display. | P0 · 1–2 |
-| UP-6 | Without a Metal device, or if the video stage fails to start, today's CPU path runs, and a notice says so once. | P0 · 1 |
-| UP-7 | View > Picture, View > 3D Resolution, the settings window rows and the settings file keys of 6.7, with old `filter` values migrated. | P0 · 1 |
-| UP-8 | Shaders are ported only from MIT, BSD, zlib, MPL-2.0 or Apache sources, keep their licence headers, and compile from source at run time. | P0 · 1 |
+| UP-1 | A Metal video stage in `emu-app` that colour corrects, turns, upscales and shades each published frame into one BGRA image per placement, at that placement's exact size in device pixels. ✅ partly: colour correction and rotation stay on the CPU, cheap at console size, and so do the shading filters (UP-4); it runs in render (6.1). | P0 · 1 |
+| UP-2 | Pixel Art mode: the bake-off's winner (6.2), rendering straight to any output size, with diagonals and curves rebuilt and 5–8 px text still legible. ✅ OmniScale (UQ-2). | P0 · 1 |
+| UP-3 | Smooth mode: MetalFX spatial scaler, to any output size. ✅ | P0 · 1 |
+| UP-4 | Sharp Pixels, LCD Grid and Scanlines produce what today's CPU path produces, to within ±1 per channel. ✅ the CPU path, unchanged. | P0 · 1 |
+| UP-5 | Auto picks per system as in 6.3. It is the default; the default for 3D resolution is Match Display. ✅ for the picture; Match Display is phase 2. | P0 · 1–2 |
+| UP-6 | Without a Metal device, or if the video stage fails to start, today's CPU path runs, and a notice says so once. ✅ Scale2x and Scale3x stand in for Pixel Art, and a notice says why. | P0 · 1 |
+| UP-7 | View > Picture, View > 3D Resolution, the settings window rows and the settings file keys of 6.7, with old `filter` values migrated. ✅ View > Picture, its settings window row and `picture`, with old `filter` values migrated; View > 3D Resolution is phase 2. | P0 · 1 |
+| UP-8 | Shaders are ported only from MIT, BSD, zlib, MPL-2.0 or Apache sources, keep their licence headers, and compile from source at run time. ✅ OmniScale from SameBoy (Expat), its notice kept. | P0 · 1 |
 
 ### 7.2 Every screen type
 
 | ID | Requirement | Priority · Phase |
 |---|---|---|
-| UP-S1 | Each placement's target is its rect × the window's current scale factor, rounded to whole device pixels. It is recomputed on resize, entering or leaving full screen, a move to another display, and a layout, rotation, gap or swap change, and the next frame drawn uses the new size. | P0 · 1 |
-| UP-S2 | Placement rects snap to whole device pixels, origin and size, so an image of the target size is drawn 1:1. Touch mapping uses the same snapped rects. | P0 · 1 |
-| UP-S3 | Correct at backing scale 1 and 2, at any window size, and in macOS's scaled display modes, where the target is the backing size. | P0 · 1 |
-| UP-S4 | One upscale per frame drawn, never per display refresh. At 60, 120, 144 and 240 Hz and with ProMotion's variable refresh, frames still last the same whole number of refreshes as with upscaling off (decision 0003). `refresh.rs`'s `Lock` counts the video stage in each frame's time. | P0 · 1 |
-| UP-S5 | A per-frame output budget in pixels, set from measurement so the stage stays within its time at 3× fast-forward on the 240 Hz display. Past it, the stage renders the largest size within budget and GPUI's linear filter covers the rest. | P0 · 1 |
-| UP-S6 | Screens of different sizes in one window (3DS 400 and 320 wide; hybrid large and small; RPG Maker games of any size) each get their own target. | P0 · 1 |
-| UP-S7 | Colours unchanged: sRGB in, sRGB out. Flat areas match upscaling off exactly on every display, wide-gamut and EDR panels included. | P0 · 1 |
-| UP-S8 | No upscaling work while the window draws nothing (minimised, hidden or fully covered). | P1 · 1 |
-| UP-S9 | Displays connected, disconnected or changed mid-game re-fit without a restart. | P1 · 1 |
+| UP-S1 | Each placement's target is its rect × the window's current scale factor, rounded to whole device pixels. It is recomputed on resize, entering or leaving full screen, a move to another display, and a layout, rotation, gap or swap change, and the next frame drawn uses the new size. ✅ (`picture::device_size`) | P0 · 1 |
+| UP-S2 | Placement rects snap to whole device pixels, origin and size, so an image of the target size is drawn 1:1. Touch mapping uses the same snapped rects. ✅ (`Rect::snapped`) | P0 · 1 |
+| UP-S3 | Correct at backing scale 1 and 2, at any window size, and in macOS's scaled display modes, where the target is the backing size. ✅ by construction; tried at 2×, not yet on a 1× or scaled display. | P0 · 1 |
+| UP-S4 | One upscale per frame drawn, never per display refresh. At 60, 120, 144 and 240 Hz and with ProMotion's variable refresh, frames still last the same whole number of refreshes as with upscaling off (decision 0003). `refresh.rs`'s `Lock` counts the video stage in each frame's time. ✅ one upscale per new frame. Not yet: `Lock` counting it (6.1) and the pacing benchmarks. | P0 · 1 |
+| UP-S5 | A per-frame output budget in pixels, set from measurement so the stage stays within its time at 3× fast-forward on the 240 Hz display. Past it, the stage renders the largest size within budget and GPUI's linear filter covers the rest. ✅ 6 million pixels, from the standalone benchmark; still to measure in the app on the external display. | P0 · 1 |
+| UP-S6 | Screens of different sizes in one window (3DS 400 and 320 wide; hybrid large and small; RPG Maker games of any size) each get their own target. ✅ tried with the DS hybrid layout, turned. | P0 · 1 |
+| UP-S7 | Colours unchanged: sRGB in, sRGB out. Flat areas match upscaling off exactly on every display, wide-gamut and EDR panels included. ✅ flat colours within ±1 after both upscalers (GPU tests). | P0 · 1 |
+| UP-S8 | No upscaling work while the window draws nothing (minimised, hidden or fully covered). ✅ GPUI draws nothing in a hidden or covered window, so nothing is upscaled. | P1 · 1 |
+| UP-S9 | Displays connected, disconnected or changed mid-game re-fit without a restart. ✅ by construction (the scale factor is read every draw); not yet tried by moving a window between displays. | P1 · 1 |
 
 ### 7.3 3D and per-system
 
@@ -381,8 +388,12 @@ Acceptance tests:
 
 ## 9. Phases
 
-1. **The video stage and 2D.** UP-1 to UP-8, UP-S1 to UP-S9, with
-   decision 0013. GB, GBC, GBA, RPG Maker and DS frames without upscaled
+1. **The video stage and 2D.** ✅ Built 2026-11-04 (marks in section 7),
+   with [decision 0013](decisions/0013-upscaling-on-the-gpu.md). Left from
+   it: the pacing benchmarks on both displays (they take the screen for a
+   while), the in-app budget check on the external display, and `Lock`
+   counting the upscale if those call for it. UP-1 to UP-8, UP-S1 to UP-S9,
+   with decision 0013. GB, GBC, GBA, RPG Maker and DS frames without upscaled
    3D get Pixel Art or Smooth at display size. Measure GPUI's atlas
    upload at the largest targets and set UP-S5's budget.
 2. **3D that follows the display.** UP-10 to UP-14: Match Display, the
@@ -409,9 +420,9 @@ Acceptance tests:
 
 | ID | Question | Needed by |
 |---|---|---|
-| UQ-1 | Should Auto (upscaled) be the default for existing players, or should they opt in? The draft says default, since higher resolution for every game is the point. | Phase 1 |
-| UQ-2 | Which Pixel Art algorithm wins the bake-off: OmniScale, ScaleFX or MMPX? | Phase 1 |
-| UQ-3 | One View > Picture menu (this draft), or keep View > Filter and add View > Upscaling? | Phase 1 |
+| UQ-1 | ~~Should Auto (upscaled) be the default for existing players, or should they opt in?~~ On by default, decided by the owner (2026-11-04): every player starts upscaled and turns it off from View > Picture. Settings files from before View > Picture start on Auto too, whatever filter they had. | Phase 1 |
+| UQ-2 | ~~Which Pixel Art algorithm wins the bake-off: OmniScale, ScaleFX or MMPX?~~ OmniScale for phase 1: it draws straight to any size in one pass, and on the GB test image it rounded the eyes, straightened the nose's diagonal and kept text and large blocks crisp. ScaleFX and MMPX were not ported; compare them on real games if Pixel Art falls short. | Phase 1 |
+| UQ-3 | ~~One View > Picture menu, or keep View > Filter and add View > Upscaling?~~ One View > Picture menu, built. | Phase 1 |
 | UQ-4 | What cap should Match Display use for DS 3D, given 3× fast-forward? | Phase 2 |
 | UQ-5 | For zero copy, patch GPUI 0.2.2, or move to a Zed revision that has BGRA surfaces once they merge? That would also bring the `CAMetalDisplayLink` pacing fix (PRD Q2). | Phase 3 |
 | UQ-6 | Should RPG Maker games whose art is drawn at twice its pixel size get Pixel Art at the art's own pixel size, without spoiling their text? | Phase 4 |

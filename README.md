@@ -139,7 +139,7 @@ SPEED=normal FRONT=1 scripts/macos/bench.sh ~/Games/My\ Fan\ Game
 | | | | | Run / stop a Lua script | ⌘⇧L / ⌘⌥L |
 | | | | | Randomize a Pokémon game | ⌘⌥R |
 | | | | | Colour correction on/off | ⌘⇧C |
-| | | | | Filter: none, LCD grid, scanlines, Scale2x, Scale3x | View > Filter |
+| | | | | Picture: Auto (upscaled), Sharp Pixels, Pixel Art, Smooth, LCD Grid, Scanlines | View > Picture |
 | | | | | Debugger | ⌘⇧D |
 | | | | | Step / step over / next frame (debugger) | ⌘⇧I / ⌘⇧O / ⌘⇧N |
 | | | | | 3D resolution (DS, 3DS) | View > 3D Resolution |
@@ -177,17 +177,24 @@ on black. Hybrid shows one screen large beside both screens small, as in
 melonDS; Swap Screens chooses the large one. Rotation turns the whole
 arrangement for games played with the DS held like a book, and touch
 follows it. A 90 px gap matches the DS hinge. The layout, swap, rotation,
-gap, 3D resolution and filter are remembered in
+gap, 3D resolution and picture are remembered in
 `~/Library/Application Support/ds-emulator/settings.toml`.
 
-View > Filter changes how the screens look. LCD Grid draws a thin dark
-line between pixels, as on the handhelds' screens; Scanlines darkens the
-bottom of each row, as on a CRT. Both need at least two of your display's
-pixels to each console pixel, and show nothing in a smaller window. Scale2x
-and Scale3x round off the staircase edges of sprites and text. They skip
-DS frames drawn at a higher 3D resolution, whose 3D is smooth already.
-Filters apply after colour correction and turn with the screens. xBRZ is
-not offered: its code is GPL-3.0, which the project doesn't take (see the
+View > Picture changes how the screens look. **Auto**, the default,
+upscales every game on the GPU to your display's own resolution, whatever
+the display and window size: **Pixel Art** for Game Boy, GBA and DS
+games, which rebuilds smooth edges and curves from the pixels (OmniScale,
+from SameBoy), and **Smooth** for RPG Maker and 3DS games (Apple's
+MetalFX). Either can be chosen for any game. **Sharp Pixels** shows each
+console pixel as a crisp square, as before. **LCD Grid** draws a thin dark
+line between pixels, as on the handhelds' screens; **Scanlines** darkens
+the bottom of each row, as on a CRT. Both need at least two of your
+display's pixels to each console pixel, and show nothing in a smaller
+window. Everything applies after colour correction and turns with the
+screens. DS frames drawn at a higher 3D resolution get Smooth for now,
+as Pixel Art would smear their 3D. On a Mac without Metal, Scale2x and
+Scale3x stand in for Pixel Art. xBRZ is not offered: its code is GPL-3.0,
+which the project doesn't take (see the
 [legal policy](docs/PRD.md#9-legal-policy)).
 
 View > 3D Resolution draws DS 3D at 2×, 3× or 4× its own resolution

@@ -188,7 +188,8 @@ pub trait Debugger {
                                             run the Lua script, if any
                                             record frame and sound ───────► JPEG, QuickTime
  render(): copy latest frames ◄── Mutex ─── publish screens                 (bounded queue)
-           correct, turn, filter             │
+           correct, turn, then upscale       │
+           on the GPU or filter and          │
            pre-scale to BGRA                 │
            img() per screen                  │
  cx.notify() ◄─── Event (async channel) ◄───┘ coalesced "frame ready", notices
@@ -305,26 +306,42 @@ pub trait Debugger {
 
 ## Video path
 
-GPUI draws images with linear filtering and has no nearest-neighbour option.
-`emu-app/src/video.rs` enlarges each frame by the largest integer factor that
-fits the on-screen size in device pixels (capped at 6×), and lets GPUI's
-linear filter cover the remaining fraction. That is the "sharp bilinear"
-technique: crisp pixels without uneven pixel widths at non-integer sizes.
-
-Filters are CPU passes over frames before they become images
-([decision 0005](decisions/0005-video-filters-on-the-cpu.md)), in this
-order:
+GPUI draws images with linear filtering and has no nearest-neighbour option
+or shader hook. Each screen is placed on whole device pixels
+(`Rect::snapped`), then drawn as one of View > Picture's looks
+(`picture.rs`). Every new frame goes through, in this order:
 1. GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup table
    from each 15-bit console colour to its corrected pixel;
 2. rotation (`video::turn`, below);
-3. the filter chosen in View > Filter (`filter.rs`). LCD grid and
-   scanlines take over the integer pre-scale and darken part of each
-   console pixel's square of device pixels; Scale2x and Scale3x enlarge
-   two or three times, rounding diagonal edges, and leave the rest of the
-   pre-scale to `video.rs`. Their masks turn with the screen, and on DS
-   frames drawn at a higher 3D resolution they follow console pixels
-   (the scalers skip those frames). Each costs at most about 0.7 ms per
-   DS screen at 6×.
+3. for an upscaled look (Auto, Pixel Art, Smooth), the GPU
+   (`gpu_upscale.rs`, [decision 0013](decisions/0013-upscaling-on-the-gpu.md)):
+   the frame goes up to a Metal texture and is enlarged to the
+   placement's exact size in device pixels, by OmniScale for pixel art or
+   MetalFX's spatial scaler for smooth pictures, then read back as the
+   bytes of the GPUI image. All the screens of a frame together stay
+   within 6 million pixels (`picture::MAX_UPSCALED_PIXELS`); past that
+   they are drawn smaller and GPUI's linear filter enlarges the rest. On
+   this M5 Max that took 1.1–1.4 ms a frame for a GB screen or two DS
+   screens of about 1.5 million pixels in all. The GPU starts on a
+   background thread at launch, as compiling the shader takes about
+   130 ms; until then, and on a Mac without Metal, screens take the CPU
+   path;
+4. otherwise the CPU filters ([decision 0005](decisions/0005-video-filters-on-the-cpu.md),
+   `filter.rs`). LCD grid and scanlines take over the integer pre-scale
+   and darken part of each console pixel's square of device pixels.
+   Scale2x and Scale3x, which stand in for Pixel Art without Metal,
+   enlarge two or three times, rounding diagonal edges, and leave the rest
+   of the pre-scale to `video.rs`. Their masks turn with the screen, and on
+   DS frames drawn at a higher 3D resolution they follow console pixels
+   (the scalers skip those frames). Each costs at most about 0.7 ms per DS
+   screen at 6×. Sharp Pixels is the plain pre-scale: `video.rs` enlarges
+   each frame by the largest integer factor that fits (capped at 6×) and
+   GPUI's linear filter covers the remaining fraction, the "sharp
+   bilinear" technique: crisp pixels without uneven pixel widths at
+   non-integer sizes.
+
+Pixel Art would smear DS frames drawn at a higher 3D resolution, so they
+get Smooth until the DS says which pixels are 3D (PRD-upscaler UP-13).
 
 DS 3D upscaling is the core's job, as that decision planned. At a render
 scale above 1, the DS draws each 3D frame twice: at the native
@@ -354,7 +371,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
 | One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
-| Layout, speeds, 3D resolution, filter | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
+| Layout, speeds, 3D resolution, picture | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
 | Screenshot | next to the ROM, `game 2026-10-07 at 18.58.12.png` | 8-bit RGB PNG of the screens as the core drew them |
 | Recording | next to the ROM, `game 2026-10-07 at 18.58.12.mov` | QuickTime movie: Photo-JPEG video, 16-bit stereo PCM sound, see `emu-app/src/mov.rs` |
 | Unpacked game | `~/Library/Application Support/ds-emulator/Games/` | The ROM from a `.zip`, `.7z` or `.rar`, see `emu-app/src/archive.rs` |
