@@ -41,6 +41,7 @@ use crate::icons;
 use crate::library::{self, Game, Library};
 use crate::persist;
 use crate::probe;
+use crate::randomizer;
 use crate::rom_info::{self, Platform};
 use crate::romhack::{self, MakeError};
 use crate::slots::STATE_SLOTS;
@@ -124,6 +125,8 @@ pub enum LibraryEvent {
     AddGames,
     /// Open the settings window.
     OpenSettings,
+    /// Open the randomize window with the game at this path chosen.
+    Randomize(PathBuf),
     /// Tell the user something went wrong.
     Notice(String),
 }
@@ -166,6 +169,8 @@ struct Facts {
     saved: Option<SystemTime>,
     /// How many of its save-state slots hold a state.
     states: usize,
+    /// Whether the randomizer can make a randomized copy of it.
+    randomizable: bool,
 }
 
 /// The library's view.
@@ -1307,7 +1312,8 @@ impl LibraryView {
 
     /// The menu of `game`, whose files say `facts` once read: its picture,
     /// title and system; when and how long it has been played, its saves
-    /// and its size; then Play, Show in Finder and Remove from Library.
+    /// and its size; then Play, Show in Finder, Randomize… for a Pokémon
+    /// game the randomizer knows, and Remove from Library.
     fn game_menu(
         &self,
         game: &Game,
@@ -1427,7 +1433,9 @@ impl LibraryView {
 
         let play_path = game.path.clone();
         let reveal_path = game.path.clone();
+        let randomize_path = game.path.clone();
         let remove_path = game.path.clone();
+        let randomizable = facts.as_ref().is_some_and(|facts| facts.randomizable);
         let play_label = if pictures.played.is_some() {
             "Resume"
         } else {
@@ -1465,6 +1473,21 @@ impl LibraryView {
             }))
         })
         .children(probe::part("menu.action:reveal"));
+        let randomize = randomizable.then(|| {
+            menu_action(
+                "menu-randomize",
+                icons::SHUFFLE,
+                "Randomize…",
+                None,
+                TEXT,
+                true,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.close_menu(cx);
+                cx.emit(LibraryEvent::Randomize(randomize_path.clone()));
+            }))
+            .children(probe::part("menu.action:randomize"))
+        });
         let remove = menu_action(
             "menu-remove",
             icons::TRASH,
@@ -1502,6 +1525,7 @@ impl LibraryView {
             .child(rule())
             .child(play)
             .child(reveal)
+            .children(randomize)
             .child(rule())
             .child(remove)
             .children(probe::bordered_part("menu", MENU_BORDER))
@@ -2131,6 +2155,7 @@ fn read_facts(game: &Game) -> Facts {
         size,
         saved,
         states,
+        randomizable: randomizer::generation(&game.path).is_some(),
     }
 }
 
@@ -2386,6 +2411,14 @@ mod tests {
         let facts = read_facts(&game);
         assert!(facts.saved.is_some());
         assert_eq!(facts.states, 2);
+        assert!(!facts.randomizable, "not a Pokémon game");
+
+        // FireRed's game code says the randomizer knows it.
+        let mut fire_red = vec![0; 2048];
+        fire_red[0xAC..0xB0].copy_from_slice(b"BPRE");
+        let rom = dir.join("FireRed.gba");
+        fs::write(&rom, fire_red).expect("rom");
+        assert!(read_facts(&Game::new(&rom, &info(Platform::Gba))).randomizable);
 
         // An RPG Maker game is its folder, all of it.
         let folder = dir.join("Fan Game");

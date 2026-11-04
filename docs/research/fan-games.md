@@ -131,7 +131,27 @@ string appears only in a comment.
   (Renegade's Classic, SpeedUp and shiny-rate patches). The base picker
   takes any file, including a game in the Hacks folder.
 
-### 3. Randomize from the app (medium)
+### 3. Randomize from the app (done)
+
+Done on 2026-11-03: File > Randomize Pokémon Game… runs FVX 1.6.2 with a
+preset or a pasted settings string
+([decision 0012](../decisions/0012-randomizer.md)). What was found on the
+way:
+
+- **FVX misreads ZX 4.6.1's settings strings.** It gives version id 322 to
+  ZX 4.6.1 and to the closer-to-vanilla fork, reads 322 as the fork's and
+  throws. ZX's format didn't change from 4.6.0 (321), so the app
+  relabels a ZX-shaped 322 string as 321 before passing it on.
+- **FVX writes Gen 1 games as `.gbc`.** The app keeps the base game's own
+  extension, so Red stays a Game Boy game.
+- **The same seed and settings give the same ROM, byte for byte**, with
+  `-z`.
+- **3DS games are left out.** FVX writes a decrypted `.cxi` that the 3DS
+  core opens, but Azahar keeps saves by title ID in one SD card, so a
+  randomized copy would share the clean game's save.
+
+What follows is the research that led to it.
+
 
 The Universal Pokémon Randomizer ZX
 ([repo](https://github.com/Ajarmar/universal-pokemon-randomizer-zx), GPL-3.0)
@@ -458,8 +478,8 @@ In the order that unlocks the most games for the least work:
    Unlocks Radical Red, Unbound and the old clock hacks.
 2. **Better wrong-base messages (gap 2):** the xdelta description, and a
    known-base table.
-3. **Randomize in the app (gap 3):** FVX or ZX on the command line, writing
-   into the Hacks folder.
+3. **Randomize in the app (gap 3):** done, with FVX on its command line,
+   writing into the Hacks folder ([decision 0012](../decisions/0012-randomizer.md)).
 4. **A generic preload for Essentials v19+ (gap 5).** Try it on Infinite
    Fusion and Tectonic.
 5. **BSP patches (gap 4)**, for Prism.

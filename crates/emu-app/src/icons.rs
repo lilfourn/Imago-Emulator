@@ -35,12 +35,14 @@ pub const REFRESH: &str = "icons/refresh.svg";
 /// An arrow coming round: starting over.
 pub const RESTART: &str = "icons/restart.svg";
 pub const SETTINGS: &str = "icons/settings.svg";
+/// Two arrows crossing: randomizing a game.
+pub const SHUFFLE: &str = "icons/shuffle.svg";
 /// A shopfront: the store.
 pub const STORE: &str = "icons/shop.svg";
 /// A bin: taking a game out of the library.
 pub const TRASH: &str = "icons/trash-bin-minimalistic.svg";
 
-const FILES: [(&str, &[u8]); 15] = [
+const FILES: [(&str, &[u8]); 16] = [
     (ADD, include_bytes!("../../../assets/icons/add.svg")),
     (
         BACK,
@@ -72,6 +74,7 @@ const FILES: [(&str, &[u8]); 15] = [
         SETTINGS,
         include_bytes!("../../../assets/icons/settings.svg"),
     ),
+    (SHUFFLE, include_bytes!("../../../assets/icons/shuffle.svg")),
     (STORE, include_bytes!("../../../assets/icons/shop.svg")),
     (
         TRASH,
