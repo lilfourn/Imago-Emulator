@@ -41,8 +41,8 @@ use crate::theme::{
 };
 use crate::ui::{self, Section, choice, fit, track};
 
-/// The background lightens a touch towards the foot, as the library's does.
-const FOOT: u32 = 0x0016_181B;
+/// The background greys a touch towards the foot, as the library's does.
+const FOOT: u32 = 0x00F6_F6F7;
 /// Space between the games.
 const GAP: f32 = 12.0;
 /// Room around a game's cover and words, inside its tile.
@@ -649,7 +649,7 @@ impl StoreView {
             .gap_2()
             .px(px(SEARCH_PADDING))
             .rounded_lg()
-            .bg(rgba(0xFFFF_FF12))
+            .bg(rgb(PANEL))
             .border_1()
             .border_color(rgba(if self.searching {
                 with_alpha(ACCENT, 0xAA)
@@ -1043,7 +1043,7 @@ impl StoreView {
                 .children(probe::part("button:get"));
             if getting {
                 button
-                    .bg(rgba(0xFFFF_FF14))
+                    .bg(rgba(HOVER))
                     .text_color(rgb(DIM))
                     .with_animation(
                         "getting-page",
@@ -1135,7 +1135,7 @@ impl StoreView {
                 div()
                     .text_sm()
                     .line_height(px(20.0))
-                    .text_color(rgb(0x00C9_CDD3))
+                    .text_color(rgb(TEXT))
                     .child(paragraph.replace('\n', " "))
             });
         div()

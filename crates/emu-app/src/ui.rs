@@ -2,8 +2,8 @@
 //! go between them, the segmented filters under their search fields, and
 //! text cut short to fit.
 //!
-//! What is chosen is a white pill with dark type, as in Apple's own dark
-//! apps; the accent is kept for what to press, such as Play and Get.
+//! What is chosen is an ink pill with white type, as in Imago; the accent
+//! is kept for what to press, such as Play and Get.
 
 use gpui::{Div, SharedString, Stateful, Window, div, prelude::*, px, rgb};
 
@@ -121,7 +121,7 @@ pub fn choice(
         .child(label.into())
 }
 
-/// A tab or choice: white with dark type if `chosen`, else muted type that
+/// A tab or choice: ink with white type if `chosen`, else muted type that
 /// brightens under the pointer.
 fn pill(element: Stateful<Div>, chosen: bool) -> Stateful<Div> {
     element

@@ -65,7 +65,7 @@ use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
 use crate::speed::{self, Pace, Speed, Speeds};
 use crate::store_view::pulse;
-use crate::theme::{BACKGROUND, INSET};
+use crate::theme::{BACKGROUND, INSET, STAGE};
 use crate::trace;
 use crate::video;
 use crate::window_chrome;
@@ -2838,8 +2838,15 @@ impl Render for EmulatorView {
         }
 
         // Black around the screens in full screen, unless the backdrop
-        // glows.
-        root = root.bg(rgb(if fullscreen { 0x0000_0000 } else { BACKGROUND }));
+        // glows; the dark stage around them in a window; the library's
+        // white without a game.
+        root = root.bg(rgb(if fullscreen {
+            0x0000_0000
+        } else if self.session.is_some() {
+            STAGE
+        } else {
+            BACKGROUND
+        }));
         let shown = self.shown_layout();
         let mut upscaler_failed = None;
         if let Some(session) = self.session.as_mut() {
@@ -2943,7 +2950,7 @@ impl Render for EmulatorView {
             self.show_notice(format!("Upscaling is off: {error}"), cx);
         }
         root = root.children(self.cursor_marks());
-        if self.window_controls && !fullscreen {
+        if self.window_controls && !fullscreen && self.session.is_some() {
             root = root.child(top_bar_shade());
         }
         if self

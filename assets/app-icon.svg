@@ -2,17 +2,23 @@
   <!-- The macOS app icon: icon.svg on Apple's grid, an 824-point body with
        its own drop shadow inside a 1024-point canvas. -->
   <defs>
-    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FF7C52"/>
-      <stop offset="1" stop-color="#FF6A3D"/>
-    </linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000000" flood-opacity="0.30"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000000" flood-opacity="0.22"/>
     </filter>
   </defs>
-  <g transform="translate(100 100) scale(8.24)">
-    <rect width="100" height="100" rx="22.4" fill="url(#body)" filter="url(#shadow)"/>
-    <path fill="#FFFFFF" d="M33 23 H67 Q70 23 70.4 26 L72.6 44 Q73 47 70 47 H30 Q27 47 27.4 44 L29.6 26 Q30 23 33 23 Z"/>
-    <path fill="#FFFFFF" d="M30 53 H70 Q73 53 73 56 V74 Q73 77 70 77 H30 Q27 77 27 74 V56 Q27 53 30 53 Z"/>
+  <g transform="translate(100 100) scale(0.858333) translate(-32 -32)">
+    <rect x="40" y="40" width="944" height="944" rx="208" fill="#FFFFFF" stroke="#E7E7EA" stroke-width="16" filter="url(#shadow)"/>
+<path fill="#3bb7fd" fill-rule="evenodd" d="M185 255A90 90 0 0 1 275 165H480A70 70 0 0 1 550 235V470Q550 488 532 491L255 529Q185 538 185 470ZM295 245H440A30 30 0 0 1 470 275V408A30 30 0 0 1 440 438H295A30 30 0 0 1 265 408V275A30 30 0 0 1 295 245Z"/>
+<path fill="#fea220" d="M640 198Q590 198 590 250V430Q590 478 640 471L795 450Q840 443 832 400Q828 375 812 358L690 228Q668 200 640 198Z"/>
+<path fill="#fc6146" fill-rule="evenodd" d="M500 535L790 491Q842 484 842 536V690Q842 858 695 858H520Q457 858 457 795V580Q457 541 500 535ZM573 582H722A30 30 0 0 1 752 612V742A30 30 0 0 1 722 772H573A30 30 0 0 1 543 742V612A30 30 0 0 1 573 582Z"/>
+<path fill="#65c162" d="M232 567L375 551Q415 547 415 590V790Q415 855 360 855Q340 855 320 835L238 752Q205 718 200 670L192 605Q188 572 232 567Z"/>
+<g fill="#ffffff">
+<circle cx="683" cy="318" r="22"/>
+<circle cx="638" cy="365" r="22"/>
+<circle cx="729" cy="365" r="22"/>
+<circle cx="683" cy="410" r="22"/>
+<rect x="290" y="606" width="42" height="132" rx="12"/>
+<rect x="245" y="651" width="132" height="42" rx="12"/>
+</g>
   </g>
 </svg>
