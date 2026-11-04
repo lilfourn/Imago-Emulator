@@ -22,19 +22,29 @@ the game keeps running beside it.
 - **Knows the game.** Every question carries:
   - the exact game: No-Intro name, platform, region and revision;
   - whether it is a ROM hack, randomized copy or fan game;
-  - optionally, the current screens as an image.
+  - any screenshots the player took with the **Screenshot** button or
+    ⌥⌘S: both screens exactly as they were, sent only when attached
+    (5.4).
 - **Knows where to look.** A curated source map tells the model which fan
   sites and wikis players trust for this game, such as Bulbapedia,
   Serebii, StrategyWiki or Zelda Wiki. The model searches and reads
   those sites through OpenRouter's web search and fetch, limited to the
   map's domains. Each answer shows the pages it came from.
-- **Looks like Imago, in the game's colours.** Imago's transcript is
-  ported to stock GPUI 0.2.2:
-  - plates, spacing and type;
-  - Markdown with mended partial text and a fade-in veil;
-  - the "Thought process" chip;
-  - the 3 × 3 spinner trailer;
-  - the pill composer with send and stop.
+- **Looks like ChatGPT, in the game's colours.** The owner asked for
+  ChatGPT's cleanness (2026-11-04), taken from its web and iOS apps on
+  Mobbin:
+  - answers sit on the panel with no bubble, and questions sit in a grey
+    pill;
+  - thinking is one grey "Thought for 6s ›" line;
+  - sources are small chips and a Sources sheet;
+  - a quiet action row sits under each answer;
+  - the composer is rounded, with tool chips and a white send / stop
+    circle.
+
+  Imago supplies what makes streaming feel good: mended partial
+  Markdown, the fade-in veil, block-by-block parsing and the shimmer.
+  Both are ported to stock GPUI 0.2.2. The mockup is
+  `/tmp/guide-mock/guide-mock.html`; it is described in 6.7.
 
   The panel has no fixed theme. Its glass, accent and spinner take
   their colours from the game on screen, the way the ambient backdrop
@@ -73,7 +83,7 @@ What exists, and what was found, is in the
 | GG-3 | **Never in the way.** The chat uses the margins the screens leave. Closed, it leaves the window exactly as today. It never covers the screens, and never changes their arrangement on its own (stacked stays stacked). |
 | GG-4 | **Imago quality.** It looks and moves like Imago's chat: streaming that never shows broken Markdown, thinking shown and folded away, a calm working indicator. |
 | GG-7 | **Part of the game.** The panel takes its colours from the game being played, so it complements Omega Ruby's greens, a Game Boy's greys or a fan game's palette alike, and always stays readable. |
-| GG-5 | **The player's own account and data.** The player brings their own OpenRouter account. The key never leaves the Mac except to OpenRouter. The screen is sent only while its toggle is on. Nothing is sent before the player connects. |
+| GG-5 | **The player's own account and data.** The player brings their own OpenRouter account. The key never leaves the Mac except to OpenRouter. A screenshot is sent only when the player attaches one, and each shows on the message it went with. Nothing is sent before the player connects. |
 | GG-6 | **Keyboard first.** One shortcut opens the chat and puts the caret in it. Escape gives the keys back to the game. Held game keys never leak into the chat, and chat keys never reach the game. |
 
 Non-goals:
@@ -141,12 +151,17 @@ Non-goals:
 └───────────────────────────────────────────────────────────────┘
 ```
 
+The sketch shows where things go. The mockup (§1) shows how they look,
+flush to the window's side as below.
+
 - **One panel, in one margin.** The right one by default, with View >
   Guide Side > Left or Right.
-- **Size.** Inset `theme::INSET` (16 pt) from the window's edges and from
-  the screens. Top aligned with the top bar's midline row (40 pt, as the
-  design system's top bar), bottom 16 pt from the window's bottom.
-  - Width: the margin less two insets, clamped to 300–440 pt.
+- **Size.** Flush with the window's side, top and bottom, as ChatGPT's
+  side panel is, with a hairline on its inner edge.
+  - Its header is the top bar's 40 pt: the game's title and the buttons
+    sit on the traffic lights' midline.
+  - Width: the margin less one inset (16 pt) from the screens, clamped
+    to 300–440 pt.
 - **Not enough room.** If the margin is below 300 + 2 × 16 pt, opening
   Guide lays the screens out in the window less the panel's column. They
   shrink, stay stacked and stay centred in what's left. Closing restores
@@ -172,6 +187,7 @@ Non-goals:
 | Escape while the composer has the caret | The caret leaves; keys go back to the game. The panel stays open. A second Escape opens the game menu as today. |
 | Click on the screens | The caret leaves, as Escape does. |
 | ✕ in the panel header | Close. |
+| ⌥⌘S, Emulation > Screenshot for Guide | Take a screenshot into Guide's composer, as the Screenshot button does, at any time while playing. The panel may be closed: the notice "Screenshot added to Guide (2)" says so, and the shots wait in the composer for the next question. ⌥⌘S is free today. |
 | Gamepad | Select + R3 opens and closes it (a `chords.rs` shortcut), if R3 is free. Typing still needs the keyboard. |
 
 **Keys.** `key_routes.rs` gains `Route::Guide`.
@@ -189,31 +205,43 @@ Non-goals:
 
 1. **Not connected.**
    - Copy: "Guide answers questions about the game you're playing,
-     using models on OpenRouter. Your questions, and the screen when you
-     include it, go to OpenRouter and the model's provider."
+     with sources from the wikis players trust." Under the button:
+     "Your questions, and any screenshots you add, go to OpenRouter."
    - Button: **Connect OpenRouter**.
    - While connecting: "Finish connecting in your browser." with a
      spinner and Cancel.
    - On failure: the reason and "Try again".
 2. **Empty chat.**
-   - The game's title, with its picture as in the library.
-   - Three starter chips, chosen by game kind. For a Pokémon game:
-     "Where am I?", "What should I do next?", "What's good against this
-     gym?". For other games: "Where am I?", "What should I do next?",
-     "How do I beat this?". The starters send with the screen on.
-3. **Asked, before the first token.** The user plate, then Imago's
-   trailer: the 3 × 3 spinner, a rotating word, and the elapsed time.
-4. **Thinking.** A "Thought process" chip, open, with the newest reasoning
-   lines in faint 12 px type, capped at 24 lines.
-5. **Looking it up.** While tools run, the chip's live title shimmers:
-   "Searching Serebii…", "Reading Bulbapedia: Ralts…". These rows fold
-   into the same group as the thinking.
-6. **Answering.** The Markdown answer streams. Partial Markdown is mended
-   and new text fades in. The thought group folds closed when the answer
-   starts.
-7. **Done.** The answer, then a **Sources** row of chips (favicon letter
-   plus site name). A chip opens its page in the browser. On hover, a
-   strip shows the time, the cost ("$0.003") and a copy button.
+   - ChatGPT's centred question, "What are you stuck on?", with the
+     composer under it.
+   - Three starter chips, chosen by game kind:
+     - Pokémon: "Where am I?", "What should I do next?", "What's good
+       against this gym?".
+     - Other games: "Where am I?", "What should I do next?", "How do I
+       beat this?".
+
+     A starter takes a screenshot itself, as it needs one.
+3. **Asked, before the first token.** The question's pill, with its
+   screenshots above it, then one shimmering grey line: "Thinking".
+4. **Thinking.** The line reads "Thinking" while reasoning streams. It
+   opens into the reasoning summaries in faint 13 px type.
+5. **Looking it up.** While searches and fetches run, the line names
+   them: "Searching Bulbapedia for Roxanne's team", "Reading Route 104 ·
+   Serebii".
+6. **Answering.** The Markdown answer streams under the line, which
+   becomes "Thought for 9s ›". Clicked, it opens ChatGPT's activity list:
+   - what was searched;
+   - each page read, with its site's icon;
+   - the reasoning summaries.
+
+   Partial Markdown is mended and new text fades in.
+7. **Done.** Under the answer, an action row in grey icons: copy, good,
+   bad, ask again, then **Sources** with the sites' icons stacked.
+   - Sources opens a sheet over the panel listing each page: the site,
+     the page title and a line from it. A page opens in the browser.
+   - Small grey chips after a sentence ("Serebii", "Bulbapedia +1")
+     name the page that sentence came from.
+   - On hover, the row also shows the time and the cost ("$0.003").
 8. **Error.** Imago's error chip:
    - 401: "OpenRouter no longer accepts this key — connect again".
    - 402 or 403, branching on `metadata.limit_source`:
@@ -229,15 +257,37 @@ Non-goals:
 
 ### 5.4 Composer
 
-Imago's pill, scaled to the panel:
+ChatGPT's composer, scaled to the panel:
 
-- **Shape.** Radius 22. 56 pt tall when empty, growing to 160 pt.
-- **Placeholder.** "Ask about {short title}…"
+- **Shape.** Radius 24, on a raised fill with a hairline edge. The text
+  is on top and the actions row is under it. 76 pt tall when empty,
+  growing to 200 pt.
+- **Placeholder.** "Ask about {short title}"
 - **Actions row.**
-  - The **screen toggle**: a monitor icon, on by default and
-    remembered. With it on, a small thumbnail of the screens shows above
-    the text when the message is sent.
-  - The **send / stop** circle.
+  - **＋**: add a picture from a file, such as a photo of a paper map or
+    a guide's page.
+  - **Screenshot**: a camera icon and the word, in the game's accent.
+    The tooltip reads "Screenshot the game ⌥⌘S".
+  - The **send / stop** circle: white with an arrow, and a square while
+    an answer streams.
+- **Screenshots.** The owner asked for this button (2026-11-04), so the
+  player can capture the game as it is for reference.
+  - **Pressing it.** The console's frames are copied between frames
+    (`Command::CaptureScreens`), as View > Screenshot does. Both screens
+    are stacked as shown, with nothing drawn over them: no notices,
+    readouts or script overlays.
+  - **The thumbnail.** It lands in a row above the text. For a moment it
+    has a 1.5 pt edge in the game's accent, the only flash.
+  - **Up to four a message.** The button greys out at four.
+  - **Removing and enlarging.** × on a thumbnail removes it. A click
+    opens it large over the panel.
+  - **Sending.** The shots go with the question and show above its pill
+    in the thread, so it is always visible what was sent.
+  - **Saving.** They are saved with the chat (5.5), so they stay as
+    references after the game moves on.
+  - **Nothing else is sent.** Only attached shots go; there is no
+    automatic screen. A model without vision greys the button out, with
+    a tooltip saying why.
 - **Keys.** Enter sends; Shift-Enter adds a line; ⌘V pastes text. IME,
   selection and clipboard come from GPUI's `EntityInputHandler`, as in
   its `examples/input.rs` (§7.4).
@@ -250,8 +300,11 @@ Imago's pill, scaled to the panel:
 - The header's title menu lists earlier chats for this game, by first
   question and date. A chat can be deleted from there.
 - Older chats are never sent to the model. Within a chat, every earlier
-  turn's text is sent. Earlier screens are not: only the newest
-  message's image goes.
+  turn's text is sent. Earlier screenshots are not: only the newest
+  message's go.
+- Screenshots are kept as PNGs beside the chat in
+  `~/Library/Application Support/ds-emulator/Guide/` and are deleted
+  with it.
 
 ### 5.6 Settings
 
@@ -264,7 +317,6 @@ the existing row style:
 | Model | GPT-6 Luna; the picker (6.5) for others | GPT-6 Luna |
 | Thinking | Off · Low · Medium · High | Low |
 | Look things up | On · Off (tools and web search) | On |
-| Include the screen | On · Off (the composer toggle's default) | On |
 | Pause while typing | On · Off | Off |
 | Side | Left · Right | Right |
 
@@ -579,7 +631,7 @@ How to answer:
   - an eye glyph when its `input_modalities` include `image`.
 - **Cache.** The list is cached for a day in the app's cache folder.
 - **No vision.** If the chosen model can't take images, the screen
-  toggle greys out with a tooltip saying why.
+  Screenshot button greys out with a tooltip saying why.
 
 ### 6.6 Looking things up
 
@@ -691,7 +743,7 @@ loop.
   - Only domains in the map are fetched.
 - **The server tools stay** for sites behind bot checks.
 
-### 6.7 Rendering, ported from Imago
+### 6.7 Rendering: ChatGPT's look, Imago's streaming
 
 **Colours from the game.** The panel complements whatever game is
 being played. A `guide::Palette` is taken from the game's own screens,
@@ -701,13 +753,13 @@ backdrop is Solid or the window is full screen.
 
 | Token | Where it comes from |
 |---|---|
-| Glass (panel plate) | The picture's average colour, mixed 25% into the stage (`#0B0B0D`), at 72% opacity over the backdrop. Radius 20, with a 1 px border in the accent at 14%. Over the ambient glow it reads as tinted glass of the game's own light. |
-| Accent (links, list markers, inline code, send button, source chips) | The picture's most prominent saturated colour: Omega Ruby's grass green, a Game Boy's palette green, a fan game's title colour. Lightened in OKLCH until it reaches 4.5 : 1 against the glass. |
-| Spinner rows | The picture's three most distinct colours, each at the lightness of Imago's pastels (`#B6D3EF`, `#EDB185`, `#F888A0`), which are also the fallback. |
-| User plate | The accent at 14% over the glass, radius 16, padding 16 × 10. |
+| Glass (the panel) | ChatGPT's dark (`#121212`) with the picture's average colour mixed in at 8%, at 94% opacity over the backdrop, with a 30 pt backdrop blur. A 1 px white hairline at 7% on its inner edge. |
+| Accent (the Screenshot button, the "new" edge on a fresh thumbnail, inline code) | The picture's most prominent saturated colour: Omega Ruby's grass green, a Game Boy's palette green, a fan game's title colour. Lightened in OKLCH until it reaches 4.5 : 1 against the glass. ChatGPT keeps colour rare, so the accent marks only these. |
+| Raised (question pill, composer, chips) | White at 7.5% over the glass. |
+| Send / stop | `#F4F4F4` with black, as ChatGPT's dark mode. White at 18% when there's nothing to send. |
 | Text / muted / faint | Near-white `#EDEDF0`, `#A1A1AA` and `#71717A`, nudged 4% towards the accent's hue. They stay neutral enough to keep 7 : 1, 4.5 : 1 and 3 : 1 against any glass. |
 | Danger | Imago's coral `#FC6146` unless the accent is itself red. In that case it is the coral's lightness at the accent's hue plus 30°, so an error still stands out in a red game. |
-| Assistant | Text on the glass, not plated. A one-paragraph answer gets the user plate's shape in a 6% white wash, as in Imago. |
+| Answer | Text straight on the glass, with no plate, as ChatGPT draws it. |
 
 How it follows the game:
 
@@ -730,15 +782,38 @@ How it follows the game:
   synthetic extremes (pure red, pure white, black, a two-colour Game
   Boy frame) and check every pairing above.
 
-Type, from Imago, at the panel's scale:
+Layout, from ChatGPT's iOS app, which is about the panel's width:
 
-- Body 14/22. H1 17/25, H2 15/23, H3 14/22 semibold.
+- **Margins and spacing.** 20 pt side padding, 14 pt between turns, 10
+  pt between paragraphs.
+- **The question.** Right-aligned, at most 80% wide. Radius 18, padding
+  8 × 14. Its screenshots sit above it, both screens stacked, 76 pt
+  wide.
+- **The thinking line.** "Thought for 6s ›" in 13.5 pt muted type.
+  Opened, the activity list has a 15 pt icon (search, the site's icon,
+  the screen) and 13/19 text per step.
+- **Source chips.** 18 pt high, radius 9, 11 pt muted type on raised
+  fill, after the sentence they back.
+- **The action row.** 16 pt icons in 28 pt buttons (copy, good, bad, ask
+  again), then "Sources" with up to three 16 pt site icons stacked.
+- **The Sources sheet.** It slides up over the panel, which dims to
+  35%, with radius 18 at the top. Each row has the site (12 pt) and the
+  title (13.5 semibold) over one line from the page.
+- **The composer.** Radius 24 on raised fill with a hairline edge and a
+  soft shadow. ＋ and Screenshot on the left, send / stop (32 pt) on the
+  right. Under it, in 11 pt faint type: "Guide can make mistakes.
+  Answers cite fan wikis."
+- **Screenshot thumbnails.** In the composer, 44 × 26 and 35 × 26 pt
+  stacked on black, radius 10, with a × badge (18 pt) at the corner.
+
+Type, in the system font, as the rest of the app:
+
+- Body 14.5/23.
+- H1 17/25, H2 15/23, H3 14.5/23, semibold.
 - Code 12.5/18 Menlo, as the app already uses.
-- Meta 12/16.
-- The system font, as the rest of the app. Imago's Geist is an open
-  question (GQ-3).
+- Meta 13.5 and 12; fine print 11.
 
-Behaviour, copied value for value from the research §2:
+Behaviour, copied value for value from Imago (research §2):
 
 - **Blocks.** The answer is split into top-level blocks; only the last
   block is reparsed per commit. Each block is a `list` row.
@@ -753,20 +828,15 @@ Behaviour, copied value for value from the research §2:
   - duration `clamp(3 × ema, 120, 400)` ms;
   - no fade for text already on screen when the panel opens;
   - off with macOS Reduce Motion.
-- **Thought process chip.**
-  - Header 28 pt, 12 px muted.
-  - Open while live, closed when settled; a click toggles.
-  - Fold 140 ms ease-out.
-  - Body: 12/18 faint, at most 24 lines, tail while live, head when
-    settled, "… N more lines".
-- **Trailer.**
-  - The 3 × 3 spinner: rows in the palette's spinner colours (Imago's
-    `#B6D3EF`, `#EDB185`, `#F888A0` as the fallback), 750 ms period,
-    opacity 1 → 0.1 → 1 by distance from the bottom centre.
-  - Then the word from Imago's list of 21, changing every 7 s.
-  - Then the elapsed time.
-- **Shimmer.** On live tool titles and the trailer word: a 3.4 s sweep,
-  repainting the shaped line in 2 px strips under content masks.
+- **The thinking line.** While live, it shimmers ("Thinking", then what
+  is being searched or read). Settled, it reads "Thought for Ns ›" and is
+  closed until clicked. It opens and folds over 140 ms, ease-out. The
+  reasoning summaries in it are capped at 24 lines, then "… N more
+  lines".
+  - There's no spinner: ChatGPT's shimmering line is the only sign of
+    work.
+- **Shimmer.** A 3.4 s sweep, repainting the shaped line in 2 px strips
+  under content masks.
 - **Markdown elements:**
   - paragraphs;
   - bold, italic and strike;
@@ -784,8 +854,9 @@ Behaviour, copied value for value from the research §2:
   Free text selection is not built, as Imago's took its own registry
   (GQ-4).
 - **Probe.** Probe part names for `check-layout`: `panel:guide`,
-  `field:guide`, `button:send`, `button:stop`, `chip:thought`,
-  `chip:source`, `button:connect`.
+  `field:guide`, `button:send`, `button:stop`, `button:screenshot`,
+  `thumb:shot.N`, `line:thought`, `chip:source`, `button:sources`,
+  `button:connect`.
 
 ### 6.8 Staying free in play
 
@@ -825,7 +896,7 @@ Behaviour, copied value for value from the research §2:
 | GC-12 | Streaming chat completions through `curl` with the key and body on stdin or pipes; SSE parsing of text, reasoning, tool-call fragments, annotations, usage, keep-alive comments and mid-stream errors; stop kills the request. | P0 · 1 |
 | GC-13 | Errors mapped to the copy in 5.3; one retry before the first token on connection errors, 502 and 503. | P0 · 1 |
 | GC-14 | Reasoning effort from the Thinking setting; reasoning shown in the Thought process chip; reasoning details passed back across tool rounds as the API requires. | P0 · 1 |
-| GC-15 | The model picker from `/api/v1/models` (6.5), cached a day; vision-less models grey out the screen toggle. | P1 · 3 |
+| GC-15 | The model picker from `/api/v1/models` (6.5), cached a day; vision-less models grey out the Screenshot button. | P1 · 3 |
 | GC-16 | Key usage (and limit, if set) in the settings row from `/api/v1/key`, with Manage key; cost per answer on hover, from the usage chunk. | P1 · 3 |
 
 ### 7.3 Answers
@@ -833,7 +904,7 @@ Behaviour, copied value for value from the research §2:
 | ID | Requirement | Priority · phase |
 |---|---|---|
 | GC-20 | `GameContext` (6.4) in every request: exact title, platform, region, revision, kind. | P0 · 1 |
-| GC-21 | The screen toggle; `Command::CaptureScreens` returns the console's frames between frames; PNG scaled as 6.4 and sent only with the toggle on. | P0 · 1 |
+| GC-21 | The Screenshot button and ⌥⌘S (5.4): `Command::CaptureScreens` returns the console's frames between frames, without overlays. Up to four thumbnails in the composer, removable and enlargeable, sent as PNGs scaled as 6.4 and shown above the question. They are saved with the chat. Only attached shots are sent. | P0 · 1 |
 | GC-22 | The system prompt of 6.4, versioned in `prompt.rs`, with snapshot tests per game kind. | P0 · 1 |
 | GC-23 | The source map, about 25 series plus fan games and the fallback, with `check-sources.sh`. | P0 · 2 |
 | GC-24 | `openrouter:web_search` and `openrouter:web_fetch` with the Exa engine, `allowed_domains` from the game's sources and use limits (6.6); one unrestricted search only when the sources found nothing, and the answer says so. | P0 · 2 |
@@ -847,13 +918,14 @@ Behaviour, copied value for value from the research §2:
 | ID | Requirement | Priority · phase |
 |---|---|---|
 | GC-30 | Markdown blocks with incremental reparse and mend, ported from Imago with its tests. | P0 · 1 |
-| GC-31 | The veil, the Thought process chip, the 3 × 3 trailer and the shimmer, to 6.7's values; Reduce Motion turns them off. | P0 · 1 |
+| GC-31 | The veil, the thinking line with its activity list, and the shimmer, to 6.7's values; Reduce Motion turns them off. | P0 · 1 |
 | GC-32 | Tables, blockquotes, lists, inline and fenced code styled as 6.7; tables scroll sideways. | P0 · 1 |
 | GC-33 | Scroll follow with wheel unpin and jump-to-bottom. | P1 · 1 |
 | GC-34 | One chat per game, persisted; ＋ for a new one; earlier chats in the title menu; delete. | P1 · 1 |
 | GC-35 | Copy buttons per answer and code block. | P1 · 1 |
-| GC-36 | `check-layout.sh` states: not connected, empty, streaming, answered with sources, error, narrow window (GC-2), at default and minimum sizes. | P0 · 1–2 |
-| GC-37 | The game's palette (6.7): glass, accent, spinner, user plate, text and danger taken from the ambient picture. Recomputed at most every 2 s and eased; dark, white and flat frames keep the last palette; system tint before the first frame. Contrast pairs are unit-tested on test-ROM and synthetic frames. | P0 · 1 |
+| GC-38 | ChatGPT's look (6.7, owner 2026-11-04): unboxed answers, the question pill, the thinking line, source chips and the Sources sheet, the action row, the rounded composer with ＋, Screenshot and send / stop, the panel flush to the window's side. Checked against the mockup and the Mobbin references in the research. | P0 · 1 |
+| GC-36 | `check-layout.sh` states: not connected, empty, streaming, answered with sources, Sources sheet, screenshots in the composer, error, narrow window (GC-2), at default and minimum sizes. | P0 · 1–2 |
+| GC-37 | The game's palette (6.7): the glass's tint, the accent, text and danger taken from the ambient picture. Recomputed at most every 2 s and eased; dark, white and flat frames keep the last palette; system tint before the first frame. Contrast pairs are unit-tested on test-ROM and synthetic frames. | P0 · 1 |
 
 ### 7.5 Untouched
 
@@ -953,7 +1025,7 @@ Acceptance:
 | Fan sites block or rate-limit the app | Lookups fail | Map only sites that allow it; respect crawl delays; cache pages a day; fall back to web search; never get past bot checks. |
 | A site's layout changes and HTML extraction breaks | Poor page text | Prefer MediaWiki and JSON APIs; HTML extraction is generic (text, tables), not per-site scraping. |
 | Costs surprise the player | Distrust | Cheap default model, low default thinking, cost shown per answer, credits in settings, OpenRouter's own key limits. |
-| Screens sent without the player meaning to | Privacy | Toggle visible in the composer, a thumbnail on each sent message, disclosure on the connect card. |
+| Screens sent without the player meaning to | Privacy | Nothing is sent automatically. Screenshots are taken only by the button, ⌥⌘S or a starter, each is a thumbnail before sending and on the sent message, and the connect card says so. |
 | `curl` streaming quirks (buffering, proxies) | Stalls | `-N --no-buffer`, idle timeout, phase 0 probe; an HTTP crate is the fallback (`ureq` with rustls), recorded in decision 0014 if needed. |
 | A text field on `EntityInputHandler` is more work than it looks | Phase 1 slips | Start from GPUI's own `examples/input.rs`; multiline wrap is the main addition. |
 | OpenRouter API changes (reasoning fields, web search) | Broken parsing | Unknown fields ignored; recorded fixtures updated with the live probe. |
@@ -968,7 +1040,7 @@ Acceptance:
 |---|---|---|
 | GQ-1 | ~~Dark panel or an Imago Light white card?~~ Neither: "have it complement whatever game is being played" (owner, 2026-11-04). The panel takes its colours from the game (6.7, GC-37). | Phase 1 |
 | GQ-2 | Keep playing while typing (the plan's default), or pause while the composer has the caret? Not answered; the default stands, with the setting in 5.6. | Phase 1 |
-| GQ-3 | System font, as the app uses, or bundle Imago's Geist (SIL OFL) for the chat? | Phase 1 |
+| GQ-3 | ~~System font or Imago's Geist?~~ The system font: ChatGPT's look, in the app's own type (6.7). | Phase 1 |
 | GQ-4 | Is a copy button per answer enough, or is free text selection wanted? | Phase 3 |
 | GQ-5 | Right margin by default, or left? | Phase 1 |
 | GQ-6 | ~~Paste-a-key as well as Connect OpenRouter?~~ Connect OpenRouter only, as in Imago (owner, 2026-11-04). Built (6.2). | Phase 1 |

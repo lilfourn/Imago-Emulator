@@ -227,6 +227,38 @@ add its own system prompt for game answers (§6).
 - **Crates.** `pulldown-cmark` (Imago pins 0.12) and
   `unicode-segmentation`. Skip tree-sitter and RaTeX.
 
+### 2.9 ChatGPT's look, from Mobbin
+
+The owner asked to copy ChatGPT's cleanness (2026-11-04). The references,
+all on Mobbin:
+
+- web: an answer with "Thought for 42s" and inline sources;
+- web: the Activity and Sources side panel;
+- web: the Sources list;
+- web: the empty chat with its composer;
+- iOS: a narrow answer with its action row and Sources;
+- iOS: the Sources sheet.
+
+What to take:
+
+- **Answers.** Answers sit on the page with no bubble. Questions sit in
+  a grey pill on the right.
+- **Thinking.** Reasoning is one grey line, "Thought for Ns ›". Opened,
+  it lists what was searched and read, with each site's icon.
+- **Sources.**
+  - Small grey chips ("Mobbin +2") follow the sentence they back.
+  - A Sources button with stacked site icons sits in the action row,
+    and opens a list: site, title, a line from the page.
+- **The action row.** Copy, good, bad, retry, share, as small grey
+  icons under each answer.
+- **The composer.**
+  - A rounded box: the text on top, then ＋, tool chips in colour
+    ("Think", "Research"), and a filled send circle that becomes a
+    square to stop.
+  - A new chat centres a short question over it ("What are you working
+    on?").
+- **Colour.** Almost none: greys, with colour only on tool chips.
+
 ## 3. Imago's OpenRouter approach
 
 - **Imago never calls OpenRouter's chat API from Rust.** It signs the
