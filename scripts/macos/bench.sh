@@ -7,8 +7,10 @@
 # time; bench-report.py reads the app's timing trace (trace.rs).
 #
 # usage: scripts/macos/bench.sh GAME [seconds, default 20] [out-dir]
-#   GAME is a ROM or an RPG Maker game's folder. The window has to stay
-#   partly visible: GPUI stops drawing a window that is covered.
+#   GAME is a ROM, a 3DS game or an RPG Maker game's folder; an RPG Maker
+#   game's player and a 3DS game's helper are counted as the player's CPU.
+#   The window has to stay partly visible: GPUI stops drawing a window
+#   that is covered.
 #   KEYS="w s" picks the keys tapped, in turn (default: w and s), and
 #   SPEED=normal turns the user's fast-forward off, FRONT=1 leaves the app
 #   in front, with the keyboard, and WINDOW="x y width height" places its
@@ -32,6 +34,9 @@ mkdir -p "$config" $out/games
 for file in settings.toml bindings.toml; do
   [[ -f "$real/$file" ]] && cp "$real/$file" "$config/"
 done
+# The 3DS core and the emulated console's files, cloned, so a 3DS game
+# neither downloads the core again nor touches the user's console.
+[[ -d "$real/3DS" ]] && cp -c -R "$real/3DS" "$config/3DS"
 # WINDOW="x y width height" places the window.
 if [[ -n ${WINDOW:-} && -f "$config/settings.toml" ]]; then
   read wx wy ww wh <<<$WINDOW
@@ -60,7 +65,9 @@ sleep 0.6
 # Wait for frames, then let the game settle before measuring.
 for _ in {1..300}; do grep -q ' run ' $out/trace.txt 2>/dev/null && break; sleep 0.2; done
 sleep 3
+# An RPG Maker game's hidden player, or a 3DS game's helper.
 player=$(pgrep -f "$home/Library/Application Support/ds-emulator/RPG Maker/.*/Player.app" | head -1)
+[[ -n $player ]] || player=$(pgrep -f -- "--3ds-helper .*$home/" | head -1)
 cpu() { ps -o time= -p $1 2>/dev/null | awk -F'[:.]' '{ print ($1 * 60 + $2) + ("0." $3) }'; }
 started=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
 app_cpu=$(cpu $pid) player_cpu=${player:+$(cpu $player)}

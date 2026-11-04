@@ -713,6 +713,39 @@ mod tests {
     }
 
     #[test]
+    fn a_3ds_touch_lands_on_its_narrower_bottom_screen() {
+        // Stacked, the 320-wide bottom screen is centred under the 400-wide
+        // top one, with a margin each side that is not the touch screen.
+        let placed = Layout::default().place(&emu_3ds::SCREENS, (540.0, 648.0));
+        assert_eq!(placed[0].rect, rect(0.0, 0.0, 540.0, 324.0));
+        assert_eq!(placed[1].rect, rect(54.0, 324.0, 432.0, 324.0));
+        let (bottom, size) = (placed[1], emu_3ds::SCREENS[1]);
+        assert_eq!(
+            bottom.pixel_at(size, (54.0, 324.0)),
+            Some(TouchPoint { x: 0, y: 0 })
+        );
+        assert_eq!(
+            bottom.pixel_at(size, (270.0, 486.0)),
+            Some(TouchPoint { x: 160, y: 120 })
+        );
+        assert_eq!(
+            bottom.pixel_at(size, (485.9, 647.9)),
+            Some(TouchPoint { x: 319, y: 239 })
+        );
+        assert_eq!(bottom.pixel_at(size, (40.0, 500.0)), None, "in the margin");
+        assert_eq!(
+            bottom.pixel_nearest(size, (40.0, 500.0)),
+            Some(TouchPoint { x: 0, y: 130 }),
+            "a drag into the margin holds at the edge"
+        );
+        // Every pixel maps back to itself through the window.
+        for (x, y) in [(0, 0), (88, 206), (319, 239), (160, 1)] {
+            let point = bottom.window_point(size, (f32::from(x) + 0.5, f32::from(y) + 0.5));
+            assert_eq!(bottom.pixel_at(size, point), Some(TouchPoint { x, y }));
+        }
+    }
+
+    #[test]
     fn pixel_nearest_holds_points_outside_at_the_edge() {
         let bottom = placement(rect(0.0, 384.0, 512.0, 384.0), Rotation::Upright);
         let size = DS[1];
