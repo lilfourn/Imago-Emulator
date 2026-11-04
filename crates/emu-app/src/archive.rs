@@ -340,6 +340,17 @@ mod tests {
         path
     }
 
+    /// Taken by every test that unpacks a 7-Zip file: unpacking one makes
+    /// a scratch folder in the shared temporary folder, and a test that
+    /// counts those must not see another test's, made at the same moment.
+    static SCRATCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn scratch_lock() -> std::sync::MutexGuard<'static, ()> {
+        SCRATCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// A 7-Zip file in `dir` named `name` holding `files`, made by
     /// macOS's `tar`, which writes 7-Zip as well as reading it.
     fn seven_zip_file(dir: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
@@ -408,6 +419,7 @@ mod tests {
 
     #[test]
     fn unpacks_7_zip_files_with_tar() {
+        let _scratch = scratch_lock();
         let dir = temp_dir("unpack-7z");
         let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let archive = seven_zip_file(
@@ -446,6 +458,7 @@ mod tests {
 
     #[test]
     fn unpacks_3ds_games_up_to_a_3ds_cartridge_s_size() {
+        let _scratch = scratch_lock();
         let dir = temp_dir("unpack-3ds");
         let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let zip = zip_file(
