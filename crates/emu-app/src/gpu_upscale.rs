@@ -1,7 +1,7 @@
-//! The upscaler's GPU half ([decision 0013]): enlarges a frame to an exact
-//! size in device pixels on Metal, with OmniScale for pixel art or MetalFX's
-//! spatial scaler for smooth pictures, and reads the result back as the
-//! BGRA bytes a GPUI image is made from.
+//! The upscaler's GPU half ([decision 0013]): draws a frame at an exact
+//! size in device pixels on Metal, as crisp pixels (the default for pixel
+//! art), smooth (MetalFX's spatial scaler), or rounded (OmniScale), and
+//! reads the result back as the BGRA bytes a GPUI image is made from.
 //!
 //! GPUI 0.2.2 draws only images it is handed as bytes, so each frame goes
 //! up to the GPU and comes back: measured at 0.3–2.5 ms a frame on an
@@ -39,11 +39,14 @@ pub struct Request<'a> {
 /// How a frame is enlarged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
-    /// OmniScale: pixel art's edges and curves rebuilt at the output's own
-    /// resolution.
-    PixelArt,
+    /// The game's own pixels as crisp, even squares at any size
+    /// (`shaders/sharp.metal`).
+    Sharp,
     /// MetalFX's spatial scaler: smooth, for painted and rendered pictures.
     Smooth,
+    /// OmniScale: pixel art's edges reshaped into smooth curves and lines,
+    /// for those who want it; it changes how the art looks.
+    Rounded,
 }
 
 /// Why the GPU could not upscale.
@@ -97,6 +100,7 @@ mod imp {
     /// GPUI's are, so building needs no Metal toolchain.
     const SHADERS: &str = concat!(
         include_str!("shaders/omniscale.metal"),
+        include_str!("shaders/sharp.metal"),
         include_str!("shaders/beside_3d.metal")
     );
 
@@ -115,6 +119,7 @@ mod imp {
     pub struct GpuDevice {
         device: Retained<ProtocolObject<dyn MTLDevice>>,
         queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        sharp: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
         omniscale: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
         split_cells: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
         near_3d: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
@@ -145,7 +150,7 @@ mod imp {
     impl Key {
         /// Whether this is Pixel Art beside larger 3D.
         fn beside_3d(self) -> bool {
-            self.method == Method::PixelArt && self.cell > 1
+            self.method == Method::Rounded && self.cell > 1
         }
 
         /// The console pixels' size: the frame's over the cell.
@@ -196,7 +201,8 @@ mod imp {
                     .newComputePipelineStateWithFunction_error(&function)
                     .map_err(|error| setup(&error.localizedDescription().to_string()))
             };
-            let (omniscale, split_cells, near_3d, beside_3d) = (
+            let (sharp, omniscale, split_cells, near_3d, beside_3d) = (
+                kernel("sharp")?,
                 kernel("omniscale")?,
                 kernel("split_cells")?,
                 kernel("near_3d")?,
@@ -208,6 +214,7 @@ mod imp {
             Ok(Self {
                 device,
                 queue,
+                sharp,
                 omniscale,
                 split_cells,
                 near_3d,
@@ -370,11 +377,18 @@ mod imp {
             let key = job.key;
             let (input, output) = (to_size(key.input), to_size(key.output));
             match (key.method, &job.console) {
+                (Method::Sharp, _) => dispatch(
+                    commands,
+                    &self.device.sharp,
+                    &[&job.input, &job.output],
+                    None,
+                    output,
+                )?,
                 (Method::Smooth, _) => {
                     let scaler = job.scaler.as_ref().expect("Smooth jobs have a scaler");
                     encode_metal_fx(commands, scaler, &job.input, &job.output, input);
                 }
-                (Method::PixelArt, Some([split, console])) => {
+                (Method::Rounded, Some([split, console])) => {
                     let console_size = to_size(key.console());
                     dispatch(
                         commands,
@@ -407,7 +421,7 @@ mod imp {
                         output,
                     )?;
                 }
-                (Method::PixelArt, None) => dispatch(
+                (Method::Rounded, None) => dispatch(
                     commands,
                     &self.device.omniscale,
                     &[&job.input, &job.output],
@@ -469,14 +483,15 @@ mod imp {
             let (input, output) = (to_size(key.input), to_size(key.output));
             let read = MTLTextureUsage::ShaderRead;
             let write = MTLTextureUsage::ShaderWrite;
-            // MetalFX for Smooth, and for 3D beside Pixel Art if it enlarges
-            // by a quarter or more; by less, sampling the frame looks the
-            // same for less work.
+            // MetalFX for Smooth, and for 3D beside Rounded Pixels if it
+            // enlarges by a quarter or more; by less, sampling the frame
+            // looks the same for less work.
             let enlarges =
                 4 * output.width >= 5 * input.width && 4 * output.height >= 5 * input.height;
             let metal_fx = match key.method {
+                Method::Sharp => false,
                 Method::Smooth => true,
-                Method::PixelArt => key.beside_3d() && enlarges && self.device.metal_fx,
+                Method::Rounded => key.beside_3d() && enlarges && self.device.metal_fx,
             };
             let scaler = metal_fx
                 .then(|| self.metal_fx_scaler(input, output))
@@ -488,7 +503,7 @@ mod imp {
             let (input_usage, smooth_usage) = usages.unwrap_or((read, write));
             let output_usage = match key.method {
                 Method::Smooth => smooth_usage,
-                Method::PixelArt => write,
+                Method::Sharp | Method::Rounded => write,
             };
             let readback = self
                 .device
@@ -705,7 +720,7 @@ mod tests {
         let Some(mut gpu) = gpu() else { return };
         let mut frame = Frame::new(ScreenSize::new(16, 12));
         frame.pixels_mut().fill(rgb(200, 120, 40));
-        for method in [Method::PixelArt, Method::Smooth] {
+        for method in [Method::Sharp, Method::Rounded, Method::Smooth] {
             for (width, height) in [(80, 60), (123, 77), (16 * 13, 12 * 13)] {
                 let bytes = gpu
                     .upscale(&frame, method, 1, width, height)
@@ -738,7 +753,7 @@ mod tests {
         let scale = 8;
         let side = 8 * scale;
         let bytes = gpu
-            .upscale(&frame, Method::PixelArt, 1, side, side)
+            .upscale(&frame, Method::Rounded, 1, side, side)
             .expect("upscaled");
         let green = |x: u32, y: u32| pixel(&bytes, side, x, y)[1];
         // Away from the edge, pixels keep their colour.
@@ -794,10 +809,10 @@ mod tests {
         let native = staircase(16);
         let side = 16 * 5;
         let direct = gpu
-            .upscale(&native, Method::PixelArt, 1, side, side)
+            .upscale(&native, Method::Rounded, 1, side, side)
             .expect("upscaled");
         let beside = gpu
-            .upscale(&enlarged(&native, 4), Method::PixelArt, 4, side, side)
+            .upscale(&enlarged(&native, 4), Method::Rounded, 4, side, side)
             .expect("upscaled");
         let most = direct
             .iter()
@@ -831,7 +846,7 @@ mod tests {
         for scale in [8, 3] {
             let (out_width, out_height) = (16 * scale, 12 * scale);
             let bytes = gpu
-                .upscale(&large, Method::PixelArt, 4, out_width, out_height)
+                .upscale(&large, Method::Rounded, 4, out_width, out_height)
                 .expect("upscaled");
             let green = |x: u32, y: u32| pixel(&bytes, out_width, x, y)[1];
             let (left, top) = (8 * scale, 6 * scale);
@@ -849,6 +864,56 @@ mod tests {
     }
 
     #[test]
+    fn sharp_pixels_are_even_crisp_squares_at_any_size() {
+        let Some(mut gpu) = gpu() else { return };
+        // Alternate black and white columns, the hardest case for evenness.
+        let (black, white) = (rgb(0, 0, 0), rgb(255, 255, 255));
+        let mut frame = Frame::new(ScreenSize::new(8, 2));
+        for row in frame.rows_mut() {
+            for (x, pixel) in row.iter_mut().enumerate() {
+                *pixel = if x % 2 == 0 { black } else { white };
+            }
+        }
+        // At a whole multiple, exactly nearest-neighbour.
+        let (width, height) = (8 * 4, 2 * 4);
+        let bytes = gpu
+            .upscale(&frame, Method::Sharp, 1, width, height)
+            .expect("upscaled");
+        for x in 0..width {
+            let expected = if (x / 4) % 2 == 0 { 0 } else { 255 };
+            assert_eq!(pixel(&bytes, width, x, 3)[1], expected, "column {x} at 4×");
+        }
+        // At 4.5×, every console pixel is 4 or 5 output pixels, each
+        // fully its colour but the one across an edge: never blurred
+        // further, never a column lost.
+        let width = 36;
+        let bytes = gpu
+            .upscale(&frame, Method::Sharp, 1, width, 9)
+            .expect("upscaled");
+        let row: Vec<u8> = (0..width).map(|x| pixel(&bytes, width, x, 4)[1]).collect();
+        let mixed = row
+            .iter()
+            .filter(|&&value| value != 0 && value != 255)
+            .count();
+        assert!(
+            mixed <= 7,
+            "at most one mixed output pixel per edge: {row:?}"
+        );
+        let mut runs = Vec::new();
+        for &value in row.iter().filter(|&&value| value == 0 || value == 255) {
+            match runs.last_mut() {
+                Some((last, count)) if *last == value => *count += 1,
+                _ => runs.push((value, 1_usize)),
+            }
+        }
+        assert_eq!(runs.len(), 8, "eight columns: {row:?}");
+        assert!(
+            runs.iter().all(|(_, count)| (3..=5).contains(count)),
+            "each column 3 to 5 pure pixels wide: {row:?}"
+        );
+    }
+
+    #[test]
     fn screens_upscaled_together_stay_apart() {
         let Some(mut gpu) = gpu() else { return };
         let (mut light, mut dark) = (
@@ -859,7 +924,7 @@ mod tests {
         dark.pixels_mut().fill(rgb(10, 10, 10));
         let request = |frame| Request {
             frame,
-            method: Method::PixelArt,
+            method: Method::Rounded,
             cell: 1,
             width: 64,
             height: 48,
@@ -877,7 +942,7 @@ mod tests {
         let Some(mut gpu) = gpu() else { return };
         let frame = Frame::new(ScreenSize::new(10, 10));
         for side in [20, 30, 40, 50, 60, 70, 80, 90, 100, 20] {
-            gpu.upscale(&frame, Method::PixelArt, 1, side, side)
+            gpu.upscale(&frame, Method::Rounded, 1, side, side)
                 .expect("upscaled");
         }
         assert_eq!(
@@ -900,7 +965,7 @@ mod tests {
         let Some(mut gpu) = gpu() else { return };
         let frame = Frame::new(ScreenSize::new(4, 4));
         assert_eq!(
-            gpu.upscale(&frame, Method::PixelArt, 1, 0, 10),
+            gpu.upscale(&frame, Method::Rounded, 1, 0, 10),
             Err(GpuError::Size(0, 10))
         );
         assert_eq!(

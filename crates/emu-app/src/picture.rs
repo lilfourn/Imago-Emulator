@@ -1,16 +1,21 @@
 //! How the screens look: View > Picture ([PRD](../../../docs/PRD-upscaler.md)).
 //!
-//! Auto, the default, upscales every game to the screen it is shown on:
-//! Pixel Art (OmniScale, on the GPU) for the Game Boy family and the DS,
-//! Smooth (MetalFX) for RPG Maker and the 3DS. Sharp Pixels is the original
-//! look, and the LCD grid and scanlines shade it.
+//! Auto, the default, draws every game at the resolution of the screen it
+//! is shown on, as the game looks: Sharp Pixels for the games drawn in
+//! pixel art (the Game Boy family, the DS and RPG Maker), each console
+//! pixel a crisp, even square, and Smooth (MetalFX) for the 3DS, whose
+//! screens are drawn at a higher resolution already. Rounded Pixels
+//! (OmniScale) reshapes pixel art into smooth curves for those who want
+//! it, and the LCD grid and scanlines shade sharp pixels.
 //!
 //! An upscaled screen is drawn at its exact size in device pixels, so it
 //! fits every display: 1× or Retina, any size, in a window or full screen.
 //!
 //! The DS and 3DS also draw their 3D larger (View > 3D Resolution). Match
 //! Display, the default, draws it as large as the screens are shown, up
-//! to [`MATCH_DISPLAY_CAP`], and the upscaler covers the rest.
+//! to [`MATCH_DISPLAY_CAP`], and the upscaler covers the rest. It keeps
+//! the speed asked for first: when the game falls behind, as 4× 3D does
+//! at 3× fast-forward, it draws 3D a step smaller ([`keep_speed`]).
 
 use emu_core::{ScreenSize, System, TextureUpscaling};
 
@@ -19,15 +24,16 @@ use crate::gpu_upscale::Method;
 /// A look for the screens, chosen from View > Picture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Picture {
-    /// The upscaler that suits the game's system.
+    /// What suits the game's system: Sharp Pixels, or Smooth for the 3DS.
     #[default]
     Auto,
-    /// Each console pixel a sharp square, as the screens showed them.
+    /// Each console pixel a crisp, even square, as the screens showed
+    /// them, at the display's full resolution.
     SharpPixels,
-    /// Pixel art's edges and curves rebuilt at the display's resolution.
-    PixelArt,
     /// Smooth enlargement, for painted art and 3D.
     Smooth,
+    /// Pixel art's edges reshaped into smooth curves and lines (OmniScale).
+    RoundedPixels,
     /// Dark lines between pixels, as on the handhelds' LCDs.
     LcdGrid,
     /// Dark lines between rows, as on a CRT television.
@@ -37,9 +43,7 @@ pub enum Picture {
 /// What a picture means for one game: [`Picture`] with Auto decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Look {
-    /// Console pixels as sharp squares.
-    SharpPixels,
-    /// Upscaled on the GPU.
+    /// Drawn at the screen's size on the GPU, as `Method` says.
     Upscaled(Method),
     /// Sharp squares with an LCD grid.
     LcdGrid,
@@ -47,25 +51,12 @@ pub enum Look {
     Scanlines,
 }
 
-impl Look {
-    /// How a core that draws on a GPU of its own (the 3DS) enlarges the
-    /// game's textures for this look: as the screens are upscaled, or not
-    /// at all for sharp pixels and the shading filters.
-    pub fn texture_upscaling(self) -> TextureUpscaling {
-        match self {
-            Self::Upscaled(Method::Smooth) => TextureUpscaling::Smooth,
-            Self::Upscaled(Method::PixelArt) => TextureUpscaling::PixelArt,
-            Self::SharpPixels | Self::LcdGrid | Self::Scanlines => TextureUpscaling::Off,
-        }
-    }
-}
-
 /// Each picture and its name in the settings file.
 const NAMES: [(Picture, &str); 6] = [
     (Picture::Auto, "auto"),
     (Picture::SharpPixels, "sharp-pixels"),
-    (Picture::PixelArt, "pixel-art"),
     (Picture::Smooth, "smooth"),
+    (Picture::RoundedPixels, "rounded-pixels"),
     (Picture::LcdGrid, "lcd-grid"),
     (Picture::Scanlines, "scanlines"),
 ];
@@ -132,6 +123,31 @@ pub fn matched_resolution(screens: impl IntoIterator<Item = ((u32, u32), ScreenS
         .clamp(1, MATCH_DISPLAY_CAP)
 }
 
+/// How often Match Display checks that the game keeps its speed.
+pub const SPEED_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The most Match Display may draw 3D at from now, given that it may draw
+/// at most `ceiling` and drew at `scale` while the game ran `ran` frames a
+/// second, asked for `wanted` (`None` for unlimited speed) on a system of
+/// `normal` frames a second: a step smaller if the game fell behind, by
+/// more than 5%, and was running at all (not paused or loading), else as
+/// it was. It never steps up; the view starts it again at
+/// [`MATCH_DISPLAY_CAP`] when the speed asked for or the screens change.
+///
+/// The DS's 3D is the costliest thing the app does: in Pokémon Platinum's
+/// overworld, headless on an M5 Max, the core took 3.75 ms a frame with 3D
+/// at 1×, 5.2 ms at 2× and 7.35 ms at 4×, against 5.6 ms a frame at 3×
+/// fast-forward.
+pub fn keep_speed(ceiling: u32, scale: u32, ran: f64, wanted: Option<f64>, normal: f64) -> u32 {
+    let running = ran >= 0.25 * wanted.unwrap_or(normal).min(normal);
+    let behind = wanted.is_none_or(|wanted| ran < 0.95 * wanted);
+    if running && behind && scale > 1 {
+        ceiling.min(scale - 1)
+    } else {
+        ceiling
+    }
+}
+
 /// The most pixels the GPU draws in all a frame's screens together. Past
 /// it, screens are drawn as large as fits, and GPUI's linear filter
 /// enlarges them the rest of the way, which on an upscaled picture barely
@@ -146,8 +162,8 @@ impl Picture {
     pub const ALL: [Picture; 6] = [
         Picture::Auto,
         Picture::SharpPixels,
-        Picture::PixelArt,
         Picture::Smooth,
+        Picture::RoundedPixels,
         Picture::LcdGrid,
         Picture::Scanlines,
     ];
@@ -160,8 +176,12 @@ impl Picture {
             .map_or("auto", |(_, name)| name)
     }
 
-    /// The picture with this name in the settings file.
+    /// The picture with this name in the settings file. `pixel-art` is
+    /// what Rounded Pixels was first called.
     pub fn from_name(name: &str) -> Option<Self> {
+        if name == "pixel-art" {
+            return Some(Self::RoundedPixels);
+        }
         NAMES
             .iter()
             .find(|(_, known)| *known == name)
@@ -177,9 +197,24 @@ impl Picture {
             .then_some(Self::Auto)
     }
 
-    /// Whether the picture upscales some system's games on the GPU.
+    /// How a core that draws on a GPU of its own (the 3DS) enlarges the
+    /// game's textures: not at all unless the player chose Smooth or
+    /// Rounded Pixels, as filtering changes the art, and 3DS games hold
+    /// pixel art too (Omega Ruby's AreaNav map, which ScaleForce blurs).
+    /// Auto draws the 3DS's 3D larger instead.
+    pub fn texture_upscaling(self) -> TextureUpscaling {
+        match self {
+            Self::Smooth => TextureUpscaling::Smooth,
+            Self::RoundedPixels => TextureUpscaling::PixelArt,
+            Self::Auto | Self::SharpPixels | Self::LcdGrid | Self::Scanlines => {
+                TextureUpscaling::Off
+            }
+        }
+    }
+
+    /// Whether the picture draws on the GPU: all but the shading filters.
     pub fn upscales(self) -> bool {
-        matches!(self, Self::Auto | Self::PixelArt | Self::Smooth)
+        !matches!(self, Self::LcdGrid | Self::Scanlines)
     }
 
     /// The picture as the View menu and settings window name it.
@@ -187,25 +222,28 @@ impl Picture {
         match self {
             Self::Auto => "Auto",
             Self::SharpPixels => "Sharp Pixels",
-            Self::PixelArt => "Pixel Art",
             Self::Smooth => "Smooth",
+            Self::RoundedPixels => "Rounded Pixels",
             Self::LcdGrid => "LCD Grid",
             Self::Scanlines => "Scanlines",
         }
     }
 
-    /// How a game of `system` looks with this picture. Auto upscales pixel
-    /// art for the systems drawn in it, and smoothly for RPG Maker games,
-    /// whose art is painted or drawn at twice its pixel size, and the 3DS,
-    /// whose screens are already drawn at a higher resolution.
+    /// How a game of `system` looks with this picture. Auto keeps pixel
+    /// art as crisp pixels for the systems drawn in it (RPG Maker games
+    /// included, whose art is pixel art drawn at twice its size), and is
+    /// smooth for the 3DS, whose screens are already drawn at a higher
+    /// resolution.
     pub fn look(self, system: System) -> Look {
         match self {
             Self::Auto => match system {
-                System::Gb | System::Gba | System::Nds => Look::Upscaled(Method::PixelArt),
-                System::RpgMaker | System::N3ds => Look::Upscaled(Method::Smooth),
+                System::Gb | System::Gba | System::Nds | System::RpgMaker => {
+                    Look::Upscaled(Method::Sharp)
+                }
+                System::N3ds => Look::Upscaled(Method::Smooth),
             },
-            Self::SharpPixels => Look::SharpPixels,
-            Self::PixelArt => Look::Upscaled(Method::PixelArt),
+            Self::SharpPixels => Look::Upscaled(Method::Sharp),
+            Self::RoundedPixels => Look::Upscaled(Method::Rounded),
             Self::Smooth => Look::Upscaled(Method::Smooth),
             Self::LcdGrid => Look::LcdGrid,
             Self::Scanlines => Look::Scanlines,
@@ -253,6 +291,10 @@ mod tests {
             assert_eq!(picture.name(), name);
             assert_eq!(Picture::from_name(name), Some(picture));
         }
+        assert_eq!(
+            Picture::from_name("pixel-art"),
+            Some(Picture::RoundedPixels)
+        );
         assert_eq!(Picture::from_name("xbrz"), None);
         assert_eq!(Picture::ALL.len(), NAMES.len());
     }
@@ -270,20 +312,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_upscales_pixel_art_and_smooths_painted_and_3d_games() {
-        let pixel_art = Look::Upscaled(Method::PixelArt);
+    fn auto_keeps_pixel_art_sharp_and_smooths_the_3ds() {
+        let sharp = Look::Upscaled(Method::Sharp);
         let smooth = Look::Upscaled(Method::Smooth);
-        for system in [System::Gb, System::Gba, System::Nds] {
-            assert_eq!(Picture::Auto.look(system), pixel_art, "{system:?}");
+        let rounded = Look::Upscaled(Method::Rounded);
+        for system in [System::Gb, System::Gba, System::Nds, System::RpgMaker] {
+            assert_eq!(Picture::Auto.look(system), sharp, "{system:?}");
         }
-        for system in [System::RpgMaker, System::N3ds] {
-            assert_eq!(Picture::Auto.look(system), smooth, "{system:?}");
-        }
-        assert!(Picture::Auto.upscales() && Picture::Smooth.upscales());
-        assert!(!Picture::SharpPixels.upscales() && !Picture::LcdGrid.upscales());
+        assert_eq!(Picture::Auto.look(System::N3ds), smooth);
+        assert!(Picture::Auto.upscales() && Picture::SharpPixels.upscales());
+        assert!(!Picture::LcdGrid.upscales() && !Picture::Scanlines.upscales());
         // Other pictures look the same for every system.
         assert_eq!(Picture::Smooth.look(System::Gb), smooth);
-        assert_eq!(Picture::PixelArt.look(System::N3ds), pixel_art);
+        assert_eq!(Picture::SharpPixels.look(System::N3ds), sharp);
+        assert_eq!(Picture::RoundedPixels.look(System::N3ds), rounded);
         assert_eq!(Picture::LcdGrid.look(System::Nds), Look::LcdGrid);
     }
 
@@ -313,21 +355,45 @@ mod tests {
     }
 
     #[test]
-    fn the_3ds_textures_follow_the_picture() {
+    fn the_3ds_textures_are_filtered_only_when_chosen() {
         assert_eq!(
-            Picture::Auto.look(System::N3ds).texture_upscaling(),
+            Picture::Smooth.texture_upscaling(),
             TextureUpscaling::Smooth
         );
         assert_eq!(
-            Picture::PixelArt.look(System::N3ds).texture_upscaling(),
+            Picture::RoundedPixels.texture_upscaling(),
             TextureUpscaling::PixelArt
         );
-        for off in [Picture::SharpPixels, Picture::LcdGrid, Picture::Scanlines] {
-            assert_eq!(
-                off.look(System::N3ds).texture_upscaling(),
-                TextureUpscaling::Off
-            );
+        for off in [
+            Picture::Auto,
+            Picture::SharpPixels,
+            Picture::LcdGrid,
+            Picture::Scanlines,
+        ] {
+            assert_eq!(off.texture_upscaling(), TextureUpscaling::Off, "{off:?}");
         }
+    }
+
+    #[test]
+    fn match_display_steps_3d_down_to_keep_the_speed_asked_for() {
+        let normal = 59.83;
+        // 3× fast-forward at 2× speed: a step down, and so on each second
+        // it stays behind.
+        assert_eq!(keep_speed(4, 4, 119.0, Some(179.5), normal), 3);
+        assert_eq!(keep_speed(3, 3, 140.0, Some(179.5), normal), 2);
+        // Keeping up, or nearly: no change.
+        assert_eq!(keep_speed(4, 4, 59.8, Some(normal), normal), 4);
+        assert_eq!(keep_speed(2, 2, 172.0, Some(179.5), normal), 2);
+        // Paused or loading: not behind, just stopped.
+        assert_eq!(keep_speed(4, 4, 0.0, Some(normal), normal), 4);
+        assert_eq!(keep_speed(4, 4, 10.0, Some(179.5), normal), 4);
+        // Slow motion at a quarter: 15 frames a second is keeping up.
+        assert_eq!(keep_speed(4, 4, 15.0, Some(normal / 4.0), normal), 4);
+        // Unlimited wants all it can get, down to 1×, and no lower.
+        assert_eq!(keep_speed(4, 2, 400.0, None, normal), 1);
+        assert_eq!(keep_speed(1, 1, 400.0, None, normal), 1);
+        // A ceiling already below the scale drawn stays.
+        assert_eq!(keep_speed(2, 4, 100.0, Some(179.5), normal), 2);
     }
 
     #[test]

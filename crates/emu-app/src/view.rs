@@ -22,7 +22,7 @@ use crate::app::{
     AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
     EditCheats, GameInfo, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
     LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore,
-    PictureAuto, PictureLcdGrid, PicturePixelArt, PictureScanlines, PictureSharpPixels,
+    PictureAuto, PictureLcdGrid, PictureRoundedPixels, PictureScanlines, PictureSharpPixels,
     PictureSmooth, PreviousStateSlot, Randomize, RemoveFromLibrary, Reset, Resolution3d1x,
     Resolution3d2x, Resolution3d3x, Resolution3d4x, Resolution3d6x, Resolution3d8x,
     Resolution3dMatchDisplay, RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot,
@@ -242,6 +242,11 @@ struct Session {
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
     /// The 3D resolution last sent to the core.
     render_scale: u32,
+    /// Match Display's check that the game keeps its speed: the most it
+    /// may draw 3D at now, what it was set for (the scale matching the
+    /// screens and the speed asked for; a change starts it again at the
+    /// cap), and when the speed was last measured, with the frames run then.
+    keeping: Keeping,
     /// The ambient backdrop, while it is shown.
     ambient: Option<Glow>,
     /// The display whose refresh the emulation thread was last told of,
@@ -266,6 +271,57 @@ struct ImageKey {
     look: Look,
     /// The placement's size in device pixels.
     target: (u32, u32),
+}
+
+/// Match Display's check that the game keeps the speed asked for
+/// ([`picture::keep_speed`]).
+struct Keeping {
+    ceiling: u32,
+    set_for: Option<(u32, Speed)>,
+    measured: Option<(Instant, u64)>,
+}
+
+impl Keeping {
+    fn new() -> Self {
+        Self {
+            ceiling: picture::MATCH_DISPLAY_CAP,
+            set_for: None,
+            measured: None,
+        }
+    }
+}
+
+impl Session {
+    /// The scale Match Display draws 3D at: `matched`, the scale that
+    /// matches the screens, or less while the game cannot keep `speed`,
+    /// measured every [`picture::SPEED_CHECK`].
+    fn keep_speed(&mut self, matched: u32, speed: Speed) -> u32 {
+        let keeping = &mut self.keeping;
+        if keeping.set_for != Some((matched, speed)) {
+            *keeping = Keeping::new();
+            keeping.set_for = Some((matched, speed));
+        }
+        let now = Instant::now();
+        let frames = self.emulator.frames_shown();
+        match keeping.measured {
+            Some((at, before)) if now.duration_since(at) >= picture::SPEED_CHECK => {
+                // Frame counts are far below 2^52, so f64 holds them exactly.
+                let ran =
+                    frames.saturating_sub(before) as f64 / now.duration_since(at).as_secs_f64();
+                let normal = self.info.frame_rate.hz();
+                let wanted = match speed {
+                    Speed::Unlimited => None,
+                    Speed::Times(rate) => Some(normal * rate.get()),
+                };
+                keeping.ceiling =
+                    picture::keep_speed(keeping.ceiling, self.render_scale, ran, wanted, normal);
+                keeping.measured = Some((now, frames));
+            }
+            Some(_) => {}
+            None => keeping.measured = Some((now, frames)),
+        }
+        matched.min(keeping.ceiling)
+    }
 }
 
 /// The GPU half of the upscaler ([`gpu_upscale`](crate::gpu_upscale)).
@@ -319,16 +375,17 @@ impl Upscaler {
     }
 }
 
-/// The CPU pass that draws `look`. Without the GPU, Scale2x and Scale3x
-/// stand in for Pixel Art, as large as `factor` device pixels to a console
-/// pixel allows.
+/// The CPU pass that draws `look` while the GPU is starting, or without
+/// one: sharp pixels enlarged by a whole factor, the shading filters, and
+/// without the GPU, Scale2x and Scale3x standing in for Rounded Pixels, as
+/// large as `factor` device pixels to a console pixel allows.
 fn cpu_filter(look: Look, factor: usize, gpu_off: bool) -> Filter {
     match look {
         Look::LcdGrid => Filter::LcdGrid,
         Look::Scanlines => Filter::Scanlines,
-        Look::Upscaled(Method::PixelArt) if gpu_off && factor >= 3 => Filter::Scale3x,
-        Look::Upscaled(Method::PixelArt) if gpu_off => Filter::Scale2x,
-        Look::SharpPixels | Look::Upscaled(_) => Filter::None,
+        Look::Upscaled(Method::Rounded) if gpu_off && factor >= 3 => Filter::Scale3x,
+        Look::Upscaled(Method::Rounded) if gpu_off => Filter::Scale2x,
+        Look::Upscaled(_) => Filter::None,
     }
 }
 
@@ -684,8 +741,9 @@ impl EmulatorView {
             window.scale_factor(),
         );
         emulator.send(Command::SetRenderScale(render_scale));
-        let look = self.picture.look(info.system);
-        emulator.send(Command::SetTextureUpscaling(look.texture_upscaling()));
+        emulator.send(Command::SetTextureUpscaling(
+            self.picture.texture_upscaling(),
+        ));
         // Pick up where the player left off, unless a battery save has
         // changed since: the emulation thread checks.
         emulator.send(Command::LoadCheckpoint(CHECKPOINT));
@@ -727,6 +785,7 @@ impl EmulatorView {
             recording: false,
             images: Vec::new(),
             render_scale,
+            keeping: Keeping::new(),
             ambient: None,
             display: None,
             taken_at: None,
@@ -2343,10 +2402,9 @@ impl EmulatorView {
     fn set_picture(&mut self, picture: Picture, cx: &mut Context<Self>) {
         self.picture = picture;
         if let Some(session) = &self.session {
-            let look = picture.look(session.info.system);
             session
                 .emulator
-                .send(Command::SetTextureUpscaling(look.texture_upscaling()));
+                .send(Command::SetTextureUpscaling(picture.texture_upscaling()));
         }
         self.start_upscaler(cx);
         self.rebuild_images();
@@ -2519,9 +2577,11 @@ impl Session {
             redraws.push((index, key, frame, cell));
         }
 
-        // Upscaled together on the GPU: only enlargements, of the console's
-        // pixels for Pixel Art, which on a frame with larger 3D works on the
-        // parts the 3D left alone, or of the frame itself for Smooth.
+        // Drawn together on the GPU, each at its exact size. Sharp Pixels
+        // draws any frame at any size. Smooth and Rounded Pixels only
+        // enlarge: Smooth the frame itself, Rounded the console's pixels,
+        // which on a frame with larger 3D it works on beside the 3D; where
+        // they would not enlarge, Sharp Pixels draws the frame instead.
         let requests: Vec<(usize, Request<'_>)> = redraws
             .iter()
             .enumerate()
@@ -2531,13 +2591,18 @@ impl Session {
                 };
                 let shown = frame.size();
                 let cell = (*cell).max(1);
-                let base = match method {
-                    Method::PixelArt => (shown.width / cell, shown.height / cell),
-                    Method::Smooth => (shown.width, shown.height),
-                };
                 let (width, height) = drawn[*index];
-                let enlarges = width > u32::from(base.0) && height > u32::from(base.1);
-                enlarges.then_some((
+                let enlarges = |(across, down): (u16, u16)| {
+                    width > u32::from(across) && height > u32::from(down)
+                };
+                let method = match method {
+                    Method::Rounded if !enlarges((shown.width / cell, shown.height / cell)) => {
+                        Method::Sharp
+                    }
+                    Method::Smooth if !enlarges((shown.width, shown.height)) => Method::Sharp,
+                    method => method,
+                };
+                Some((
                     at,
                     Request {
                         frame,
@@ -2789,8 +2854,8 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &PictureSharpPixels, _, cx| {
                 this.set_picture(Picture::SharpPixels, cx);
             }))
-            .on_action(cx.listener(|this, _: &PicturePixelArt, _, cx| {
-                this.set_picture(Picture::PixelArt, cx);
+            .on_action(cx.listener(|this, _: &PictureRoundedPixels, _, cx| {
+                this.set_picture(Picture::RoundedPixels, cx);
             }))
             .on_action(cx.listener(|this, _: &PictureSmooth, _, cx| {
                 this.set_picture(Picture::Smooth, cx);
@@ -2860,16 +2925,22 @@ impl Render for EmulatorView {
                     ..placement
                 })
                 .collect();
-            // 3D as large as the screens are now shown, for Match Display.
-            let scale = render_scale(
+            // 3D as large as the screens are now shown, for Match Display,
+            // as long as the game keeps the speed asked for.
+            let mut scale = render_scale(
                 self.resolution_3d,
                 &session.info,
                 &self.placements,
                 scale_factor,
             );
+            if self.resolution_3d == Resolution3d::MatchDisplay {
+                scale = session.keep_speed(scale, self.speeds.speed(self.sent.pace));
+            }
             if scale != session.render_scale {
                 session.render_scale = scale;
                 session.emulator.send(Command::SetRenderScale(scale));
+                // Measure the speed afresh at the new scale.
+                session.keeping.measured = None;
             }
             // Frames keep in step with the refreshes of the display the
             // window is on.

@@ -22,7 +22,7 @@
 //!
 //! [video]
 //! resolution_3d = "auto"  # DS and 3DS 3D as large as the screens are shown, or 1 to 8 times
-//! picture = "auto"       # "auto", "sharp-pixels", "pixel-art", "smooth", "lcd-grid" or "scanlines"
+//! picture = "auto"       # "auto", "sharp-pixels", "smooth", "rounded-pixels", "lcd-grid" or "scanlines"
 //! show_fps = true        # the frame rate and speed in the window's corner
 //! backdrop = "ambient"    # around the screens: "ambient" (the game's colours, blurred) or "solid"
 //! color_correction = true # GBC and GBA colours as their screens showed them
@@ -825,8 +825,8 @@ mod tests {
     #[test]
     fn the_picture_is_one_of_six_names_and_auto_by_default() {
         let settings =
-            Settings::from_toml("[video]\npicture = \"pixel-art\"\n").expect("valid file");
-        assert_eq!(settings.picture, Picture::PixelArt);
+            Settings::from_toml("[video]\npicture = \"rounded-pixels\"\n").expect("valid file");
+        assert_eq!(settings.picture, Picture::RoundedPixels);
         assert_eq!(
             Settings::from_toml("").map(|s| s.picture),
             Ok(Picture::Auto)
