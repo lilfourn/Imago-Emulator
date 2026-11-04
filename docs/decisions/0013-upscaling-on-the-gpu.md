@@ -37,10 +37,14 @@ its only zero-copy surface takes 4:2:0 YCbCr, which smears pixel art.
    placements snap to whole device pixels so the image is drawn one to
    one. A budget of 6 million pixels a frame keeps the cost bounded on
    large displays; GPUI's linear filter enlarges past it.
-3. **Two upscalers, both licensed for reuse:** OmniScale for pixel art,
-   ported from SameBoy's shader (Expat, notice kept), and Apple's MetalFX
-   spatial scaler for smooth pictures. Shaders compile from source at run
-   time, as GPUI's do, so the build needs no Metal toolchain.
+3. **Three ways to draw, all licensed for reuse:** Sharp Pixels, the
+   default for pixel art, the project's own kernel that keeps every console
+   pixel a crisp, even square at any size; Apple's MetalFX spatial scaler
+   for smooth pictures; and OmniScale, ported from SameBoy's shader
+   (Expat, notice kept), which reshapes pixel art and is opt-in only, as
+   Rounded Pixels, after the owner rejected it as the default (PRD 6.2).
+   Shaders compile from source at run time, as GPUI's do, so the build
+   needs no Metal toolchain.
 4. **An `unsafe` exception for one module.** objc2's Metal and MetalFX
    calls are `unsafe`. `gpu_upscale` is marked `#[allow(unsafe_code)]`,
    every block has a `// SAFETY:` comment, and the CPU only touches a
@@ -48,7 +52,7 @@ its only zero-copy surface takes 4:2:0 YCbCr, which smears pixel art.
    waits for its own command buffer.
 5. **The CPU path stays** for Sharp Pixels, the LCD grid and scanlines,
    while the GPU starts, and on a Mac without Metal, where Scale2x and
-   Scale3x stand in for Pixel Art.
+   Scale3x stand in for Rounded Pixels.
 
 Not chosen: a `CAMetalLayer` of the app's own, which would cover GPUI's
 menus, notices and script overlays; and patching GPUI for BGRA surfaces,

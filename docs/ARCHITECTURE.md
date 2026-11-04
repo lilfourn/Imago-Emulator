@@ -313,12 +313,18 @@ or shader hook. Each screen is placed on whole device pixels
 1. GBC/GBA colour correction (`color.rs`), a 32,768-entry lookup table
    from each 15-bit console colour to its corrected pixel;
 2. rotation (`video::turn`, below);
-3. for an upscaled look (Auto, Pixel Art, Smooth), the GPU
-   (`gpu_upscale.rs`, [decision 0013](decisions/0013-upscaling-on-the-gpu.md)):
-   the frame goes up to a Metal texture and is enlarged to the
-   placement's exact size in device pixels, by OmniScale for pixel art or
-   MetalFX's spatial scaler for smooth pictures, then read back as the
-   bytes of the GPUI image. All the screens of a frame together stay
+3. for every look but the shading filters, the GPU (`gpu_upscale.rs`,
+   [decision 0013](decisions/0013-upscaling-on-the-gpu.md)): the frame
+   goes up to a Metal texture and is drawn at the placement's exact size
+   in device pixels, then read back as the bytes of the GPUI image. Sharp
+   Pixels (`shaders/sharp.metal`), the default for pixel-art games, keeps
+   each console pixel a crisp, even square at any size: each output pixel
+   takes the console pixel under its middle, except the one across an edge,
+   which mixes the two in linear light by how much of it each covers.
+   Smooth is MetalFX's spatial scaler, Auto's fit for the 3DS. Rounded
+   Pixels is OmniScale, which reshapes pixel art, for those who choose it.
+   Smooth and Rounded Pixels only enlarge; where they would not, Sharp
+   Pixels draws the frame. All the screens of a frame together stay
    within 6 million pixels (`picture::MAX_UPSCALED_PIXELS`); past that
    they are drawn smaller and GPUI's linear filter enlarges the rest. On
    this M5 Max that took 1.1–1.4 ms a frame for a GB screen or two DS
@@ -329,18 +335,20 @@ or shader hook. Each screen is placed on whole device pixels
 4. otherwise the CPU filters ([decision 0005](decisions/0005-video-filters-on-the-cpu.md),
    `filter.rs`). LCD grid and scanlines take over the integer pre-scale
    and darken part of each console pixel's square of device pixels.
-   Scale2x and Scale3x, which stand in for Pixel Art without Metal,
+   Scale2x and Scale3x, which stand in for Rounded Pixels without Metal,
    enlarge two or three times, rounding diagonal edges, and leave the rest
    of the pre-scale to `video.rs`. Their masks turn with the screen, and on
    DS frames drawn at a higher 3D resolution they follow console pixels
    (the scalers skip those frames). Each costs at most about 0.7 ms per DS
-   screen at 6×. Sharp Pixels is the plain pre-scale: `video.rs` enlarges
-   each frame by the largest integer factor that fits (capped at 6×) and
-   GPUI's linear filter covers the remaining fraction, the "sharp
-   bilinear" technique: crisp pixels without uneven pixel widths at
-   non-integer sizes.
+   screen at 6×. Sharp Pixels without the GPU is the plain pre-scale:
+   `video.rs` enlarges each frame by the largest integer factor that fits
+   (capped at 6×) and GPUI's linear filter covers the remaining fraction,
+   the "sharp bilinear" technique, softer than the GPU's at large sizes.
 
-On a DS frame drawn with larger 3D, Pixel Art works on the 2D only, on
+Sharp Pixels needs nothing special for a DS frame drawn with larger 3D:
+the 2D in it is enlarged as squares, which it keeps crisp, beside the
+3D's own detail. With Rounded Pixels chosen, OmniScale works on the 2D
+only, on
 the GPU, in one more pass each way (`shaders/beside_3d.metal`): the frame
 is split into console pixels, those whose square of the larger frame is
 all one colour carry no 3D detail; those within two console pixels of
@@ -352,17 +360,26 @@ frame's screens go to the GPU in one command buffer and one wait, which
 is most of an upscale's time: in Pokémon Platinum at 4× 3D, both screens'
 images took 1.6 ms a frame in the app.
 
-The 3DS also enlarges the game's own textures as the picture says
-(`Core::set_texture_upscaling`, sent on to the helper as `TEXTURES`):
-Azahar's ScaleForce for Smooth, MMPX for Pixel Art, none for Sharp
-Pixels and the shading filters.
+The 3DS filters the game's own textures only when the player chooses a
+picture that changes the art (`Core::set_texture_upscaling`, sent on to
+the helper as `TEXTURES`): Azahar's ScaleForce with Smooth, MMPX with
+Rounded Pixels, none with Auto, Sharp Pixels and the shading filters. 3DS
+games hold pixel art too, such as Omega Ruby's AreaNav map, which
+ScaleForce blurs.
 
 Match Display, the default 3D resolution (`picture::matched_resolution`),
 draws DS and 3DS 3D about as large as the screens are shown: for each
 screen, its device pixels over its console pixels, rounded up unless a
-quarter or less above a whole number, at most 4×. The view sends the
-core a new render scale only when that changes, with the window, the
-display or the layout.
+quarter or less above a whole number, at most 4×. It keeps the speed
+asked for first (`picture::keep_speed`): every second the view compares
+the frames run with the speed asked for, and if the game fell behind by
+more than 5% while running, it draws 3D a step smaller, never stepping
+back up until the speed asked for or the screens change. In Pokémon
+Platinum's overworld the core took 3.75 ms a frame with 3D at 1×, 5.2 ms
+at 2× and 7.35 ms at 4× (headless), against 5.6 ms a frame at 3×
+fast-forward; with the check, 3× fast-forward ran at 172 frames a second
+instead of about 110, while normal speed keeps 4×. The view sends the
+core a new render scale only when the scale changes.
 
 DS 3D upscaling is the core's job, as that decision planned. At a render
 scale above 1, the DS draws each 3D frame twice: at the native

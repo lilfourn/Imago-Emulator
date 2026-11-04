@@ -380,6 +380,6 @@ are done.
 | Filters (LCD grid, scanlines, Scale2x/3x), screenshots, video recording | UI-4, UI-14 | Phase 4 ✅ |
 | Lua scripting: File > Run Script…, `--script`, headless | UI-14 | Phase 4 ✅ |
 | ROM-hack patches (IPS, UPS, BPS, xdelta); `.7z` and `.rar` games | UI-15 | Frontend ✅ |
-| Upscaler: View > Picture, Pixel Art and Smooth on the GPU at every display's resolution | UI-17 | Upscaler phase 1 ✅ |
+| Upscaler: View > Picture on the GPU at every display's resolution; Sharp Pixels by default, Smooth and Rounded Pixels | UI-17 | Upscaler phase 1 ✅ |
 | Upscaler: Match Display 3D resolution, DS 2D as pixel art beside larger 3D | UI-17 | Upscaler phase 2 ✅ (part) |
 | xBRZ, slang presets, achievements | UI-4, UI-14 | Later |

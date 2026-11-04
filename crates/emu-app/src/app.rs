@@ -64,7 +64,7 @@ actions!(
         DmgColorsGameBoyColor,
         PictureAuto,
         PictureSharpPixels,
-        PicturePixelArt,
+        PictureRoundedPixels,
         PictureSmooth,
         PictureLcdGrid,
         PictureScanlines,
@@ -418,8 +418,8 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                     items: vec![
                         MenuItem::action("Auto", PictureAuto),
                         MenuItem::action("Sharp Pixels", PictureSharpPixels),
-                        MenuItem::action("Pixel Art", PicturePixelArt),
                         MenuItem::action("Smooth", PictureSmooth),
+                        MenuItem::action("Rounded Pixels", PictureRoundedPixels),
                         MenuItem::action("LCD Grid", PictureLcdGrid),
                         MenuItem::action("Scanlines", PictureScanlines),
                     ],

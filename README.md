@@ -139,7 +139,7 @@ SPEED=normal FRONT=1 scripts/macos/bench.sh ~/Games/My\ Fan\ Game
 | | | | | Run / stop a Lua script | ⌘⇧L / ⌘⌥L |
 | | | | | Randomize a Pokémon game | ⌘⌥R |
 | | | | | Colour correction on/off | ⌘⇧C |
-| | | | | Picture: Auto (upscaled), Sharp Pixels, Pixel Art, Smooth, LCD Grid, Scanlines | View > Picture |
+| | | | | Picture: Auto (sharp pixels at your display's resolution), Sharp Pixels, Smooth, Rounded Pixels, LCD Grid, Scanlines | View > Picture |
 | | | | | Debugger | ⌘⇧D |
 | | | | | Step / step over / next frame (debugger) | ⌘⇧I / ⌘⇧O / ⌘⇧N |
 | | | | | 3D resolution (DS, 3DS) | View > 3D Resolution |
@@ -181,22 +181,24 @@ gap, 3D resolution and picture are remembered in
 `~/Library/Application Support/ds-emulator/settings.toml`.
 
 View > Picture changes how the screens look. **Auto**, the default,
-upscales every game on the GPU to your display's own resolution, whatever
-the display and window size: **Pixel Art** for Game Boy, GBA and DS
-games, which rebuilds smooth edges and curves from the pixels (OmniScale,
-from SameBoy), and **Smooth** for RPG Maker and 3DS games (Apple's
-MetalFX). Either can be chosen for any game. **Sharp Pixels** shows each
-console pixel as a crisp square, as before. **LCD Grid** draws a thin dark
-line between pixels, as on the handhelds' screens; **Scanlines** darkens
-the bottom of each row, as on a CRT. Both need at least two of your
-display's pixels to each console pixel, and show nothing in a smaller
-window. Everything applies after colour correction and turns with the
-screens. With DS 3D drawn larger, Pixel Art works on the 2D only (menus,
-text, sprites, the touch screen): wherever the 3D added detail, the
-larger 3D is drawn smooth instead. On a Mac without Metal, Scale2x and
-Scale3x stand in for Pixel Art. 3DS games smooth their own textures to
-match (Azahar's ScaleForce, or MMPX with Pixel Art), except with Sharp
-Pixels or a shading filter. xBRZ is not offered: its code is GPL-3.0,
+shows every game as it looks, drawn on the GPU at your display's own
+resolution, whatever the display and window size: **Sharp Pixels** for
+Game Boy, GBA, DS and RPG Maker games, each console pixel a crisp, even
+square, and a smooth fit (Apple's MetalFX) for 3DS games, whose screens
+are drawn at a higher resolution already. Sharp Pixels never blurs a
+pixel or makes one wider than its neighbour, at any size: only the one
+display pixel across each edge is mixed. **Smooth** draws any game with
+MetalFX. **Rounded Pixels** reshapes pixel art into smooth curves and
+lines (OmniScale, from SameBoy), which changes how the art looks; with DS
+3D drawn larger it reshapes only the 2D, and wherever the 3D added detail
+the larger 3D is drawn smooth instead. **LCD Grid** draws a thin dark line
+between pixels, as on the handhelds' screens; **Scanlines** darkens the
+bottom of each row, as on a CRT. Both need at least two of your display's
+pixels to each console pixel, and show nothing in a smaller window.
+Everything applies after colour correction and turns with the screens. On
+a Mac without Metal, Scale2x and Scale3x stand in for Rounded Pixels. 3DS
+games filter their own textures only with Smooth (Azahar's ScaleForce) or
+Rounded Pixels (MMPX). xBRZ is not offered: its code is GPL-3.0,
 which the project doesn't take (see the
 [legal policy](docs/PRD.md#9-legal-policy)).
 
@@ -204,8 +206,10 @@ View > 3D Resolution draws DS and 3DS 3D larger than its own resolution:
 polygon edges, textures and shading come out smooth, and the 2D layers
 around them stay pixel for pixel. **Match Display**, the default, draws it
 about as large as the screens are shown on your display, up to 4×, and
-changes only when the window, display or layout does; the upscaler covers
-the rest. Or pick Native (1×), 2×, 3×, 4×, 6× or 8× (`resolution_3d` under
+keeps the speed you asked for first: when the game falls behind, as 4× 3D
+does at 3× fast-forward, it draws 3D a step smaller each second until the
+game keeps up, and tries the full size again when you change speed or the
+window, display or layout changes. Or pick Native (1×), 2×, 3×, 4×, 6× or 8× (`resolution_3d` under
 `[video]` in settings.toml: `"auto"` or 1 to 8). The game still sees native 3D wherever it reads
 it back, so emulation and save states are the same at every resolution.
 States hold only native frames, so the first frame after loading one, and

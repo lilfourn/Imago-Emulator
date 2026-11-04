@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Phase 1 and most of phase 2 built (2026-11-04); UP-12 and phases 3–4 to do |
+| Status | Phase 1 and most of phase 2 built (2026-11-04); Sharp Pixels made the default after the owner saw OmniScale (6.2); UP-12 and phases 3–4 to do |
 | Date | 2026-11-04 |
 | Owner | Luke Fournier |
 | Research | [research/upscaling.md](research/upscaling.md) |
@@ -160,6 +160,20 @@ to device pixels
 
 ### 6.2 Algorithms
 
+**Changed after phase 2 (2026-11-04): Sharp Pixels is Auto's look for
+pixel-art games.** The owner saw OmniScale on Pokémon Platinum's menu and
+rejected it: "I don't mean making it not pixel look, that is what the game
+is looking like, I just mean it should look a lot nicer… everything looks
+warped cause it's trying to turn a purposefully pixel game into a non
+pixel game." Better means the game's own pixels shown cleaner: crisp,
+even squares at the display's full resolution, and 3D drawn larger where
+the hardware drew 3D. Reshaping scalers stay as an opt-in, named Rounded
+Pixels. Sharp Pixels on the GPU (`shaders/sharp.metal`) takes the console
+pixel under each output pixel's middle and mixes only the one output
+pixel across an edge, in linear light, so no pixel is wider than its
+neighbour and none is blurred, at any size. The table below is the plan
+as first written.
+
 | Mode | For | Algorithm | Why |
 |---|---|---|---|
 | Pixel Art | GB, GBC, GBA, DS 2D | Bake-off between OmniScale (one pass, any factor), ScaleFX (3×, 5 passes) and MMPX (2×, repeated), all MIT. The finish to the exact size is part of the pass (OmniScale) or a sharp resample. | Rebuild diagonals and curves, keep text and dithering legible. OmniScale leads because it renders straight to any output size. |
@@ -188,6 +202,8 @@ committed.
 | DS | 3D at Auto: matches the display, capped at 8× | Pixel Art for 2D, the larger 3D as drawn | See 6.4. |
 | 3DS | Auto: matches the display, cap raised past 4× by 6.5 | Smooth to finish | Optional texture filter, see 6.5. |
 | RPG Maker | none for now (see 6.6) | Smooth | Essentials art is drawn at twice its pixel size, which pixel-art scalers handle badly. |
+
+As built after the change in 6.2: Auto is Sharp Pixels for the GB, GBC, GBA, DS and RPG Maker, with the DS's 3D at Match Display, and Smooth for the 3DS, with its textures left as the game made them.
 
 ### 6.4 DS: 2D beside upscaled 3D
 
@@ -324,7 +340,7 @@ is wanted, **P2** comes later. Phases are in section 9.
 | ID | Requirement | Priority · Phase |
 |---|---|---|
 | UP-1 | A Metal video stage in `emu-app` that colour corrects, turns, upscales and shades each published frame into one BGRA image per placement, at that placement's exact size in device pixels. ✅ partly: colour correction and rotation stay on the CPU, cheap at console size, and so do the shading filters (UP-4); it runs in render (6.1). | P0 · 1 |
-| UP-2 | Pixel Art mode: the bake-off's winner (6.2), rendering straight to any output size, with diagonals and curves rebuilt and 5–8 px text still legible. ✅ OmniScale (UQ-2). | P0 · 1 |
+| UP-2 | Pixel Art mode: the bake-off's winner (6.2), rendering straight to any output size, with diagonals and curves rebuilt and 5–8 px text still legible. ✅ built as OmniScale, then renamed Rounded Pixels and made opt-in when the owner chose Sharp Pixels for Auto (6.2). | P0 · 1 |
 | UP-3 | Smooth mode: MetalFX spatial scaler, to any output size. ✅ | P0 · 1 |
 | UP-4 | Sharp Pixels, LCD Grid and Scanlines produce what today's CPU path produces, to within ±1 per channel. ✅ the CPU path, unchanged. | P0 · 1 |
 | UP-5 | Auto picks per system as in 6.3. It is the default; the default for 3D resolution is Match Display. ✅ both: Auto picture (phase 1) and Match Display 3D (phase 2). | P0 · 1–2 |
@@ -354,7 +370,7 @@ is wanted, **P2** comes later. Phases are in section 9.
 | UP-11 | DS menus and the settings window offer 1–8× (the core's range). ✅ Match Display, 1×, 2×, 3×, 4×, 6×, 8×. | P0 · 2 |
 | UP-12 | The DS's larger 3D is drawn only for frames the window will show. The 3D the game reads and the frame CRCs stay the same. | P1 · 2 |
 | UP-13 | DS 2D beside upscaled 3D gets Pixel Art: per screen when no 3D showed, and per pixel through a 3D mask (6.4). ✅ found from the frame on the GPU, not a core mask (6.4); both screens in one GPU submit, 1.6 ms a frame in Platinum at 4×. | P1 · 2 |
-| UP-14 | 3DS texture filter option (6.5), off by default, with the `xBRZ freescale` value sent for xBRZ. ✅ on by default instead, following the picture (6.5); ScaleForce or MMPX. Runs in Omega Ruby; not yet compared by eye. | P1 · 2 |
+| UP-14 | 3DS texture filter option (6.5), off by default, with the `xBRZ freescale` value sent for xBRZ. ✅ off with Auto after all (ScaleForce blurred Omega Ruby's pixel-art AreaNav map), ScaleForce with Smooth, MMPX with Rounded Pixels. | P1 · 2 |
 | UP-15 | 3DS frames through shared memory, and the 3DS cap raised to at least 8× while holding full speed at that scale. | P1 · 3 |
 | UP-16 | Zero-copy drawing through a GPUI BGRA surface, if UP-S5's budget leaves the external display below its full size at 1× speed. | P1 · 3 |
 | UP-17 | DS 2D layers upscaled before composing (melonDS's approach). | P2 · 4 |
@@ -442,8 +458,8 @@ Acceptance tests:
 | ID | Question | Needed by |
 |---|---|---|
 | UQ-1 | ~~Should Auto (upscaled) be the default for existing players, or should they opt in?~~ On by default, decided by the owner (2026-11-04): every player starts upscaled and turns it off from View > Picture. Settings files from before View > Picture start on Auto too, whatever filter they had. | Phase 1 |
-| UQ-2 | ~~Which Pixel Art algorithm wins the bake-off: OmniScale, ScaleFX or MMPX?~~ OmniScale for phase 1: it draws straight to any size in one pass, and on the GB test image it rounded the eyes, straightened the nose's diagonal and kept text and large blocks crisp. ScaleFX and MMPX were not ported; compare them on real games if Pixel Art falls short. | Phase 1 |
+| UQ-2 | ~~Which Pixel Art algorithm wins the bake-off: OmniScale, ScaleFX or MMPX?~~ None by default: the owner wants pixel art kept as crisp pixels (6.2). OmniScale stays as the opt-in Rounded Pixels. | Phase 1 |
 | UQ-3 | ~~One View > Picture menu, or keep View > Filter and add View > Upscaling?~~ One View > Picture menu, built. | Phase 1 |
-| UQ-4 | ~~What cap should Match Display use for DS 3D, given 3× fast-forward?~~ 4×, for the DS and the 3DS: the DS ran at 2.7× full speed with 4× 3D (White's bedroom, headless), close to the 3× fast-forward the owner keeps on, and 4× is the most the 3DS helper reads back. Revisit with UP-12 and the pacing benchmarks. | Phase 2 |
+| UQ-4 | ~~What cap should Match Display use for DS 3D, given 3× fast-forward?~~ 4×, and it keeps the speed asked for first (`picture::keep_speed`). In the app, 4× held fast-forward at about 2× (in Platinum's overworld, headless, the core took 3.75 ms a frame at 1×, 5.2 ms at 2× and 7.35 ms at 4×, against 5.6 ms a frame at 3×). So Match Display measures the speed every second and draws 3D a step smaller while the game falls behind, until the speed or the screens change: 3× fast-forward then ran at 172 frames a second, uneven refresh gaps fell from 11–18 to 2 a second and the app's CPU from 540% to 166%, while normal speed keeps 4×. | Phase 2 |
 | UQ-5 | For zero copy, patch GPUI 0.2.2, or move to a Zed revision that has BGRA surfaces once they merge? That would also bring the `CAMetalDisplayLink` pacing fix (PRD Q2). | Phase 3 |
 | UQ-6 | Should RPG Maker games whose art is drawn at twice its pixel size get Pixel Art at the art's own pixel size, without spoiling their text? | Phase 4 |

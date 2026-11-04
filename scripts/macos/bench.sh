@@ -14,7 +14,10 @@
 #   KEYS="w s" picks the keys tapped, in turn (default: w and s), and
 #   SPEED=normal turns the user's fast-forward off, FRONT=1 leaves the app
 #   in front, with the keyboard, and WINDOW="x y width height" places its
-#   window.
+#   window (DISPLAY_UUID moves its place to that display). PICTURE (an
+#   `[video] picture` name) and RES3D ("auto" or 1 to 8) set the picture
+#   and 3D resolution for the run, BIN runs that build of the app instead
+#   of this tree's, and CAPTURE=1 keeps window.png of the run's end.
 set -uo pipefail
 root=${0:A:h:h:h}
 tools=$root/target/macos-tools
@@ -24,7 +27,7 @@ out=${3:-/tmp/ds-emulator-bench}
 ax=$tools/ax
 mkdir -p $tools
 [[ $tools/ax -nt $root/scripts/macos/ax.swift ]] || swiftc -O $root/scripts/macos/ax.swift -o $tools/ax || exit 1
-cargo build --release -p emu-app --quiet --manifest-path $root/Cargo.toml || exit 1
+[[ -n ${BIN:-} ]] || cargo build --release -p emu-app --quiet --manifest-path $root/Cargo.toml || exit 1
 
 real="$HOME/Library/Application Support/ds-emulator"
 home=$out/home
@@ -43,6 +46,22 @@ if [[ -n ${WINDOW:-} && -f "$config/settings.toml" ]]; then
   sed -i '' -e "s/^x = .*/x = $wx.0/" -e "s/^y = .*/y = $wy.0/" \
     -e "s/^width = .*/width = $ww.0/" -e "s/^height = .*/height = $wh.0/" "$config/settings.toml"
 fi
+# PICTURE and RES3D set View > Picture and the 3D resolution for the run.
+[[ -f "$config/settings.toml" ]] && PICTURE=${PICTURE:-} RES3D=${RES3D:-} python3 -I -c '
+import os, re, sys
+path = sys.argv[1]
+text = open(path).read()
+for key, value in (("picture", os.environ["PICTURE"] and repr(os.environ["PICTURE"]).replace(chr(39), chr(34))), ("resolution_3d", os.environ["RES3D"])):
+    if value:
+        text = re.sub(rf"^{key} = .*\n", "", text, flags=re.M)
+        if key == "picture":
+            text = re.sub(r"^filter = .*\n", "", text, flags=re.M)
+        text = text.replace("[video]\n", f"[video]\n{key} = {value}\n", 1)
+open(path, "w").write(text)
+' "$config/settings.toml"
+# DISPLAY_UUID moves the window's place to that display.
+[[ -n ${DISPLAY_UUID:-} && -f "$config/settings.toml" ]] &&
+  sed -i '' "s/^display = .*/display = \"$DISPLAY_UUID\"/" "$config/settings.toml"
 # SPEED=normal turns the user's fast-forward off for the run.
 [[ ${SPEED:-} == normal && -f "$config/settings.toml" ]] &&
   sed -i '' 's/^fast_forward_on = true/fast_forward_on = false/' "$config/settings.toml"
@@ -55,7 +74,7 @@ if [[ -f $game ]]; then
 fi
 
 front=$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true')
-HOME=$home DS_EMULATOR_TRACE=$out/trace.txt $root/target/release/ds-emulator $game >$out/app.log 2>&1 &
+HOME=$home DS_EMULATOR_TRACE=$out/trace.txt ${BIN:-$root/target/release/ds-emulator} $game >$out/app.log 2>&1 &
 pid=$!
 # The app activates itself on launch; hand the front back right away.
 sleep 0.6
@@ -81,6 +100,8 @@ while (( $(date +%s) < end )); do
   sleep 0.$(( RANDOM % 300 + 200 ))
 done
 finished=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+# CAPTURE=1 keeps a picture of the window as the run ends.
+[[ -n ${CAPTURE:-} ]] && screencapture -x -o -l $($ax $pid winid) $out/window.png
 app_cpu_end=$(cpu $pid) player_cpu_end=${player:+$(cpu $player)}
 kill $pid 2>/dev/null
 wait $pid 2>/dev/null
