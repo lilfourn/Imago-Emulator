@@ -367,7 +367,14 @@ Items marked *unverified* need the phase 0 probe.
 Server tools are run by OpenRouter. The model calls them, and the app
 never sends results back. They work on Chat Completions.
 
-- **`openrouter:web_search`.**
+- **`openrouter:web_search`.** "Gives any model on OpenRouter access to
+  real-time web information": OpenRouter runs the search when the model
+  asks for it.
+  - **GPT-6 Luna can use it two ways.** OpenAI lists native web search
+    for "GPT-5 and later". Luna's OpenAI and Azure endpoints list
+    `openrouter:web_search` in their `native_tools`; its Bedrock endpoint
+    lists none. With `engine: "exa"`, the search runs on Exa whatever
+    endpoint serves Luna.
   - Parameters: `engine` (`auto`, `native`, `exa`, `parallel`,
     `firecrawl` or `perplexity`), `max_results`, `max_uses`,
     `allowed_domains` and `excluded_domains`.
@@ -375,7 +382,13 @@ never sends results back. They work on Chat Completions.
   - **Domain filtering by engine:** Exa honours both lists. Native
     OpenAI honours only the allow list. Native Google has no domain
     filter: with `auto` it falls back to Exa, and with `native` it
-    returns 400. So the Guide uses `engine: "exa"`.
+    returns 400. So the Guide uses `engine: "exa"`. It costs $0.007 a
+    search against about $0.01 for OpenAI's native search, and it serves
+    every endpoint the same.
+  - Exa's `mode`: `instant` (~250 ms), `fast` (~450 ms) or `auto`
+    (~1 s), all $0.007. Results come back as extracts from each page,
+    about 2–4 k characters, unless `max_characters` or
+    `search_context_size` sets the size.
 - **`openrouter:web_fetch`.** Reads one page, with `allowed_domains`,
   `blocked_domains`, `max_uses`, `max_content_tokens` and `engine`.
 - **Pricing**, on top of tokens:
@@ -528,73 +541,180 @@ encounter, what a version exclusive is, where an item is. The chat
 should ground answers in the sites players trust, and say which page
 each answer came from.
 
-### 5.1 Reachability, checked 2026-11-04 with `curl`
+### 5.1 How the sites were chosen and checked
 
-**Readable directly** (HTTP 200; MediaWiki sites answer
-`api.php?action=query&list=search` and `action=parse`):
+**Chosen.** For each series that the app's systems (GB to 3DS, plus
+RPG Maker fan games) mostly play, the site its community treats as the
+reference:
 
-| Site | Covers | How |
-|---|---|---|
-| StrategyWiki (`strategywiki.org/w/api.php`) | Walkthroughs for most games, every series | MediaWiki API |
-| Zelda Wiki (`zeldawiki.wiki/w/api.php`) | Zelda | MediaWiki API |
-| Super Mario Wiki (`mariowiki.com/api.php`) | Mario and spin-offs | MediaWiki API |
-| WiKirby (`wikirby.com/w/api.php`) | Kirby | MediaWiki API |
-| Metroid Wiki (`metroidwiki.org/w/api.php`) | Metroid | MediaWiki API |
-| Fire Emblem Wiki (`fireemblemwiki.org/w/api.php`) | Fire Emblem | MediaWiki API |
-| Golden Sun Universe (`goldensunwiki.net/w/api.php`) | Golden Sun | MediaWiki API |
-| Nookipedia (`nookipedia.com/w/api.php`) | Animal Crossing | MediaWiki API |
-| Dragon Quest Wiki (`dragon-quest.org/w/api.php`) | Dragon Quest | MediaWiki API |
-| Fandom wikis (`{name}.fandom.com/api.php`) | Many series and most fan games, e.g. `infinitefusion.fandom.com` | MediaWiki API |
-| PokeAPI (`pokeapi.co/api/v2/`) | Structured Pokémon data: encounters per version, moves, evolutions | JSON API |
-| Serebii (`serebii.net`) | Per-game Pokémon guides, encounter tables, events | HTML; robots.txt allows it |
-| PokémonDB (`pokemondb.net`) | Pokédex, moves, locations | HTML; robots.txt asks for a 2 s crawl delay |
-| Serenes Forest (`serenesforest.net`) | Fire Emblem data | HTML |
-| Smogon (`smogon.com`) | Competitive Pokémon | HTML |
-| IGN wikis | Guides | HTML |
+- **An independent wiki over a Fandom copy.** Many communities left
+  Fandom, and Fandom keeps the old wiki up. Most Nintendo series have a
+  member of NIWA, the Nintendo Independent Wiki Alliance. Indie Wiki
+  Buddy's list (§5.3) names the independent wiki for each Fandom one,
+  and has about twenty of these series.
+- **A data site beside the wiki where one is the standard.** Serebii and
+  PokémonDB for Pokémon, Serenes Forest for Fire Emblem.
+- **For every game, a walkthrough site:** StrategyWiki, GameFAQs and
+  IGN.
+- **For fan games and hacks,** where their makers post: the game's own
+  wiki, Eevee Expo, Relic Castle and PokéCommunity.
 
-**Behind a Cloudflare bot check** (HTTP 403 "Just a moment…" to
-`curl`): Bulbapedia, GameFAQs, PokéCommunity, Relic Castle, Zelda
-Dungeon, The Cutting Room Floor, Speedrun.com and Neoseeker.
+**Checked** on 2026-11-04 with `curl`, as the app would send it (user agent
+`ds-emulator/0.1.0 (Guide; …)`). Each MediaWiki site was searched through
+`api.php?action=query&list=search`, and each other site's page was
+fetched. The verdicts:
 
-- Search engines index these sites. OpenRouter's `web_search` and
-  `web_fetch` server tools with the Exa engine reach them through Exa's
-  index (§4.4).
-- The app itself must never try to get past these checks.
-- Firecrawl's engine advertises "anti-bot" fetching, so the Guide does
-  not use it.
+- **API.** The wiki answers searches as JSON. The app can read it
+  directly, for free (phase 3's own tools).
+- **Page.** HTML, with no bot check.
+- **Search.** A Cloudflare bot check (HTTP 403, "Just a moment…"), so it
+  is reached only through OpenRouter's web search and fetch with Exa
+  (§4.4). The app must never try to get past these checks.
+  - Whether Exa's index covers these sites well is *unverified* until
+    the first live search with a key. Phase 0 checks Bulbapedia and
+    GameFAQs first.
+- **Down.** No answer at the time.
+
+**Robots and signals.**
+
+- **Crawl delays:**
+  - PokémonDB 2 s (30 s for some bots);
+  - Mario Wiki 1 s;
+  - StrategyWiki and Zelda Wiki 10 s.
+
+  The app's own fetches respect them per site, and pages are cached for
+  a day.
+- **Content signals.** Relic Castle and Serenes Forest send Cloudflare's
+  `Content-Signal: search=yes, ai-train=no, use=reference`.
+  - Guide reads pages to answer a question, and cites them. That is
+    reference use, never training.
+  - No site that was checked forbids it.
 
 ### 5.2 The source map
 
-The chat should carry a small, curated map from game series to their
-best sources, bundled with the app. Each entry has:
+The order within a series is the order of trust the system prompt gives.
+The verdicts are those from §5.1.
 
-- the site's name and domain;
-- what it is good for;
-- how it is reached: the MediaWiki API, a page fetch, a JSON API, or
-  search only;
-- per-game paths where a site has them, such as Serebii's
-  `/omegarubyalphasapphire/`.
+**Pokémon, main series (GB to 3DS):**
 
-The game's identity selects the entry:
+| Site | Domain | Best for | Reach |
+|---|---|---|---|
+| Bulbapedia | bulbapedia.bulbagarden.net | Everything: walkthroughs (`Appendix:{game} walkthrough`), locations, mechanics, version differences | Search |
+| Serebii | serebii.net | Per-game sections: each version's Pokédex and locations, items, trainers, events | Page |
+| PokémonDB | pokemondb.net | Pokédex, moves, location lists by game (`/location/…`) | Page (2 s delay) |
+| PokeAPI | pokeapi.co/api/v2 | Encounters by version, moves, evolutions, as data | JSON API |
+| Smogon | smogon.com/dex | Competitive sets by generation | Page |
+| IGN | ign.com/wikis | Walkthroughs for the bigger games | Page |
+| Mystery Dungeon Wiki | mysterydungeonwiki.com/api.php | The Mystery Dungeon games | API |
 
-- by No-Intro title, for example "Pokemon …" or "Legend of Zelda, The …";
-- by series;
-- by kind: ROM hack, randomized copy, RPG Maker fan game.
+Serebii's per-game paths, all returning 200:
 
-[Indie Wiki Buddy](https://github.com/KevinPayravi/indie-wiki-buddy)
-(MIT, updated 2026-10-30) publishes `data/data.json`, which lists 863
-independent wikis with each one's Fandom origin, base URL, platform
-(`mediawiki` …) and search path. It is a good seed for the map, and it
-lets the app prefer a community's independent wiki over an outdated
-Fandom fork. The map itself stays hand-curated: a few dozen series that
-the supported systems actually play.
+| Games | Path |
+|---|---|
+| Red, Blue | `/rb/` |
+| Yellow | `/yellow/` |
+| Gold, Silver | `/gs/` |
+| Crystal | `/crystal/` |
+| Ruby, Sapphire | `/rubysapphire/` |
+| Emerald | `/emerald/` |
+| FireRed, LeafGreen | `/fireredleafgreen/` |
+| Diamond, Pearl | `/diamondpearl/` |
+| Platinum | `/platinum/` |
+| HeartGold, SoulSilver | `/heartgoldsoulsilver/` |
+| Black, White | `/blackwhite/` |
+| Black 2, White 2 | `/black2white2/` |
+| X, Y | `/xy/` |
+| Omega Ruby, Alpha Sapphire | `/omegarubyalphasapphire/` |
+| Sun, Moon | `/sunmoon/` |
+| Ultra Sun, Ultra Moon | `/ultrasunultramoon/` |
 
-Fan games and ROM hacks need their own entry:
+**Pokémon ROM hacks and fan games.** The game's own wiki comes first.
+Wiki locations for the original game do not apply to a randomized copy.
 
-- the game's own wiki, often on Fandom;
-- PokéCommunity and Relic Castle threads, through search only;
-- a warning that wiki locations for the original game don't apply to a
-  randomized copy.
+| Site | Domain | Best for | Reach |
+|---|---|---|---|
+| Infinite Fusion wiki | infinitefusion.fandom.com | Infinite Fusion | API |
+| Unbound wiki | pokemonunbound.miraheze.org | Unbound (the independent wiki; a Fandom one also answers) | API |
+| Reborn, Insurgence, Uranium wikis | reborn / pokemoninsurgence / pokemonuranium.fandom.com | Those games | API |
+| Pokémon Infinity wiki | pokemoninfinity.miraheze.org | Infinity | API |
+| Eevee Expo | eeveeexpo.com | Pokémon Essentials fan games: game pages, makers' threads | Page |
+| Relic Castle | reliccastle.com | Older Essentials games' pages | Page |
+| PokéCommunity | pokecommunity.com | ROM hack and fan game threads: makers' docs and FAQs | Search |
+| romhack.ing | romhack.ing | Hack pages and readmes (Romhacking.net is behind a check) | Page |
+
+**Nintendo series:**
+
+| Series | Site (domain) | Reach | Also |
+|---|---|---|---|
+| Mario, Wario, Yoshi, Donkey Kong, Mario & Luigi, Paper Mario | Super Mario Wiki (mariowiki.com) | API | — |
+| Zelda | Zelda Wiki (zeldawiki.wiki) | API | Zelda Dungeon, walkthroughs (Search) |
+| Kirby | WiKirby (wikirby.com) | API | — |
+| Metroid | Metroid Wiki (metroidwiki.org) | API | Wikitroid (metroid.fandom.com, API) |
+| Fire Emblem | Fire Emblem Wiki (fireemblemwiki.org) | API | Serenes Forest: growths, data (Page) |
+| Golden Sun | Golden Sun Universe (goldensunwiki.net) | API | — |
+| Advance Wars | Wars Wiki (warswiki.org) | API | Wars World News (Page) |
+| Animal Crossing | Nookipedia (nookipedia.com) | API | — |
+| EarthBound, Mother 3 | WikiBound (wikibound.info) | API | Starmen.net (Search) |
+| Pikmin | Pikipedia (pikminwiki.com) | API | — |
+| Rhythm Heaven | Rhythm Heaven Wiki (rhwiki.net) | API | — |
+| Smash Bros. (3DS) | SmashWiki (ssbwiki.com) | API | — |
+| Professor Layton | Layton Wiki (layton.fandom.com) | API | — |
+| Ace Attorney | Ace Attorney Wiki (aceattorney.fandom.com) | API | — |
+
+**Other series common on these systems:**
+
+| Series | Site (domain) | Reach |
+|---|---|---|
+| Final Fantasy, including Tactics Advance | Final Fantasy Wiki (finalfantasy.fandom.com) | API |
+| Dragon Quest | Dragon Quest Wiki (dragon-quest.org) | API |
+| Kingdom Hearts | Kingdom Hearts Wiki (khwiki.com) | API |
+| Castlevania | Castlevania Wiki (castlevania.fandom.com) | API |
+| Mega Man, including Battle Network, Zero, ZX and Star Force | Mega Man Knowledge Base (megaman.fandom.com) | API |
+| Sonic | Sonic Retro (info.sonicretro.org) | API |
+| Harvest Moon, Story of Seasons | FoGu (fogu.com, guides) | Page |
+| Chrono Trigger (DS) | Chrono Wiki (chronowiki.org/w/api.php) | API |
+| Yu-Gi-Oh! | Yugipedia (yugipedia.com) | API |
+| Digimon | Wikimon (wikimon.net) | API |
+| Shin Megami Tensei, Devil Survivor | Megami Tensei Wiki (megatenwiki.com) | Search |
+| The World Ends with You | TWEWY Wiki (twewy.wiki) | Search |
+
+Left out: Lylat Wiki (Star Fox), which gave no answer.
+
+**Every game, after its series:**
+
+| Site | Domain | Best for | Reach |
+|---|---|---|---|
+| StrategyWiki | strategywiki.org | Walkthroughs for most games | API (10 s delay) |
+| GameFAQs | gamefaqs.gamespot.com | Text guides and FAQs for nearly every game, message boards | Search |
+| IGN | ign.com/wikis | Guides for popular games | Page |
+| The game's Fandom wiki | {name}.fandom.com | When no independent wiki exists | API |
+| The Cutting Room Floor | tcrf.net | Unused content, version differences | Search |
+| TASVideos | tasvideos.org | Glitches and their exact inputs | Page |
+| Speedrun.com | speedrun.com | Routes and skips | Search |
+| HowLongToBeat | howlongtobeat.com | How long a game takes | Page |
+| GameHacking.org | gamehacking.org | Cheat codes, for the app's cheat lists | Search |
+
+### 5.3 How the map is used
+
+- **Picking the entry.** The game's identity selects it:
+  - by No-Intro title, for example "Pokemon …" or "Legend of Zelda,
+    The …";
+  - by series;
+  - by kind: ROM hack, randomized copy, RPG Maker fan game.
+- **Phase 2.** The entry's domains become `web_search` and `web_fetch`'s
+  `allowed_domains`, and the system prompt names the sites in order,
+  with what each is best for. Every site in the map is reachable this
+  way, including the Search ones.
+- **Phase 3.** The app's own tools read the API and Page sites
+  directly, for free and exactly, by title. The server tools stay for
+  the Search sites.
+- **Keeping it current.**
+  - [Indie Wiki Buddy](https://github.com/KevinPayravi/indie-wiki-buddy)
+    (MIT, updated 2026-10-30) publishes `data/data.json`: 863
+    independent wikis, each with its Fandom origin, base URL, platform
+    and search path. It seeds new series, and tells when a community
+    moves.
+  - `scripts/guide/check-sources.sh` re-runs §5.1's probe by hand.
 
 ## 6. Answer quality
 
