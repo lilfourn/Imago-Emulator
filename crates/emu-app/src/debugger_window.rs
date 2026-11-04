@@ -27,13 +27,15 @@ use crate::view::EmulatorView;
 /// Height of a line of monospaced text, in logical pixels.
 const LINE: f32 = 15.0;
 
-const BACKGROUND: u32 = 0x001E_1E1E;
-const PANEL: u32 = 0x0026_2626;
-const TEXT: u32 = 0x00DD_DDDD;
-const DIM: u32 = 0x0088_8888;
-const ACCENT: u32 = 0x0026_4F78;
-const BREAKPOINT: u32 = 0x00E5_3935;
-const CHANGED: u32 = 0x00FF_D54F;
+const BACKGROUND: u32 = crate::theme::BACKGROUND;
+const PANEL: u32 = crate::theme::PANEL;
+const TEXT: u32 = crate::theme::TEXT;
+const DIM: u32 = crate::theme::MUTED;
+/// Behind the chosen row, cell and tab: a pale Imago blue.
+const ACCENT: u32 = 0x00D6_ECFB;
+const BREAKPOINT: u32 = crate::theme::DANGER;
+/// What a step changed: Imago Light's amber, dark enough to read.
+const CHANGED: u32 = 0x00A4_5E00;
 
 /// A hex field being typed into, and what it is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1096,8 +1098,8 @@ fn button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful
         .px_2()
         .rounded_sm()
         .cursor_pointer()
-        .bg(rgb(0x0037_3737))
-        .hover(|style| style.bg(rgb(0x0045_4545)))
+        .bg(rgb(crate::theme::LINE))
+        .hover(|style| style.bg(rgb(0x00D4_D4D8)))
         .child(label)
 }
 

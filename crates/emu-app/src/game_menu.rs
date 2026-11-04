@@ -22,15 +22,17 @@ use gpui::{
 use crate::icons;
 use crate::key_guide::{self, Control};
 use crate::probe;
-use crate::theme::{ACCENT, INSET, LINE, MUTED as DIM, ON_ACCENT, TEXT, with_alpha};
+use crate::theme::{
+    ACCENT, BACKGROUND, DANGER, INSET, LINE, MUTED as DIM, ON_ACCENT, TEXT, with_alpha,
+};
 
-/// The sheet: graphite, a touch see-through.
-const SHEET: u32 = with_alpha(0x0013_1417, 0xF2);
-const TILE: u32 = 0xFFFF_FF0D;
-const TILE_HOVER: u32 = 0xFFFF_FF1A;
-const DANGER_FILL: u32 = 0x00E0_4848;
+/// The sheet: white, a touch see-through.
+const SHEET: u32 = with_alpha(BACKGROUND, 0xF2);
+const TILE: u32 = with_alpha(TEXT, 0x0A);
+const TILE_HOVER: u32 = with_alpha(TEXT, 0x14);
+const DANGER_FILL: u32 = DANGER;
 /// The ring around whatever the keyboard is on, and how thick it is.
-const FOCUS: u32 = 0xFFFF_FFCC;
+const FOCUS: u32 = with_alpha(ACCENT, 0xCC);
 const RING: f32 = 2.0;
 
 /// Widest the sheet gets, in logical pixels.
@@ -435,7 +437,7 @@ impl GameMenu {
             .items_center()
             .justify_center()
             .bg(rgba(TILE_HOVER))
-            .hover(|button| button.bg(rgba(0xFFFF_FF26)))
+            .hover(|button| button.bg(rgba(with_alpha(TEXT, 0x1F))))
             .text_color(rgb(TEXT))
             .child("Cancel")
             .children(probe::bordered_part("button:cancel", RING));
@@ -548,7 +550,9 @@ fn switch(on: bool) -> Div {
         .rounded_full()
         .flex()
         .when(on, |track| track.justify_end().bg(rgb(ACCENT)))
-        .when(!on, |track| track.justify_start().bg(rgba(0xFFFF_FF26)))
+        .when(!on, |track| {
+            track.justify_start().bg(rgba(with_alpha(TEXT, 0x26)))
+        })
         .child(div().size(px(16.0)).rounded_full().bg(rgb(0x00FF_FFFF)))
 }
 

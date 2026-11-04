@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -54,8 +54,9 @@ use crate::theme::{
     ON_ACCENT, PANEL, TEXT, tint, with_alpha,
 };
 
-/// The background lightens a touch towards the foot of the window.
-const FOOT: u32 = 0x0016_181B;
+/// The background greys a touch towards the foot of the window, to
+/// Imago Light's shell.
+const FOOT: u32 = 0x00F6_F6F7;
 
 /// Room left of the header for the close, minimise and zoom buttons and
 /// a gap after them.
@@ -1919,6 +1920,9 @@ impl LibraryView {
         // Only in a window with room for it over the buttons and hint.
         let tall = f32::from(window.viewport_size().height) >= 400.0;
         let badge = tall.then(|| {
+            if none {
+                return brand_mark(56.0).mb_2();
+            }
             div()
                 .size(px(56.0))
                 .mb_2()
@@ -1929,15 +1933,7 @@ impl LibraryView {
                 .bg(rgb(PANEL))
                 .border_1()
                 .border_color(rgb(LINE))
-                .child(icons::icon(
-                    if none {
-                        icons::LIBRARY
-                    } else {
-                        icons::MAGNIFIER
-                    },
-                    24.0,
-                    DIM,
-                ))
+                .child(icons::icon(icons::MAGNIFIER, 24.0, DIM))
         });
         let buttons = none.then(|| {
             let button = |id: &'static str| {
@@ -2244,6 +2240,16 @@ fn cover(
                 .child(game.platform.label()),
         )
         .into_any_element()
+}
+
+/// The app's icon, `side` across, for the empty library: `assets/icon.svg`
+/// made with `resvg -w 168 -h 168 assets/icon.svg assets/icon.png`.
+fn brand_mark(side: f32) -> gpui::Div {
+    static ICON: LazyLock<Arc<gpui::Image>> = LazyLock::new(|| {
+        let png = include_bytes!("../../../assets/icon.png");
+        Arc::new(gpui::Image::from_bytes(ImageFormat::Png, png.to_vec()))
+    });
+    div().size(px(side)).child(img(ICON.clone()).size_full())
 }
 
 /// What spills past the rounded corners of the box it is in, `radius`

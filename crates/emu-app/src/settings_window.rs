@@ -19,7 +19,7 @@ use crate::layout::{Arrangement, GAPS, HINGE_GAP, Rotation};
 use crate::picture::{Picture, RESOLUTIONS_3D};
 use crate::probe;
 use crate::settings::Settings;
-use crate::theme::{ACCENT, BACKGROUND, MUTED as DIM, PANEL, TEXT, with_alpha};
+use crate::theme::{ACCENT, BACKGROUND, LINE, MUTED as DIM, PANEL, TEXT, with_alpha};
 use crate::view::EmulatorView;
 
 /// Size of the window's words, in logical pixels.
@@ -256,7 +256,7 @@ impl SettingsWindow {
                     button.bg(rgb(TEXT)).text_color(rgb(BACKGROUND))
                 })
                 .when(!chosen, |button| {
-                    button.hover(|button| button.bg(rgb(0x0033_3333)))
+                    button.hover(|button| button.bg(rgb(LINE)))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| this.pick(index, at, cx)))
                 .child(label)

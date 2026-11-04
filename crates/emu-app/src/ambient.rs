@@ -13,7 +13,7 @@ use emu_core::{Frame, ScreenSize, rgb};
 
 use crate::color::Correction;
 use crate::layout::{Placement, Rect};
-use crate::theme::BACKGROUND;
+use crate::theme::STAGE as BACKGROUND;
 
 /// What fills the window around the screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

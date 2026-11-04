@@ -1,8 +1,12 @@
 # Design system
 
-The app's look is Graphite & Signal (`crates/emu-app/src/theme.rs`):
-graphite surfaces, white type and one signal-orange accent, so the colour
-on screen comes from the games. `scripts/macos/check-layout.sh` checks the
+The app's look is Imago Light (`crates/emu-app/src/theme.rs`), shared with
+its sibling app Imago: white paper, ink type, cool grey hairlines, Imago's
+blue for what to press, and the four colour blocks of the app icon (blue,
+coral, amber, green) for systems' plates. The app icon (`assets/icon.svg`)
+builds a handheld from those blocks and stands over the empty library. A
+running game sits on a dark stage instead, so its colours and the ambient
+glow read as they would on a dark screen. `scripts/macos/check-layout.sh` checks the
 rules below in every screen state; a new screen or control adds its checks
 to `scripts/macos/layout.swift`.
 
@@ -40,8 +44,8 @@ to `scripts/macos/layout.swift`.
   last-played game's) is covered at the corners by a band in the colour
   behind it (`corners` in `library_view.rs`).
 - **Colour carries meaning.** The accent marks what to press (Resume,
-  Play, Get) and where the caret is; the chosen tab, filter or setting is a
-  white pill with dark type; the chosen game sits on a lighter tile. Red
+  Play, Get) and where the caret is; the chosen tab, filter or setting is an
+  ink pill with white type; the chosen game sits on a grey tile. Red
   marks only the action that destroys something.
 - **Every game has a picture.** Its box art; or else the screen where it
   was left; or else a plate in its system's colour (`theme::tint`) with its
