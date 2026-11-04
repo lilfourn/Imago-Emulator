@@ -31,6 +31,7 @@ mod game_menu;
 mod gamepad;
 #[allow(unsafe_code)]
 mod gpu_upscale;
+mod guide;
 mod icons;
 mod key_guide;
 mod key_routes;
