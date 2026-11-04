@@ -15,8 +15,8 @@ use gpui::{
 
 use crate::ambient::Backdrop;
 use crate::app::{TOP_BAR, top_bar};
-use crate::filter::Filter;
 use crate::layout::{Arrangement, GAPS, HINGE_GAP, Rotation};
+use crate::picture::Picture;
 use crate::probe;
 use crate::settings::Settings;
 use crate::theme::{ACCENT, BACKGROUND, MUTED as DIM, PANEL, TEXT, with_alpha};
@@ -137,19 +137,13 @@ fn rows(settings: &Settings) -> Vec<Row> {
             |settings, gap| settings.layout.gap = gap,
         ),
         Row::new(
-            "Filter",
-            [
-                Filter::None,
-                Filter::LcdGrid,
-                Filter::Scanlines,
-                Filter::Scale2x,
-                Filter::Scale3x,
-            ]
-            .into_iter()
-            .map(|filter| (filter.label().into(), filter))
-            .collect(),
-            settings.filter,
-            |settings, filter| settings.filter = filter,
+            "Picture",
+            Picture::ALL
+                .into_iter()
+                .map(|picture| (picture.label().into(), picture))
+                .collect(),
+            settings.picture,
+            |settings, picture| settings.picture = picture,
         )
         .under("Video"),
         Row::new(

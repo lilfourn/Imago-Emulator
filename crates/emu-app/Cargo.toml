@@ -73,6 +73,31 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSArray",
     "NSData",
+    "NSError",
+    "NSString",
+] }
+# Metal and MetalFX for the upscaler (gpu_upscale.rs, decision 0013);
+# objc2-metal is the version already in GPUI's tree.
+objc2-metal = { version = "0.3", default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLTexture",
+    "MTLTypes",
+] }
+objc2-metal-fx = { version = "0.3", default-features = false, features = [
+    "std",
+    "MTLFXSpatialScaler",
 ] }
 raw-window-handle = "0.6"
 

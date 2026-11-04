@@ -102,12 +102,19 @@ pub fn render_image(frame: &Frame, factor: usize) -> Arc<RenderImage> {
     let scaled = |length: u16| {
         u32::try_from(usize::from(length) * factor).expect("factor is at most MAX_FACTOR")
     };
-    let buffer = image::RgbaImage::from_raw(
+    bgra_image(
         scaled(size.width),
         scaled(size.height),
         upscale_bgra(frame, factor),
     )
-    .expect("upscale_bgra returns exactly width * height * 4 bytes");
+}
+
+/// A GPUI image `width` × `height` pixels of `bgra`, which must be exactly
+/// `width * height * 4` bytes, as the upscaler and [`upscale_bgra`] give.
+pub fn bgra_image(width: u32, height: u32, bgra: Vec<u8>) -> Arc<RenderImage> {
+    // GPUI's images hold BGRA, whatever the buffer type calls it.
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)
+        .expect("the bytes are exactly width * height * 4");
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 

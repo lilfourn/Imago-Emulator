@@ -19,14 +19,14 @@ use gpui::{
 use crate::ambient::{self, Backdrop};
 use crate::app::{
     AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
-    EditCheats, FilterLcdGrid, FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, GameInfo,
-    InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState,
-    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore, PreviousStateSlot, Randomize,
-    RemoveFromLibrary, Reset, Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x,
-    RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot, SaveState, ShowDebugger,
-    StopScript, SwapScreens, SwitchPlayer, TOP_BAR, ToggleColorCorrection, ToggleFastForward,
-    ToggleFullScreen, ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion,
-    ToggleWindowControls,
+    EditCheats, GameInfo, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
+    LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore,
+    PictureAuto, PictureLcdGrid, PicturePixelArt, PictureScanlines, PictureSharpPixels,
+    PictureSmooth, PreviousStateSlot, Randomize, RemoveFromLibrary, Reset, Resolution3d1x,
+    Resolution3d2x, Resolution3d3x, Resolution3d4x, RotateAnticlockwise, RotateClockwise,
+    RunScript, SaveScreenshot, SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
+    TOP_BAR, ToggleColorCorrection, ToggleFastForward, ToggleFullScreen, ToggleMicrophone,
+    TogglePause, ToggleRecording, ToggleSlowMotion, ToggleWindowControls,
 };
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
@@ -45,6 +45,7 @@ use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Loaded};
 use crate::filter::Filter;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
+use crate::gpu_upscale::{Gpu, GpuDevice, GpuError, Method};
 use crate::key_guide;
 use crate::key_routes::{KeyRoutes, Route};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
@@ -53,6 +54,7 @@ use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist::{self, GameFiles};
+use crate::picture::{self, Look, Picture};
 use crate::probe;
 use crate::randomize_window::{self, RandomizeWindow};
 use crate::romhack::{self, MakeError};
@@ -120,8 +122,10 @@ pub struct EmulatorView {
     heard: u8,
     /// Show GBC and GBA colours as their screens did.
     color_correction: bool,
-    /// How the screens are filtered on their way to the window.
-    filter: Filter,
+    /// How the screens look: upscaled, as sharp pixels, or shaded.
+    picture: Picture,
+    /// The GPU half of the upscaler, started when a picture first needs it.
+    upscaler: Upscaler,
     /// What fills the window around the screens.
     backdrop: Backdrop,
     /// Whether the speed readout shows in the window's corner.
@@ -249,12 +253,72 @@ struct Session {
     _audio: Option<AudioOutput>,
 }
 
-/// What an image shows: a screen, enlarged by a whole factor and turned.
+/// What an image shows: a screen, turned, in a look, for a place on the
+/// window so many device pixels across.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ImageKey {
     screen: usize,
-    factor: usize,
     rotation: Rotation,
+    look: Look,
+    /// The placement's size in device pixels.
+    target: (u32, u32),
+}
+
+/// The GPU half of the upscaler ([`gpu_upscale`](crate::gpu_upscale)).
+enum Upscaler {
+    /// Not started: no picture has needed it.
+    Idle,
+    /// Starting on a background thread ([`EmulatorView::start_upscaler`]).
+    Starting,
+    Ready(Gpu),
+    /// It would not start, or failed: screens stay on the CPU path, with
+    /// Scale2x and Scale3x standing in for Pixel Art. Holds why until the
+    /// player has been told.
+    Off(Option<GpuError>),
+}
+
+impl Upscaler {
+    /// `frame` upscaled by `method` to `width` × `height`, or `None` while
+    /// the GPU is starting or once it is off.
+    ///
+    /// # Errors
+    ///
+    /// The [`GpuError`] that turned it off, once.
+    fn image(
+        &mut self,
+        frame: &Frame,
+        method: Method,
+        (width, height): (u32, u32),
+    ) -> Result<Option<Arc<RenderImage>>, GpuError> {
+        match self {
+            Self::Ready(gpu) => match gpu.upscale(frame, method, width, height) {
+                Ok(bgra) => Ok(Some(video::bgra_image(width, height, bgra))),
+                Err(error) => {
+                    *self = Self::Off(None);
+                    Err(error)
+                }
+            },
+            Self::Off(untold) => untold.take().map_or(Ok(None), Err),
+            Self::Idle | Self::Starting => Ok(None),
+        }
+    }
+
+    fn is_off(&self) -> bool {
+        matches!(self, Self::Off(_))
+    }
+}
+
+/// The CPU pass that draws `look`. Without the GPU, Scale2x and Scale3x
+/// stand in for Pixel Art, as large as `factor` device pixels to a console
+/// pixel allows.
+fn cpu_filter(look: Look, factor: usize, gpu_off: bool) -> Filter {
+    match look {
+        Look::LcdGrid => Filter::LcdGrid,
+        Look::Scanlines => Filter::Scanlines,
+        Look::Upscaled(Method::PixelArt) if gpu_off && factor >= 3 => Filter::Scale3x,
+        Look::Upscaled(Method::PixelArt) if gpu_off => Filter::Scale2x,
+        Look::SharpPixels | Look::Upscaled(_) => Filter::None,
+    }
 }
 
 /// The ambient backdrop: what it was last sampled from, its fade toward
@@ -376,7 +440,8 @@ impl EmulatorView {
             microphone: None,
             heard: 0,
             color_correction: true,
-            filter: Filter::default(),
+            picture: Picture::default(),
+            upscaler: Upscaler::Idle,
             backdrop: Backdrop::default(),
             show_fps: false,
             speed_readout: None,
@@ -425,7 +490,7 @@ impl EmulatorView {
                 view.layout = settings.layout;
                 view.speeds = settings.speed;
                 view.resolution_3d = settings.resolution_3d;
-                view.filter = settings.filter;
+                view.picture = settings.picture;
                 view.backdrop = settings.backdrop;
                 view.show_fps = settings.show_fps;
                 view.dmg_colors = settings.dmg_colors;
@@ -463,6 +528,7 @@ impl EmulatorView {
         if view.show_fps {
             view.start_readout(cx);
         }
+        view.start_upscaler(cx);
         if !roms.is_empty() {
             view.open(roms, window, cx);
         }
@@ -1892,7 +1958,7 @@ impl EmulatorView {
             fast_forward_on: self.controls.fast_forward_latched(),
             slow_motion_on: self.controls.slow_motion_latched(),
             resolution_3d: self.resolution_3d,
-            filter: self.filter,
+            picture: self.picture,
             backdrop: self.backdrop,
             show_fps: self.show_fps,
             color_correction: self.color_correction,
@@ -1939,8 +2005,8 @@ impl EmulatorView {
         if settings.resolution_3d != self.resolution_3d {
             self.set_resolution_3d(settings.resolution_3d, cx);
         }
-        if settings.filter != self.filter {
-            self.set_filter(settings.filter, cx);
+        if settings.picture != self.picture {
+            self.set_picture(settings.picture, cx);
         }
         if settings.backdrop != self.backdrop {
             self.set_backdrop(settings.backdrop, cx);
@@ -2234,13 +2300,40 @@ impl EmulatorView {
         self.save_settings(cx);
     }
 
-    /// Filters the screens with `filter` from now on, and saves that for
-    /// next launch.
-    fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
-        self.filter = filter;
+    /// Shows the screens as `picture` from now on, and saves that for next
+    /// launch.
+    fn set_picture(&mut self, picture: Picture, cx: &mut Context<Self>) {
+        self.picture = picture;
+        self.start_upscaler(cx);
         self.rebuild_images();
-        self.show_notice(format!("Filter: {}", filter.label()), cx);
+        self.show_notice(format!("Picture: {}", picture.label()), cx);
         self.save_settings(cx);
+    }
+
+    /// Starts the upscaler's GPU on a background thread, if the picture
+    /// upscales and it has not been started. Compiling its shaders takes
+    /// about 130 ms, which the first upscaled frame would otherwise wait
+    /// for; screens are drawn as sharp pixels until it is ready.
+    fn start_upscaler(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.upscaler, Upscaler::Idle) || !self.picture.upscales() {
+            return;
+        }
+        let started = cx.background_executor().spawn(async { GpuDevice::start() });
+        cx.spawn(async move |this, cx| {
+            let started = started.await;
+            this.update(cx, |view, cx| {
+                view.upscaler = match started {
+                    Ok(device) => Upscaler::Ready(Gpu::new(device)),
+                    Err(error) => Upscaler::Off(Some(error)),
+                };
+                // Screens drawn sharp meanwhile are drawn again.
+                view.rebuild_images();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        self.upscaler = Upscaler::Starting;
     }
 
     /// Turns colour correction on or off, and saves that for next launch.
@@ -2312,16 +2405,21 @@ impl Session {
     }
 
     /// Brings the images up to date with how each placement draws its
-    /// screen. Each frame is colour corrected, turned and filtered, then
-    /// enlarged by the whole factor left.
+    /// screen. Each frame is colour corrected and turned, then upscaled on
+    /// the GPU to the placement's exact size in device pixels, or filtered
+    /// and enlarged by a whole factor on the CPU.
+    ///
+    /// Returns the GPU's error the moment it fails, after which screens
+    /// stay on the CPU.
     fn refresh_images(
         &mut self,
         placements: &[Placement],
         scale_factor: f32,
         color_correction: bool,
-        filter: Filter,
+        picture: Picture,
+        upscaler: &mut Upscaler,
         window: &mut Window,
-    ) {
+    ) -> Option<GpuError> {
         // One image per placement, so the layout decides how many.
         if self.images.len() > placements.len() {
             for (_, image) in self.images.drain(placements.len()..).flatten() {
@@ -2330,15 +2428,30 @@ impl Session {
         }
         self.images.resize(placements.len(), None);
         let correction = self.correction.as_ref().filter(|_| color_correction);
-        for (slot, placement) in self.images.iter_mut().zip(placements) {
+        let look = picture.look(self.info.system);
+        let targets: Vec<(u32, u32)> = placements
+            .iter()
+            .map(|placement| {
+                picture::device_size(placement.rect.width, placement.rect.height, scale_factor)
+            })
+            .collect();
+        let drawn = picture::within_budget(&targets, picture::MAX_UPSCALED_PIXELS);
+        let mut failed = None;
+        for (((slot, placement), &target), &size) in self
+            .images
+            .iter_mut()
+            .zip(placements)
+            .zip(&targets)
+            .zip(&drawn)
+        {
             let Some(frame) = self.frames.get(placement.screen) else {
                 continue;
             };
-            let shown = placement.rotation.turn_size(frame.size());
             let key = ImageKey {
                 screen: placement.screen,
-                factor: video::prescale_factor(shown.width, placement.rect.width, scale_factor),
                 rotation: placement.rotation,
+                look,
+                target,
             };
             if slot.as_ref().is_some_and(|(built, _)| *built == key) {
                 continue;
@@ -2355,10 +2468,34 @@ impl Session {
             let turned =
                 (key.rotation != Rotation::Upright).then(|| video::turn(frame, key.rotation));
             let frame = turned.as_ref().unwrap_or(frame);
-            let (filtered, factor) =
-                filter.apply(frame, key.factor, usize::from(cell), key.rotation);
-            *slot = Some((key, video::render_image(&filtered, factor)));
+
+            // Pixel Art would smear larger 3D, already smooth: until the
+            // DS says which pixels are 3D (PRD UP-13), those frames are
+            // enlarged smoothly. Only enlargements go to the GPU.
+            let method = match look {
+                Look::Upscaled(Method::PixelArt) if cell <= 1 => Some(Method::PixelArt),
+                Look::Upscaled(_) => Some(Method::Smooth),
+                _ => None,
+            };
+            let shown = frame.size();
+            let enlarges = size.0 > u32::from(shown.width) && size.1 > u32::from(shown.height);
+            let upscaled = method.filter(|_| enlarges).and_then(|method| {
+                upscaler.image(frame, method, size).unwrap_or_else(|error| {
+                    failed = Some(error);
+                    None
+                })
+            });
+            let image = upscaled.unwrap_or_else(|| {
+                let factor =
+                    video::prescale_factor(shown.width, placement.rect.width, scale_factor);
+                let filter = cpu_filter(look, factor, upscaler.is_off());
+                let (filtered, factor) =
+                    filter.apply(frame, factor, usize::from(cell), key.rotation);
+                video::render_image(&filtered, factor)
+            });
+            *slot = Some((key, image));
         }
+        failed
     }
 
     /// Brings the ambient backdrop up to date with the screens as
@@ -2557,20 +2694,23 @@ impl Render for EmulatorView {
                     this.set_dmg_colors(emu_core::DmgColors::ByTitle, cx);
                 }),
             )
-            .on_action(cx.listener(|this, _: &FilterNone, _, cx| {
-                this.set_filter(Filter::None, cx);
+            .on_action(cx.listener(|this, _: &PictureAuto, _, cx| {
+                this.set_picture(Picture::Auto, cx);
             }))
-            .on_action(cx.listener(|this, _: &FilterLcdGrid, _, cx| {
-                this.set_filter(Filter::LcdGrid, cx);
+            .on_action(cx.listener(|this, _: &PictureSharpPixels, _, cx| {
+                this.set_picture(Picture::SharpPixels, cx);
             }))
-            .on_action(cx.listener(|this, _: &FilterScanlines, _, cx| {
-                this.set_filter(Filter::Scanlines, cx);
+            .on_action(cx.listener(|this, _: &PicturePixelArt, _, cx| {
+                this.set_picture(Picture::PixelArt, cx);
             }))
-            .on_action(cx.listener(|this, _: &FilterScale2x, _, cx| {
-                this.set_filter(Filter::Scale2x, cx);
+            .on_action(cx.listener(|this, _: &PictureSmooth, _, cx| {
+                this.set_picture(Picture::Smooth, cx);
             }))
-            .on_action(cx.listener(|this, _: &FilterScale3x, _, cx| {
-                this.set_filter(Filter::Scale3x, cx);
+            .on_action(cx.listener(|this, _: &PictureLcdGrid, _, cx| {
+                this.set_picture(Picture::LcdGrid, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PictureScanlines, _, cx| {
+                this.set_picture(Picture::Scanlines, cx);
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
@@ -2612,9 +2752,18 @@ impl Render for EmulatorView {
         // glows.
         root = root.bg(rgb(if fullscreen { 0x0000_0000 } else { BACKGROUND }));
         let shown = self.shown_layout();
+        let mut upscaler_failed = None;
         if let Some(session) = self.session.as_mut() {
             let consoles = consoles(&session.info);
-            self.placements = shown.place_consoles(session.info.screens, consoles, viewport);
+            // On whole device pixels, so upscaled screens draw one to one.
+            self.placements = shown
+                .place_consoles(session.info.screens, consoles, viewport)
+                .into_iter()
+                .map(|placement| Placement {
+                    rect: placement.rect.snapped(scale_factor),
+                    ..placement
+                })
+                .collect();
             // Frames keep in step with the refreshes of the display the
             // window is on.
             let display = window.display(cx).map(|display| display.id());
@@ -2629,11 +2778,12 @@ impl Render for EmulatorView {
             if session.sequence != seen {
                 trace::event("take", &[session.sequence]);
             }
-            session.refresh_images(
+            upscaler_failed = session.refresh_images(
                 &self.placements,
                 scale_factor,
                 self.color_correction,
-                self.filter,
+                self.picture,
+                &mut self.upscaler,
                 window,
             );
             if session.sequence != seen {
@@ -2688,6 +2838,9 @@ impl Render for EmulatorView {
         } else {
             self.placements.clear();
             root = root.child(self.library.clone());
+        }
+        if let Some(error) = upscaler_failed {
+            self.show_notice(format!("Upscaling is off: {error}"), cx);
         }
         root = root.children(self.cursor_marks());
         if self.window_controls && !fullscreen {

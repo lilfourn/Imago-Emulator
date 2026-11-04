@@ -1,8 +1,8 @@
 //! Settings kept between launches, so the app opens as it was left: the
 //! screen layout, fast-forward and slow motion and their speeds, the
-//! resolution of DS and 3DS 3D, the video filter and colour correction, what
-//! fills the window around the screens, the save-state slot, and the
-//! window's place, size and controls.
+//! resolution of DS and 3DS 3D, the picture (upscaled or filtered) and
+//! colour correction, what fills the window around the screens, the
+//! save-state slot, and the window's place, size and controls.
 //!
 //! The app writes them whenever one changes, as TOML next to the bindings
 //! file:
@@ -22,7 +22,7 @@
 //!
 //! [video]
 //! resolution_3d = 2       # DS and 3DS 3D at 1 to 8 times its own resolution
-//! filter = "lcd-grid"     # "none", "lcd-grid", "scanlines", "scale2x" or "scale3x"
+//! picture = "auto"       # "auto", "sharp-pixels", "pixel-art", "smooth", "lcd-grid" or "scanlines"
 //! show_fps = true        # the frame rate and speed in the window's corner
 //! backdrop = "ambient"    # around the screens: "ambient" (the game's colours, blurred) or "solid"
 //! color_correction = true # GBC and GBA colours as their screens showed them
@@ -55,9 +55,9 @@ use emu_core::DmgColors;
 use serde::{Deserialize, Serialize};
 
 use crate::ambient::Backdrop;
-use crate::filter::Filter;
 use crate::layout::{Arrangement, Layout, Rotation};
 use crate::persist;
+use crate::picture::Picture;
 use crate::slots::STATE_SLOTS;
 use crate::speed::{MIN_RATE, Rate, Speed, Speeds};
 
@@ -87,8 +87,9 @@ pub struct Settings {
     /// How many times its own resolution DS and 3DS 3D is drawn at, 1 to
     /// [`MAX_RESOLUTION_3D`] (see `Core::set_render_scale`).
     pub resolution_3d: u32,
-    /// How the screens are filtered on their way to the window.
-    pub filter: Filter,
+    /// How the screens look: upscaled, as sharp pixels, or shaded
+    /// (View > Picture).
+    pub picture: Picture,
     /// Whether the speed readout shows in the window's corner.
     pub show_fps: bool,
     /// What fills the window around the screens.
@@ -135,7 +136,7 @@ impl Default for Settings {
             fast_forward_on: false,
             slow_motion_on: false,
             resolution_3d: 1,
-            filter: Filter::None,
+            picture: Picture::Auto,
             show_fps: false,
             backdrop: Backdrop::Ambient,
             color_correction: true,
@@ -292,7 +293,12 @@ fn dmg_colors_from_name(name: &str) -> Option<DmgColors> {
 #[serde(default, deny_unknown_fields)]
 struct VideoSection {
     resolution_3d: u32,
-    filter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    picture: Option<String>,
+    /// Before View > Picture, the screens' filter: read, so that an old
+    /// file still loads (on Auto, whatever it was), but never written.
+    #[serde(default, skip_serializing)]
+    filter: Option<String>,
     show_fps: bool,
     backdrop: String,
     color_correction: bool,
@@ -308,7 +314,8 @@ impl From<&Settings> for VideoSection {
     fn from(settings: &Settings) -> Self {
         Self {
             resolution_3d: settings.resolution_3d,
-            filter: settings.filter.name().to_owned(),
+            picture: Some(settings.picture.name().to_owned()),
+            filter: None,
             show_fps: settings.show_fps,
             backdrop: settings.backdrop.name().to_owned(),
             color_correction: settings.color_correction,
@@ -436,8 +443,15 @@ impl Settings {
         if !(1..=MAX_RESOLUTION_3D).contains(&resolution_3d) {
             return Err(SettingsError::UnsupportedResolution(resolution_3d));
         }
-        let filter = Filter::from_name(&file.video.filter)
-            .ok_or_else(|| SettingsError::UnknownFilter(file.video.filter.clone()))?;
+        let picture = match (file.video.picture, file.video.filter) {
+            (Some(name), _) => {
+                Picture::from_name(&name).ok_or(SettingsError::UnknownPicture(name))?
+            }
+            (None, Some(name)) => {
+                Picture::from_filter_name(&name).ok_or(SettingsError::UnknownFilter(name))?
+            }
+            (None, None) => Picture::Auto,
+        };
         let backdrop = Backdrop::from_name(&file.video.backdrop)
             .ok_or_else(|| SettingsError::UnknownBackdrop(file.video.backdrop.clone()))?;
         let dmg_colors = dmg_colors_from_name(&file.game_boy.dmg_colors)
@@ -452,7 +466,7 @@ impl Settings {
             fast_forward_on: file.speed.fast_forward_on,
             slow_motion_on: file.speed.slow_motion_on,
             resolution_3d,
-            filter,
+            picture,
             show_fps: file.video.show_fps,
             backdrop,
             color_correction: file.video.color_correction,
@@ -533,7 +547,11 @@ pub enum SettingsError {
     /// The rotation is not 0, 90, 180 or 270 degrees.
     #[error("unsupported rotation {0}° in settings")]
     UnsupportedRotation(u16),
-    /// The filter is not one of the five names.
+    /// The picture is not one of the six names.
+    #[error("unknown picture {0:?} in settings")]
+    UnknownPicture(String),
+    /// A file from before View > Picture names a filter that was never
+    /// one of the five.
     #[error("unknown video filter {0:?} in settings")]
     UnknownFilter(String),
     /// The backdrop is not "solid" or "ambient".
@@ -581,7 +599,7 @@ mod tests {
             fast_forward_on: true,
             slow_motion_on: true,
             resolution_3d: 4,
-            filter: Filter::Scanlines,
+            picture: Picture::Scanlines,
             show_fps: true,
             backdrop: Backdrop::Solid,
             color_correction: false,
@@ -600,7 +618,8 @@ mod tests {
         let text = settings.to_toml();
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
         assert!(text.contains("resolution_3d = 4"), "{text}");
-        assert!(text.contains("filter = \"scanlines\""), "{text}");
+        assert!(text.contains("picture = \"scanlines\""), "{text}");
+        assert!(!text.contains("filter"), "{text}");
         assert!(text.contains("show_fps = true"), "{text}");
         assert!(text.contains("backdrop = \"solid\""), "{text}");
         assert!(text.contains("dmg_colors = \"left+b\""), "{text}");
@@ -740,14 +759,46 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_is_one_of_five_names() {
-        let settings = Settings::from_toml("[video]\nfilter = \"lcd-grid\"\n").expect("valid file");
-        assert_eq!(settings.filter, Filter::LcdGrid);
-        assert_eq!(Settings::from_toml("").map(|s| s.filter), Ok(Filter::None));
+    fn the_picture_is_one_of_six_names_and_auto_by_default() {
+        let settings =
+            Settings::from_toml("[video]\npicture = \"pixel-art\"\n").expect("valid file");
+        assert_eq!(settings.picture, Picture::PixelArt);
         assert_eq!(
-            Settings::from_toml("[video]\nfilter = \"xbrz\"\n"),
+            Settings::from_toml("").map(|s| s.picture),
+            Ok(Picture::Auto)
+        );
+        assert_eq!(
+            Settings::from_toml("[video]\npicture = \"xbrz\"\n"),
+            Err(SettingsError::UnknownPicture("xbrz".to_owned()))
+        );
+    }
+
+    #[test]
+    fn files_from_when_there_was_a_filter_start_upscaled() {
+        let picture = |text: &str| Settings::from_toml(text).map(|s| s.picture);
+        assert_eq!(
+            picture("[video]\nfilter = \"lcd-grid\"\n"),
+            Ok(Picture::Auto)
+        );
+        assert_eq!(
+            picture("[video]\nfilter = \"scale3x\"\n"),
+            Ok(Picture::Auto)
+        );
+        assert_eq!(picture("[video]\nfilter = \"none\"\n"), Ok(Picture::Auto));
+        // A picture, once saved, wins.
+        assert_eq!(
+            picture("[video]\nfilter = \"lcd-grid\"\npicture = \"smooth\"\n"),
+            Ok(Picture::Smooth)
+        );
+        assert_eq!(
+            picture("[video]\nfilter = \"xbrz\"\n"),
             Err(SettingsError::UnknownFilter("xbrz".to_owned()))
         );
+        let saved = Settings::from_toml("[video]\nfilter = \"scanlines\"\n")
+            .expect("valid file")
+            .to_toml();
+        assert!(saved.contains("picture = \"auto\""), "{saved}");
+        assert!(!saved.contains("filter"), "{saved}");
     }
 
     #[test]
