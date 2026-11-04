@@ -47,6 +47,7 @@ own dumps. The app has:
   3DS games, demos, music carts and tools, each added to the library in
   one click;
 - ROM hacks, from IPS, UPS, BPS and xdelta patches;
+- randomized Pokémon games, made from your own copies of Red to White 2;
 - cheats;
 - Lua scripts that read and write memory, press buttons and draw over the
   screens;
@@ -68,7 +69,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [Games we can't run](docs/research/games-we-cant-run.md): store games and homebrew for other systems that the cores can't run yet, with leads
 - [Fan-made Pokémon games](docs/research/fan-games.md): famous ROM hacks, randomizers and PC fan games, what each needs, and the plan to run them all
 - [3DS games](docs/research/3ds.md): what hosting Azahar's core takes, what was measured, and what is left
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store, 3DS games
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store, 3DS games, the randomizer
 
 ## Build and run
 
@@ -136,6 +137,7 @@ SPEED=normal FRONT=1 scripts/macos/bench.sh ~/Games/My\ Fan\ Game
 | | | | | Save screenshot | ⌘⇧S |
 | | | | | Start / stop recording | ⌘⇧R |
 | | | | | Run / stop a Lua script | ⌘⇧L / ⌘⌥L |
+| | | | | Randomize a Pokémon game | ⌘⌥R |
 | | | | | Colour correction on/off | ⌘⇧C |
 | | | | | Filter: none, LCD grid, scanlines, Scale2x, Scale3x | View > Filter |
 | | | | | Debugger | ⌘⇧D |
@@ -515,6 +517,37 @@ a hack whose patch has the same name makes a different game, numbered as in
 `Radical Red.sav` to `Radical Red (2).sav`. xdelta patches made with
 xdelta3's old DJW or FGK compression, which it uses only when asked to, are
 not read ([decision 0009](docs/decisions/0009-rom-hack-patches.md)).
+
+## Randomizer
+
+File > Randomize Pokémon Game… (⌘⌥R), or Randomize… in a Pokémon game's
+menu in the library, makes a randomized copy of the game: the same game with new
+wild Pokémon, trainers, starters and more. It runs the [Universal Pokémon Randomizer
+FVX](https://github.com/upr-fvx/universal-pokemon-randomizer-fvx), the
+successor of the Universal Pokémon Randomizer ZX. The first time, the app
+downloads FVX 1.6.2 with its own Java (41 MB, checked against a pinned
+SHA-256) into `~/Library/Application Support/ds-emulator/Randomizer`.
+
+It offers your copies of Red, Blue, Yellow, Gold, Silver, Crystal, Ruby,
+Sapphire, Emerald, FireRed, LeafGreen, Diamond, Pearl, Platinum, HeartGold,
+SoulSilver, Black, White, Black 2 and White 2. Choose what changes:
+
+| Choice | What changes |
+|---|---|
+| Wild Pokémon | Wild Pokémon only, the same ones in each place every visit |
+| Classic | Your starter, wild Pokémon, trainers' teams, gifts and trades, each about as strong as what it replaces |
+| Everything | Classic, and every Pokémon's types, abilities and moves, the TMs, the tutors and the items lying around |
+| Pasted | Settings from the randomizer's own window or a guide: copy the settings string, then press ⌘V in the window. ZX and FVX strings both work |
+
+Each also turns evolutions by trade into evolutions by level. The game
+goes into the hacks folder as `Pokemon - Platinum Version (Random
+482913).nds`, with its own saves and its own place in the library, and its
+spoiler log beside it (Spoiler Log in the window opens it). Your copy is
+left as it is. The six digits are the seed: the same seed and settings in
+FVX make the same game. One game is made at a time; closing the window
+doesn't stop it, and the main window says when it is done. The 3DS games
+are not offered yet, because a randomized copy would share its save with
+the game it came from ([decision 0012](docs/decisions/0012-randomizer.md)).
 
 ## Cheats
 

@@ -21,7 +21,7 @@ use crate::app::{
     AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
     EditCheats, FilterLcdGrid, FilterNone, FilterScale2x, FilterScale3x, FilterScanlines, GameInfo,
     InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle, LayoutVertical, LoadState,
-    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore, PreviousStateSlot,
+    NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore, PreviousStateSlot, Randomize,
     RemoveFromLibrary, Reset, Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x,
     RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot, SaveState, ShowDebugger,
     StopScript, SwapScreens, SwitchPlayer, TOP_BAR, ToggleColorCorrection, ToggleFastForward,
@@ -54,6 +54,7 @@ use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
 use crate::persist::{self, GameFiles};
 use crate::probe;
+use crate::randomize_window::{self, RandomizeWindow};
 use crate::romhack::{self, MakeError};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
@@ -146,6 +147,10 @@ pub struct EmulatorView {
     debugger: Option<WindowHandle<DebuggerWindow>>,
     /// The settings window, once opened.
     settings_window: Option<WindowHandle<SettingsWindow>>,
+    /// The randomize window, once opened.
+    randomize_window: Option<WindowHandle<RandomizeWindow>>,
+    /// Whether the randomize window is about to open, its games being read.
+    opening_randomizer: bool,
     /// The games, shown while none runs.
     library: Entity<LibraryView>,
     /// The game menu, while it is open over the paused game.
@@ -377,6 +382,8 @@ impl EmulatorView {
             shown_controls: None,
             debugger: None,
             settings_window: None,
+            randomize_window: None,
+            opening_randomizer: false,
             library,
             menu: None,
             sessions: 0,
@@ -1680,6 +1687,7 @@ impl EmulatorView {
             LibraryEvent::Play(path) => self.open(vec![path.clone()], window, cx),
             LibraryEvent::AddGames => self.add_to_library(&AddToLibrary, window, cx),
             LibraryEvent::OpenSettings => self.show_settings(cx),
+            LibraryEvent::Randomize(path) => self.show_randomizer(Some(path.clone()), window, cx),
             LibraryEvent::Notice(text) => self.show_notice(text.clone(), cx),
         }
     }
@@ -2079,6 +2087,59 @@ impl EmulatorView {
         });
     }
 
+    /// Opens the randomize window, or brings it to the front with the
+    /// library's games read anew, with `game` chosen if given. A new window
+    /// opens once the games it offers are read, off the UI thread, so it
+    /// opens showing them.
+    fn show_randomizer(&mut self, game: Option<PathBuf>, window: &Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self.randomize_window
+            && handle
+                .update(cx, |randomizer, window, cx| {
+                    window.activate_window();
+                    randomizer.refresh(game.clone(), cx);
+                })
+                .is_ok()
+        {
+            return;
+        }
+        if self.opening_randomizer {
+            return;
+        }
+        self.opening_randomizer = true;
+        let games = randomize_window::library_games(self.library.read(cx));
+        let read = cx
+            .background_executor()
+            .spawn(async move { randomize_window::candidates(games) });
+        let main_window = window.window_handle();
+        let library = self.library.clone();
+        cx.spawn(async move |this, cx| {
+            let candidates = read.await;
+            let Some(main) = this.upgrade() else {
+                return;
+            };
+            cx.update(|cx| {
+                let opened =
+                    RandomizeWindow::open(&main, main_window, library, candidates, game, cx);
+                main.update(cx, |this, cx| {
+                    this.opening_randomizer = false;
+                    match opened {
+                        Ok(handle) => this.randomize_window = Some(handle),
+                        Err(error) => {
+                            this.show_notice(format!("Cannot open the randomizer: {error:#}"), cx);
+                        }
+                    }
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Plays the game at `path`, as a click in the library would.
+    pub fn play(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(vec![path], window, cx);
+    }
+
     /// Sends a step for the CPU the debugger window shows, if it is open.
     fn step_in_debugger(&mut self, step: fn(usize) -> debugger::Command, cx: &mut Context<Self>) {
         let cpu = self
@@ -2468,6 +2529,9 @@ impl Render for EmulatorView {
             }))
             .on_action(cx.listener(|this, _: &ToggleFps, _, cx| this.toggle_fps(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
+            .on_action(cx.listener(|this, _: &Randomize, window, cx| {
+                this.show_randomizer(None, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleWindowControls, _, cx| {
                 this.set_window_controls(!this.window_controls, cx);
             }))

@@ -239,7 +239,7 @@ fn too_big(name: &Path) -> io::Error {
 }
 
 /// The CRC-32 of the file at `path`, read a piece at a time.
-fn file_crc32(path: &Path) -> io::Result<u32> {
+pub fn file_crc32(path: &Path) -> io::Result<u32> {
     let mut file = File::open(path)?;
     let mut hasher = crc32fast::Hasher::new();
     let mut buffer = vec![0; 1 << 20];

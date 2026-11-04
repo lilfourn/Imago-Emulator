@@ -357,6 +357,8 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Game from the store | `~/Library/Application Support/ds-emulator/Games/Store/<catalog>/<slug>/` | The game's ROM as its catalog has it, unpacked if it came in an archive, see `emu-app/src/store.rs` |
 | The store's catalogs and pictures | `~/Library/Caches/ds-emulator/store/` | Each catalog's JSON as fetched, and screenshots as PNGs named by a checksum of their URL |
 | Game made from a ROM-hack patch | `~/Library/Application Support/ds-emulator/Hacks/`, named after the patch | The patched ROM, see `emu-app/src/romhack.rs` |
+| Randomized game | `~/Library/Application Support/ds-emulator/Hacks/<title> (Random <seed>).<ext>`, with `….<ext>.log` beside it | The ROM FVX wrote and its spoiler log, see `emu-app/src/randomizer.rs` |
+| The randomizer | `~/Library/Application Support/ds-emulator/Randomizer/upr-fvx-<version>/` | FVX's Mac release as it ships, with its own Java, see `emu-app/src/randomizer.rs` |
 | An RPG Maker game's hidden player | `~/Library/Application Support/ds-emulator/RPG Maker/<CRC-32 of the folder's path>/Player.app` | A copy of the game's player app, signed ad hoc; the bridge script beside it, see `emu-mkxp/src/player.rs` |
 | The 3DS core and MoltenVK | `~/Library/Application Support/ds-emulator/3DS/azahar-<version>/`, `…/3DS/moltenvk-<version>/` | Azahar's libretro core and MoltenVK as their releases ship them, with their licences, see `emu-3ds/src/install.rs` |
 | The emulated 3DS's own files | `~/Library/Application Support/ds-emulator/3DS/Azahar/` | Azahar's NAND, SD card (where 3DS games keep their own saves, in `title/<id>/data/` and `extdata/<id>/`) and shader caches; the helper's log is `3DS/helper.log` |

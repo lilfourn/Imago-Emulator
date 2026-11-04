@@ -68,6 +68,16 @@ EOF
   done
 }
 
+# The library's Pokémon games, as files holding only the title or game code
+# in their header, so the randomize window lists them. No Nintendo data.
+seed_pokemon() {
+  local games=/tmp/ds-emulator-layout-games file at code
+  for file at code in 2.gb 308 'POKEMON RED' 3.nds 12 IRAO 5.gbc 308 PM_CRYSTAL; do
+    head -c 512 /dev/zero >$games/$file
+    printf %s $code | dd of=$games/$file bs=1 seek=$at conv=notrunc 2>/dev/null
+  done
+}
+
 # The store's catalogs, as if fetched just now so they are not fetched
 # again: made-up games whose screenshots can't be had, so each shows its
 # system's plate and nothing is downloaded.
@@ -94,9 +104,10 @@ seed_store() {
 # empty; context is the chosen game's menu, opened with ⌘I. Game
 # runs a test ROM with the key guide and the speed readout; menu, cheats and
 # restart are its game menu's pages; settings is the settings window; store
-# and page are the store and a game's page in it.
+# and page are the store and a game's page in it; randomize is the randomize
+# window, listing the library's Pokémon games.
 failed=0
-for state in ${=STATES:-empty library search context settings game menu cheats restart store page}; do
+for state in ${=STATES:-empty library search context settings game menu cheats restart store page randomize}; do
   # The main window is the only one; its title names the game.
   rom=() steps=() window=main title=''
   case $state in
@@ -111,6 +122,7 @@ for state in ${=STATES:-empty library search context settings game menu cheats r
     restart) seed library; rom=($game); steps=(key escape key right key right key return) ;;
     store) seed library; seed_store; steps=(key cmd-shift-g) ;;
     page) seed library; seed_store; steps=(key cmd-shift-g key return) ;;
+    randomize) seed library; seed_pokemon; steps=(key cmd-alt-r); window=randomize title=Randomize ;;
   esac
   [[ -f $tools/desktop.pid ]] && kill $(<$tools/desktop.pid) 2>/dev/null && sleep 0.5
   front=$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true')
@@ -129,9 +141,9 @@ for state in ${=STATES:-empty library search context settings game menu cheats r
   for _ in {1..20}; do [[ -s $out/probe/$window.tsv ]] && break; sleep 0.2; done
   for size in default minimum; do
     if [[ $size == minimum ]]; then
-      # Settings is one size. A game's menu is taller than the smallest
-      # window.
-      [[ $window == settings || $state == context ]] && continue
+      # Settings and Randomize are one size. A game's menu is taller than
+      # the smallest window.
+      [[ $window == settings || $window == randomize || $state == context ]] && continue
       $ax $pid size 256 192 >/dev/null
     fi
     $ax $pid place $title >/dev/null

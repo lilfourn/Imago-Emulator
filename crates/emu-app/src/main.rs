@@ -42,6 +42,8 @@ mod microphone;
 mod mov;
 mod persist;
 mod probe;
+mod randomize_window;
+mod randomizer;
 mod recorder;
 mod refresh;
 mod resample;

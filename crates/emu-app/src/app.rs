@@ -33,6 +33,7 @@ actions!(
         ConnectLinkCable,
         InsertGbaCartridge,
         EditCheats,
+        Randomize,
         RunScript,
         StopScript,
         SaveScreenshot,
@@ -152,6 +153,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                 KeyBinding::new("cmd-o", OpenRom, None),
                 KeyBinding::new("cmd-shift-a", AddToLibrary, None),
                 KeyBinding::new("cmd-shift-g", OpenStore, None),
+                KeyBinding::new("cmd-alt-r", Randomize, None),
                 // The chosen game's menu, as Get Info in the Finder, and
                 // taking it out of the library, as Move to Trash there.
                 KeyBinding::new("cmd-i", GameInfo, Some("Emulator")),
@@ -358,6 +360,8 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                 MenuItem::action("Close Game", CloseGame),
                 MenuItem::action("Connect Second Console…", ConnectLinkCable),
                 MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),
+                MenuItem::separator(),
+                MenuItem::action("Randomize Pokémon Game…", Randomize),
                 MenuItem::separator(),
                 MenuItem::action("Save Screenshot", SaveScreenshot),
                 MenuItem::action("Start / Stop Recording", ToggleRecording),
