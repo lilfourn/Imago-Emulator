@@ -12,7 +12,7 @@
 //! Display, the default, draws it as large as the screens are shown, up
 //! to [`MATCH_DISPLAY_CAP`], and the upscaler covers the rest.
 
-use emu_core::{ScreenSize, System};
+use emu_core::{ScreenSize, System, TextureUpscaling};
 
 use crate::gpu_upscale::Method;
 
@@ -45,6 +45,19 @@ pub enum Look {
     LcdGrid,
     /// Sharp squares with scanlines.
     Scanlines,
+}
+
+impl Look {
+    /// How a core that draws on a GPU of its own (the 3DS) enlarges the
+    /// game's textures for this look: as the screens are upscaled, or not
+    /// at all for sharp pixels and the shading filters.
+    pub fn texture_upscaling(self) -> TextureUpscaling {
+        match self {
+            Self::Upscaled(Method::Smooth) => TextureUpscaling::Smooth,
+            Self::Upscaled(Method::PixelArt) => TextureUpscaling::PixelArt,
+            Self::SharpPixels | Self::LcdGrid | Self::Scanlines => TextureUpscaling::Off,
+        }
+    }
 }
 
 /// Each picture and its name in the settings file.
@@ -297,6 +310,24 @@ mod tests {
             matched_resolution([((540, 720), ScreenSize::new(192, 256))]),
             3
         );
+    }
+
+    #[test]
+    fn the_3ds_textures_follow_the_picture() {
+        assert_eq!(
+            Picture::Auto.look(System::N3ds).texture_upscaling(),
+            TextureUpscaling::Smooth
+        );
+        assert_eq!(
+            Picture::PixelArt.look(System::N3ds).texture_upscaling(),
+            TextureUpscaling::PixelArt
+        );
+        for off in [Picture::SharpPixels, Picture::LcdGrid, Picture::Scanlines] {
+            assert_eq!(
+                off.look(System::N3ds).texture_upscaling(),
+                TextureUpscaling::Off
+            );
+        }
     }
 
     #[test]

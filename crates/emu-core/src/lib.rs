@@ -25,4 +25,4 @@ pub use input::{Button, Buttons, Input, ParseButtonError, TouchPoint};
 pub use media::{Cartridge, DmgColors, LoadError, Media, SystemFile, SystemFileKind};
 pub use rom_patch::RomPatch;
 pub use system::{ParseSystemError, System};
-pub use video::{Frame, ScreenSize, rgb};
+pub use video::{Frame, ScreenSize, TextureUpscaling, rgb};

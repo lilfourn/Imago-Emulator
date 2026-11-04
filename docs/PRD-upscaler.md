@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Phase 1 and most of phase 2 built (2026-11-04); UP-12, UP-14 and phases 3–4 to do |
+| Status | Phase 1 and most of phase 2 built (2026-11-04); UP-12 and phases 3–4 to do |
 | Date | 2026-11-04 |
 | Owner | Luke Fournier |
 | Research | [research/upscaling.md](research/upscaling.md) |
@@ -251,6 +251,16 @@ So:
   inside the GPL core the app downloads, so the app copies no GPL code.
   Off by default until the bake-off has looked at it.
 
+  **Built (2026-11-04), on by default:** upscaling is on until the
+  player turns it off (UQ-1), so the 3DS's textures follow View >
+  Picture: ScaleForce with Smooth (Auto's choice for the 3DS), MMPX with
+  Pixel Art, none with Sharp Pixels or a shading filter. The app sends it
+  with `Core::set_texture_upscaling` and the helper's `TEXTURES` request;
+  the core reads its options again before the next frame. Azahar 2126.2
+  has a second name the menu and the code disagree on: the menu offers
+  `Anime4K`, the code checks `Anime4K Ultrafast`. Only ScaleForce and MMPX
+  are sent.
+
 ### 6.6 RPG Maker
 
 - **P1:** Smooth (MetalFX) on the captured native frame.
@@ -344,7 +354,7 @@ is wanted, **P2** comes later. Phases are in section 9.
 | UP-11 | DS menus and the settings window offer 1–8× (the core's range). ✅ Match Display, 1×, 2×, 3×, 4×, 6×, 8×. | P0 · 2 |
 | UP-12 | The DS's larger 3D is drawn only for frames the window will show. The 3D the game reads and the frame CRCs stay the same. | P1 · 2 |
 | UP-13 | DS 2D beside upscaled 3D gets Pixel Art: per screen when no 3D showed, and per pixel through a 3D mask (6.4). ✅ found from the frame on the GPU, not a core mask (6.4); both screens in one GPU submit, 1.6 ms a frame in Platinum at 4×. | P1 · 2 |
-| UP-14 | 3DS texture filter option (6.5), off by default, with the `xBRZ freescale` value sent for xBRZ. | P1 · 2 |
+| UP-14 | 3DS texture filter option (6.5), off by default, with the `xBRZ freescale` value sent for xBRZ. ✅ on by default instead, following the picture (6.5); ScaleForce or MMPX. Runs in Omega Ruby; not yet compared by eye. | P1 · 2 |
 | UP-15 | 3DS frames through shared memory, and the 3DS cap raised to at least 8× while holding full speed at that scale. | P1 · 3 |
 | UP-16 | Zero-copy drawing through a GPUI BGRA surface, if UP-S5's budget leaves the external display below its full size at 1× speed. | P1 · 3 |
 | UP-17 | DS 2D layers upscaled before composing (melonDS's approach). | P2 · 4 |
@@ -408,8 +418,8 @@ Acceptance tests:
    upload at the largest targets and set UP-S5's budget.
 2. **3D that follows the display.** UP-10 to UP-14: Match Display, the
    DS's 1–8× in menus, larger 3D only for shown frames, DS 2D beside 3D,
-   the 3DS texture filter. ✅ UP-10, UP-11 and UP-13 (2026-11-04). Left:
-   UP-12, UP-14.
+   the 3DS texture filter. ✅ UP-10, UP-11, UP-13 and UP-14 (2026-11-04).
+   Left: UP-12.
 3. **Bigger and cheaper.** UP-15 and UP-16: 3DS shared memory and a
    higher cap; zero-copy drawing if phase 1's measurements call for it.
 4. **Later.** UP-17 to UP-22.

@@ -194,7 +194,9 @@ window. Everything applies after colour correction and turns with the
 screens. With DS 3D drawn larger, Pixel Art works on the 2D only (menus,
 text, sprites, the touch screen): wherever the 3D added detail, the
 larger 3D is drawn smooth instead. On a Mac without Metal, Scale2x and
-Scale3x stand in for Pixel Art. xBRZ is not offered: its code is GPL-3.0,
+Scale3x stand in for Pixel Art. 3DS games smooth their own textures to
+match (Azahar's ScaleForce, or MMPX with Pixel Art), except with Sharp
+Pixels or a shading filter. xBRZ is not offered: its code is GPL-3.0,
 which the project doesn't take (see the
 [legal policy](docs/PRD.md#9-legal-policy)).
 

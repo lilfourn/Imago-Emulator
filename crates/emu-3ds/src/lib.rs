@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use emu_core::{
     Button, Core, CoreInfo, Frame, FrameRate, Input, ScreenSize, StateError, StereoSample, System,
+    TextureUpscaling,
 };
 
 pub use host::run_helper_if_asked;
@@ -346,6 +347,21 @@ impl Core for ThreeDs {
     fn set_render_scale(&mut self, scale: u32) {
         if self.ended.is_none()
             && let Err(why) = self.link.get_mut().set_scale(scale)
+        {
+            self.end(why);
+        }
+    }
+
+    fn set_texture_upscaling(&mut self, upscaling: TextureUpscaling) {
+        // Azahar's filters that work on Vulkan: ScaleForce enlarges
+        // smoothly, MMPX keeps pixel art's edges.
+        let filter = match upscaling {
+            TextureUpscaling::Off => "none",
+            TextureUpscaling::Smooth => "ScaleForce",
+            TextureUpscaling::PixelArt => "MMPX",
+        };
+        if self.ended.is_none()
+            && let Err(why) = self.link.get_mut().set_texture_filter(filter)
         {
             self.end(why);
         }

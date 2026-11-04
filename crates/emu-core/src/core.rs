@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{Debugger, Frame, Input, RomPatch, ScreenSize, StereoSample, System};
+use crate::{Debugger, Frame, Input, RomPatch, ScreenSize, StereoSample, System, TextureUpscaling};
 
 /// One emulated system with a game loaded.
 ///
@@ -54,6 +54,14 @@ pub trait Core: Send {
     /// [`Core::reset`]. Cores without 3D ignore it.
     fn set_render_scale(&mut self, scale: u32) {
         let _ = scale;
+    }
+
+    /// Enlarges the game's own textures as `upscaling` says, for cores
+    /// whose renderer can (the 3DS's), from the next frame. A display
+    /// setting, as [`Core::set_render_scale`] is: emulation, audio and
+    /// save states are the same either way. Cores without one ignore it.
+    fn set_texture_upscaling(&mut self, upscaling: TextureUpscaling) {
+        let _ = upscaling;
     }
 
     /// Power-cycles the system. The loaded game and its backup memory stay.

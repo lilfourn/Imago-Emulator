@@ -684,6 +684,8 @@ impl EmulatorView {
             window.scale_factor(),
         );
         emulator.send(Command::SetRenderScale(render_scale));
+        let look = self.picture.look(info.system);
+        emulator.send(Command::SetTextureUpscaling(look.texture_upscaling()));
         // Pick up where the player left off, unless a battery save has
         // changed since: the emulation thread checks.
         emulator.send(Command::LoadCheckpoint(CHECKPOINT));
@@ -2340,6 +2342,12 @@ impl EmulatorView {
     /// launch.
     fn set_picture(&mut self, picture: Picture, cx: &mut Context<Self>) {
         self.picture = picture;
+        if let Some(session) = &self.session {
+            let look = picture.look(session.info.system);
+            session
+                .emulator
+                .send(Command::SetTextureUpscaling(look.texture_upscaling()));
+        }
         self.start_upscaler(cx);
         self.rebuild_images();
         self.show_notice(format!("Picture: {}", picture.label()), cx);

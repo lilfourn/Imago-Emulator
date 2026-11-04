@@ -352,6 +352,11 @@ frame's screens go to the GPU in one command buffer and one wait, which
 is most of an upscale's time: in Pokémon Platinum at 4× 3D, both screens'
 images took 1.6 ms a frame in the app.
 
+The 3DS also enlarges the game's own textures as the picture says
+(`Core::set_texture_upscaling`, sent on to the helper as `TEXTURES`):
+Azahar's ScaleForce for Smooth, MMPX for Pixel Art, none for Sharp
+Pixels and the shading filters.
+
 Match Display, the default 3D resolution (`picture::matched_resolution`),
 draws DS and 3DS 3D about as large as the screens are shown: for each
 screen, its device pixels over its console pixels, rounded up unless a
