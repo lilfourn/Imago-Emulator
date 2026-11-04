@@ -492,6 +492,14 @@ debugger or memory viewer, and `.3dsx` homebrew has no save states
 extra data (extdata), live on the emulated SD card, in `3DS/Azahar`, and
 the app won't pick up where you left off once they've changed since.
 
+The first time a game draws something new, it waits while the shaders for
+it compile; after that, Azahar and macOS both keep them. To keep those
+first waits short, the helper shades vertices on the CPU and lets Azahar's
+threads compile at once (decision 0011): Pokémon Omega Ruby's longest
+freeze in its opening went from 2 s to a quarter of a second. To shade
+vertices on the GPU again, start the app with
+`DS_EMULATOR_3DS_OPTIONS=citra_use_hw_shader=enabled`.
+
 ## ROM hacks
 
 A ROM hack comes as a patch for the game it was made from: `.ips`, `.ups`

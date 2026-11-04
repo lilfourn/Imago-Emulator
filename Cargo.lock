@@ -1651,6 +1651,7 @@ dependencies = [
  "gpui",
  "image",
  "jpeg-encoder",
+ "libc",
  "lz4_flex",
  "memchr",
  "objc2",

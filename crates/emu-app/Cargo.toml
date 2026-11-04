@@ -52,6 +52,9 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2-zli
 # zoom buttons, the standard About panel, the Dock icon and the display's
 # refresh rate. The versions GPUI already uses.
 [target.'cfg(target_os = "macos")'.dependencies]
+# The emulation thread's quality of service (qos.rs); already used through
+# GPUI and emu-3ds.
+libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",

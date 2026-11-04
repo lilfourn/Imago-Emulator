@@ -60,9 +60,13 @@ fn play(game: &Path, frames: u64, out: Option<&Path>) -> Result<(), String> {
         core.set_render_scale(scale);
     }
 
+    // DS_EMULATOR_3DS_PACE=1 runs frames at the 3DS's own rate, as the app
+    // does, rather than as fast as they go.
+    let paced = std::env::var_os("DS_EMULATOR_3DS_PACE").is_some();
+    let mut deadline = Instant::now();
     let mut audio = Vec::new();
     let mut sound = 0usize;
-    let mut slowest = Duration::ZERO;
+    let mut times = Vec::new();
     let begun = Instant::now();
     for frame in 0..frames {
         // Tap A for 6 frames in every 90 from frame 300, to pass title screens.
@@ -96,11 +100,18 @@ fn play(game: &Path, frames: u64, out: Option<&Path>) -> Result<(), String> {
         audio.clear();
         let one = Instant::now();
         core.run_frame(&[input], &mut audio);
-        let took = one.elapsed();
-        if frame > 60 {
-            slowest = slowest.max(took);
-        }
+        times.push((frame, one.elapsed()));
         sound += audio.len();
+        if paced {
+            deadline += emu_3ds::FRAME_RATE.frame_duration();
+            deadline = deadline.max(Instant::now() - Duration::from_millis(100));
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                if left < Duration::from_micros(200) {
+                    break;
+                }
+                std::thread::sleep(left * 3 / 4);
+            }
+        }
         if let Some(why) = core.ended() {
             return Err(format!("the game ended at frame {frame}: {why}"));
         }
@@ -122,12 +133,12 @@ fn play(game: &Path, frames: u64, out: Option<&Path>) -> Result<(), String> {
     }
     let total = begun.elapsed().as_secs_f64();
     println!(
-        "{frames} frames in {total:.1} s: {:.1} fps ({:.0}% of 59.83), slowest {:.1} ms, sound {:.2} s",
+        "{frames} frames in {total:.1} s: {:.1} fps ({:.0}% of 59.83), sound {:.2} s",
         frames as f64 / total,
         frames as f64 / total / 59.83 * 100.0,
-        slowest.as_secs_f64() * 1000.0,
         sound as f64 / f64::from(emu_3ds::SAMPLE_RATE),
     );
+    report_times(&times);
     let sizes: Vec<String> = core
         .screens()
         .iter()
@@ -161,6 +172,39 @@ fn play(game: &Path, frames: u64, out: Option<&Path>) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&data);
     }
     Ok(())
+}
+
+/// Prints how long frames took after the first second: their spread, how
+/// many took longer than a frame lasts, and the slowest.
+fn report_times(times: &[(u64, Duration)]) {
+    let ms = |time: Duration| time.as_secs_f64() * 1000.0;
+    let mut sorted: Vec<Duration> = times.iter().skip(60).map(|(_, time)| *time).collect();
+    if sorted.is_empty() {
+        return;
+    }
+    sorted.sort();
+    let at = |share: f64| ms(sorted[((sorted.len() - 1) as f64 * share) as usize]);
+    let frame = emu_3ds::FRAME_RATE.frame_duration();
+    let over = sorted.iter().filter(|time| **time > frame).count();
+    let stalled: Duration = sorted.iter().map(|time| time.saturating_sub(frame)).sum();
+    println!(
+        "frame ms: median {:.2}, p90 {:.2}, p99 {:.2}, max {:.2}; {over} of {} over a frame's {:.1} ms, by {:.0} ms in all",
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        at(1.0),
+        sorted.len(),
+        ms(frame),
+        ms(stalled),
+    );
+    let mut slowest: Vec<&(u64, Duration)> = times.iter().skip(60).collect();
+    slowest.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    let list: Vec<String> = slowest
+        .iter()
+        .take(12)
+        .map(|(frame, time)| format!("{frame}: {:.1}", ms(*time)))
+        .collect();
+    println!("slowest frames (frame: ms): {}", list.join(", "));
 }
 
 fn write_ppm(path: &Path, frame: &Frame) -> Result<(), String> {
