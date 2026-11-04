@@ -491,6 +491,8 @@ debugger or memory viewer, and `.3dsx` homebrew has no save states
 (Azahar's core can't load them for a game without a title ID). A game's own saves, its save data and any
 extra data (extdata), live on the emulated SD card, in `3DS/Azahar`, and
 the app won't pick up where you left off once they've changed since.
+Restart > Start Over sets them aside, renaming their folders to end in
+`.bak`, so the game begins anew and the old save is kept.
 
 The first time a game draws something new, it waits while the shaders for
 it compile; after that, Azahar and macOS both keep them. To keep those

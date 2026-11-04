@@ -121,18 +121,30 @@ impl SaveData {
     /// Every file in the game's save data and extdata now, sorted.
     #[must_use]
     pub fn files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = self
+            .folders()
+            .iter()
+            .flat_map(|folder| files_under(folder))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// The game's save data and extdata folders there are now: setting
+    /// these aside starts the game from the very beginning, as a console
+    /// does once its save data is deleted.
+    #[must_use]
+    pub fn folders(&self) -> Vec<PathBuf> {
         if self.folders.is_empty() {
             return Vec::new();
         }
         // The two IDs are the console's and its SD card's; Azahar makes
         // one of each, but any will do.
-        let mut files: Vec<PathBuf> = subfolders(&self.sd)
+        subfolders(&self.sd)
             .flat_map(|id0| subfolders(&id0).collect::<Vec<_>>())
             .flat_map(|ids| self.folders.iter().map(move |folder| ids.join(folder)))
-            .flat_map(|folder| files_under(&folder))
-            .collect();
-        files.sort();
-        files
+            .filter(|folder| folder.is_dir())
+            .collect()
     }
 }
 
@@ -455,6 +467,14 @@ mod tests {
             std::fs::write(file, b"save").unwrap();
         }
         assert_eq!(SaveData::of(&game, &data).files(), [extdata, save]);
+        assert_eq!(
+            SaveData::of(&game, &data).folders(),
+            [
+                ids.join("title/00040000/00123400/data"),
+                ids.join("extdata/00000000/000123AB"),
+            ],
+            "the game's own folders, not another's"
+        );
 
         let encrypted = root.join("encrypted.cxi");
         std::fs::write(&encrypted, header::tests::ncch(false, &icon)).unwrap();
