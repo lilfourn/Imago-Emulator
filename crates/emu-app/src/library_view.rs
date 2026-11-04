@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use emu_cores::rpg_maker;
 use gpui::{
@@ -45,7 +45,7 @@ use crate::randomizer;
 use crate::rom_info::{self, Platform};
 use crate::romhack::{self, MakeError};
 use crate::slots::STATE_SLOTS;
-use crate::store_view::{StoreEvent, StoreView, platform_name};
+use crate::store_view::{StoreEvent, StoreView, platform_name, pulse};
 use crate::ui::{self, Section};
 
 use crate::theme::{
@@ -115,6 +115,16 @@ const MENU_INSET: f32 = (ACTION_HEIGHT - icons::SIZE) / 2.0;
 /// Height of a line of the game's facts, and side of its picture.
 const FACT_HEIGHT: f32 = 22.0;
 const THUMBNAIL: f32 = 44.0;
+/// How long a game is being added before its tile shows, so one added at
+/// once does not flash up; and how often the tiles are drawn anew after,
+/// for their progress.
+const ADDING_SHOWS_AFTER: Duration = Duration::from_millis(250);
+const ADDING_REDRAW: Duration = Duration::from_millis(100);
+/// Height of the progress bar on the tile of a game being added, and the
+/// share of it the bar's moving piece fills while how far it has got is
+/// not known.
+const PROGRESS_BAR: f32 = 4.0;
+const PROGRESS_PIECE: f32 = 0.3;
 
 /// What the library asks of the main window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +183,77 @@ struct Facts {
     randomizable: bool,
 }
 
+/// A game being added: unpacked from an archive, made from a patch or
+/// read from its ROM. It shows as a tile before the games, with how far it
+/// has got, until it is in the library.
+struct Adding {
+    /// What it is added from: an archive, a patch, a ROM or an RPG Maker
+    /// game's folder.
+    path: PathBuf,
+    /// What its tile is titled: the name of that file, or folder.
+    name: String,
+    progress: Arc<archive::Progress>,
+    since: Instant,
+}
+
+impl Adding {
+    fn new(path: &Path, progress: Arc<archive::Progress>) -> Self {
+        let name = if path.is_dir() {
+            path.file_name()
+        } else {
+            path.file_stem()
+        };
+        Self {
+            path: path.to_owned(),
+            name: name
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+            progress,
+            since: Instant::now(),
+        }
+    }
+
+    /// How far it has got, from 0 to 1, while that is known: while its
+    /// archive unpacks.
+    fn fraction(&self) -> Option<f32> {
+        let unpacking = archive::is_archive(&self.path);
+        unpacking
+            .then(|| self.progress.fraction())
+            .flatten()
+            .filter(|&fraction| fraction < 1.0)
+    }
+
+    /// What is being done: `"Unpacking · 42%"`, `"Patching…"`, `"Adding…"`.
+    fn stage(&self) -> String {
+        if let Some(fraction) = self.fraction() {
+            // Rounded down, so it never says 100% before it is done.
+            let percent = (fraction * 100.0) as u32;
+            format!("Unpacking · {percent}%")
+        } else if archive::is_archive(&self.path) && self.progress.fraction().is_none() {
+            "Unpacking…".to_owned()
+        } else if romhack::is_patch(&self.path) {
+            "Patching…".to_owned()
+        } else {
+            "Adding…".to_owned()
+        }
+    }
+
+    /// What is being done to it, with `more` games being added after it:
+    /// `"Unpacking Game · 42% · 1 more"`, `"Adding Game…"`.
+    fn status(&self, more: usize) -> String {
+        let (stage, name) = (self.stage(), &self.name);
+        let status = match stage.strip_prefix("Unpacking") {
+            Some(rest) => format!("Unpacking {name}{rest}"),
+            None => format!("{} {name}…", stage.trim_end_matches('…')),
+        };
+        match more {
+            0 => status,
+            more => format!("{status} · {more} more"),
+        }
+    }
+}
+
 /// The library's view.
 pub struct LibraryView {
     library: Library,
@@ -219,6 +300,15 @@ pub struct LibraryView {
     /// Where the chosen game's tile was last drawn, if it was: where ⌘I
     /// opens its menu.
     chosen_tile: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The games being added, oldest first, by a key for
+    /// [`Self::added`].
+    adding: Vec<(usize, Adding)>,
+    next_adding: usize,
+    /// Draws the library anew while games are being added.
+    adding_redraws: Option<Task<()>>,
+    /// How many tiles of games being added came before the games, as last
+    /// drawn.
+    adding_shown: usize,
 }
 
 impl EventEmitter<LibraryEvent> for LibraryView {}
@@ -248,6 +338,10 @@ impl LibraryView {
             menu: None,
             removed: None,
             chosen_tile: Rc::default(),
+            adding: Vec::new(),
+            next_adding: 0,
+            adding_redraws: None,
+            adding_shown: 0,
         };
         // Box art and icons, in the cache, are read at once, so the games
         // don't open on plates that their pictures replace a moment later.
@@ -268,41 +362,157 @@ impl LibraryView {
     /// any archives among them once unpacked, and those that any ROM-hack
     /// patches among them make from games the library has. Games already
     /// in the library are left as they are, so playing one does not read
-    /// its ROM again.
+    /// its ROM again. Each shows as a tile while it is added.
     pub fn add(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.add_paths(paths, false, cx);
+    }
+
+    /// Adds the games at `paths` that the user chose, as [`Self::add`]
+    /// does, then chooses the first and says it was added.
+    pub fn add_chosen(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.add_paths(paths, true, cx);
+    }
+
+    fn add_paths(&mut self, paths: Vec<PathBuf>, chosen: bool, cx: &mut Context<Self>) {
         let mut seen = HashSet::new();
+        // A file still being added is not added again, which would unpack
+        // two copies into one file at once.
         let paths: Vec<PathBuf> = paths
             .iter()
             .map(|path| library::absolute(path))
-            .filter(|path| !self.library.contains(path) && seen.insert(path.clone()))
+            .filter(|path| {
+                !self.library.contains(path)
+                    && !self.adding.iter().any(|(_, adding)| adding.path == *path)
+                    && seen.insert(path.clone())
+            })
             .collect();
-        if paths.is_empty() {
-            return;
+        for path in paths {
+            // Only what the user chose shows as being added: a game played
+            // or made for the first time is read at once, and the library
+            // stays where it was.
+            let (key, progress) = if chosen {
+                let (key, progress) = self.start_adding(&path, cx);
+                (Some(key), progress)
+            } else {
+                (None, Arc::default())
+            };
+            let cache = self.cache.clone();
+            let known = self.checksums();
+            let read = cx
+                .background_executor()
+                .spawn(async move { read_games(&path, cache.as_deref(), &known, &progress) });
+            cx.spawn(async move |this, cx| {
+                let games = read.await;
+                this.update(cx, |this, cx| {
+                    if let Some(key) = key {
+                        this.added(key, cx);
+                    }
+                    let mut errors = Vec::new();
+                    let mut titles = Vec::new();
+                    for game in games {
+                        match game {
+                            Ok(game) => {
+                                if titles.is_empty() && chosen {
+                                    this.selected = Some(game.path.clone());
+                                }
+                                titles.push(game.title.clone());
+                                this.library.add(game);
+                            }
+                            Err(error) => errors.push(error),
+                        }
+                    }
+                    if chosen {
+                        match titles.as_slice() {
+                            [] => {}
+                            [title] => cx.emit(LibraryEvent::Notice(format!(
+                                "Added {title} to the library"
+                            ))),
+                            titles => cx.emit(LibraryEvent::Notice(format!(
+                                "Added {} games to the library",
+                                titles.len()
+                            ))),
+                        }
+                        // Where the game now is, once drawn: the grid's rows
+                        // come after what leads it.
+                        if !titles.is_empty() {
+                            this.scroll_to_chosen();
+                        }
+                    }
+                    // After, so a game that could not be added is told.
+                    for error in errors {
+                        cx.emit(LibraryEvent::Notice(error));
+                    }
+                    this.save(cx);
+                    this.refresh(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         }
-        let cache = self.cache.clone();
-        let known = self.checksums();
-        let read = cx.background_executor().spawn(async move {
-            paths
-                .iter()
-                .flat_map(|path| read_games(path, cache.as_deref(), &known))
-                .collect::<Vec<_>>()
-        });
-        cx.spawn(async move |this, cx| {
-            let games = read.await;
-            this.update(cx, |this, cx| {
-                for game in games {
-                    match game {
-                        Ok(game) => this.library.add(game),
-                        Err(error) => cx.emit(LibraryEvent::Notice(error)),
+    }
+
+    /// Shows the game at `path` as being added, until [`Self::added`] is
+    /// called with the key returned; and the progress its unpacking is to
+    /// tell, for its tile to show.
+    pub fn start_adding(
+        &mut self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> (usize, Arc<archive::Progress>) {
+        let key = self.next_adding;
+        self.next_adding += 1;
+        let progress = Arc::<archive::Progress>::default();
+        self.adding
+            .push((key, Adding::new(path, Arc::clone(&progress))));
+        if self.adding_redraws.is_none() {
+            self.adding_redraws = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(ADDING_REDRAW).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
                     }
                 }
-                this.save(cx);
-                this.refresh(cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            }));
+        }
+        // Up to the grid's first row, where its tile shows.
+        self.scroll.scroll_to_item(self.lead);
+        (key, progress)
+    }
+
+    /// Stops showing the game added under `key` as being added.
+    pub fn added(&mut self, key: usize, cx: &mut Context<Self>) {
+        self.adding.retain(|(adding, _)| *adding != key);
+        if self.adding.is_empty() {
+            self.adding_redraws = None;
+        }
+        cx.notify();
+    }
+
+    /// What is being added, for the main window to say over a game:
+    /// `"Unpacking Game · 42%"`. `None` until it has been a moment.
+    pub fn adding_status(&self) -> Option<String> {
+        let mut shown = self.shown_adding();
+        let (_, first) = shown.next()?;
+        Some(first.status(shown.count()))
+    }
+
+    /// The games being added that have been for long enough to show, by
+    /// their keys.
+    fn shown_adding(&self) -> impl Iterator<Item = (usize, &Adding)> {
+        let now = Instant::now();
+        self.adding
+            .iter()
+            .filter(move |(_, adding)| now.duration_since(adding.since) >= ADDING_SHOWS_AFTER)
+            .map(|(key, adding)| (*key, adding))
+    }
+
+    /// Scrolls the chosen game into view, by its row.
+    fn scroll_to_chosen(&self) {
+        let shown = self.shown();
+        let at = self.chosen_at(&shown) + self.adding_shown;
+        self.scroll
+            .scroll_to_item(self.lead + at / self.columns.max(1));
     }
 
     /// Each game's ROM checksum and path, for finding the game a patch is
@@ -427,8 +637,7 @@ impl LibraryView {
                 let at = self.chosen_at(&shown);
                 let at = moved(at, shown.len(), self.columns, key);
                 self.selected = shown.get(at).map(|game| game.path.clone());
-                self.scroll
-                    .scroll_to_item(self.lead + at / self.columns.max(1));
+                self.scroll_to_chosen();
             }
             // Tab and ⇧Tab go through the systems, as in the store.
             "tab" => {
@@ -1095,15 +1304,22 @@ impl LibraryView {
     }
 
     /// What the grid shows, over it, and how many.
-    fn section_title(&self, count: usize) -> AnyElement {
+    /// The grid's title, with how many games it shows and how many are
+    /// being added: `12 games · 1 adding`.
+    fn section_title(&self, count: usize, adding: usize) -> AnyElement {
         let title = if self.query.is_empty() {
             self.platform.map_or("All Games", platform_name)
         } else {
             "Results"
         };
-        let count = match count {
+        let games = match count {
             1 => "1 game".to_owned(),
             count => format!("{count} games"),
+        };
+        let count = match (count, adding) {
+            (_, 0) => games,
+            (0, adding) => format!("{adding} adding"),
+            (_, adding) => format!("{games} · {adding} adding"),
         };
         div()
             .mx(px(INSET))
@@ -1126,6 +1342,128 @@ impl LibraryView {
                     .text_size(px(12.0))
                     .text_color(rgb(DIM))
                     .child(count),
+            )
+            .into_any_element()
+    }
+
+    /// The tile of a game being added, the one added under `key`: in
+    /// place of its picture, a plate with an arrow into a tray, breathing,
+    /// and a bar of how far it has got, or a piece of one going to and fro
+    /// while that is not known; under it, its file's name and what is
+    /// being done.
+    fn adding_tile(
+        &self,
+        key: usize,
+        adding: &Adding,
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let inner = width - 2.0 * TILE_PADDING;
+        let track = inner - 2.0 * PLATE_PADDING;
+        let bar = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .rounded_full()
+            .bg(rgb(TEXT));
+        let bar = match adding.fraction() {
+            Some(fraction) => bar
+                .left_0()
+                .w(px((track * fraction).max(PROGRESS_BAR)))
+                .into_any_element(),
+            None => {
+                let piece = track * PROGRESS_PIECE;
+                bar.w(px(piece))
+                    .with_animation(
+                        ("adding.bar", key),
+                        Animation::new(Duration::from_millis(1600)).repeat(),
+                        move |bar, delta| {
+                            let along = pulse(delta);
+                            let eased = along * along * (3.0 - 2.0 * along);
+                            bar.left(px((track - piece) * eased))
+                        },
+                    )
+                    .into_any_element()
+            }
+        };
+        let plate = div()
+            .relative()
+            .size_full()
+            .rounded(px(ART_RADIUS))
+            .overflow_hidden()
+            .bg(linear_gradient(
+                135.0,
+                linear_color_stop(rgb(PANEL), 0.0),
+                linear_color_stop(rgb(TOP), 1.0),
+            ))
+            .border_1()
+            .border_color(rgba(with_alpha(TEXT, 0x14)))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icons::icon(icons::DOWNLOAD, 24.0, DIM).with_animation(
+                        ("adding.icon", key),
+                        Animation::new(Duration::from_millis(1600)).repeat(),
+                        |icon, delta| icon.opacity(0.45 + 0.55 * pulse(delta)),
+                    )),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(PLATE_PADDING))
+                    .right(px(PLATE_PADDING))
+                    .bottom(px(PLATE_PADDING))
+                    .h(px(PROGRESS_BAR))
+                    .rounded_full()
+                    .bg(rgba(with_alpha(TEXT, 0x1F)))
+                    .child(bar),
+            );
+        let line =
+            |text: &str, size: f32, weight| ui::fit(text, inner - 1.0, size, weight, window, cx);
+        div()
+            .w(px(width))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(TILE_PADDING))
+            .children(probe::part(format!("adding:{key}")))
+            .child(div().w_full().h(px(inner)).child(plate))
+            .child(
+                div().w_full().flex().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(TITLE_LINE))
+                                .text_size(px(13.0))
+                                .line_height(px(TITLE_LINE))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgb(TEXT))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(line(&adding.name, 13.0, gpui::FontWeight::MEDIUM)),
+                        )
+                        .child(
+                            div()
+                                .h(px(DETAIL_LINE))
+                                .text_size(px(11.0))
+                                .line_height(px(DETAIL_LINE))
+                                .text_color(rgb(DIM))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(line(&adding.stage(), 11.0, gpui::FontWeight::NORMAL))
+                                .children(probe::part(format!("adding.stage:{key}"))),
+                        ),
+                ),
             )
             .into_any_element()
     }
@@ -1679,6 +2017,18 @@ impl gpui::Render for LibraryView {
         self.selected = selected;
         self.chosen_tile.set(None);
 
+        // Games being added lead the grid, but not search results.
+        let adding: Vec<AnyElement> = if self.query.is_empty() {
+            let shown: Vec<(usize, &Adding)> = self.shown_adding().collect();
+            shown
+                .into_iter()
+                .map(|(key, adding)| self.adding_tile(key, adding, tile, window, cx))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.adding_shown = adding.len();
+
         let root = div()
             .relative()
             .size_full()
@@ -1691,7 +2041,7 @@ impl gpui::Render for LibraryView {
             ))
             .child(self.header(window, cx))
             .child(self.search_field(cx));
-        if games.is_empty() {
+        if games.is_empty() && adding.is_empty() {
             return root.child(self.empty(window, cx));
         }
         // The game last played leads, unless the user is looking for
@@ -1703,30 +2053,29 @@ impl gpui::Render for LibraryView {
             .map(|game| self.hero(&game, width - 2.0 * INSET, window, cx));
         let mut lead: Vec<AnyElement> = hero.into_iter().collect();
         lead.extend(self.filters(cx));
-        lead.push(self.section_title(games.len()));
+        lead.push(self.section_title(games.len(), adding.len()));
         self.lead = lead.len();
-        let rows: Vec<AnyElement> = games
-            .chunks(columns)
-            .enumerate()
-            .map(|(row, chunk)| {
-                let tiles: Vec<AnyElement> = chunk
-                    .iter()
-                    .enumerate()
-                    .map(|(column, game)| {
-                        let index = row * columns + column;
-                        self.tile(index, game, tile, index == at, window, cx)
-                    })
-                    .collect();
+        let mut tiles = adding;
+        tiles.extend(
+            games
+                .iter()
+                .enumerate()
+                .map(|(index, game)| self.tile(index, game, tile, index == at, window, cx)),
+        );
+        let mut tiles = tiles.into_iter().peekable();
+        let mut rows: Vec<AnyElement> = Vec::new();
+        while tiles.peek().is_some() {
+            rows.push(
                 div()
                     .flex_none()
                     .flex()
                     .gap(px(GAP))
                     .px(px(INSET))
                     .pb(px(GAP))
-                    .children(tiles)
-                    .into_any_element()
-            })
-            .collect();
+                    .children(tiles.by_ref().take(columns))
+                    .into_any_element(),
+            );
+        }
         let menu = self.menu_layer(window, cx);
         root.child(
             div()
@@ -1920,14 +2269,16 @@ fn ago(then: SystemTime, now: SystemTime) -> String {
 /// The games at `path`: the ROM or RPG Maker game there, or each ROM in it
 /// if it is an archive, unpacked into the games folder; and the game each
 /// ROM-hack patch there makes from the game it names among `known`
-/// (checksum and path) or the archive's ROMs.
+/// (checksum and path) or the archive's ROMs. Tells `progress` how far an
+/// archive's unpacking has got.
 fn read_games(
     path: &Path,
     cache: Option<&Path>,
     known: &[(u32, PathBuf)],
+    progress: &archive::Progress,
 ) -> Vec<Result<Game, String>> {
     let files = if archive::is_archive(path) {
-        match archive::unpack(path) {
+        match archive::unpack(path, progress) {
             Ok(files) => files,
             Err(error) => return vec![Err(error)],
         }
@@ -2429,5 +2780,34 @@ mod tests {
         assert!(facts.found);
         assert_eq!(facts.size, 1000);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_game_being_added_says_how_far_it_has_got() {
+        let adding = |path: &str, progress: archive::Progress| {
+            Adding::new(Path::new(path), Arc::new(progress))
+        };
+        let archive = "/Downloads/Omega Ruby (USA).7z";
+        // Before the archive's size is known, and while it unpacks: the
+        // share is rounded down, so it never reads 100% too soon.
+        let listing = adding(archive, archive::Progress::default());
+        assert_eq!(listing.stage(), "Unpacking…");
+        assert_eq!(listing.fraction(), None);
+        let unpacking = adding(archive, archive::Progress::at(999, 1000));
+        assert_eq!(unpacking.name, "Omega Ruby (USA)");
+        assert_eq!(unpacking.stage(), "Unpacking · 99%");
+        assert_eq!(unpacking.fraction(), Some(0.999));
+        assert_eq!(unpacking.status(0), "Unpacking Omega Ruby (USA) · 99%");
+        assert_eq!(listing.status(2), "Unpacking Omega Ruby (USA)… · 2 more");
+        // Unpacked, the game is read into the library.
+        let reading = adding(archive, archive::Progress::at(1000, 1000));
+        assert_eq!(reading.stage(), "Adding…");
+        assert_eq!(reading.fraction(), None, "the bar goes to and fro");
+        assert_eq!(reading.status(0), "Adding Omega Ruby (USA)…");
+
+        let patch = adding("/Downloads/Hack.bps", archive::Progress::default());
+        assert_eq!(patch.status(0), "Patching Hack…");
+        let rom = adding("/Downloads/Tetris.gb", archive::Progress::default());
+        assert_eq!(rom.status(0), "Adding Tetris…");
     }
 }
