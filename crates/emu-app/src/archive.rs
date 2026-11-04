@@ -457,8 +457,12 @@ mod tests {
             ],
         );
         let unpacked = unpack_into(&zip, &games, &patches).expect("unpacks");
-        assert_eq!(unpacked, [games.join("Homebrew.3dsx")]);
+        assert_eq!(
+            unpacked,
+            [games.join("Homebrew.3dsx"), games.join("Game.cia")]
+        );
         assert_eq!(fs::read(&unpacked[0]).expect("unpacked"), b"3DSX");
+        assert_eq!(size_cap(Path::new("Game.cia")), MAX_3DS_GAME);
         let seven = seven_zip_file(&dir, "Cartridge.7z", &[("Cartridge.3ds", b"NCSD")]);
         let unpacked = unpack_into(&seven, &games, &patches).expect("unpacks");
         assert_eq!(unpacked, [games.join("Cartridge.3ds")]);

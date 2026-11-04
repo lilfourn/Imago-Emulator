@@ -12,7 +12,12 @@
 //! clock and the core's threads are its own. States are the whole
 //! machine, so they save and load anywhere, but take a few hundred
 //! milliseconds, so there is no rewind.
+//!
+//! The core cannot install a title, so an installable title (`.cia`)
+//! plays as the executable it holds, which [`cia::extract`] writes out
+//! first.
 
+pub mod cia;
 pub mod header;
 pub mod install;
 
@@ -35,11 +40,12 @@ pub use host::run_helper_if_asked;
 /// The argument that starts the app's executable as the helper.
 pub const HELPER_FLAG: &str = "--3ds-helper";
 
-/// The file extensions of games the core opens: cartridge images (`.3ds`,
-/// `.cci`), executables (`.cxi`), homebrew (`.3dsx`) and Azahar's
-/// compressed forms of each. Installable titles (`.cia`) are not among
-/// them; the core cannot install one.
-pub const EXTENSIONS: [&str; 7] = ["3ds", "cci", "cxi", "3dsx", "zcci", "zcxi", "z3dsx"];
+/// The file extensions of 3DS games: cartridge images (`.3ds`, `.cci`),
+/// executables (`.cxi`), homebrew (`.3dsx`) and Azahar's compressed forms
+/// of each, which the core opens; and installable titles (`.cia`), which
+/// the core cannot install, so they play as the executable they hold
+/// ([`cia::extract`]).
+pub const EXTENSIONS: [&str; 8] = ["3ds", "cci", "cxi", "3dsx", "zcci", "zcxi", "z3dsx", "cia"];
 
 /// Whether `path` names a 3DS game, by its extension.
 #[must_use]
@@ -61,22 +67,25 @@ pub fn data_dir() -> Option<PathBuf> {
     Some(dirs::data_dir()?.join("ds-emulator").join("3DS"))
 }
 
-/// Where the core keeps one game's own saves: the save data Azahar gives
-/// the title on the emulated SD card,
+/// Where the core keeps one game's own saves on the emulated SD card: the
+/// save data Azahar gives the title,
 /// `Azahar/sdmc/Nintendo 3DS/<ID0>/<ID1>/title/<high>/<low>/data/` (beside
-/// `content/`, an installed title's own files, which are not saves). The
-/// app
-/// fingerprints these files beside a checkpoint, so that a checkpoint is
-/// never picked up over a save the game made since (see
-/// `docs/decisions/0011-3ds-games.md`). Homebrew without a title ID keeps
-/// its files where it likes, so it has none. Saves in extra data (extdata),
-/// which some games keep beside their save data, are not counted.
+/// `content/`, an installed title's own files, which are not saves), and
+/// the extra data (extdata) some games keep as well, in
+/// `…/<ID0>/<ID1>/extdata/<HIGH>/<LOW>/`, named by the extdata ID in the
+/// game's extended header. Azahar names a title's folders in lowercase
+/// hex and an extdata's in capitals. The app fingerprints these files
+/// beside a checkpoint, so that a checkpoint is never picked up over a
+/// save the game made since (see `docs/decisions/0011-3ds-games.md`).
+/// Homebrew without a title ID keeps its files where it likes, so it has
+/// none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SaveData {
     /// `Azahar/sdmc/Nintendo 3DS` in the data folder.
     sd: PathBuf,
-    /// The title ID's high and low halves, as Azahar names their folders.
-    title: Option<(String, String)>,
+    /// The game's folders in each `<ID0>/<ID1>` folder there: its save
+    /// data's, then its extdata's if it has any.
+    folders: Vec<PathBuf>,
 }
 
 impl SaveData {
@@ -84,37 +93,50 @@ impl SaveData {
     /// `data` ([`data_dir`]).
     #[must_use]
     pub fn of(game: &Path, data: &Path) -> Self {
-        let title = header::read(game)
-            .ok()
+        let header = header::read(game).ok();
+        let save_data = header
+            .as_ref()
             .and_then(|header| header.title_id)
             .map(|id| {
-                (
-                    format!("{:08x}", id >> 32),
-                    format!("{:08x}", id & 0xFFFF_FFFF),
-                )
+                let (high, low) = halves(id);
+                Path::new("title")
+                    .join(format!("{high:08x}"))
+                    .join(format!("{low:08x}"))
+                    .join("data")
             });
+        let extdata = header.and_then(|header| header.extdata_id).map(|id| {
+            let (high, low) = halves(id);
+            Path::new("extdata")
+                .join(format!("{high:08X}"))
+                .join(format!("{low:08X}"))
+        });
         Self {
             sd: data.join("Azahar").join("sdmc").join("Nintendo 3DS"),
-            title,
+            folders: save_data.into_iter().chain(extdata).collect(),
         }
     }
 
-    /// Every file in the game's save data now, sorted.
+    /// Every file in the game's save data and extdata now, sorted.
     #[must_use]
     pub fn files(&self) -> Vec<PathBuf> {
-        let Some((high, low)) = &self.title else {
+        if self.folders.is_empty() {
             return Vec::new();
-        };
+        }
         // The two IDs are the console's and its SD card's; Azahar makes
         // one of each, but any will do.
         let mut files: Vec<PathBuf> = subfolders(&self.sd)
             .flat_map(|id0| subfolders(&id0).collect::<Vec<_>>())
-            .map(|id1| id1.join("title").join(high).join(low).join("data"))
+            .flat_map(|ids| self.folders.iter().map(move |folder| ids.join(folder)))
             .flat_map(|folder| files_under(&folder))
             .collect();
         files.sort();
         files
     }
+}
+
+/// The high and low halves of a 64-bit ID, as Azahar names its folders.
+fn halves(id: u64) -> (u32, u32) {
+    ((id >> 32) as u32, id as u32)
 }
 
 /// The folders directly in `folder`.
@@ -386,7 +408,7 @@ mod tests {
         assert!(is_game(Path::new("/games/Game.3DS")));
         assert!(is_game(Path::new("game.cci")));
         assert!(is_game(Path::new("homebrew.3dsx")));
-        assert!(!is_game(Path::new("game.cia")));
+        assert!(is_game(Path::new("Title.CIA")));
         assert!(!is_game(Path::new("game.nds")));
         assert!(!is_game(Path::new("Player.app")));
     }
@@ -405,10 +427,40 @@ mod tests {
         }
         let saves = SaveData {
             sd: root.join("Azahar/sdmc/Nintendo 3DS"),
-            title: Some(("00040000".to_owned(), "0011c400".to_owned())),
+            folders: vec![PathBuf::from("title/00040000/0011c400/data")],
         };
         assert_eq!(saves.files(), [mine.join("main")]);
         assert!(SaveData::default().files().is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_games_extdata_is_watched_beside_its_save_data() {
+        let root = std::env::temp_dir().join(format!("emu-3ds-extdata-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // header::tests::ncch's title ID and extdata ID.
+        let icon = header::tests::smdh(&[(1, "Test Game")]);
+        let game = root.join("game.cxi");
+        std::fs::write(&game, header::tests::ncch(true, &icon)).unwrap();
+        let data = root.join("3DS");
+        let ids = data.join("Azahar/sdmc/Nintendo 3DS/0000/1111");
+        let save = ids.join("title/00040000/00123400/data/00000001/main");
+        let extdata = ids.join("extdata/00000000/000123AB/user/progress");
+        let other = ids.join("extdata/00000000/00055D00/user/progress");
+        for file in [&save, &extdata, &other] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"save").unwrap();
+        }
+        assert_eq!(SaveData::of(&game, &data).files(), [extdata, save]);
+
+        let encrypted = root.join("encrypted.cxi");
+        std::fs::write(&encrypted, header::tests::ncch(false, &icon)).unwrap();
+        assert_eq!(
+            SaveData::of(&encrypted, &data).files().len(),
+            1,
+            "its extended header can't be read"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

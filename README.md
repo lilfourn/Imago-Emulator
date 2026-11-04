@@ -43,9 +43,9 @@ own dumps. The app has:
 - GBC/GBA colour correction, and DS 3D at 2×, 3× or 4× resolution;
 - filters: LCD grid, scanlines, Scale2x and Scale3x;
 - screenshots, and video recording to QuickTime movies;
-- a store of free homebrew: 1,586 Game Boy, Game Boy Color, GBA and DS
-  games, demos, music carts and tools, each added to the library in one
-  click;
+- a store of free homebrew: 1,650 Game Boy, Game Boy Color, GBA, DS and
+  3DS games, demos, music carts and tools, each added to the library in
+  one click;
 - ROM hacks, from IPS, UPS, BPS and xdelta patches;
 - cheats;
 - Lua scripts that read and write memory, press buttons and draw over the
@@ -403,8 +403,11 @@ plate in its system's colour with its title.
 The store (the Store tab in the library's top bar, File > Game Store or
 ⌘⇧G) offers free homebrew that its authors share: Game Boy, Game Boy
 Color and GBA games from gbdev's [Homebrew Hub](https://hh.gbdev.io), and
-DS games from [Universal-DB](https://db.universal-team.net). It never
-offers commercial games.
+DS and 3DS games from [Universal-DB](https://db.universal-team.net). It
+never offers commercial games, ports of them, or fan ports that carry
+their art or data. A 3DS game comes as homebrew's own `.3dsx` where its
+catalog has one, else as a `.cia`, and plays on the core the app
+downloads the first time (see [3DS games](#3ds-games)).
 
 Type to search titles, makers and genres. The filters narrow it to one
 system (Tab and ⇧Tab step through them) and to games, demos, music or
@@ -421,12 +424,14 @@ into view; both are cached in `~/Library/Caches/ds-emulator/store`.
 
 Only games seen to start in the app are offered. `scripts/store-compat.py`
 downloads every game in both catalogs and runs each one headless for 900
-frames. On 2026-11-02, 1,602 of 1,647 started, and the rest are left out.
-Games added to the catalogs since then are offered unchecked. The ones
-that don't start, with what stops each, and the 3DS and NES homebrew the
-app has no core for, are listed in
-[games we can't run](docs/research/games-we-cant-run.md), a backlog for
-the cores. Rerun it after changing a core:
+frames, 3DS games on a copy of the app's 3DS core. By 2026-11-03, 1,655
+of 1,717 had started, 71 of the 89 3DS games among them. Five of those 3DS
+games start on an error screen, so 1,650 are offered and the rest are
+left out. Games added to the catalogs since then are offered unchecked.
+The ones that don't start, with what stops each, five 3DS games that
+start on an error screen, and the NES homebrew the app has no core for,
+are listed in [games we can't run](docs/research/games-we-cant-run.md), a
+backlog for the cores. Rerun it after changing a core:
 
 ```sh
 python3 -I scripts/store-compat.py            # reruns only what changed
@@ -462,25 +467,28 @@ There is no rewind, link play, cheats, debugger or memory for these games.
 
 3DS games play in the window on [Azahar](https://azahar-emu.org)'s
 libretro core ([decision 0011](docs/decisions/0011-3ds-games.md)). Open
-a `.3ds`, `.cci`, `.cxi` or `.3dsx` file (or Azahar's compressed `.zcci`,
-`.zcxi` or `.z3dsx`), drop it on the window, add it to the library, or open
-an archive holding one. The first time, the app downloads Azahar's core
-(GPL-3.0) and MoltenVK (Apache-2.0), about 67 MB, checks them against the
-digests it pins, and keeps them in
+a `.3ds`, `.cci`, `.cxi`, `.3dsx` or `.cia` file (or Azahar's compressed
+`.zcci`, `.zcxi` or `.z3dsx`), drop it on the window, add it to the
+library, or open an archive holding one. The first time, the app
+downloads Azahar's core (GPL-3.0) and MoltenVK (Apache-2.0), about 67 MB,
+checks them against the digests it pins, and keeps them in
 `~/Library/Application Support/ds-emulator/3DS`; neither ships with the
 app. The game runs in a helper process, the app's own executable, and
 draws on the GPU through Vulkan on Metal, at the internal resolution View >
 3D Resolution sets.
 
 Games must be decrypted dumps of your own: the core refuses an encrypted
-one, and the app holds no keys. Installable titles (`.cia`) don't open.
-The controls are the app's own (see above), with the D-pad's keys also
-tilting the circle pad, ZL and ZR on Z and C, and the mouse on the bottom
-screen. Save states work anywhere and the app keeps where you left off,
-but there is no rewind, link play, cheats, debugger or memory viewer, and
-`.3dsx` homebrew has no save states (Azahar's core can't load them for a
-game without a title ID). A game's own saves live on the emulated SD
-card, in `3DS/Azahar`.
+one, and the app holds no keys. Azahar's core can't install a title, so a
+`.cia` plays as the executable it holds, which the app writes into
+`~/Library/Application Support/ds-emulator/Games` the first time; an
+encrypted `.cia` is refused. The controls are the app's own (see above),
+with the D-pad's keys also tilting the circle pad, ZL and ZR on Z and C,
+and the mouse on the bottom screen. Save states work anywhere and the app
+keeps where you left off, but there is no rewind, link play, cheats,
+debugger or memory viewer, and `.3dsx` homebrew has no save states
+(Azahar's core can't load them for a game without a title ID). A game's own saves, its save data and any
+extra data (extdata), live on the emulated SD card, in `3DS/Azahar`, and
+the app won't pick up where you left off once they've changed since.
 
 ## ROM hacks
 

@@ -75,7 +75,10 @@ fn options(renderer: Renderer) -> HashMap<String, CString> {
         // Touch comes as the pointer; the right stick is the C stick.
         ("citra_enable_mouse_touchscreen", "disabled"),
         ("citra_enable_touch_touchscreen", "enabled"),
-        ("citra_enable_touch_pointer_timeout", "disabled"),
+        // The core draws a cursor where the bottom screen was last
+        // touched; the timeout hides it four seconds after, as the mouse
+        // is the player's cursor. Touch itself is the same either way.
+        ("citra_enable_touch_pointer_timeout", "enabled"),
         ("citra_analog_function", "c_stick"),
         ("citra_use_virtual_sd", "enabled"),
         ("citra_use_libretro_save_path", "LibRetro Default"),
@@ -597,7 +600,9 @@ fn has_title_id(path: &Path) -> bool {
         Ok(header) => match header.format {
             crate::header::Format::Homebrew => false,
             crate::header::Format::Compressed => !homebrew_extension,
-            crate::header::Format::Cartridge | crate::header::Format::Executable => true,
+            crate::header::Format::Cartridge
+            | crate::header::Format::Executable
+            | crate::header::Format::Installable => true,
         },
         Err(_) => !homebrew_extension,
     }

@@ -1,21 +1,36 @@
 //! What the app reads from a 3DS game file's headers: its format, whether
-//! it is encrypted, its title and a CRC-32 that identifies it.
+//! it is encrypted, its title, its extdata ID and a CRC-32 that identifies
+//! it.
 //!
 //! Games are 2–4 GB, so only the few small regions the headers point at
-//! are read: the first sector, the game partition's header, its ExeFS
-//! header and the icon (SMDH) it holds. Offsets come from the file, so
-//! every read is capped and every field is looked up with bounds checks;
-//! a file cut short reads as one without the missing parts.
+//! are read: the first sector, the game partition's header and extended
+//! header, its ExeFS header and the icon (SMDH) it holds. Offsets come
+//! from the file, so every read is capped and every field is looked up
+//! with bounds checks; a file cut short reads as one without the missing
+//! parts.
 //!
 //! The formats, all little-endian, sizes in media units of 0x200 bytes:
 //!
 //! - A cartridge image (NCSD) has `NCSD` at 0x100, its title ID at 0x108
 //!   and a table of eight partitions at 0x120, each an offset and a size.
 //!   The first partition is the game's executable.
-//! - An executable (NCCH) has `NCCH` at 0x100, its program ID at 0x118,
-//!   its product code at 0x150 and its flags at 0x188; the eighth flag's
-//!   0x04 bit says its contents are not encrypted. Its ExeFS's offset and
-//!   size are at 0x1A0, and the ExeFS's file named `icon` is the SMDH.
+//! - An executable (NCCH) has `NCCH` at 0x100, its size at 0x104, its
+//!   program ID at 0x118, its product code at 0x150, its extended header's
+//!   size at 0x180 and its flags at 0x188; the eighth flag's 0x04 bit says
+//!   its contents are not encrypted. Its ExeFS's offset and size are at
+//!   0x1A0, and the ExeFS's file named `icon` is the SMDH.
+//! - The extended header follows the executable's header, at 0x200, and
+//!   is encrypted with the rest. Its access control info, at 0x200 in it,
+//!   holds storage info at 0x30, eight bytes of which, at 0x230 in the
+//!   extended header, are the game's extdata ID. An application may open
+//!   only the extdata its extended header names, so an ID of zero means it
+//!   has none. When bit 1 of the storage info's last byte is set
+//!   (extended save data access), its first and third eight bytes hold six
+//!   20-bit save IDs instead, three each, from the top bits down; the app
+//!   takes the first that is set, from the third eight bytes first, as
+//!   Azahar does.
+//! - An installable title (CIA) holds its executable as its first content,
+//!   read as any executable is (see [`crate::cia`]).
 //! - Homebrew (3DSX) has `3DSX` at 0 and its header's size at 4; a header
 //!   of at least 0x2C bytes gives the SMDH's offset and size at 0x20.
 //! - An icon (SMDH) has `SMDH` at 0 and sixteen titles from 0x8, one per
@@ -25,6 +40,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::cia;
+
 /// How a 3DS game is packaged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -32,6 +49,9 @@ pub enum Format {
     Cartridge,
     /// One executable partition, NCCH (`.cxi`).
     Executable,
+    /// An installable title, CIA (`.cia`), which plays as the executable
+    /// it holds (see [`crate::cia`]).
+    Installable,
     /// Homebrew, 3DSX (`.3dsx`).
     Homebrew,
     /// One of Azahar's zstd-compressed forms (`.zcci`, `.zcxi`, `.z3dsx`).
@@ -53,13 +73,29 @@ pub struct Header {
     pub title_id: Option<u64>,
     /// Its product code, as `CTR-P-ABCD`, if it has one.
     pub product_code: Option<String>,
+    /// The ID of the extra data (extdata) it may keep beside its save
+    /// data, from its executable's extended header, if it names one and is
+    /// not encrypted.
+    pub extdata_id: Option<u64>,
 }
 
 /// The unit the headers measure offsets and sizes in.
-const MEDIA_UNIT: u64 = 0x200;
+pub(crate) const MEDIA_UNIT: u64 = 0x200;
 /// The size of an NCSD, NCCH or ExeFS header, and of what is read to tell
 /// the formats apart.
-const HEADER_SIZE: usize = 0x200;
+pub(crate) const HEADER_SIZE: usize = 0x200;
+/// The size of the part of an executable's extended header that the app
+/// reads: its system control info and access control info.
+const EXHEADER_SIZE: usize = 0x400;
+/// Where the storage info is in an extended header: in its access control
+/// info, at 0x200, the ARM11 local system capabilities' storage info, at
+/// 0x30.
+const STORAGE_INFO: usize = 0x230;
+/// The size of the storage info.
+const STORAGE_INFO_SIZE: usize = 0x20;
+/// The bit, in the storage info's last byte, that says it lists save IDs
+/// the game may open instead of its extdata ID.
+const EXTENDED_SAVE_ACCESS: u8 = 0x02;
 /// The size of an icon (SMDH), the most read for one.
 const SMDH_SIZE: usize = 0x36C0;
 /// The NCCH flag, in its eighth flag byte, that says its contents are not
@@ -79,12 +115,17 @@ const WHOLE_FILE_LIMIT: u64 = 64 << 20;
 const IDENTITY_PREFIX: u64 = 1 << 20;
 
 /// Reads the headers of the 3DS game at `path`, without reading the rest.
+/// A `.cia`, which has no magic number of its own, is known by its
+/// extension; other files by their contents.
 ///
 /// # Errors
 ///
 /// Fails if the file cannot be read or is not a 3DS game.
 pub fn read(path: &Path) -> io::Result<Header> {
     let mut file = File::open(path)?;
+    if cia::is_cia(path) {
+        return installable(&mut file, path);
+    }
     let start = read_at(&mut file, 0, HEADER_SIZE)?;
     if has_magic(&start, 0x100, b"NCSD") {
         cartridge(&mut file, &start)
@@ -99,6 +140,7 @@ pub fn read(path: &Path) -> io::Result<Header> {
             title: None,
             title_id: None,
             product_code: None,
+            extdata_id: None,
         })
     } else {
         Err(invalid(format!(
@@ -152,11 +194,14 @@ fn executable(file: &mut File, ncch: &[u8], at: u64, format: Format) -> io::Resu
             "the game's executable partition is missing or cut short".to_owned(),
         ));
     }
-    let encrypted = ncch.get(0x18F).is_none_or(|flags| flags & NO_CRYPTO == 0);
-    let title = if encrypted {
-        None
+    let encrypted = is_encrypted(ncch);
+    let (title, extdata_id) = if encrypted {
+        (None, None)
     } else {
-        executable_title(file, ncch, at)?
+        (
+            executable_title(file, ncch, at)?,
+            executable_extdata(file, ncch, at)?,
+        )
     };
     Ok(Header {
         format,
@@ -164,7 +209,38 @@ fn executable(file: &mut File, ncch: &[u8], at: u64, format: Format) -> io::Resu
         title,
         title_id: u64_at(ncch, 0x118).filter(|&id| id != 0),
         product_code: ncch.get(0x150..0x160).and_then(product_code),
+        extdata_id,
     })
+}
+
+/// The headers of the installable title (CIA) at `path`, open as `file`:
+/// its executable's, with the title ID its title metadata gives if the
+/// executable has none. Of an executable encrypted with the title key,
+/// nothing more can be read.
+fn installable(file: &mut File, path: &Path) -> io::Result<Header> {
+    let layout = cia::layout(file, path)?;
+    if layout.encrypted {
+        return Ok(Header {
+            format: Format::Installable,
+            encrypted: true,
+            title: None,
+            title_id: layout.title_id,
+            product_code: None,
+            extdata_id: None,
+        });
+    }
+    let ncch = read_at(file, layout.offset, HEADER_SIZE)?;
+    let header = executable(file, &ncch, layout.offset, Format::Installable)?;
+    Ok(Header {
+        title_id: header.title_id.or(layout.title_id),
+        ..header
+    })
+}
+
+/// Whether the executable partition whose header is `ncch` is encrypted:
+/// whether its NoCrypto flag is clear.
+pub(crate) fn is_encrypted(ncch: &[u8]) -> bool {
+    ncch.get(0x18F).is_none_or(|flags| flags & NO_CRYPTO == 0)
 }
 
 /// The title in the icon in the ExeFS of the unencrypted executable
@@ -176,7 +252,9 @@ fn executable_title(file: &mut File, ncch: &[u8], at: u64) -> io::Result<Option<
     if size == 0 {
         return Ok(None);
     }
-    let exefs = at + u64::from(offset) * MEDIA_UNIT;
+    let Some(exefs) = at.checked_add(u64::from(offset) * MEDIA_UNIT) else {
+        return Ok(None);
+    };
     let files = read_at(file, exefs, HEADER_SIZE)?;
     match icon_entry(&files) {
         Some((offset, size)) => {
@@ -184,6 +262,36 @@ fn executable_title(file: &mut File, ncch: &[u8], at: u64) -> io::Result<Option<
         }
         None => Ok(None),
     }
+}
+
+/// The extdata ID in the extended header of the unencrypted executable
+/// partition at `at`, whose header is `ncch`, if it has an extended header
+/// that names one.
+fn executable_extdata(file: &mut File, ncch: &[u8], at: u64) -> io::Result<Option<u64>> {
+    let has_exheader = u32_at(ncch, 0x180)
+        .is_some_and(|size| usize::try_from(size).is_ok_and(|size| size >= EXHEADER_SIZE));
+    if !has_exheader {
+        return Ok(None);
+    }
+    let exheader = read_at(file, at + HEADER_SIZE as u64, EXHEADER_SIZE)?;
+    Ok(extdata_id(&exheader))
+}
+
+/// The extdata ID in the storage info of the extended header `exheader`,
+/// if it names one (see the module's notes).
+fn extdata_id(exheader: &[u8]) -> Option<u64> {
+    let storage = exheader.get(STORAGE_INFO..STORAGE_INFO + STORAGE_INFO_SIZE)?;
+    let extdata = u64_at(storage, 0)?;
+    let id = if storage[STORAGE_INFO_SIZE - 1] & EXTENDED_SAVE_ACCESS == 0 {
+        extdata
+    } else {
+        let save_ids = [u64_at(storage, 0x10)?, extdata];
+        save_ids
+            .into_iter()
+            .flat_map(|packed| [40, 20, 0].map(|shift| (packed >> shift) & 0xF_FFFF))
+            .find(|&id| id != 0)?
+    };
+    (id != 0).then_some(id)
 }
 
 /// The offset and size of the file named `icon` among an ExeFS's ten.
@@ -210,6 +318,7 @@ fn homebrew(file: &mut File, header: &[u8]) -> io::Result<Header> {
         title,
         title_id: None,
         product_code: None,
+        extdata_id: None,
     })
 }
 
@@ -264,7 +373,7 @@ fn is_compressed(path: &Path) -> bool {
 }
 
 /// Up to `len` bytes of `file` from `at`: fewer where the file ends first.
-fn read_at(file: &mut File, at: u64, len: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn read_at(file: &mut File, at: u64, len: usize) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(at))?;
     let mut bytes = Vec::with_capacity(len);
     file.take(len as u64).read_to_end(&mut bytes)?;
@@ -285,7 +394,7 @@ fn hash_all(hasher: &mut crc32fast::Hasher, mut reader: impl Read) -> io::Result
 }
 
 /// Whether `bytes` holds `magic` at `at`.
-fn has_magic(bytes: &[u8], at: usize, magic: &[u8]) -> bool {
+pub(crate) fn has_magic(bytes: &[u8], at: usize, magic: &[u8]) -> bool {
     bytes.get(at..at + magic.len()) == Some(magic)
 }
 
@@ -304,12 +413,12 @@ fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
 }
 
 /// The little-endian `u32` at `at` in `bytes`, if it is all there.
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// The little-endian `u64` at `at` in `bytes`, if it is all there.
-fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
+pub(crate) fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
@@ -319,16 +428,19 @@ fn invalid(why: String) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::cia::tests::{PLAIN, cia};
     use std::fs;
     use std::path::PathBuf;
 
-    const TITLE_ID: u64 = 0x0004_0000_0012_3400;
+    pub(crate) const TITLE_ID: u64 = 0x0004_0000_0012_3400;
+    /// The extdata ID the test executables' extended headers name.
+    pub(crate) const EXTDATA_ID: u64 = 0x0001_23AB;
     const PRODUCT_CODE: &str = "CTR-P-ABCD";
 
     /// A fresh, empty folder for `test`.
-    fn temp_dir(test: &str) -> PathBuf {
+    pub(crate) fn temp_dir(test: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("emu-3ds-header-{test}-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
@@ -337,7 +449,7 @@ mod tests {
     }
 
     /// Writes `bytes` into `image` at `at`, growing it as needed.
-    fn put(image: &mut Vec<u8>, at: usize, bytes: &[u8]) {
+    pub(crate) fn put(image: &mut Vec<u8>, at: usize, bytes: &[u8]) {
         if image.len() < at + bytes.len() {
             image.resize(at + bytes.len(), 0);
         }
@@ -345,7 +457,7 @@ mod tests {
     }
 
     /// An icon with each of `names` as the short title in its language.
-    fn smdh(names: &[(usize, &str)]) -> Vec<u8> {
+    pub(crate) fn smdh(names: &[(usize, &str)]) -> Vec<u8> {
         let mut icon = vec![0; SMDH_SIZE];
         put(&mut icon, 0, b"SMDH");
         for &(language, name) in names {
@@ -356,19 +468,28 @@ mod tests {
         icon
     }
 
-    /// An executable partition, encrypted or not, whose ExeFS holds a
-    /// code file and then `icon`.
-    fn ncch(no_crypto: bool, icon: &[u8]) -> Vec<u8> {
+    /// An executable partition, encrypted or not, whose extended header
+    /// names [`EXTDATA_ID`] and whose ExeFS holds a code file and then
+    /// `icon`.
+    pub(crate) fn ncch(no_crypto: bool, icon: &[u8]) -> Vec<u8> {
         let mut image = vec![0; HEADER_SIZE];
         put(&mut image, 0x100, b"NCCH");
         put(&mut image, 0x118, &TITLE_ID.to_le_bytes());
         put(&mut image, 0x150, PRODUCT_CODE.as_bytes());
         put(&mut image, 0x18F, &[if no_crypto { NO_CRYPTO } else { 0 }]);
-        // The ExeFS: its header, a small code file, then the icon.
-        let exefs = 0x200;
+        // The extended header, its storage info naming the extdata.
+        put(&mut image, 0x180, &(EXHEADER_SIZE as u32).to_le_bytes());
+        put(&mut image, HEADER_SIZE, b"TestGame");
+        put(
+            &mut image,
+            HEADER_SIZE + STORAGE_INFO,
+            &EXTDATA_ID.to_le_bytes(),
+        );
+        // The ExeFS, after it: its header, a small code file, then the icon.
+        let exefs = HEADER_SIZE + EXHEADER_SIZE;
         let icon_offset = 0x200;
         let exefs_size = HEADER_SIZE + icon_offset + icon.len();
-        put(&mut image, 0x1A0, &1_u32.to_le_bytes());
+        put(&mut image, 0x1A0, &((exefs / 0x200) as u32).to_le_bytes());
         put(
             &mut image,
             0x1A4,
@@ -383,6 +504,8 @@ mod tests {
         put(&mut image, exefs + HEADER_SIZE, &[0xAA; 0x10]);
         put(&mut image, exefs + HEADER_SIZE + icon_offset, icon);
         image.resize(image.len().next_multiple_of(0x200), 0);
+        let units = (image.len() / 0x200) as u32;
+        put(&mut image, 0x104, &units.to_le_bytes());
         image
     }
 
@@ -433,6 +556,7 @@ mod tests {
                 title: Some("Test Game".to_owned()),
                 title_id: Some(TITLE_ID),
                 product_code: Some(PRODUCT_CODE.to_owned()),
+                extdata_id: Some(EXTDATA_ID),
             }
         );
         fs::remove_dir_all(&dir).ok();
@@ -449,6 +573,100 @@ mod tests {
         assert_eq!(header.title, None);
         assert_eq!(header.title_id, Some(TITLE_ID));
         assert_eq!(header.product_code.as_deref(), Some(PRODUCT_CODE));
+        assert_eq!(header.extdata_id, None, "its extended header is encrypted");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_installable_title_is_read_from_its_executable() {
+        let dir = temp_dir("installable");
+        let executable = ncch(true, &smdh(&[(ENGLISH, "Test Game")]));
+        let path = write(&dir, "game.CIA", &cia(&[(0, PLAIN, Some(&executable))]));
+        assert_eq!(
+            read(&path).expect("read"),
+            Header {
+                format: Format::Installable,
+                encrypted: false,
+                title: Some("Test Game".to_owned()),
+                title_id: Some(TITLE_ID),
+                product_code: Some(PRODUCT_CODE.to_owned()),
+                extdata_id: Some(EXTDATA_ID),
+            }
+        );
+        // Without the extension, it is not taken for one.
+        let renamed = write(&dir, "game.3ds", &fs::read(&path).expect("read"));
+        assert!(read(&renamed).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_encrypted_title_has_its_id_but_nothing_more() {
+        let dir = temp_dir("installable-encrypted");
+        let executable = ncch(true, &smdh(&[(ENGLISH, "Test Game")]));
+        let path = write(&dir, "game.cia", &cia(&[(0, 1, Some(&executable))]));
+        assert_eq!(
+            read(&path).expect("read"),
+            Header {
+                format: Format::Installable,
+                encrypted: true,
+                title: None,
+                title_id: Some(TITLE_ID),
+                product_code: None,
+                extdata_id: None,
+            }
+        );
+        let unflagged = write(
+            &dir,
+            "unflagged.cia",
+            &cia(&[(0, PLAIN, Some(&ncch(false, &smdh(&[]))))]),
+        );
+        let header = read(&unflagged).expect("read");
+        assert!(header.encrypted);
+        assert_eq!(header.product_code.as_deref(), Some(PRODUCT_CODE));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_extdata_id_comes_from_the_extended_header() {
+        let mut exheader = vec![0; EXHEADER_SIZE];
+        assert_eq!(extdata_id(&exheader), None, "zero: no extdata");
+        put(&mut exheader, STORAGE_INFO, &0x55D_u64.to_le_bytes());
+        assert_eq!(extdata_id(&exheader), Some(0x55D));
+        assert_eq!(extdata_id(&exheader[..STORAGE_INFO + 8]), None, "cut short");
+        assert_eq!(extdata_id(&[]), None);
+    }
+
+    #[test]
+    fn extended_save_data_access_takes_the_first_save_id_listed() {
+        let mut exheader = vec![0; EXHEADER_SIZE];
+        put(&mut exheader, STORAGE_INFO + 0x1F, &[EXTENDED_SAVE_ACCESS]);
+        assert_eq!(extdata_id(&exheader), None, "none listed");
+        // Three 20-bit IDs in each field, from the top: the field at 0x10
+        // comes first.
+        let packed = |ids: [u64; 3]| (ids[0] << 40) | (ids[1] << 20) | ids[2];
+        put(
+            &mut exheader,
+            STORAGE_INFO,
+            &packed([0x111, 0x222, 0x333]).to_le_bytes(),
+        );
+        assert_eq!(extdata_id(&exheader), Some(0x111));
+        put(
+            &mut exheader,
+            STORAGE_INFO + 0x10,
+            &packed([0, 0x444, 0]).to_le_bytes(),
+        );
+        assert_eq!(extdata_id(&exheader), Some(0x444));
+    }
+
+    #[test]
+    fn an_executable_without_an_extended_header_has_no_extdata() {
+        let dir = temp_dir("no-exheader");
+        let mut executable = ncch(true, &smdh(&[(ENGLISH, "Test Game")]));
+        put(&mut executable, 0x180, &0_u32.to_le_bytes());
+        let path = write(&dir, "game.cxi", &executable);
+        let header = read(&path).expect("read");
+        assert_eq!(header.extdata_id, None);
+        assert_eq!(header.title.as_deref(), Some("Test Game"));
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -493,6 +711,7 @@ mod tests {
                 title: Some("Homebrew App".to_owned()),
                 title_id: None,
                 product_code: None,
+                extdata_id: None,
             }
         );
         let plain = write(&dir, "plain.3dsx", &threedsx(0x20, &icon));
@@ -523,6 +742,8 @@ mod tests {
             ("game.3ds", &[0x55; 0x400][..]),
             ("empty.cci", &[][..]),
             ("game.nds", &[0; 0x200][..]),
+            ("game.cia", &[0x55; 0x4000][..]),
+            ("empty.cia", &[][..]),
         ] {
             let path = write(&dir, name, bytes);
             let error = read(&path).expect_err(name);
@@ -542,6 +763,11 @@ mod tests {
                 "app.3dsx",
                 Format::Homebrew,
                 threedsx(EXTENDED_3DSX_HEADER, &icon),
+            ),
+            (
+                "game.cia",
+                Format::Installable,
+                cia(&[(0, PLAIN, Some(&ncch(true, &icon)))]),
             ),
         ];
         for (name, format, image) in images {

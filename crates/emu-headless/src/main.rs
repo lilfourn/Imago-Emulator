@@ -15,7 +15,10 @@
 //! `--work-dir`, by default the app's own
 //! (`~/Library/Application Support/ds-emulator/3DS`), and the core is
 //! downloaded there the first time. Should the helper stop, the run ends
-//! there with exit status 1, saying why.
+//! there with exit status 1, saying why. An installable title (`.cia`)
+//! plays as the executable it holds, written out the first time into
+//! `Games` in `--work-dir`, by default in `~/Library/Caches/emu-headless`;
+//! an encrypted one is refused.
 //!
 //! Output is plain `key=value` text, one line per screen:
 //!
@@ -172,9 +175,7 @@ fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
     if let Some(game) = emu_cores::rpg_maker::game_folder(&args.rom) {
         let work_dir = match &args.work_dir {
             Some(dir) => dir.clone(),
-            None => std::env::home_dir()
-                .context("there is no home folder to keep the game's player in; pass --work-dir")?
-                .join("Library/Caches/emu-headless"),
+            None => cache_dir()?,
         };
         let core = emu_cores::rpg_maker::Mkxp::open(&game, &work_dir)?;
         return Ok((System::RpgMaker, Box::new(core)));
@@ -195,7 +196,7 @@ fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
                 .context("there is no folder to keep the 3DS core in; pass --work-dir")?,
         };
         let helper = std::env::current_exe().context("cannot find emu-headless to start again")?;
-        let core = emu_3ds::ThreeDs::open(&args.rom, &data, &helper)?;
+        let core = emu_3ds::ThreeDs::open(&playable_3ds(args)?, &data, &helper)?;
         return Ok((system, Box::new(core)));
     }
     let rom = fs::read(&args.rom).with_context(|| format!("reading {}", args.rom.display()))?;
@@ -204,6 +205,28 @@ fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
         ..Media::new(&rom)
     };
     Ok((system, emu_cores::create(system, &media)?))
+}
+
+/// Where emu-headless keeps what it makes by default:
+/// `~/Library/Caches/emu-headless`.
+fn cache_dir() -> anyhow::Result<PathBuf> {
+    Ok(std::env::home_dir()
+        .context("there is no home folder to keep the game's files in; pass --work-dir")?
+        .join("Library/Caches/emu-headless"))
+}
+
+/// The file the 3DS core opens for the game `args` names: the game
+/// itself, or for an installable title, the executable it holds, written
+/// into `Games` in the work folder.
+fn playable_3ds(args: &Args) -> anyhow::Result<PathBuf> {
+    if !emu_3ds::cia::is_cia(&args.rom) {
+        return Ok(args.rom.clone());
+    }
+    let work_dir = match &args.work_dir {
+        Some(dir) => dir.clone(),
+        None => cache_dir()?,
+    };
+    Ok(emu_3ds::cia::extract(&args.rom, &work_dir.join("Games"))?)
 }
 
 /// Runs up to `args.frames` frames with the script at `path` alongside,

@@ -332,21 +332,39 @@ fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
 
 /// Starts the 3DS game at `path` in a helper process, the app's own
 /// executable started again, downloading the 3DS core into its data
-/// folder first if it is not there yet.
+/// folder first if it is not there yet. An installable title (`.cia`)
+/// plays as the executable it holds, written into the games folder the
+/// first time; the session is still the `.cia`'s, so its states and
+/// checkpoint sit beside it and are known by its checksum.
 fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
     let data = emu_3ds::data_dir().context("there is no folder to keep the 3DS core in")?;
     let helper = std::env::current_exe().context("cannot find the app to start the 3DS core")?;
     let rom_crc32 = emu_3ds::header::identity(path)
         .with_context(|| format!("cannot read {}", path.display()))?;
-    let core = emu_3ds::ThreeDs::open(path, &data, &helper)?;
+    let game = playable_3ds(path)?;
+    let core = emu_3ds::ThreeDs::open(&game, &data, &helper)?;
     Ok(Loaded {
         core: Box::new(core),
         rom_paths: vec![path.to_owned()],
+        // Named once the executable is written, which may sit beside the
+        // `.cia` as its namesake, so the names never change after.
         files: vec![GameFiles::of(path)],
         rom_crc32,
         live_sound: None,
         own_saves: OwnSaves::ThreeDs(emu_3ds::SaveData::of(path, &data)),
     })
+}
+
+/// The file the 3DS core opens for the game at `path`: the game itself,
+/// or for an installable title, the executable it holds, written into the
+/// games folder.
+fn playable_3ds(path: &Path) -> anyhow::Result<PathBuf> {
+    if !emu_3ds::cia::is_cia(path) {
+        return Ok(path.to_owned());
+    }
+    let games = crate::archive::games_dir()
+        .context("there is no folder to keep the game's executable in")?;
+    Ok(emu_3ds::cia::extract(path, &games)?)
 }
 
 /// Fails if two cartridges with battery saves would use one `.sav` file,
@@ -2677,6 +2695,41 @@ mod tests {
         }
         let twice = [paths[1].clone(), paths[1].clone()];
         assert!(load(&twice, DmgColors::Grey).is_err(), "nor with itself");
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// An installable title whose one content, its executable, is
+    /// encrypted with the title key: a header, a TMD signed with RSA-2048,
+    /// and the content.
+    fn encrypted_cia() -> Vec<u8> {
+        let mut cia = vec![0; 0x2040];
+        cia[0..4].copy_from_slice(&0x2020_u32.to_le_bytes());
+        let tmd_size = 0x140 + 0xC4 + 0x900 + 0x30;
+        cia[0x10..0x14].copy_from_slice(&(tmd_size as u32).to_le_bytes());
+        cia[0x18..0x20].copy_from_slice(&0x200_u64.to_le_bytes());
+        cia[0x20] = 0x80; // Content 0 is there.
+        let mut tmd = vec![0; tmd_size];
+        tmd[0..4].copy_from_slice(&0x0001_0004_u32.to_be_bytes());
+        tmd[0x140 + 0x9E..0x140 + 0xA0].copy_from_slice(&1_u16.to_be_bytes());
+        let record = 0x140 + 0xC4 + 0x900;
+        tmd[record + 6..record + 8].copy_from_slice(&1_u16.to_be_bytes());
+        tmd[record + 8..record + 16].copy_from_slice(&0x200_u64.to_be_bytes());
+        cia.extend_from_slice(&tmd);
+        cia.resize(cia.len().next_multiple_of(64) + 0x200, 0x99);
+        cia
+    }
+
+    #[test]
+    fn an_encrypted_cia_is_refused_before_the_core_starts() {
+        let (dir, paths) = rom_dir("3ds-encrypted-cia", &[("Title.cia", &encrypted_cia())]);
+        let error = load(&paths, DmgColors::Grey).err().expect("refused");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "{} is encrypted: Azahar plays only decrypted games",
+                paths[0].display()
+            )
+        );
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

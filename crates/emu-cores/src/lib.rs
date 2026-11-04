@@ -17,8 +17,8 @@ pub use emu_mkxp as rpg_maker;
 /// File extensions this build recognises, and the system each belongs to.
 /// `.cgb` and `.agb` are older names for Game Boy Color and Game Boy
 /// Advance ROMs, the same files as `.gbc` and `.gba`. The 3DS's are
-/// [`emu_3ds::EXTENSIONS`].
-pub const ROM_EXTENSIONS: [(&str, System); 14] = [
+/// [`emu_3ds::EXTENSIONS`], installable titles (`.cia`) among them.
+pub const ROM_EXTENSIONS: [(&str, System); 15] = [
     ("gb", System::Gb),
     ("gbc", System::Gb),
     ("cgb", System::Gb),
@@ -33,6 +33,7 @@ pub const ROM_EXTENSIONS: [(&str, System); 14] = [
     ("zcci", System::N3ds),
     ("zcxi", System::N3ds),
     ("z3dsx", System::N3ds),
+    ("cia", System::N3ds),
 ];
 
 /// The system a ROM file is for, judged by its extension.
@@ -130,7 +131,7 @@ mod tests {
             system_for_path(Path::new("homebrew.3dsx")),
             Some(System::N3ds)
         );
-        assert_eq!(system_for_path(Path::new("game.cia")), None);
+        assert_eq!(system_for_path(Path::new("game.cia")), Some(System::N3ds));
         assert_eq!(system_for_path(Path::new("notes.txt")), None);
         assert_eq!(system_for_path(Path::new("no_extension")), None);
     }

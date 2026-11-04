@@ -6,15 +6,24 @@ broken ones.
 
 It reads the two catalogs the store lists, Homebrew Hub (`hh:<slug>`, its
 Game Boy, Game Boy Color and Game Boy Advance entries) and Universal-DB
-(`udb:<slug>`, its DS games), picks each game's file by the same rules as
-the app, downloads it and runs it in emu-headless for 900 frames with no
-input. A game is "ok" when a screen shows more than one colour at frame
-900, or, when every screen is one colour there, at frame 600 or 300 (each
-of those is a run of its own, as emu-headless dumps only its last frame).
-It is "blank" when every screen is one colour at all three, "crash" when
-emu-headless fails, "timeout" when a run takes over 120 s, "unsupported"
-when the catalog has no file the emulator plays, and "unavailable" when
-the download fails.
+(`udb:<slug>`, its DS and 3DS games), picks each game's file by the same
+rules as the app, downloads it and runs it in emu-headless for 900 frames
+with no input. A game is "ok" when a screen shows more than one colour at
+frame 900, or, when every screen is one colour there, at frame 600 or 300
+(each of those is a run of its own, as emu-headless dumps only its last
+frame). It is "blank" when every screen is one colour at all three,
+"crash" when emu-headless fails, "timeout" when a run takes over 120 s,
+"unsupported" when the catalog has no file the emulator plays,
+"unavailable" when the download fails, and "untested" when emu-headless
+cannot open the file's kind yet (a 3DS `.cia` before it learns them);
+untested games get no verdict in the TOML file, so the app offers them
+unchecked.
+
+3DS games run on the core the app downloads at first use (Azahar's
+libretro core and MoltenVK), copied for each run with `cp -c` from the
+app's install, ~/Library/Application Support/ds-emulator/3DS, or from
+--3ds-core: each run starts a console of its own, never the user's, and
+nothing is downloaded again.
 
 Everything it fetches is kept in ~/Library/Caches/ds-emulator-store-compat:
 the catalogs, each game in a folder of its own, the results of each run
@@ -32,9 +41,9 @@ build instead.
 --backlog writes docs/research/games-we-cant-run.md from the cached
 results: each store game that doesn't run, grouped by what stops it, with
 what a few cheap probes tell (the ROM inside a ZIP, a patched header,
-buttons pressed, the CPU and video registers of a blank screen), then the
-catalogs' 3DS and NES games, which have no core, and the entries with no
-ROM to download. It runs nothing but those probes.
+buttons pressed, the CPU and video registers of a blank screen), then
+Homebrew Hub's NES games, which have no core, and the entries with no ROM
+to download. It runs nothing but those probes.
 """
 
 import argparse
@@ -76,6 +85,17 @@ HH_EXTENSIONS = ("gb", "gbc", "cgb", "gba", "agb")
 # The platform to count a Homebrew Hub entry under when it names none.
 PLATFORM_FOR_EXTENSION = {"gb": "GB", "gbc": "GBC", "cgb": "GBC", "gba": "GBA", "agb": "GBA"}
 UDB_EXTENSIONS = (".nds", ".zip", ".7z")
+# A 3DS game's files: homebrew (.3dsx), installable titles (.cia),
+# cartridges and executables, and Azahar's compressed forms of them.
+THREE_DS_EXTENSIONS = ("3dsx", "cia", "3ds", "cci", "cxi", "z3dsx", "zcci", "zcxi")
+SYSTEMS.update({ext: "3ds" for ext in THREE_DS_EXTENSIONS})
+# Systems other than the 3DS that a 3DS entry's download may be named for.
+# As OTHER_SYSTEMS in store.rs.
+OTHER_SYSTEMS = {"android", "gamecube", "linux", "mac", "macos", "nds", "pc", "ps3", "psp",
+                 "switch", "vita", "wii", "wiiu", "win", "win32", "win64", "windows", "x64", "x86"}
+# Where the app installs the 3DS core, and the folders that hold it there.
+CORE_3DS = Path.home() / "Library/Application Support/ds-emulator/3DS"
+CORE_3DS_PARTS = (("azahar-", "azahar_libretro.dylib"), ("moltenvk-", "libMoltenVK.dylib"))
 
 # Downloads larger than this are refused, and so are files unpacked from
 # archives: no DS homebrew comes close.
@@ -103,6 +123,9 @@ def main():
     parser.add_argument("--rerun", action="store_true", help="run games again despite a cached result")
     parser.add_argument("--limit", type=int, help="take only the first N games of the catalogs")
     parser.add_argument("--emu", type=Path, help="an emu-headless binary to run instead of building one")
+    parser.add_argument("--3ds-core", dest="core_3ds", type=Path, default=CORE_3DS,
+                        help="the folder the app installed the 3DS core in, copied for each 3DS run "
+                             "and never changed (default %(default)s)")
     parser.add_argument("--out", type=Path, default=OUT, help="the TOML file to write")
     parser.add_argument("--no-write", action="store_true", help="leave the TOML file alone")
     parser.add_argument("--report", action="store_true",
@@ -135,14 +158,27 @@ def main():
     games = hh_games(hh_entries) + udb_games(udb_entries)
     games = sorted({game["id"]: game for game in reversed(games)}.values(),
                    key=lambda game: game["id"])  # each id once, the first entry of it
+    # The store never offers these, and some carry a commercial game's
+    # data, so they are never downloaded or run either.
+    games = [game for game in games if game["id"] not in WITHHELD]
     if args.limit:
         games = games[: args.limit]
     wanted = set(args.ids)
+    if wanted & WITHHELD:
+        parser.error("withheld, so never run: " + ", ".join(sorted(wanted & WITHHELD)))
     unknown = wanted - {game["id"] for game in games}
     if unknown:
         parser.error("not in the catalogs: " + ", ".join(sorted(unknown)))
     log.write(f"{len(games)} games: {sum(g['source'] == 'hh' for g in games)} Homebrew Hub, "
-              f"{sum(g['source'] == 'udb' for g in games)} Universal-DB")
+              f"{sum(g['source'] == 'udb' for g in games)} Universal-DB "
+              f"({sum(g['platform'] == '3DS' for g in games)} for the 3DS)")
+    global CORE
+    CORE = find_core_3ds(args.core_3ds)
+    if CORE:
+        log.write(f"3DS core {CORE['id']} from {args.core_3ds}")
+    elif any(game["platform"] == "3DS" for game in games if not wanted or game["id"] in wanted):
+        raise SystemExit(f"the 3DS core is not installed in {args.core_3ds}: open a 3DS game in "
+                         "the app once, or pass --3ds-core")
 
     cache = RunCache(CACHE / "results.jsonl")
     if args.backlog:
@@ -162,7 +198,8 @@ def main():
             latest = cache.latest(game["id"])
             if latest:
                 key = latest.get("key")
-                stale = bool(key) and key != settings_key(settings, key.get("rom"))
+                stale = bool(key) and key != settings_key(settings, key.get("rom"),
+                                                          "core" in key)
                 results[game["id"]] = {**game, **latest, "stale": stale}
     report = {
         "generated": datetime.date.today().isoformat(),
@@ -227,6 +264,32 @@ def sha256(path):
     return digest.hexdigest()
 
 
+# The 3DS core the runs use, as find_core_3ds finds it; set once by main.
+CORE = None
+
+
+def find_core_3ds(folder):
+    """The 3DS core the app installed in `folder`: the folders that hold
+    its parts, and an id naming their versions (azahar-2126.2+moltenvk-1.4.2),
+    which goes into a 3DS game's cache key. None if a part is missing."""
+    parts = []
+    for prefix, library in CORE_3DS_PARTS:
+        found = sorted(path for path in folder.glob(prefix + "*") if (path / library).is_file())
+        if not found:
+            return None
+        parts.append(found[-1])
+    return {"parts": parts, "id": "+".join(part.name for part in parts)}
+
+
+def copy_core_3ds(work):
+    """Makes `work` a 3DS core folder of its own: the installed core's parts
+    cloned into it (copy-on-write, so instant and free), and nothing else,
+    so the run starts a console of its own."""
+    work.mkdir()
+    subprocess.run(["/bin/cp", "-c", "-R", *map(str, CORE["parts"]), str(work)], check=True,
+                   capture_output=True)
+
+
 # --- Downloading -----------------------------------------------------------
 
 
@@ -239,6 +302,17 @@ class Unavailable(Exception):
         self.final = final
 
 
+class Redirects(urllib.request.HTTPRedirectHandler):
+    """Follows permanent redirects (308) too, as curl and the app do;
+    Python's own handler does only from 3.11."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return super().redirect_request(req, fp, 307 if code == 308 else code, msg, headers,
+                                        newurl)
+
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302
+
+
 class Http:
     """Polite downloads: our User-Agent, at most DOWNLOADS at once, and
     retries with backoff when a server is busy or failing."""
@@ -246,6 +320,7 @@ class Http:
     def __init__(self, log):
         self.slots = threading.Semaphore(DOWNLOADS)
         self.log = log
+        self.opener = urllib.request.build_opener(Redirects)
 
     def fetch(self, url, dest):
         """Downloads `url` to `dest`, through a temporary file."""
@@ -258,7 +333,7 @@ class Http:
             last = None
             request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             try:
-                with self.slots, urllib.request.urlopen(request, timeout=60) as response:
+                with self.slots, self.opener.open(request, timeout=60) as response:
                     size = 0
                     with open(part, "wb") as file:
                         for chunk in iter(lambda: response.read(1 << 16), b""):
@@ -417,21 +492,75 @@ def best(names):
     return chosen
 
 
+def words(name):
+    """The words of a lower-case file name without its extension."""
+    return set(re.split(r"[^a-z0-9]+", os.path.splitext(name)[0])) - {""}
+
+
+def score_3ds(name):
+    """How much a 3DS download is preferred: a .3dsx over a .cia over an
+    archive of either; of archives, one named for a .3dsx, then for the
+    3DS, then for a .cia, any of them over one named for another system,
+    and of equals a ZIP over a 7-Zip file, which macOS's tar can't always
+    unpack. None if it holds no 3DS game. Matches download_score_3ds in
+    store.rs."""
+    name = name.lower()
+    if name.endswith(".3dsx"):
+        return 20
+    if name.endswith(".cia"):
+        return 10
+    if not name.endswith((".zip", ".7z")):
+        return None
+    named = words(name)
+    points = (2 * ("3dsx" in named) + ("3ds" in named) - ("cia" in named)
+              - 3 * bool(named & OTHER_SYSTEMS))
+    return 2 * points + name.endswith(".zip")
+
+
+def names_3ds(name):
+    """Whether a download is named as a 3DS build. As names_3ds in store.rs."""
+    return bool(words(name.lower()) & {"3ds", "3dsx", "cia"})
+
+
+def best_scored(names, score):
+    """The name `score` rates highest, the first of those that tie; names it
+    rates None are left out."""
+    chosen, top = None, None
+    for name in names:
+        points = score(name)
+        if points is not None and (top is None or points > top):
+            chosen, top = name, points
+    return chosen
+
+
 def udb_games(entries):
-    """Universal-DB's DS games, each with the download it plays."""
+    """Universal-DB's DS and 3DS games, each with the download it plays. An
+    entry for both systems is a DS game if it has a DS build (an archive
+    named for the 3DS is not one), else a 3DS game, as in store.rs. The
+    downloads are looked at in name order, as the app reads them, so ties
+    go the same way."""
     games = []
     for entry in entries:
-        if "DS" not in (entry.get("systems") or []) or "game" not in (entry.get("categories") or []):
+        systems = entry.get("systems") or []
+        if "game" not in (entry.get("categories") or []) or not {"DS", "3DS"} & set(systems):
             continue
         slug = entry["slug"]
         downloads = entry.get("downloads") or {}
-        name = best(name for name in downloads if name.lower().endswith(UDB_EXTENSIONS))
+        names = sorted(downloads)
+        platform = "DS" if "DS" in systems else "3DS"
+        name = None
+        if "DS" in systems:
+            name = best(name for name in names if name.lower().endswith(UDB_EXTENSIONS)
+                        and not ("3DS" in systems and names_3ds(name)))
+        if name is None and "3DS" in systems:
+            name = best_scored(names, score_3ds)
+            platform = "3DS" if name else platform
         game = {
             "id": f"udb:{slug}",
             "source": "udb",
             "title": entry.get("title", slug),
             "typetag": None,
-            "platform": "DS",
+            "platform": platform,
             "platform_inferred": False,
         }
         if name:
@@ -494,11 +623,33 @@ class NothingToPlay(Exception):
     pass
 
 
-def nds_members(names):
+def game_members(names, platform):
+    """The members of an archive, by name, that are games for `platform`:
+    .nds files for a DS game, 3DS files for a 3DS game. Not folders, and
+    not macOS's copies of files' metadata."""
+    extensions = THREE_DS_EXTENSIONS if platform == "3DS" else ("nds",)
     return [name for name in names
-            if name.lower().endswith(".nds")
+            if extension(basename(name)) in extensions
             and "__MACOSX" not in name.replace("\\", "/").split("/")
             and not name.endswith("/")]
+
+
+def pick_member(names, platform, in_order):
+    """The game in an archive to play: for a DS game, the .nds with the best
+    score by its file name; for a 3DS game, the one the app adds to the
+    library (best_3ds_game in store.rs): its .3dsx, else its .cia, else
+    another 3DS file, the first of equals in the order the app unpacks
+    them. `in_order` says the names are already in that order (a ZIP's
+    own); else they are sorted by folder and name, as the app sorts what
+    tar unpacks."""
+    members = game_members(names, platform)
+    if platform != "3DS":
+        return best_member(members)
+    if not in_order:
+        members.sort(key=lambda name: name.replace("\\", "/").split("/"))
+    rank = {"3dsx": 0, "cia": 1}
+    members.sort(key=lambda name: rank.get(extension(basename(name)), 2))
+    return members[0] if members else None
 
 
 def basename(name):
@@ -534,27 +685,29 @@ def unpack_rom(archive):
     return dest
 
 
-def unpack(archive):
-    """The .nds in a downloaded archive that a DS should play, unpacked
-    next to it. Members are scored by their file names."""
+def unpack(archive, platform):
+    """The game in a downloaded archive to play, unpacked next to it (see
+    pick_member)."""
     out = archive.parent / "unpacked"
     marker = out / "from.json"
     archive_sha = sha256(archive)
+    wanted = "3DS game" if platform == "3DS" else ".nds"
     if marker.exists():
         meta = json.loads(marker.read_text())
-        if meta.get("archive") == archive_sha:
+        if meta.get("archive") == archive_sha and meta.get("platform", "DS") == platform:
             if meta.get("member") is None:
-                raise NothingToPlay(f"no .nds in {archive.name}")
+                raise NothingToPlay(f"no {wanted} in {archive.name}")
             return out / meta["file"]
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir()
     if archive.suffix.lower() == ".zip":
         with zipfile.ZipFile(archive) as zipped:
             infos = {info.filename: info for info in zipped.infolist() if not info.is_dir()}
-            member = best_member(nds_members(list(infos)))
+            member = pick_member(list(infos), platform, in_order=True)
             if member is None:
-                atomic_write(marker, json.dumps({"archive": archive_sha, "member": None}))
-                raise NothingToPlay(f"no .nds in {archive.name}")
+                atomic_write(marker, json.dumps({"archive": archive_sha, "member": None,
+                                                 "platform": platform}))
+                raise NothingToPlay(f"no {wanted} in {archive.name}")
             info = infos[member]
             if info.file_size > MAX_BYTES:
                 raise NothingToPlay(f"{member} is larger than {MAX_BYTES >> 20} MiB")
@@ -568,10 +721,11 @@ def unpack(archive):
                                  text=True, errors="replace", timeout=120)
         if listing.returncode:
             raise NothingToPlay(f"tar cannot read {archive.name}: {listing.stderr.strip()[:200]}")
-        member = best_member(nds_members(listing.stdout.splitlines()))
+        member = pick_member(listing.stdout.splitlines(), platform, in_order=False)
         if member is None:
-            atomic_write(marker, json.dumps({"archive": archive_sha, "member": None}))
-            raise NothingToPlay(f"no .nds in {archive.name}")
+            atomic_write(marker, json.dumps({"archive": archive_sha, "member": None,
+                                             "platform": platform}))
+            raise NothingToPlay(f"no {wanted} in {archive.name}")
         work = out / "all"
         work.mkdir()
         # `ulimit -f` counts 512-byte blocks.
@@ -585,7 +739,8 @@ def unpack(archive):
         dest = out / safe_name(basename(member))
         os.replace(source, dest)
         shutil.rmtree(work)
-    atomic_write(marker, json.dumps({"archive": archive_sha, "member": member, "file": dest.name}))
+    atomic_write(marker, json.dumps({"archive": archive_sha, "member": member, "file": dest.name,
+                                     "platform": platform}))
     return dest
 
 
@@ -627,8 +782,13 @@ class RunCache:
             self.file.flush()
 
 
-def settings_key(settings, rom_sha):
-    return {**settings, "rom": rom_sha}
+def settings_key(settings, rom_sha, three_ds=False):
+    """What a result depends on: the run's settings and the ROM, and for a
+    3DS game the core it ran on, which emu-headless downloads apart."""
+    key = {**settings, "rom": rom_sha}
+    if three_ds:
+        key["core"] = CORE["id"] if CORE else None
+    return key
 
 
 def run_all(games, http, cache, settings, emu, args, jobs, log):
@@ -666,7 +826,7 @@ def run_all(games, http, cache, settings, emu, args, jobs, log):
         try:
             path = fetch_game(http, game, args.refresh)
             if game["source"] == "udb" and path.suffix.lower() in (".zip", ".7z"):
-                path = unpack(path)
+                path = unpack(path, game["platform"])
             elif game["source"] == "hh" and is_zip(path):
                 path = unpack_rom(path)
         except Unavailable as error:
@@ -681,7 +841,7 @@ def run_all(games, http, cache, settings, emu, args, jobs, log):
         return path
 
     def play(game, rom):
-        key = settings_key(settings, sha256(rom))
+        key = settings_key(settings, sha256(rom), SYSTEMS[extension(rom.name)] == "3ds")
         latest = cache.latest(game["id"])
         if latest and latest["key"] == key and not args.rerun:
             finish(game, {**latest, "cached": True})
@@ -726,6 +886,8 @@ def judge(emu, rom, checks, timeout, folder, script=None):
     for frame in reversed(checks):
         run = run_once(emu, rom, system, frame, timeout, folder, script)
         total += run["seconds"]
+        if run["verdict"] == "untested":
+            return run
         if run["verdict"] != "ok":
             return {**run, "seconds": round(total, 2), "failed_at": frame}
         if run["colours"] is None:
@@ -746,28 +908,53 @@ def run_once(emu, rom, system, frames, timeout, folder, script=None):
 
 
 def run_in(emu, rom, system, frames, timeout, dump, script):
-    command = [str(emu), "--system", system, "--frames", str(frames), "--dump", str(dump)]
+    # A 3DS game's system is told by its extension, so a kind of file
+    # emu-headless doesn't open yet says so rather than failing in the
+    # core. Its core and console go in a folder of their own.
+    command = [str(emu)] + (["--system", system] if system != "3ds" else [])
+    command += ["--frames", str(frames), "--dump", str(dump)]
+    if system == "3ds":
+        work = dump / "3ds"
+        copy_core_3ds(work)
+        command += ["--work-dir", str(work)]
     command += ["--script", str(script)] if script else []
     command.append(str(rom))
     env = {**os.environ, "RUST_BACKTRACE": "0"}
     start = time.monotonic()
+    # In a process group of its own, so a timeout also ends the 3DS helper
+    # emu-headless starts, and nothing it started outlives the run.
+    process = subprocess.Popen(command, cwd=dump, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
     try:
-        done = subprocess.run(command, cwd=dump, env=env, stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        end_group(process.pid)
+        process.communicate()
         return {"verdict": "timeout", "seconds": time.monotonic() - start,
                 "message": f"over {timeout:g} s for {frames} frames"}
+    finally:
+        end_group(process.pid)
     seconds = time.monotonic() - start
-    stderr = done.stderr.decode("utf-8", "replace")
-    if done.returncode:
-        return {"verdict": "crash", "seconds": seconds, "message": crash_message(done.returncode, stderr),
-                "exit": done.returncode, "stderr": stderr[-2000:]}
-    lines = done.stdout.decode("utf-8", "replace").splitlines()
+    stderr = stderr.decode("utf-8", "replace")
+    if process.returncode and "cannot tell the system of" in stderr:
+        return {"verdict": "untested", "seconds": seconds,
+                "message": f"emu-headless does not open .{extension(rom.name)} files yet"}
+    if process.returncode:
+        result = {"verdict": "crash", "seconds": seconds,
+                  "message": crash_message(process.returncode, stderr),
+                  "exit": process.returncode, "stderr": stderr[-2000:]}
+        helper_log = dump / "3ds" / "helper.log"
+        if system == "3ds" and helper_log.is_file():
+            result["helper_log"] = helper_log.read_text(errors="replace")[-2000:]
+        return result
+    lines = stdout.decode("utf-8", "replace").splitlines()
     screens = len([line for line in lines if line.startswith("system=")])
     log = [line for line in lines if not line.startswith("system=")]
     colours = []
     for index in range(screens):
-        colour = one_colour(dump / f"screen{index}.ppm")
+        ignore = CURSOR_3DS if system == "3ds" and index == 1 else ()
+        colour = one_colour(dump / f"screen{index}.ppm", ignore)
         if colour is None:
             return {"verdict": "ok", "seconds": seconds, "colours": None, "log": log}
         colours.append(colour)
@@ -776,16 +963,38 @@ def run_in(emu, rom, system, frames, timeout, dump, script):
     return {"verdict": "ok", "seconds": seconds, "colours": colours, "log": log}
 
 
-def one_colour(path):
+def end_group(pid):
+    """Kills what is left of the process group `pid` leads."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+# The pixels of the 3DS touch screen (x, y) that Azahar's core inverts to
+# draw its touch cursor, a cross centred on the last point touched, which
+# is the corner (0, 0) until something touches it. They are the core's,
+# not the game's, so the check leaves them out, or no 3DS game would be
+# one colour.
+CURSOR_3DS = ((1, 0), (2, 0), (3, 0), (0, 1), (0, 2), (0, 3))
+
+
+def one_colour(path, ignore=()):
     """The screen's colour as RRGGBB if every pixel of the dumped PPM is
-    that colour, else None. emu-headless writes `P6\\nW H\\n255\\n` and
-    then the pixels."""
+    that colour, else None, leaving out the pixels at the (x, y) places in
+    `ignore`. emu-headless writes `P6\\nW H\\n255\\n` and then the
+    pixels."""
     magic, size, depth, pixels = path.read_bytes().split(b"\n", 3)
     width, height = map(int, size.split())
     if magic != b"P6" or depth != b"255" or len(pixels) != width * height * 3:
         raise ValueError(f"{path} is not a PPM emu-headless writes")
-    first = pixels[:3]
-    return first.hex() if pixels == first * (width * height) else None
+    last = pixels[-3:]
+    if ignore:
+        pixels = bytearray(pixels)
+        for x, y in ignore:
+            at = (y * width + x) * 3
+            pixels[at:at + 3] = last
+    return last.hex() if pixels == last * (width * height) else None
 
 
 def crash_message(code, stderr):
@@ -821,15 +1030,23 @@ def toml(report):
         f"# Generated by scripts/store-compat.py on {report['generated']}: each store game run",
         f"# headless for {report['frames']} frames with no input. ok: a screen showed more than one",
         f"# colour at {at}; blank: none did; crash: emu-headless failed;",
-        f"# timeout: over {report['timeout']:g} s; unsupported: no file it plays; unavailable: no download.",
+        f"# timeout: over {report['timeout']:g} s; unsupported: no file it plays; unavailable: no download;",
+        "# error: it started, but on an error screen (ERROR_SCREENS in the script).",
+        "# Games emu-headless could not open yet have no line, and are offered unchecked.",
         "[verdicts]",
     ]
     for game in sorted(report["games"], key=lambda game: game["id"]):
-        lines.append(f"{toml_string(game['id'])} = {toml_string(game['verdict'])}")
+        verdict = game["verdict"]
+        # The check can't tell an error screen from a game; these were
+        # looked at by hand, and the store leaves them out.
+        if verdict == "ok" and game["id"] in ERROR_SCREENS:
+            verdict = "error"
+        if verdict != "untested":
+            lines.append(f"{toml_string(game['id'])} = {toml_string(verdict)}")
     return "\n".join(lines) + "\n"
 
 
-VERDICTS = ["ok", "blank", "crash", "timeout", "unsupported", "unavailable"]
+VERDICTS = ["ok", "blank", "crash", "timeout", "unsupported", "unavailable", "untested"]
 
 
 def table(title, groups):
@@ -864,7 +1081,7 @@ def summary(games, report):
         out.append("  (Homebrew Hub entries with no platform, counted by file: "
                    + ", ".join(notes) + ")")
     out += ["", table("HH typetag", by_typetag), ""]
-    for verdict in ("crash", "timeout", "unsupported", "unavailable"):
+    for verdict in ("crash", "timeout", "unsupported", "unavailable", "untested"):
         groups = defaultdict(list)
         for game in games:
             if game["verdict"] == verdict:
@@ -911,7 +1128,9 @@ WITHHELD = read_withheld()
 # Left out of the backlog, which names no commercial game: crack groups'
 # intros and trainers titled after one (their downloads hold only the
 # intro), and ports or rebuilds of one that use its code, art or data.
-# Original fan games and clones stay in.
+# Original fan games and clones stay in. Universal-DB's ports of commercial
+# games, which this list once held, are in WITHHELD now that the store
+# offers 3DS games, and so are never run or listed.
 UNLISTED = {
     # Intros and trainers named after commercial games.
     "hh:benjamin-bluemchen-2", "hh:dangan-gb-4", "hh:denki-blocks", "hh:harvest-moon-3",
@@ -920,14 +1139,6 @@ UNLISTED = {
     "hh:vip-5", "hh:wwf-betrayal-5-are-you-real",
     # Ports of commercial games, and engines that need one's data.
     "hh:jet-set-willy-v2-beta-2", "nes:plourples_helmet-nes",
-    "udb:3d-pinball---space-cadet", "udb:bart-bash", "udb:bugdom", "udb:cro-mag-rally",
-    "udb:ctgp-7-downloader", "udb:ctrquake", "udb:devilutionx", "udb:dungeons-of-daggorath-3ds",
-    "udb:eduke3d", "udb:emerald-online-3ds", "udb:geometry-dash-3ds", "udb:halo-renewed-solitude",
-    "udb:halo-revamped", "udb:ioquake3ds", "udb:lego-island", "udb:mario-kart-64-3ds",
-    "udb:omnispeak-3ds", "udb:opentitus-3ds", "udb:papas-pizzeria", "udb:postal-1-3ds",
-    "udb:prboom", "udb:prboom3ds", "udb:quake2ctr", "udb:sonic-1--2", "udb:sonic-cd",
-    "udb:sonic-mania", "udb:thextech", "udb:xash3ds", "udb:xrick-3ds", "udb:zelda-alttp-3ds",
-    "udb:zelda-tmc-3ds",
 }
 
 # What was found by hand, beyond what the probes below can tell.
@@ -948,6 +1159,44 @@ NOTES = {
     "hh:sierpinskiboy": (
         "334 bytes (0x14E), ending at the header checksum. It booted until the core's "
         "minimum length went from 0x14E to 0x150 bytes, with the header checksum change."),
+    "udb:3deins": (
+        "Within its first frames the core reports a fatal error: an undefined instruction "
+        "in the game's main thread (PC 0x001029B4, LR 0x001117C4). It then writes a memory "
+        "dump to `3DS/helper.log` every frame, about 3 s each, so 60 frames take nearly "
+        "three minutes."),
+    "udb:ballcopter": (
+        "Within its first frames the core reports `Fatal Error encountered (16)`, with no "
+        "more said, in `3DS/helper.log`."),
+}
+
+# 3DS games built on LÖVE Potion, the LÖVE runtime for homebrew consoles,
+# found by their pages and the runtime's strings in their files.
+LOVE_POTION = {
+    "udb:antibounce", "udb:ballcopter", "udb:breakup-simulator-portable", "udb:custom-yacht-3ds",
+    "udb:hax0r", "udb:hrt3ds", "udb:talk-with-okelote", "udb:tasmanquest", "udb:turtleinvaders",
+}
+
+# Store games that pass the check, as their screens are not one colour,
+# but whose screens at frame 900, looked at by hand on 2026-11-03, show an
+# error: the check counts colours, not what they say. Most need files of
+# their own on the SD card, which their archives hold beside the game, but
+# the store unpacks only the game.
+ERROR_SCREENS = {
+    "udb:antibounce": (
+        "A LÖVE Potion error: `main.lua:45: bad argument #1 to 'lists' (table expected, "
+        "got nil)`."),
+    "udb:crosscraft-classic": (
+        "One log line, `[CORE][INFO]: Initialized base layer`, and nothing more. Its ZIP "
+        "holds 65 more files beside the game."),
+    "udb:falling-blocks-watch-out": (
+        "`error loading textures! missing files?` Its ZIP holds 115 more files beside the "
+        "game."),
+    "udb:nazi-zombies-portable": (
+        "`Couldn't load` its game data: `File not found`. Its ZIP holds 1,182 more files "
+        "beside the game."),
+    "udb:sonic-robo-blast-2": (
+        "`srb2.pk3 not found`, then a panic. SRB2's game files are a download of their own, "
+        "which its README names."),
 }
 
 # Lua run alongside a blank game: the CPU and video state over the last
@@ -1015,8 +1264,8 @@ def write_backlog(path, games, hh_entries, udb_entries, cache, emu, emu_sha, che
     missing = [game["id"] for game in store if not results[game["id"]]]
     if missing:
         log.write(f"{len(missing)} games have no result yet, e.g. {', '.join(missing[:3])}; run without --backlog first")
-    failing = [game for game in store
-               if results[game["id"]] and results[game["id"]]["verdict"] not in ("ok", "unsupported")]
+    failing = [game for game in store if results[game["id"]]
+               and results[game["id"]]["verdict"] not in ("ok", "unsupported", "untested")]
     log.write(f"probing {len(failing)} games that do not run")
 
     def look(game):
@@ -1035,7 +1284,9 @@ def write_backlog(path, games, hh_entries, udb_entries, cache, emu, emu_sha, che
     links = os.path.relpath(REPO, Path(path).resolve().parent)
     out += backlog_header(store, results, builds, emu_sha, checks, timeout, games)
     out += backlog_groups(failing, results, facts, links, checks)
-    out += backlog_other_systems(hh_entries, udb_entries)
+    out += backlog_error_screens(store, results, links)
+    out += backlog_untested(store, results)
+    out += backlog_other_systems(hh_entries)
     out += backlog_unsupported(store, results, hh_entries, udb_entries)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     atomic_write(path, "\n".join(out).rstrip() + "\n")
@@ -1085,11 +1336,13 @@ def investigate(game, result, emu, checks, timeout, scripts):
             facts["patched"] = judge(emu, patched, checks, timeout, folder)
     elif result["verdict"] == "blank":
         facts["between"] = judge(emu, rom, between_frames(checks), timeout, folder)
-        probe = run_once(emu, rom, system, checks[-1], timeout, folder,
-                         scripts / ("gba.lua" if system == "gba" else "gb.lua"))
-        line = next((entry for entry in probe.get("log") or [] if entry.startswith("probe ")), "")
-        facts["state"] = {key: value if key == "near" else int(value, 16) for key, value in
-                          (pair.split("=") for pair in line.split()[1:])}
+        # Lua reads no 3DS memory, so a blank 3DS game gets no state probe.
+        if system != "3ds":
+            probe = run_once(emu, rom, system, checks[-1], timeout, folder,
+                             scripts / ("gba.lua" if system == "gba" else "gb.lua"))
+            line = next((entry for entry in probe.get("log") or [] if entry.startswith("probe ")), "")
+            facts["state"] = {key: value if key == "near" else int(value, 16) for key, value in
+                              (pair.split("=") for pair in line.split()[1:])}
         facts["pressed"] = judge(emu, rom, checks, timeout, folder, scripts / "press.lua")
         if system == "gb":
             facts["cgb_flag"] = data[0x143]
@@ -1195,7 +1448,8 @@ def outcome(run):
 
 
 def platform_family(game):
-    return {"GB": "GB", "GBC": "GBC", "GBA": "GBA", "DS": "DS"}.get(game["platform"], game["platform"])
+    return {"GB": "GB", "GBC": "GBC", "GBA": "GBA", "DS": "DS", "3DS": "3DS"}.get(
+        game["platform"], game["platform"])
 
 
 def backlog_header(store, results, builds, emu_sha, checks, timeout, games):
@@ -1220,27 +1474,35 @@ def backlog_header(store, results, builds, emu_sha, checks, timeout, games):
         + ", ".join(str(frame) for frame in checks[:-1]) + f" or {checks[-1]}; blank when "
         "every screen is one colour at each; crash when emu-headless refuses the file or "
         f"fails; timeout after {timeout:g} s. Homebrew Hub entries without a platform are "
-        "counted by their file's extension.",
+        "counted by their file's extension. 3DS games ran on the core the app downloads "
+        "(Azahar's libretro core), each run on a console of its own with none of a "
+        "console's files, so without the DSP firmware that homebrew needs for sound.",
         "",
         "| Platform | Ok | Not ok | Total |",
         "|---|---:|---:|---:|",
     ]
-    for platform in ("GB", "GBC", "GBA", "DS"):
+    for platform in ("GB", "GBC", "GBA", "DS", "3DS"):
         row = counts[platform]
         out.append(f"| {platform} | {row['ok']} | {row['not ok']} | {row['ok'] + row['not ok']} |")
+    untested = sum(1 for game in store
+                   if results[game["id"]] and results[game["id"]]["verdict"] == "untested")
     out += [
         "",
-        f"Not ok includes the entries with no ROM to download (see the last section). Left out "
-        f"of every list: the {len(WITHHELD)} entries the store withholds (crack groups' "
-        f"trainers that hold a commercial game), and {unlisted} more that don't run but are "
-        "named after a commercial game or port one (UNLISTED in the script).",
+        "Not ok includes the entries with no ROM to download (see the last section)"
+        + (f" and {untested} not run yet (see below)" if untested else "") + ". Left out of "
+        f"every list, and never run: the {len(WITHHELD)} entries the store withholds (crack "
+        "groups' trainers that hold a commercial game, ports of commercial games and engines "
+        "that need one's data, and fan ports that carry a commercial game's own art or "
+        "sound; WITHHELD in crates/emu-app/src/store.rs)"
+        + (f", and {unlisted} more that don't run but are named after a commercial game or "
+           "port one (UNLISTED in the script)" if unlisted else "") + ".",
         "",
     ]
     return out
 
 
 GROUP_ORDER = ["zip", "no-rom", "between", "input", "cgb-white", "lcd-off", "lcd-on", "gba-blank",
-               "short", "gba-header"]
+               "3ds-blank", "short", "gba-header"]
 
 
 def classify(game, result, facts):
@@ -1249,7 +1511,7 @@ def classify(game, result, facts):
         kind = facts.get("kind")
         if kind == "zip" and facts.get("inside"):
             return "zip"
-        if kind in ("zip", "video", "archive"):
+        if kind in ("zip", "video", "archive") and game["platform"] != "3DS":
             return "no-rom"
         message = result.get("message") or ""
         if "shorter than" in message:
@@ -1267,6 +1529,8 @@ def classify(game, result, facts):
         state = facts.get("state") or {}
         if game["platform"] == "GBA":
             return "gba-blank"
+        if game["platform"] == "3DS":
+            return "3ds-blank"
         if "lcdc" in state and not state["lcdc"] & 0x80:
             return "lcd-off"
         return "lcd-on"
@@ -1359,7 +1623,7 @@ def describe_group(key, members, results, facts, links, checks):
             out.append("| " + " | ".join(cell(value) for value in (
                 game["id"], tidy(game["title"]), game["platform"], game["typetag"],
                 size_text(fact(game).get("size")), what)) + " |")
-    elif key in ("between", "input", "cgb-white", "lcd-off", "lcd-on", "gba-blank"):
+    elif key in ("between", "input", "cgb-white", "lcd-off", "lcd-on", "gba-blank", "3ds-blank"):
         titles = {
             "between": "Drawn, but not at the checked frames",
             "input": "Blank until a button is pressed",
@@ -1367,6 +1631,7 @@ def describe_group(key, members, results, facts, links, checks):
             "lcd-off": "Screen turned off",
             "lcd-on": "Screen on, but one colour",
             "gba-blank": "GBA games that stay one colour",
+            "3ds-blank": "3DS games that stay one colour",
         }
         opcodes = ("Op is the two bytes at the PC: 76 is HALT (the PC shows the byte after "
                    "it), 10 STOP, 18FE a jump to itself, FF RST 38 (code running through empty "
@@ -1423,12 +1688,25 @@ def describe_group(key, members, results, facts, links, checks):
                          "allow. Lead: compare these registers and the PC with mGBA at the same "
                          "frame; a PC that stays put is a loop waiting for something the core "
                          "never does.",
+            "3ds-blank": "Pressing Start and A doesn't help, and Lua reads no 3DS memory, so "
+                         "there are no registers to show. Lead: play it in the app, read "
+                         "`3DS/helper.log` and compare with Azahar's own app; a game that waits "
+                         "on the DSP firmware (`sdmc:/3ds/dspfirm.cdc`), the network or files "
+                         "of its own on the SD card stays blank without them.",
         }
+        love = [game["id"] for game in members if game["id"] in LOVE_POTION]
+        if key == "3ds-blank" and love:
+            leads[key] += (f" {len(love)} of them are LÖVE Potion games ({', '.join(love)}): "
+                           "find what LÖVE Potion asks of the console as it starts that a new "
+                           "console without a player's files lacks.")
         out += [f"### {titles[key]} ({count} {plural})", "",
                 "No error, but every screen is one colour at each checked frame. " + leads[key], ""]
         gba = key == "gba-blank"
+        three_ds = key == "3ds-blank"
         columns = (["Colour", "DISPCNT", "DISPSTAT", "IE", "IME", "PC (last second)", "Buttons pressed"]
                    if gba else
+                   ["Colour", "Buttons pressed"]
+                   if three_ds else
                    ["Colour", "LCDC", "PC (last second)", "Op", "IE", "KEY1", "BGP",
                     "Buttons pressed", "As original GB"])
         out += ["| Id | Title | Platform | Type | Size | " + " | ".join(columns) + " |",
@@ -1448,6 +1726,8 @@ def describe_group(key, members, results, facts, links, checks):
             if gba:
                 row += [hex_of("dispcnt", 4), hex_of("dispstat", 4), hex_of("ie", 4),
                         hex_of("ime", 4), pc, outcome(fact(game).get("pressed"))]
+            elif three_ds:
+                row += [outcome(fact(game).get("pressed"))]
             else:
                 row += [hex_of("lcdc", 2), pc, hex_of("op", 4), hex_of("ie", 2), hex_of("key1", 2),
                         hex_of("bgp", 2),
@@ -1496,6 +1776,7 @@ def describe_group(key, members, results, facts, links, checks):
             out.append("| " + " | ".join(cell(value) for value in (
                 game["id"], tidy(game["title"]), game["platform"], game["typetag"],
                 size_text(fact(game).get("size")))) + " |")
+        out += notes(members)
     return out + [""]
 
 
@@ -1511,36 +1792,54 @@ def developer_names(value):
     return ", ".join(name for name in names if name)
 
 
-def backlog_other_systems(hh_entries, udb_entries):
-    three_ds = [entry for entry in udb_entries
-                if "3DS" in (entry.get("systems") or []) and "game" in (entry.get("categories") or [])
-                and "DS" not in (entry.get("systems") or [])]
-    listed = [entry for entry in three_ds if f"udb:{entry['slug']}" not in UNLISTED]
+def backlog_error_screens(store, results, links):
+    """The store games that pass the check but show an error (ERROR_SCREENS)."""
+    members = [game for game in store if game["id"] in ERROR_SCREENS
+               and results[game["id"]] and results[game["id"]]["verdict"] == "ok"]
+    if not members:
+        return []
+    out = [f"## Started, but on an error screen ({len(members)})", "",
+           "These pass the check, but their screens at frame 900, looked at by hand, show an "
+           "error (ERROR_SCREENS in the script), so the store leaves them out. Most "
+           "need files of their own on the SD card, which their archives hold beside the game, "
+           "while the store unpacks only the game ("
+           + source_line(links, "crates/emu-app/src/archive.rs", "fn wanted") + "). Lead: for "
+           "a 3DS game, unpack the rest of its archive onto the core's SD card "
+           "(`3DS/Azahar/sdmc`) where its README says, or withhold games that can't start "
+           "without files the catalog doesn't offer.", "",
+           "| Id | Title | Platform | File | What frame 900 shows |", "|---|---|---|---|---|"]
+    for game in members:
+        out.append("| " + " | ".join(cell(value) for value in (
+            game["id"], tidy(game["title"]), game["platform"], f"`{game.get('file')}`",
+            ERROR_SCREENS[game["id"]])) + " |")
+    return out + [""]
+
+
+def backlog_untested(store, results):
+    """The store games emu-headless could not open yet, if any."""
+    members = [game for game in store
+               if results[game["id"]] and results[game["id"]]["verdict"] == "untested"]
+    if not members:
+        return []
+    out = [f"## Not run yet ({len(members)})", "",
+           "emu-headless could not open these games' files yet, so they were not run. The store "
+           "offers them unchecked.", ""]
+    out += messages(members, results, "", [])
+    out += ["", "| Id | Title | Platform | File |", "|---|---|---|---|"]
+    for game in members:
+        out.append("| " + " | ".join(cell(value) for value in (
+            game["id"], tidy(game["title"]), game["platform"], f"`{game.get('file')}`")) + " |")
+    return out + [""]
+
+
+def backlog_other_systems(hh_entries):
     nes = [entry for entry in hh_entries
            if entry.get("basepath") == "database-nes" or entry.get("platform") == "NES"]
     nes_listed = [entry for entry in nes if f"nes:{entry['slug']}" not in UNLISTED]
     out = ["## Systems without a core", "",
-           "The PRD lists 3DS cores as a non-goal (section 4): Gen 6-9 support, if it ever comes, "
-           "means hosting an existing core, never writing one. Phase 5 of the roadmap is a "
-           "libretro-host mode for an existing core (for example one derived from Azahar), or "
-           "contributing to Azahar, with parts of a 3DS emulator (an ARM11 interpreter, a PICA200 "
-           "shader interpreter) written only for learning, against homebrew. 3DS homebrew "
-           "(`.3dsx`, and `.cia` builds of it) is not encrypted, so it needs no keys, which the "
-           "legal policy rules out (PRD section 9).", "",
-           f"### Nintendo 3DS, from Universal-DB ({len(three_ds)} games)", "",
-           f"Games whose systems include 3DS but not DS. {len(three_ds) - len(listed)} that port "
-           "a commercial game or need one's data are left out.", "",
-           "| Title | Author | Licence | Downloads | Page |", "|---|---|---|---|---|"]
-    for entry in sorted(listed, key=lambda entry: (entry.get("title") or entry["slug"]).lower()):
-        formats = sorted({os.path.splitext(name)[1].lower() for name in entry.get("downloads") or {}
-                          if os.path.splitext(name)[1]})
-        page = (entry.get("urls") or [None])[0]
-        out.append("| " + " | ".join(cell(value) for value in (
-            entry.get("title") or entry["slug"], entry.get("author"),
-            entry.get("license_name") or entry.get("license"),
-            " ".join(f"`{ext}`" for ext in formats) or "none",
-            f"[{entry['slug']}]({page})" if page else None)) + " |")
-    out += ["", f"### NES, from Homebrew Hub ({len(nes)} entries)", ""]
+           "Homebrew Hub's NES entries: the app has no NES core, so the store leaves them out. "
+           "(3DS games, listed here until the app played them, are store games now: see above.)",
+           "", f"### NES, from Homebrew Hub ({len(nes)} entries)", ""]
     left_out = len(nes) - len(nes_listed)
     if left_out:
         out += [(f"{left_out} entries that port a commercial game are" if left_out > 1 else
@@ -1569,9 +1868,10 @@ def backlog_unsupported(store, results, hh_entries, udb_entries):
                and results[game["id"]]["verdict"] == "unsupported" and game["id"] not in UNLISTED]
     out = [f"## Entries with no ROM to download ({len(members)})", "",
            "The catalog offers no file the emulator plays: no playable `.gb`, `.gbc` or `.gba` "
-           "file on Homebrew Hub, or no `.nds`, `.zip` or `.7z` download on Universal-DB. Some "
-           "could be built from source, or have a ROM inside a file the catalog does not mark "
-           "playable.", "",
+           "file on Homebrew Hub, or no `.nds`, `.3dsx`, `.cia`, `.zip` or `.7z` download on "
+           "Universal-DB, or an archive without a game for the entry's system. Some could be "
+           "built from source, or have a ROM inside a file the catalog does not mark playable.",
+           "",
            "| Id | Title | Platform | Files in the catalog | Source |", "|---|---|---|---|---|"]
     for game in members:
         entry = raw.get(game["id"], {})
