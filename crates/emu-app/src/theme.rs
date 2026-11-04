@@ -17,6 +17,9 @@ pub const MUTED: u32 = 0x008A_9099;
 pub const ACCENT: u32 = 0x00FF_6A3D;
 /// Text and marks on the accent.
 pub const ON_ACCENT: u32 = 0x00FF_FFFF;
+/// The only red: the action that destroys something, such as taking a
+/// game out of the library.
+pub const DANGER: u32 = 0x00FF_5F57;
 /// `colour` with `alpha`, for `gpui::rgba`.
 pub const fn with_alpha(colour: u32, alpha: u8) -> u32 {
     colour << 8 | alpha as u32

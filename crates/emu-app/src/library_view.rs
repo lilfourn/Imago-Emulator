@@ -8,23 +8,29 @@
 //! plate in its system's colour with its icon or title.
 //!
 //! Keyboard first: typing searches, the arrow keys choose a game, Tab and
-//! ⇧Tab change system, Return plays the chosen game and ⌘⌫ takes it out of
-//! the library. A click chooses a game and a double click plays it.
+//! ⇧Tab change system, Return plays the chosen game, ⌘⌫ takes it out of
+//! the library and ⌘Z puts it back. A click chooses a game and a double
+//! click plays it. A right click, or ⌘I, opens the game's menu: how long
+//! it has been played, its saves and size, and Play, Show in Finder and
+//! Remove from Library.
 //! The view only shows and edits the library; it asks the main window,
 //! through [`LibraryEvent`], to play a game, add games or open settings.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use emu_cores::rpg_maker;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, Entity, EventEmitter, ImageFormat,
-    KeyDownEvent, LineFragment, ObjectFit, ScrollHandle, SharedString, Subscription, Task, Window,
-    div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, Entity, EventEmitter, ImageFormat,
+    KeyDownEvent, LineFragment, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, anchored, canvas, deferred,
+    div, img, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba,
 };
 
 use crate::app::TOP_BAR;
@@ -37,12 +43,13 @@ use crate::persist;
 use crate::probe;
 use crate::rom_info::{self, Platform};
 use crate::romhack::{self, MakeError};
+use crate::slots::STATE_SLOTS;
 use crate::store_view::{StoreEvent, StoreView, platform_name};
 use crate::ui::{self, Section};
 
 use crate::theme::{
-    ACCENT as CARET, BACKGROUND as TOP, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL,
-    TEXT, tint, with_alpha,
+    ACCENT as CARET, BACKGROUND as TOP, CHOSEN, DANGER, HOVER, INSET, LINE, MUTED as DIM,
+    ON_ACCENT, PANEL, TEXT, tint, with_alpha,
 };
 
 /// The background lightens a touch towards the foot of the window.
@@ -90,6 +97,23 @@ const SEARCH_PADDING: f32 = 8.0;
 /// Size of the empty library's hint, and the widest it gets.
 const HINT_SIZE: f32 = 14.0;
 const HINT_WIDTH: f32 = 320.0;
+/// A game's menu: its width, its edge, the room inside that and its
+/// corners; its rows' corners share their centre.
+const MENU_WIDTH: f32 = 264.0;
+const MENU_BORDER: f32 = 1.0;
+const MENU_PADDING: f32 = 6.0;
+const MENU_RADIUS: f32 = 12.0;
+const ROW_RADIUS: f32 = MENU_RADIUS - MENU_BORDER - MENU_PADDING;
+/// The menu's surface, a step above the panels it floats over.
+const MENU_BACKGROUND: u32 = 0x001E_2024;
+/// Height of an action in the menu, whose icon is as far in from the
+/// row's side as from its top and bottom: as far in as everything else in
+/// the menu.
+const ACTION_HEIGHT: f32 = 32.0;
+const MENU_INSET: f32 = (ACTION_HEIGHT - icons::SIZE) / 2.0;
+/// Height of a line of the game's facts, and side of its picture.
+const FACT_HEIGHT: f32 = 22.0;
+const THUMBNAIL: f32 = 44.0;
 
 /// What the library asks of the main window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +141,31 @@ struct Pictures {
     left_at: Option<Arc<gpui::Image>>,
     /// When it was last played.
     played: Option<SystemTime>,
+}
+
+/// A game's menu, opened by a right click on it: what the library knows
+/// of the game, and what can be done with it.
+struct GameMenu {
+    /// The game's ROM file, or folder.
+    path: PathBuf,
+    /// Where it was opened, in the window.
+    at: Point<Pixels>,
+    /// What the game's files say, once read.
+    facts: Option<Facts>,
+    _reading: Task<()>,
+}
+
+/// What a game's files say of it, for its menu.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Facts {
+    /// Whether its ROM file, or folder, is still there.
+    found: bool,
+    /// How much room it takes.
+    size: u64,
+    /// When its battery save was last written, if it has one.
+    saved: Option<SystemTime>,
+    /// How many of its save-state slots hold a state.
+    states: usize,
 }
 
 /// The library's view.
@@ -157,6 +206,14 @@ pub struct LibraryView {
     store: Option<(Entity<StoreView>, Subscription)>,
     /// Whether the store shows in the library's place.
     store_open: bool,
+    /// The game menu, while it is open.
+    menu: Option<GameMenu>,
+    /// The game last taken out of the library and where it was, for ⌘Z
+    /// to put back.
+    removed: Option<(usize, Game)>,
+    /// Where the chosen game's tile was last drawn, if it was: where ⌘I
+    /// opens its menu.
+    chosen_tile: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 impl EventEmitter<LibraryEvent> for LibraryView {}
@@ -183,6 +240,9 @@ impl LibraryView {
             tried: HashSet::new(),
             store: None,
             store_open: false,
+            menu: None,
+            removed: None,
+            chosen_tile: Rc::default(),
         };
         // Box art and icons, in the cache, are read at once, so the games
         // don't open on plates that their pictures replace a moment later.
@@ -272,6 +332,7 @@ impl LibraryView {
             .collect();
         store.update(cx, |store, cx| store.set_library(paths, cx));
         self.store_open = true;
+        self.menu = None;
         cx.notify();
     }
 
@@ -316,8 +377,25 @@ impl LibraryView {
         }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
+        // The game menu takes Escape, which closes it, and Return, which
+        // plays its game. Any other key closes it and does what it does.
+        if let Some(menu) = self.menu.take() {
+            match keystroke.key.as_str() {
+                "escape" => {}
+                "enter" if event.is_held => {}
+                "enter" => cx.emit(LibraryEvent::Play(menu.path)),
+                _ => {
+                    cx.notify();
+                    return self.key_down(event, cx);
+                }
+            }
+            cx.notify();
+            return true;
+        }
         match keystroke.key.as_str() {
-            "backspace" if modifiers.platform => self.remove_selected(cx),
+            "z" if modifiers.platform && !modifiers.shift && self.removed.is_some() => {
+                self.restore(cx);
+            }
             _ if modifiers.platform || modifiers.control => return false,
             // A new search chooses its first match.
             "backspace" => {
@@ -393,19 +471,142 @@ impl LibraryView {
         position(shown, chosen.or_else(recent))
     }
 
-    /// Takes the chosen game out of the library, choosing the game that
-    /// takes its place.
-    fn remove_selected(&mut self, cx: &mut Context<Self>) {
-        let shown = self.shown();
-        let at = self.chosen_at(&shown);
-        let Some(path) = shown.get(at).map(|game| game.path.clone()) else {
+    /// Takes the game whose menu is open, or else the chosen game, out of
+    /// the library (⌘⌫).
+    pub fn remove_chosen(&mut self, cx: &mut Context<Self>) {
+        if self.store_open {
+            return;
+        }
+        let path = match &self.menu {
+            Some(menu) => Some(menu.path.clone()),
+            None => {
+                let shown = self.shown();
+                shown
+                    .get(self.chosen_at(&shown))
+                    .map(|game| game.path.clone())
+            }
+        };
+        if let Some(path) = path {
+            self.remove(&path, cx);
+        }
+    }
+
+    /// Takes the game at `path` out of the library, choosing the game that
+    /// takes its place, and says how to put it back. Its files, and its
+    /// saves beside them, stay where they are.
+    fn remove(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let at = self.shown().iter().position(|game| game.path == path);
+        let Some((place, game)) = self.library.remove(path) else {
             return;
         };
-        self.library.remove(&path);
-        let shown = self.shown();
-        let at = at.min(shown.len().saturating_sub(1));
-        self.selected = shown.get(at).map(|game| game.path.clone());
+        if let Some(at) = at {
+            let shown = self.shown();
+            let at = at.min(shown.len().saturating_sub(1));
+            self.selected = shown.get(at).map(|game| game.path.clone());
+        }
+        self.menu = None;
         self.save(cx);
+        cx.emit(LibraryEvent::Notice(format!(
+            "Removed {} from the library · ⌘Z puts it back",
+            game.title
+        )));
+        self.removed = Some((place, game));
+        cx.notify();
+    }
+
+    /// Puts the game last taken out back where it was, chosen.
+    fn restore(&mut self, cx: &mut Context<Self>) {
+        let Some((at, game)) = self.removed.take() else {
+            return;
+        };
+        cx.emit(LibraryEvent::Notice(format!(
+            "Put {} back in the library",
+            game.title
+        )));
+        self.selected = Some(game.path.clone());
+        self.library.restore(at, game);
+        self.save(cx);
+        self.refresh(cx);
+        cx.notify();
+    }
+
+    /// Adds `time` played to each of the games at `paths` that the library
+    /// has.
+    pub fn add_play_time(&mut self, paths: &[PathBuf], time: Duration, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for path in paths {
+            changed |= self.library.add_play_time(path, time);
+        }
+        if changed {
+            self.save(cx);
+            cx.notify();
+        }
+    }
+
+    /// Opens the menu of the game at `path` `at` that place in the window,
+    /// choosing the game, and reads what its files say off the UI thread.
+    fn open_menu(&mut self, path: PathBuf, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(game) = self.library.games.iter().find(|game| game.path == path) else {
+            return;
+        };
+        let game = game.clone();
+        let read = cx
+            .background_executor()
+            .spawn(async move { read_facts(&game) });
+        let reading = cx.spawn({
+            let path = path.clone();
+            async move |this, cx| {
+                let facts = read.await;
+                this.update(cx, |this, cx| {
+                    if let Some(menu) = &mut this.menu
+                        && menu.path == path
+                    {
+                        menu.facts = Some(facts);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        });
+        self.selected = Some(path.clone());
+        self.menu = Some(GameMenu {
+            path,
+            at,
+            facts: None,
+            _reading: reading,
+        });
+        cx.notify();
+    }
+
+    /// Opens the chosen game's menu over the middle of its picture, if
+    /// its tile has been drawn, or closes the menu if it is open (⌘I).
+    pub fn toggle_chosen_menu(&mut self, cx: &mut Context<Self>) {
+        if self.store_open || self.menu.is_some() {
+            self.close_menu(cx);
+            return;
+        }
+        let shown = self.shown();
+        let Some(path) = shown
+            .get(self.chosen_at(&shown))
+            .map(|game| game.path.clone())
+        else {
+            return;
+        };
+        let Some(tile) = self.chosen_tile.get() else {
+            return;
+        };
+        let middle = tile.size.width / 2.0;
+        self.open_menu(
+            path,
+            point(tile.origin.x + middle, tile.origin.y + middle),
+            cx,
+        );
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -742,9 +943,16 @@ impl LibraryView {
             .child("Resume")
             .children(probe::part("button:resume"));
         let soft = |text: &str, size: f32, weight| ui::fit(text, words, size, weight, window, cx);
+        let menu_path = game.path.clone();
         div()
             .id("hero")
             .relative()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_menu(menu_path.clone(), event.position, cx);
+                }),
+            )
             .mx(px(INSET))
             .mb(px(16.0))
             .h(px(height))
@@ -848,6 +1056,7 @@ impl LibraryView {
     fn set_platform(&mut self, platform: Option<Platform>, cx: &mut Context<Self>) {
         self.platform = platform;
         self.selected = None;
+        self.menu = None;
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
     }
@@ -928,6 +1137,7 @@ impl LibraryView {
         let inner = width - 2.0 * TILE_PADDING;
         let path = game.path.clone();
         let play = game.path.clone();
+        let menu_path = game.path.clone();
         let art = cover(game, self.pictures.get(&game.path), inner, window, cx);
         // The play button shows on the chosen game and under the pointer.
         let button = div()
@@ -975,7 +1185,8 @@ impl LibraryView {
             .cursor_pointer()
             .when(chosen, |tile| tile.bg(rgba(CHOSEN)))
             .when(!chosen, |tile| tile.hover(|tile| tile.bg(rgba(HOVER))))
-            // A click chooses the game; a second plays it.
+            // A click chooses the game; a second plays it. A right click,
+            // or a Control-click, opens its menu.
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 this.selected = Some(path.clone());
                 if event.click_count() >= 2 {
@@ -983,7 +1194,21 @@ impl LibraryView {
                 }
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_menu(menu_path.clone(), event.position, cx);
+                }),
+            )
             .children(probe::part(format!("tile:{index}")))
+            .when(chosen, |tile| {
+                let drawn = self.chosen_tile.clone();
+                tile.child(
+                    canvas(move |bounds, _, _| drawn.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+            })
             .child(
                 div()
                     .relative()
@@ -1030,6 +1255,256 @@ impl LibraryView {
                         ),
                 ),
             )
+            .into_any_element()
+    }
+
+    /// The open game menu, over everything, and a shade under it that
+    /// closes it on a click or a scroll anywhere else.
+    fn menu_layer(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(menu) = &self.menu else {
+            return Vec::new();
+        };
+        let at = menu.at;
+        let facts = menu.facts.clone();
+        let Some(game) = self
+            .library
+            .games
+            .iter()
+            .find(|game| game.path == menu.path)
+        else {
+            self.menu = None;
+            return Vec::new();
+        };
+        let card = self.game_menu(&game.clone(), facts, window, cx);
+        let close =
+            |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
+                this.close_menu(cx);
+            };
+        let shade = div()
+            .id("menu-shade")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(close))
+            .on_mouse_down(MouseButton::Right, cx.listener(close))
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_menu(cx)));
+        // Its top left corner at the pointer, but inset from the window's
+        // sides: GPUI keeps a margin only once the menu runs off the
+        // window, so the margin goes around it, transparent.
+        let margin = point(px(INSET), px(INSET));
+        vec![
+            deferred(shade).with_priority(1).into_any_element(),
+            deferred(
+                anchored()
+                    .position(at - margin)
+                    .snap_to_window()
+                    .child(div().p(px(INSET)).child(card)),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        ]
+    }
+
+    /// The menu of `game`, whose files say `facts` once read: its picture,
+    /// title and system; when and how long it has been played, its saves
+    /// and its size; then Play, Show in Finder and Remove from Library.
+    fn game_menu(
+        &self,
+        game: &Game,
+        facts: Option<Facts>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pictures = self.pictures.get(&game.path).cloned().unwrap_or_default();
+        let missing = facts.as_ref().is_some_and(|facts| !facts.found);
+        let inner = MENU_WIDTH - 2.0 * (MENU_BORDER + MENU_PADDING + MENU_INSET);
+
+        let words = inner - THUMBNAIL - 10.0;
+        let system = match &game.serial {
+            Some(serial) => format!("{} · {serial}", platform_name(game.platform)),
+            None => platform_name(game.platform).to_owned(),
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .p(px(MENU_INSET))
+            .child(thumbnail(game, &pictures, THUMBNAIL))
+            .child(
+                div()
+                    .w(px(words))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(TITLE_LINE))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .whitespace_nowrap()
+                            .child(ui::fit(
+                                &game.title,
+                                words - 1.0,
+                                13.0,
+                                gpui::FontWeight::SEMIBOLD,
+                                window,
+                                cx,
+                            ))
+                            .children(probe::part("menu.title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(DETAIL_LINE))
+                            .text_color(rgb(DIM))
+                            .whitespace_nowrap()
+                            .child(ui::fit(
+                                &system,
+                                words - 1.0,
+                                11.0,
+                                gpui::FontWeight::NORMAL,
+                                window,
+                                cx,
+                            )),
+                    ),
+            );
+
+        let now = SystemTime::now();
+        let read = |text: fn(&Facts) -> String| facts.as_ref().map_or("…".to_owned(), text);
+        let mut lines = vec![
+            (
+                "Last played",
+                pictures
+                    .played
+                    .map_or("Never".to_owned(), |played| ago(played, now)),
+                TEXT,
+            ),
+            ("Play time", play_time_text(game.play_time), TEXT),
+        ];
+        // A 3DS game's saves are the core's, and an RPG Maker game keeps
+        // its own.
+        if !matches!(game.platform, Platform::N3ds | Platform::RpgMaker) {
+            lines.push((
+                "In-game save",
+                read(|facts| {
+                    facts
+                        .saved
+                        .map_or("None".to_owned(), |saved| ago(saved, SystemTime::now()))
+                }),
+                TEXT,
+            ));
+        }
+        if game.platform != Platform::RpgMaker {
+            lines.push((
+                "Save states",
+                read(|facts| match facts.states {
+                    0 => "None".to_owned(),
+                    states => format!("{states} of {STATE_SLOTS}"),
+                }),
+                TEXT,
+            ));
+        }
+        if missing {
+            lines.push(("File", "Missing".to_owned(), DANGER));
+        } else {
+            lines.push(("Size", read(|facts| size_text(facts.size)), TEXT));
+        }
+        let lines = div()
+            .flex()
+            .flex_col()
+            .px(px(MENU_INSET))
+            .py(px(4.0))
+            .text_size(px(12.0))
+            .children(lines.into_iter().map(|(name, value, colour)| {
+                div()
+                    .h(px(FACT_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_color(rgb(DIM)).child(name))
+                    .child(div().text_color(rgb(colour)).child(value))
+            }));
+
+        let play_path = game.path.clone();
+        let reveal_path = game.path.clone();
+        let remove_path = game.path.clone();
+        let play_label = if pictures.played.is_some() {
+            "Resume"
+        } else {
+            "Play"
+        };
+        let play = menu_action(
+            "menu-play",
+            icons::PLAY,
+            play_label,
+            Some("↩"),
+            TEXT,
+            !missing,
+        )
+        .when(!missing, |row| {
+            row.on_click(cx.listener(move |this, _, _, cx| {
+                this.menu = None;
+                this.selected = Some(play_path.clone());
+                cx.emit(LibraryEvent::Play(play_path.clone()));
+                cx.notify();
+            }))
+        })
+        .children(probe::part("menu.action:play"));
+        let reveal = menu_action(
+            "menu-reveal",
+            icons::FOLDER,
+            "Show in Finder",
+            None,
+            TEXT,
+            !missing,
+        )
+        .when(!missing, |row| {
+            row.on_click(cx.listener(move |this, _, _, cx| {
+                cx.reveal_path(&reveal_path);
+                this.close_menu(cx);
+            }))
+        })
+        .children(probe::part("menu.action:reveal"));
+        let remove = menu_action(
+            "menu-remove",
+            icons::TRASH,
+            "Remove from Library",
+            Some("⌘⌫"),
+            DANGER,
+            true,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove_path, cx)))
+        .children(probe::part("menu.action:remove"));
+
+        let rule = || {
+            div()
+                .h(px(1.0))
+                .mx(px(MENU_INSET))
+                .my(px(4.0))
+                .bg(rgb(LINE))
+        };
+        div()
+            .id("game-menu")
+            .occlude()
+            .w(px(MENU_WIDTH))
+            .flex()
+            .flex_col()
+            .p(px(MENU_PADDING))
+            .rounded(px(MENU_RADIUS))
+            .bg(rgb(MENU_BACKGROUND))
+            .border(px(MENU_BORDER))
+            .border_color(rgba(with_alpha(TEXT, 0x1F)))
+            .shadow_lg()
+            .text_color(rgb(TEXT))
+            .child(header)
+            .child(rule())
+            .child(lines)
+            .child(rule())
+            .child(play)
+            .child(reveal)
+            .child(rule())
+            .child(remove)
+            .children(probe::bordered_part("menu", MENU_BORDER))
             .into_any_element()
     }
 
@@ -1178,8 +1653,10 @@ impl gpui::Render for LibraryView {
         // The game drawn as chosen is the one chosen, wherever titles
         // looked up later sort it.
         self.selected = selected;
+        self.chosen_tile.set(None);
 
         let root = div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -1226,6 +1703,7 @@ impl gpui::Render for LibraryView {
                     .into_any_element()
             })
             .collect();
+        let menu = self.menu_layer(window, cx);
         root.child(
             div()
                 .id("library")
@@ -1240,6 +1718,7 @@ impl gpui::Render for LibraryView {
                 .children(rows)
                 .children(probe::part("grid")),
         )
+        .children(menu)
     }
 }
 
@@ -1536,6 +2015,177 @@ fn broken_lines(
 
 /// How many tiles fit across `width` logical pixels, and how wide each is
 /// so that they fill it.
+/// An action in a game's menu: its icon, its label and the keys that do
+/// it too, in `colour`, or dimmed if it can't be done. The caller says
+/// what a click does.
+fn menu_action(
+    id: &'static str,
+    icon: &'static str,
+    label: &'static str,
+    keys: Option<&'static str>,
+    colour: u32,
+    enabled: bool,
+) -> Stateful<gpui::Div> {
+    let colour = if enabled { colour } else { DIM };
+    div()
+        .id(id)
+        .h(px(ACTION_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(MENU_INSET))
+        .rounded(px(ROW_RADIUS))
+        .text_size(px(13.0))
+        .text_color(rgb(colour))
+        .when(enabled, |row| {
+            row.cursor_pointer()
+                .hover(move |row| row.bg(rgba(with_alpha(colour, 0x1A))))
+        })
+        .child(icons::icon(icon, icons::SIZE, colour))
+        .child(div().flex_1().child(label))
+        .children(keys.map(|keys| div().text_size(px(12.0)).text_color(rgb(DIM)).child(keys)))
+}
+
+/// `game`'s picture, `side` square, atop its menu: its box art, or the
+/// screen where it was left off, or its icon or system's label on a plate
+/// in its system's colour.
+fn thumbnail(game: &Game, pictures: &Pictures, side: f32) -> AnyElement {
+    let frame = div().size(px(side)).flex_none();
+    if let Some(art) = &pictures.art {
+        return frame
+            .child(
+                img(art.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .rounded(px(ROW_RADIUS)),
+            )
+            .into_any_element();
+    }
+    if let Some(left_at) = &pictures.left_at {
+        return frame
+            .child(
+                img(left_at.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .rounded(px(ROW_RADIUS)),
+            )
+            .into_any_element();
+    }
+    let (light, dark) = tint(game.platform);
+    let middle = match &pictures.icon {
+        Some(icon) => img(icon.clone())
+            .size(px(side * 0.6))
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+        None => div()
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgba(0xFFFF_FFD9))
+            .child(game.platform.label())
+            .into_any_element(),
+    };
+    frame
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(ROW_RADIUS))
+        .bg(linear_gradient(
+            135.0,
+            linear_color_stop(rgb(light), 0.0),
+            linear_color_stop(rgb(dark), 1.0),
+        ))
+        .border_1()
+        .border_color(rgba(with_alpha(TEXT, 0x14)))
+        .child(middle)
+        .into_any_element()
+}
+
+/// What `game`'s files say of it: whether its ROM or folder is there, its
+/// size, when its battery save was written and how many save states it
+/// has.
+fn read_facts(game: &Game) -> Facts {
+    let Ok(metadata) = fs::metadata(&game.path) else {
+        return Facts::default();
+    };
+    let size = if metadata.is_dir() {
+        folder_size(&game.path)
+    } else {
+        metadata.len()
+    };
+    if game.platform == Platform::RpgMaker {
+        return Facts {
+            found: true,
+            size,
+            ..Facts::default()
+        };
+    }
+    let files = persist::GameFiles::of(&game.path);
+    let saved = fs::metadata(files.backup())
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    let states = (1..=STATE_SLOTS)
+        .filter(|&slot| files.state(slot, false).is_file())
+        .count();
+    Facts {
+        found: true,
+        size,
+        saved,
+        states,
+    }
+}
+
+/// How much room the files in `folder` take, not following links.
+fn folder_size(folder: &Path) -> u64 {
+    let mut total = 0;
+    let mut folders = vec![folder.to_owned()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => folders.push(entry.path()),
+                Ok(kind) if kind.is_file() => {
+                    total += entry.metadata().map_or(0, |metadata| metadata.len());
+                }
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
+/// `time` played, as the game menu says it.
+fn play_time_text(time: Duration) -> String {
+    let minutes = time.as_secs() / 60;
+    match (minutes / 60, minutes % 60) {
+        _ if time.is_zero() => "None yet".to_owned(),
+        (0, 0) => "Under a minute".to_owned(),
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
+    }
+}
+
+/// `bytes` as Finder says sizes, in thousands.
+fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} bytes");
+    }
+    let mut size = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    while size >= 999.5 && unit + 1 < UNITS.len() {
+        size /= 1000.0;
+        unit += 1;
+    }
+    if size < 9.95 {
+        format!("{size:.1} {}", UNITS[unit])
+    } else {
+        format!("{size:.0} {}", UNITS[unit])
+    }
+}
+
 fn grid(width: f32) -> (usize, f32) {
     // Whole tiles only; `as` saturates.
     let columns = (((width + GAP) / (MIN_TILE + GAP)).floor() as usize).max(1);
@@ -1690,5 +2340,61 @@ mod tests {
         assert_eq!(ago_by(380 * 24 * 60 * 60), "over a year ago");
         // A clock set back since reads as just now.
         assert_eq!(ago(now + Duration::from_secs(60), now), "just now");
+    }
+
+    #[test]
+    fn play_time_and_sizes_read_as_words() {
+        let played = |seconds| play_time_text(Duration::from_secs(seconds));
+        assert_eq!(played(0), "None yet");
+        assert_eq!(played(59), "Under a minute");
+        assert_eq!(played(45 * 60 + 30), "45 min");
+        assert_eq!(played(2 * 60 * 60), "2 h");
+        assert_eq!(played(3 * 60 * 60 + 12 * 60), "3 h 12 min");
+        assert_eq!(size_text(512), "512 bytes");
+        assert_eq!(size_text(32_768), "33 KB");
+        assert_eq!(size_text(8_388_608), "8.4 MB");
+        assert_eq!(size_text(999_999), "1.0 MB");
+        assert_eq!(size_text(268_435_456), "268 MB");
+        assert_eq!(size_text(4_294_967_296), "4.3 GB");
+    }
+
+    #[test]
+    fn a_games_facts_are_read_from_its_files() {
+        let dir = std::env::temp_dir().join(format!("emu-app-facts-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let info = |platform| rom_info::RomInfo {
+            platform,
+            crc32: 1,
+            serial: None,
+            header_title: None,
+            banner_title: None,
+        };
+        let rom = dir.join("Golden Sun.gba");
+        let game = Game::new(&rom, &info(Platform::Gba));
+        assert_eq!(read_facts(&game), Facts::default(), "a missing ROM");
+
+        fs::write(&rom, [0; 2048]).expect("rom");
+        let facts = read_facts(&game);
+        assert!(facts.found);
+        assert_eq!((facts.size, facts.saved, facts.states), (2048, None, 0));
+
+        fs::write(dir.join("Golden Sun.sav"), [0; 8]).expect("save");
+        fs::write(dir.join("Golden Sun.ss1"), [0; 8]).expect("state");
+        fs::write(dir.join("Golden Sun.ss3"), [0; 8]).expect("state");
+        // The checkpoint is no slot.
+        fs::write(dir.join("Golden Sun.ss0"), [0; 8]).expect("checkpoint");
+        let facts = read_facts(&game);
+        assert!(facts.saved.is_some());
+        assert_eq!(facts.states, 2);
+
+        // An RPG Maker game is its folder, all of it.
+        let folder = dir.join("Fan Game");
+        fs::create_dir_all(folder.join("Data")).expect("folder");
+        fs::write(folder.join("Game.ini"), [0; 100]).expect("ini");
+        fs::write(folder.join("Data/Map001.rxdata"), [0; 900]).expect("map");
+        let facts = read_facts(&Game::rpg_maker(&folder, None));
+        assert!(facts.found);
+        assert_eq!(facts.size, 1000);
+        fs::remove_dir_all(&dir).ok();
     }
 }

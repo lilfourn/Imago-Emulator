@@ -380,7 +380,14 @@ While no game runs, the window shows the library: the game you played last,
 large, with where you left it and Resume, then every game you have added,
 by its box art. Type to search; Tab and ⇧Tab show one system at a time.
 A click chooses a game, and a double click, its play button or Return
-plays it; ⌘⌫ takes it out of the library.
+plays it.
+
+Right-click a game, Control-click it or press ⌘I for its menu: when you
+last played it and for how long, when it last saved, how many save states
+it has and its size, then Play, Show in Finder and Remove from Library.
+Removing a game (or ⌘⌫ on the chosen one) leaves its file and saves where
+they are; ⌘Z puts it back. Play time counts only while the game runs, not
+while it is paused or under the game menu, and is kept in `library.toml`.
 
 Every game has a picture. Box art, or failing that the title screen, comes
 from libretro's thumbnails, by the game's No-Intro name or else by its

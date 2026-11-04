@@ -27,6 +27,8 @@ actions!(
         OpenRom,
         AddToLibrary,
         OpenStore,
+        GameInfo,
+        RemoveFromLibrary,
         CloseGame,
         ConnectLinkCable,
         InsertGbaCartridge,
@@ -150,6 +152,10 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                 KeyBinding::new("cmd-o", OpenRom, None),
                 KeyBinding::new("cmd-shift-a", AddToLibrary, None),
                 KeyBinding::new("cmd-shift-g", OpenStore, None),
+                // The chosen game's menu, as Get Info in the Finder, and
+                // taking it out of the library, as Move to Trash there.
+                KeyBinding::new("cmd-i", GameInfo, Some("Emulator")),
+                KeyBinding::new("cmd-backspace", RemoveFromLibrary, Some("Emulator")),
                 KeyBinding::new("cmd-w", CloseGame, None),
                 // In the settings and debugger windows ⌘W closes the window,
                 // as in any Mac app; only the game's own window closes games.
@@ -347,6 +353,8 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                 MenuItem::action("Open ROM…", OpenRom),
                 MenuItem::action("Add Games to Library…", AddToLibrary),
                 MenuItem::action("Game Store", OpenStore),
+                MenuItem::action("Game Info", GameInfo),
+                MenuItem::action("Remove from Library", RemoveFromLibrary),
                 MenuItem::action("Close Game", CloseGame),
                 MenuItem::action("Connect Second Console…", ConnectLinkCable),
                 MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),

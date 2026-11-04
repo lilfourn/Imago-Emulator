@@ -342,7 +342,9 @@ for (index, tile) in tiles.prefix(6) {
     guard let art = part("tile.art:\(index)") else { continue }
     even("game \(index)'s picture is inset evenly", art.minX - tile.minX, tile.maxX - art.maxX, ("left", "right"))
     even("game \(index)'s picture is as far from the sides as the top", art.minX - tile.minX, art.minY - tile.minY, ("side", "top"))
-    if let titleBox = part("tile.title:\(index)"), let line = lines(in: titleBox).first {
+    // A title under an open game menu shows only in part.
+    if let titleBox = part("tile.title:\(index)"), !(part("menu")?.intersects(titleBox) ?? false),
+       let line = lines(in: titleBox).first {
         even("game \(index)'s title starts where its picture does", line.minX, art.minX, ("title", "picture"), textTolerance)
         check(line.maxX < titleBox.maxX - 0.5,
               "game \(index)'s title fits its box", "ink to \(f(line.maxX)), box to \(f(titleBox.maxX))")
@@ -515,6 +517,35 @@ for name in ["notice", "speed", "rec"] {
 if let notice = part("notice"), let speed = part("speed"), part("sheet") == nil {
     even("notice and speed readout are as far from their sides", notice.minX, win.width - speed.maxX, ("notice", "readout"))
     even("notice and speed readout share a foot", notice.maxY, speed.maxY, ("notice", "readout"))
+}
+
+// 11. A game's menu: inside the window, as far off its foot as its sides;
+//     each action's icon centred down its row and on one line with the
+//     others, and the actions' names starting on one line.
+if let menu = part("menu") {
+    check(win.height - menu.maxY >= edgeClearance - tight, "game menu stays \(Int(edgeClearance))pt off the window's foot",
+          "\(f(win.height - menu.maxY))pt off")
+    var icons: [(String, CGRect)] = [], names: [(String, CGRect)] = []
+    for (name, row) in parts("menu.action:") {
+        let back = background(row)
+        guard let icon = ink(in: CGRect(x: row.minX, y: row.minY, width: row.height, height: row.height).insetBy(dx: 1, dy: 1), on: back),
+              let letter = firstGlyph(in: CGRect(x: row.minX + row.height, y: row.minY, width: row.width / 2, height: row.height), on: back) else {
+            check(false, "menu \(name) shows its icon and name"); continue
+        }
+        even("menu \(name) icon is centred down its row", icon.midY, row.midY, ("icon", "row"))
+        icons.append((name, icon))
+        names.append((name, letter))
+    }
+    if let first = icons.first {
+        for (name, icon) in icons.dropFirst() {
+            even("menu \(name) icon is on one line with \(first.0)'s", icon.midX, first.1.midX, (name, first.0))
+        }
+    }
+    if let first = names.first {
+        for (name, letter) in names.dropFirst() {
+            even("menu \(name) name starts where \(first.0)'s does", letter.minX, first.1.minX, (name, first.0), textTolerance)
+        }
+    }
 }
 
 print(failures == 0 ? "all checks passed" : "\(failures) checks failed")
