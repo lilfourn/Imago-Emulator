@@ -12,8 +12,10 @@
 //! - emulation: `run <frame> <buttons> <µs>` for each frame run, numbered
 //!   as it is published, with the buttons it ran with and how long it
 //!   took; `busy <µs>` for all the work of one turn of the loop; `late
-//!   <µs>` for how long after its deadline the thread woke; `fill <‰>` for
-//!   how full the sound buffer was as a frame's sound went in.
+//!   <µs>` for how long after its deadline the thread woke; `margin <µs>`
+//!   for how long before the window takes a frame a frame of the usual
+//!   length is meant to be ready (`refresh.rs`); `fill <‰>` for how full
+//!   the sound buffer was as a frame's sound went in.
 
 use std::fs::File;
 use std::io::Write as _;

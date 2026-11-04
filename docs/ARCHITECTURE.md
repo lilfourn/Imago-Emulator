@@ -200,6 +200,9 @@ pub trait Debugger {
 - File I/O for loading runs on GPUI's background executor, never on the
   main thread.
 - The emulation thread owns the core outright; nothing else touches it.
+  It runs at the user-interactive quality of service, the window's own
+  class (`qos.rs`): a thread the app starts would otherwise run at macOS's
+  default, behind other interactive work, with its sleeps let slip.
 - Dropping the `Emulator` handle closes its command channel. The thread
   finishes the frame, flushes the battery save, and is joined. The view
   drops it on app quit for the same reason.
@@ -217,8 +220,10 @@ pub trait Debugger {
 - Frames keep in step with the display's refreshes (`refresh.rs`): when
   a whole number of refreshes, or of frames to a refresh, is within 0.5%
   of the frame the speed asks for, frames last exactly that, and each
-  frame's start is nudged by up to 1 ms so it is ready 2 ms before the
-  refresh that shows it. The view tells the thread the display's refresh
+  frame's start is nudged by up to 1 ms so that a frame of the usual length
+  is ready a margin before the refresh that shows it: 2 ms, or more for a
+  game whose frames take uneven times, as much as lets the most of its
+  last 120 frames show at their own refresh. The view tells the thread the display's refresh
   interval (`Command::SetRefresh`, from AppKit) and when it takes each
   frame (`Latest::taken`); sound plays as much faster as frames then run.
 - The emulation thread counts the frames it runs and rewind steps it

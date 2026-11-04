@@ -71,3 +71,29 @@ Gym of Mine and from 6.9-12.6 to 6.2 ms in Pokémon Platinum, measured
 with `scripts/macos/bench.sh`. The 2 ms margin lets a frame run up to
 that much slower than usual and still catch its refresh; slower ones,
 as when an RPG Maker game loads a picture, still show a refresh late.
+
+Update, 2026-11-04: two changes for games whose frames take uneven times.
+- **The emulation thread asks for the window's priority.** A thread an app
+  starts runs at macOS's default quality of service whatever starts it, a
+  class below the window's, so it waited behind other work and its timers
+  were let slip: with another app compiling on every core, Pokémon
+  Platinum's thread woke up to 40 ms late (12–21 ms at the 99th
+  percentile), and its frames took 19–21 ms at the 99th percentile. It now
+  takes the user-interactive class (`qos.rs`), and under the same load
+  woke at most 1–4 ms late (0.02 ms at the 99th percentile), its frames
+  14 ms at the 99th percentile. So do the 3DS helper's thread running
+  the core and the app's thread reading its frames.
+- **The margin follows the game.** A frame was due 2 ms before its
+  refresh, so one that took 2 ms longer than usual missed it. `Lock` now
+  keeps the last 120 frames' lengths, from start to publishing, and picks
+  the least margin, in steps of a quarter millisecond, that keeps about
+  the most of them inside one refresh, with 1 ms to spare at each end and
+  up to one frame in 50 given up: more margin lets slow frames catch their
+  refresh, but too much shows quick ones a refresh early. Frames that take
+  about as long as each other keep 2 ms. Each frame's own length is taken
+  out of the error that moves the next start, as its start, not its length,
+  is what the lock controls. In Pokémon Platinum, with nothing else busy,
+  the margin settled at 2.25–2.75 ms and frames held a refresh too long or
+  short went from 0.8–2 to 0.5–0.8 a second; in Omega Ruby's opening, from
+  3.4–4.1 to 2.2–2.8 a second with vertices shaded on the GPU. The trace
+  logs the margin as `margin <µs>`.

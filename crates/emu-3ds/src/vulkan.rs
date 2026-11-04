@@ -288,7 +288,13 @@ impl Gpu {
             .create_device
             .ok_or("the core cannot make its own device")?;
         let mut context = lr::VulkanContext::default();
-        let get_instance_proc_addr = entry.static_fn().get_instance_proc_addr;
+        let moltenvk = (
+            entry.static_fn().get_instance_proc_addr,
+            instance.fp_v1_0().get_device_proc_addr,
+        );
+        // The core looks Vulkan's functions up through the helper, which
+        // stands in for its pipeline caches' (see `pipelines`).
+        let (look_up_instance, look_up_device) = crate::pipelines::lookups(moltenvk);
         // SAFETY: the core makes its device on our instance and GPU, asking
         // through our loader; no extensions, layers or features are
         // required of it.
@@ -298,7 +304,7 @@ impl Gpu {
                 instance.handle(),
                 gpu,
                 vk::SurfaceKHR::null(),
-                get_instance_proc_addr,
+                look_up_instance,
                 std::ptr::null(),
                 0,
                 std::ptr::null(),
@@ -340,8 +346,8 @@ impl Gpu {
             instance: instance.handle(),
             gpu: context.gpu,
             device: context.device,
-            get_device_proc_addr: instance.fp_v1_0().get_device_proc_addr,
-            get_instance_proc_addr,
+            get_device_proc_addr: look_up_device,
+            get_instance_proc_addr: look_up_instance,
             queue: context.queue,
             queue_index: context.queue_family_index,
             set_image,

@@ -68,6 +68,13 @@ fn options(renderer: Renderer) -> HashMap<String, CString> {
     [
         ("citra_graphics_api", api),
         ("citra_resolution_factor", "1"),
+        // Vertices are shaded on the CPU, by the core's shader JIT. On the
+        // GPU, every new pipeline also compiles the game's own vertex
+        // shader, and a game waits for each the first time it draws
+        // something new: Pokémon Omega Ruby's opening froze for up to 1.1 s
+        // at a time, 7 s in its first minute, against 0.26 s and 2 s on the
+        // CPU, which then takes about a millisecond more a frame.
+        ("citra_use_hw_shader", "disabled"),
         // Top over bottom; the helper cuts the picture into the two
         // screens and the app lays them out as the player chose.
         ("citra_layout_option", "default"),
@@ -251,9 +258,24 @@ fn take_stdout() -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(link) })
 }
 
+/// Gives the calling thread the user-interactive quality of service, the
+/// class of the app's window and emulation thread. A thread starts at
+/// macOS's default class whatever thread starts it, and waits behind
+/// interactive work, wakes late and may run on the efficiency cores; the
+/// thread running the core and the one reading its frames into the app
+/// are both on the way to every frame shown.
+pub(crate) fn interactive_thread() {
+    // SAFETY: this sets the calling thread's own scheduling class; it
+    // touches no memory, and a refusal leaves the thread as it was.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
 /// Loads the game and answers the app's requests until it says to quit
 /// or goes.
 fn serve(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> io::Result<()> {
+    interactive_thread();
     let mut out = BufWriter::with_capacity(1 << 20, take_stdout()?);
     let mut requests = BufReader::new(io::stdin().lock());
     let mut session = match Session::start(core, moltenvk, game, data) {

@@ -156,3 +156,65 @@ gave an executable byte for byte the same as a reference extractor's, and
 emu-headless played each for 300 frames from its `.cia`. Craftus's title
 screen showed, and opening it again used the executable already written.
 Neither names extdata.
+
+## Update, 2026-11-04: first-time freezes
+
+Pokémon Omega Ruby froze for up to 2 s at a time whenever it first drew
+something new. A game builds a Vulkan pipeline the first time it draws
+something new, and its frame waits for it; MoltenVK translates the
+pipeline's shaders to Metal, and macOS compiles them. With macOS's shader
+cache warm the same freezes took at most 73 ms, so nearly all of the wait
+was compiling. A profile of the helper showed why it was so long: Azahar
+builds pipelines on the game's thread and on nine workers, all through
+one pipeline cache, and MoltenVK holds that cache's lock while it
+translates and compiles each shader, so every compile waited for the one
+before. More than half of the game thread's wait was for the lock.
+
+1. **One pipeline cache to a thread** (`emu_3ds::pipelines`). The helper
+   hands the core its own `vkGetInstanceProcAddr` and
+   `vkGetDeviceProcAddr`, which give MoltenVK's functions but for those
+   that make, use, read and destroy pipeline caches. Each thread that
+   builds pipelines through one of the core's caches builds them through a
+   cache of its own, made from the same saved data, so threads compile at
+   once. When the core reads its cache to save it, the threads' caches are
+   merged into it first, so the next start finds every shader. Building
+   with no cache at all was as quick the first time, but threw away
+   MoltenVK's translations: the next start took 9 s instead of 0.5 s.
+   `DS_EMULATOR_3DS_PIPELINE_CACHE=shared` turns the split off.
+2. **Vertices shaded on the CPU** (`citra_use_hw_shader` off), by the
+   core's shader JIT. On the GPU every new pipeline also compiles the
+   game's vertex shader; on the CPU it is a fixed one, so far fewer
+   pipelines compile. It costs about a millisecond a frame more on
+   average, and a game that draws heavy scenes every other frame takes
+   up to 8 ms more on those frames, which shows as more frames held a
+   refresh longer at 120 Hz: 6 a second against 2 to 3 in Omega Ruby's
+   opening once everything was compiled. A first playthrough meets new
+   scenes all the time, so the shorter freezes were worth more.
+   `DS_EMULATOR_3DS_OPTIONS=citra_use_hw_shader=enabled` shades on the GPU
+   again; a game much heavier than Omega Ruby might need it.
+3. **The helper's threads ask for the window's priority.** The thread
+   running the core and the app's thread reading its frames take the
+   user-interactive quality of service (see decision 0003's update).
+
+MoltenVK's `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION` made no
+difference while compiles waited for the lock, nor after; turning off
+Azahar's accurate multiplication shortened the freezes by a quarter but
+changes how games draw, so it stays on.
+
+Measured on the M5 Max with `cargo run --release -p emu-3ds --example
+play` (now also giving the spread of frame times and the slowest), 3,600
+frames of Omega Ruby's opening with A pressed now and then, each run in an
+app bundle of its own so that macOS's shader cache started empty too:
+
+| First run | Frames over 16.7 ms | Time over, in all | Longest frame |
+|---|---|---|---|
+| Before | 21–23 | 10.0–10.6 s | 1.85–2.09 s |
+| One cache to a thread | 25 | 7.0 s | 1.11 s |
+| Both | 21 | 2.0 s | 0.26 s |
+
+Played again, with the caches made, every way of running it was alike: 3
+frames over 16.7 ms and 34–45 ms over in all, and the game started in about
+0.5 s. In the release app, from empty caches, 40 s of the same opening
+froze for 7.9 s in all before, the longest 1.96 s, and 1.7 s after, the
+longest 0.25 s. States still saved and loaded, which rebuilds the core's
+renderer and its pipeline cache.

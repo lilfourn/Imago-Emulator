@@ -59,6 +59,7 @@ use crate::capture;
 use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
 use crate::persist::{self, GameFiles};
+use crate::qos;
 use crate::recorder::Recorder;
 use crate::refresh::Lock;
 use crate::rewind;
@@ -619,6 +620,8 @@ impl Emulator {
         let thread = thread::Builder::new()
             .name("emulation".to_owned())
             .spawn(move || {
+                // Each frame must be ready before the refresh that shows it.
+                qos::interactive();
                 let mut runner = runner;
                 let ran = panic::catch_unwind(AssertUnwindSafe(|| runner.run(&receiver)));
                 if let Err(panic) = ran {
@@ -855,6 +858,7 @@ impl Runner {
                     });
                 }
                 let ran = Instant::now();
+                self.lock.started(ran);
                 let outcome = self.run_frame(&inputs, &mut audio);
                 let run_time = ran.elapsed();
                 if let Some(why) = self.loaded.core.ended() {
@@ -928,6 +932,7 @@ impl Runner {
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some((sequence, at)) = taken {
                 self.lock.drawn(sequence, at);
+                trace::event("margin", &[trace::micros(self.lock.margin_used())]);
             }
             let now = Instant::now();
             trace::event("busy", &[trace::micros(now - turn)]);

@@ -43,6 +43,8 @@ mod microphone;
 mod mov;
 mod persist;
 mod probe;
+#[allow(unsafe_code)]
+mod qos;
 mod randomize_window;
 mod randomizer;
 mod recorder;

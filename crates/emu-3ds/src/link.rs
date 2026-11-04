@@ -263,6 +263,8 @@ impl Client {
         thread::Builder::new()
             .name("3DS helper link".to_owned())
             .spawn(move || {
+                // The emulation thread waits on it for every frame.
+                crate::host::interactive_thread();
                 let mut from_helper = BufReader::with_capacity(1 << 20, stdout);
                 loop {
                     let mut payload = spares.try_recv().unwrap_or_default();

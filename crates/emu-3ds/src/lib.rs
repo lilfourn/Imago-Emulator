@@ -27,6 +27,8 @@ mod host;
 mod libretro;
 mod link;
 #[allow(unsafe_code)]
+mod pipelines;
+#[allow(unsafe_code)]
 mod vulkan;
 
 use std::path::{Path, PathBuf};
