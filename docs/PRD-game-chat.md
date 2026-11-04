@@ -583,8 +583,15 @@ How to answer:
 
 ### 6.6 Looking things up
 
-**The source map.** `crates/emu-guide/sources.toml`, hand-curated and
-seeded from the research's reachability table and Indie Wiki Buddy (MIT):
+**The source map.** `crates/emu-guide/sources.toml`, hand-curated from
+the verified list in [research §5.2](research/game-chat.md#52-the-source-map):
+
+- about 30 series;
+- Pokémon's per-game Serebii paths;
+- fan games and hacks;
+- a fallback for every game.
+
+The sketch of its shape:
 
 ```toml
 [[series]]
@@ -642,9 +649,14 @@ OpenRouter runs these, so the app has no tool loop to run.
 ]
 ```
 
-- **Why Exa.** It is the engine that honours domain lists on every
-  model; Google's native search ignores them. Its index also reaches
-  Bulbapedia and GameFAQs, which `curl` can't.
+- **Why Exa.** GPT-6 Luna could also use OpenAI's own search (GPT-5 and
+  later have it on OpenAI's and Azure's endpoints). Exa is chosen
+  instead:
+  - it honours domain lists on every model and every endpoint;
+  - it costs $0.007 a search against about $0.01;
+  - `mode: "fast"` answers in about 450 ms.
+- **Sites `curl` can't read.** Exa's index should reach Bulbapedia and
+  GameFAQs, which are behind bot checks. Phase 0 confirms it.
 - **Cost.** About $0.007 a search.
 - **Order of trust.** The system prompt lists the sources in the map's
   order, since the API has no way to rank them.
@@ -900,7 +912,9 @@ Acceptance:
      - whether `id` and `name` come only in a tool call's first fragment;
      - the image size limit;
      - Exa's fetch price;
-     - whether an OAuth key can read `/api/v1/key`.
+     - whether an OAuth key can read `/api/v1/key`;
+     - how well Exa's index covers the sites behind bot checks
+       (Bulbapedia, GameFAQs, PokéCommunity), with `allowed_domains`.
    - Tune GPT-6 Luna on about fifteen real questions, with and without
      the screen and search:
      - Pokémon Omega Ruby and Platinum;
