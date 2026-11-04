@@ -4,8 +4,12 @@
 //! it.
 //!
 //! Keyboard first: the arrow keys (or WASD) move up and down the rows and
-//! change the choice in the row the keyboard is on; Escape closes the
-//! window.
+//! change the choice in the row the keyboard is on; Return or Space
+//! presses the OpenRouter row's first button; Escape closes the window.
+//!
+//! Under the settings, the Guide section connects an OpenRouter account
+//! ([`OpenRouter`]): its buttons sit in a track as the choices do, with a
+//! line under them saying how the connection stands.
 
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ScrollHandle,
@@ -16,10 +20,13 @@ use gpui::{
 use crate::ambient::Backdrop;
 use crate::app::{TOP_BAR, top_bar};
 use crate::layout::{Arrangement, GAPS, HINGE_GAP, Rotation};
+use crate::openrouter::{self, OpenRouter, Status, Usage};
 use crate::picture::{Picture, RESOLUTIONS_3D};
 use crate::probe;
 use crate::settings::Settings;
-use crate::theme::{ACCENT, BACKGROUND, LINE, MUTED as DIM, PANEL, TEXT, with_alpha};
+use crate::theme::{
+    ACCENT, BACKGROUND, DANGER, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT, with_alpha,
+};
 use crate::view::EmulatorView;
 
 /// Size of the window's words, in logical pixels.
@@ -35,6 +42,9 @@ const TRACK_RADIUS: f32 = 8.0;
 const CHOICE_RADIUS: f32 = TRACK_RADIUS - TRACK_PADDING - 1.0;
 /// The least room either side of the rows.
 const MIN_SIDE: f32 = 24.0;
+/// The OpenRouter row's name, which also names its parts for the layout
+/// checks.
+const ACCOUNT: &str = "OpenRouter";
 
 /// The settings window's root view.
 pub struct SettingsWindow {
@@ -45,6 +55,8 @@ pub struct SettingsWindow {
     focused: usize,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// The app's OpenRouter connection, for Guide.
+    openrouter: Entity<OpenRouter>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -62,6 +74,90 @@ struct Row {
 
 /// Stores a row's choice, by its index, in the settings.
 type Choose = Box<dyn Fn(&mut Settings, usize)>;
+
+/// A button in the OpenRouter row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Account {
+    Connect,
+    TryAgain,
+    Cancel,
+    ManageKeys,
+    Disconnect,
+}
+
+impl Account {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connect => "Connect OpenRouter",
+            Self::TryAgain => "Try Again",
+            Self::Cancel => "Cancel",
+            Self::ManageKeys => "Manage Keys",
+            Self::Disconnect => "Disconnect",
+        }
+    }
+
+    /// Whether it is what to press, which the accent marks.
+    fn primary(self) -> bool {
+        matches!(self, Self::Connect | Self::TryAgain)
+    }
+}
+
+/// The OpenRouter row's buttons while the connection is `status`.
+fn account_buttons(status: &Status) -> Vec<Account> {
+    match status {
+        Status::NotConnected => vec![Account::Connect],
+        Status::Connecting { .. } => vec![Account::Cancel],
+        Status::Connected {
+            from_environment: true,
+            ..
+        } => vec![Account::ManageKeys],
+        Status::Connected {
+            usage: Usage::Refused,
+            ..
+        } => vec![Account::Connect, Account::Disconnect],
+        Status::Connected { .. } => vec![Account::ManageKeys, Account::Disconnect],
+        Status::Failed(_) => vec![Account::TryAgain],
+    }
+}
+
+/// The line under the OpenRouter row while the connection is `status`,
+/// and whether it tells of a problem.
+fn account_caption(status: &Status) -> (String, bool) {
+    match status {
+        Status::NotConnected => (
+            "Guide asks OpenRouter's models about the game you're playing.".to_owned(),
+            false,
+        ),
+        Status::Connecting { returned: false } => {
+            ("Finish connecting in your browser.".to_owned(), false)
+        }
+        Status::Connecting { returned: true } => ("Finishing connecting\u{2026}".to_owned(), false),
+        Status::Connected {
+            usage: Usage::Refused,
+            ..
+        } => (
+            "This key no longer works \u{2014} connect again.".to_owned(),
+            true,
+        ),
+        Status::Connected {
+            tail,
+            from_environment,
+            usage,
+        } => {
+            let mut words = if *from_environment {
+                format!("Using OPENROUTER_API_KEY \u{2026}{tail}")
+            } else {
+                format!("Connected \u{b7} key \u{2026}{tail}")
+            };
+            if let Usage::Known(spent) = usage {
+                words.push_str(" \u{b7} ");
+                words.push_str(spent);
+            }
+            (words, false)
+        }
+        Status::Failed(reason) => (reason.clone(), true),
+    }
+}
 
 impl Row {
     /// A row named `name` offering `choices`, each a label and the value
@@ -177,7 +273,7 @@ fn rows(settings: &Settings) -> Vec<Row> {
 impl SettingsWindow {
     /// Opens a settings window for `main`.
     pub fn open(main: Entity<EmulatorView>, cx: &mut App) -> anyhow::Result<WindowHandle<Self>> {
-        let bounds = Bounds::centered(None, size(px(600.0), px(560.0)), cx);
+        let bounds = Bounds::centered(None, size(px(720.0), px(640.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(top_bar("Settings")),
@@ -195,7 +291,11 @@ impl SettingsWindow {
     pub fn new(main: Entity<EmulatorView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        let openrouter = OpenRouter::global(cx);
+        // What the key has spent, freshly, each time settings open.
+        openrouter.update(cx, |openrouter, cx| openrouter.check(cx));
         let subscriptions = vec![
+            cx.observe(&openrouter, |_, _, cx| cx.notify()),
             // The main window redraws every frame; only its settings show
             // here.
             cx.observe(&main, |this, main, cx| {
@@ -214,6 +314,7 @@ impl SettingsWindow {
             focused: 0,
             focus,
             scroll: ScrollHandle::new(),
+            openrouter,
             _subscriptions: subscriptions,
         }
     }
@@ -269,8 +370,8 @@ impl SettingsWindow {
             .child(
                 div()
                     .w(px(name_width))
-                    .flex()
-                    .justify_end()
+                    .flex_none()
+                    .text_right()
                     .text_color(rgb(if focused { TEXT } else { DIM }))
                     .child(row.name)
                     .children(probe::part(format!("name:{}", row.name))),
@@ -296,6 +397,104 @@ impl SettingsWindow {
             .into_any_element()
     }
 
+    /// Does what the OpenRouter row's `button` says.
+    fn press(&mut self, button: Account, cx: &mut Context<Self>) {
+        match button {
+            Account::Connect | Account::TryAgain => {
+                self.openrouter
+                    .update(cx, |openrouter, cx| openrouter.connect(cx));
+            }
+            Account::Cancel => self
+                .openrouter
+                .update(cx, |openrouter, cx| openrouter.cancel(cx)),
+            Account::Disconnect => {
+                self.openrouter
+                    .update(cx, |openrouter, cx| openrouter.disconnect(cx));
+            }
+            Account::ManageKeys => cx.open_url(openrouter::KEYS_PAGE),
+        }
+    }
+
+    /// The OpenRouter row, the `index`th, under the Guide heading: its
+    /// buttons where choices go, and how the connection stands under
+    /// them, at most `width` wide.
+    fn account_row(
+        &self,
+        index: usize,
+        name_width: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let focused = index == self.focused;
+        let status = self.openrouter.read(cx).status().clone();
+        let (caption, problem) = account_caption(&status);
+        let buttons = account_buttons(&status)
+            .into_iter()
+            .enumerate()
+            .map(|(at, button)| {
+                div()
+                    .id((ACCOUNT, at))
+                    .px(px(CHOICE_PADDING))
+                    .py(px(3.0))
+                    .rounded(px(CHOICE_RADIUS))
+                    .cursor_pointer()
+                    .when(button.primary(), |this| {
+                        this.bg(rgb(ACCENT)).text_color(rgb(ON_ACCENT))
+                    })
+                    .when(!button.primary(), |this| {
+                        this.hover(|this| this.bg(rgb(LINE)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.focused = index;
+                        this.press(button, cx);
+                    }))
+                    .child(button.label())
+                    .children(probe::part(format!("segment:{ACCOUNT}.{at}")))
+            });
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(NAME_GAP))
+            .child(
+                div()
+                    .w(px(name_width))
+                    .flex_none()
+                    .text_right()
+                    .text_color(rgb(if focused { TEXT } else { DIM }))
+                    .child(ACCOUNT)
+                    .children(probe::part(format!("name:{ACCOUNT}"))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(TRACK_PADDING))
+                    .p(px(TRACK_PADDING))
+                    .rounded(px(TRACK_RADIUS))
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgba(if focused { with_alpha(ACCENT, 0xAA) } else { 0 }))
+                    .children(buttons)
+                    .children(probe::bordered_part(format!("track:{ACCOUNT}"), 1.0)),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("Guide", name_width))
+            .child(control)
+            .child(
+                div().pl(px(name_width + NAME_GAP)).child(
+                    div()
+                        .max_w(px(width))
+                        .text_xs()
+                        .text_color(rgb(if problem { DANGER } else { DIM }))
+                        .child(caption)
+                        .children(probe::part(format!("caption:{ACCOUNT}"))),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.key == "escape" {
@@ -308,7 +507,16 @@ impl SettingsWindow {
             return;
         }
         let rows = rows(&self.settings);
-        let focused = moved_row(self.focused, rows.len(), &keystroke.key);
+        // The OpenRouter row comes after the settings' rows.
+        let account = rows.len();
+        if self.focused == account && matches!(keystroke.key.as_str(), "enter" | "space") {
+            let status = self.openrouter.read(cx).status().clone();
+            if let Some(&button) = account_buttons(&status).first() {
+                self.press(button, cx);
+            }
+            return;
+        }
+        let focused = moved_row(self.focused, account + 1, &keystroke.key);
         if focused != self.focused {
             self.focused = focused;
             self.scroll.scroll_to_item(focused);
@@ -331,20 +539,23 @@ impl gpui::Render for SettingsWindow {
         // widest row of choices.
         let rows = rows(&self.settings);
         let widest = |width: &dyn Fn(&Row) -> f32| rows.iter().map(width).fold(0.0, f32::max);
-        let name_width = widest(&|row| text_width(row.name, window)).ceil();
-        let choices_width = widest(&|row| {
-            let labels = row.labels.iter();
-            let words: f32 = labels.map(|label| text_width(label, window)).sum();
-            let count = row.labels.len() as f32;
-            words + count * 2.0 * CHOICE_PADDING + (count + 1.0) * TRACK_PADDING + 2.0
-        });
+        let name_width = widest(&|row| text_width(row.name, window))
+            .max(text_width(ACCOUNT, window))
+            .ceil();
+        let choices_width =
+            widest(&|row| track_width(row.labels.iter().map(SharedString::as_ref), window));
+        let account = account_buttons(self.openrouter.read(cx).status());
+        let account_width = track_width(account.iter().map(|button| button.label()), window);
+        let choices_width = choices_width.max(account_width);
         let room = f32::from(window.viewport_size().width) - name_width - NAME_GAP - choices_width;
         let side = (room / 2.0).max(MIN_SIDE);
-        let rows: Vec<AnyElement> = rows
+        let count = rows.len();
+        let mut rows: Vec<AnyElement> = rows
             .into_iter()
             .enumerate()
             .map(|(index, row)| self.row(index, row, name_width, cx))
             .collect();
+        rows.push(self.account_row(count, name_width, choices_width, cx));
         div()
             .track_focus(&self.focus)
             .key_context("Settings")
@@ -393,6 +604,17 @@ fn text_width(text: &str, window: &Window) -> f32 {
         .text_system()
         .shape_line(text.to_owned().into(), px(TEXT_SIZE), &[run], None);
     f32::from(line.width)
+}
+
+/// How wide a track of buttons labelled `labels` is drawn: each label and
+/// its padding, which layout rounds up to a whole point, the gaps between
+/// them, and the track's padding and 1-pixel edge.
+fn track_width<'a>(labels: impl Iterator<Item = &'a str>, window: &Window) -> f32 {
+    let (count, buttons) = labels.fold((0.0, 0.0), |(count, width), label| {
+        let button = (text_width(label, window) + 2.0 * CHOICE_PADDING).ceil();
+        (count + 1.0, width + button)
+    });
+    buttons + (count + 1.0) * TRACK_PADDING + 2.0
 }
 
 /// A heading over a group of rows, lined up with the choices after names
@@ -487,6 +709,77 @@ mod tests {
         assert_eq!(row_named(&settings, "3D Resolution").chosen, None);
         settings.resolution_3d = Resolution3d::Times(2);
         assert_eq!(row_named(&settings, "3D Resolution").chosen, Some(2));
+    }
+
+    #[test]
+    fn the_openrouter_row_offers_what_the_connection_allows() {
+        let connected = |from_environment, usage| Status::Connected {
+            tail: "1234".to_owned(),
+            from_environment,
+            usage,
+        };
+        assert_eq!(account_buttons(&Status::NotConnected), [Account::Connect]);
+        assert_eq!(
+            account_buttons(&Status::Connecting { returned: false }),
+            [Account::Cancel]
+        );
+        assert_eq!(
+            account_buttons(&connected(false, Usage::Unknown)),
+            [Account::ManageKeys, Account::Disconnect]
+        );
+        // A key from the environment can't be forgotten from here.
+        assert_eq!(
+            account_buttons(&connected(true, Usage::Unknown)),
+            [Account::ManageKeys]
+        );
+        assert_eq!(
+            account_buttons(&connected(false, Usage::Refused)),
+            [Account::Connect, Account::Disconnect]
+        );
+        assert_eq!(
+            account_buttons(&Status::Failed("x".to_owned())),
+            [Account::TryAgain]
+        );
+        assert!(Account::Connect.primary() && Account::TryAgain.primary());
+        assert!(!Account::Disconnect.primary());
+    }
+
+    #[test]
+    fn the_openrouter_row_says_how_the_connection_stands() {
+        assert_eq!(
+            account_caption(&Status::Connected {
+                tail: "1234".to_owned(),
+                from_environment: false,
+                usage: Usage::Known("$0.42 used".to_owned()),
+            }),
+            ("Connected · key …1234 · $0.42 used".to_owned(), false)
+        );
+        assert_eq!(
+            account_caption(&Status::Connected {
+                tail: "abcd".to_owned(),
+                from_environment: true,
+                usage: Usage::Unknown,
+            }),
+            ("Using OPENROUTER_API_KEY …abcd".to_owned(), false)
+        );
+        assert!(
+            account_caption(&Status::Connected {
+                tail: "abcd".to_owned(),
+                from_environment: false,
+                usage: Usage::Refused,
+            })
+            .1
+        );
+        assert_eq!(
+            account_caption(&Status::Failed(
+                "Access was declined on OpenRouter.".to_owned()
+            )),
+            ("Access was declined on OpenRouter.".to_owned(), true)
+        );
+        assert_eq!(
+            account_caption(&Status::Connecting { returned: false }).0,
+            "Finish connecting in your browser."
+        );
     }
 
     /// The row called `name` for `settings`.

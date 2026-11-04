@@ -1644,6 +1644,7 @@ dependencies = [
  "emu-cheats",
  "emu-core",
  "emu-cores",
+ "emu-guide",
  "emu-patch",
  "emu-script",
  "emu-state",
@@ -1733,6 +1734,16 @@ name = "emu-gba-cart"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "emu-guide"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

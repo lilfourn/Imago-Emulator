@@ -10,6 +10,7 @@ How the workspace fits together. The *why* behind the big choices lives in
                  emu-app (GPUI, binary: ds-emulator)     emu-headless (binary)
                     │        │                                 │
       emu-patch ◄───┤  emu-state, emu-cheats, emu-script ◄─────┤
+      emu-guide ◄───┤        │                                 │
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
                      ┌───────┼────────┬──────────┬──────────────┐
@@ -38,6 +39,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
 | `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
 | `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
+| `emu-guide` | Guide, the chat about the game being played ([PRD](PRD-game-chat.md)): connecting an OpenRouter account by OAuth PKCE through the browser and a loopback port, as Imago does; the key in a 0600 file, with `OPENROUTER_API_KEY` over it; OpenRouter's API through `curl`, the key on its standard input. Knows no game and no window. |
 | `emu-headless` | Runs a core without a window, or an RPG Maker game in a hidden player of its own; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
