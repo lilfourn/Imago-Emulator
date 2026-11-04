@@ -23,7 +23,6 @@ actions!(
         HideOtherApps,
         ShowAllApps,
         ToggleWindowControls,
-        ToggleKeyGuide,
         OpenRom,
         AddToLibrary,
         OpenStore,
@@ -306,8 +305,6 @@ pub struct MenuChecks {
     pub fast_forward: Speed,
     /// Whether the speed readout shows.
     pub show_fps: bool,
-    /// Whether the key guide shows.
-    pub key_guide: bool,
 }
 
 impl Default for MenuChecks {
@@ -315,7 +312,6 @@ impl Default for MenuChecks {
         Self {
             fast_forward: Speeds::default().fast_forward,
             show_fps: false,
-            key_guide: crate::settings::Settings::default().key_guide,
         }
     }
 }
@@ -326,11 +322,6 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
         "Hide FPS"
     } else {
         "Show FPS"
-    };
-    let key_guide = if checks.key_guide {
-        "Hide Key Guide"
-    } else {
-        "Show Key Guide"
     };
     vec![
         Menu {
@@ -438,7 +429,6 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                     ],
                 }),
                 MenuItem::separator(),
-                MenuItem::action(key_guide, ToggleKeyGuide),
                 MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
                 MenuItem::action("Debugger", ShowDebugger),
             ],

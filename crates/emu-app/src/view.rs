@@ -25,8 +25,8 @@ use crate::app::{
     RemoveFromLibrary, Reset, Resolution3d1x, Resolution3d2x, Resolution3d3x, Resolution3d4x,
     RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot, SaveState, ShowDebugger,
     StopScript, SwapScreens, SwitchPlayer, TOP_BAR, ToggleColorCorrection, ToggleFastForward,
-    ToggleFullScreen, ToggleKeyGuide, ToggleMicrophone, TogglePause, ToggleRecording,
-    ToggleSlowMotion, ToggleWindowControls,
+    ToggleFullScreen, ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion,
+    ToggleWindowControls,
 };
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
@@ -138,9 +138,6 @@ pub struct EmulatorView {
     /// Whether the window shows its close, minimise and zoom buttons and
     /// the bar they sit in.
     window_controls: bool,
-    /// Whether the keys that play the game show along the foot of the
-    /// window.
-    key_guide: bool,
     /// Whether the buttons were last shown or hidden, once they have been.
     shown_controls: Option<bool>,
     /// The debugger window, once opened.
@@ -378,7 +375,6 @@ impl EmulatorView {
             readout_task: None,
             dmg_colors: Settings::default().dmg_colors,
             window_controls: Settings::default().window_controls,
-            key_guide: Settings::default().key_guide,
             shown_controls: None,
             debugger: None,
             settings_window: None,
@@ -425,7 +421,6 @@ impl EmulatorView {
                 view.show_fps = settings.show_fps;
                 view.dmg_colors = settings.dmg_colors;
                 view.window_controls = settings.window_controls;
-                view.key_guide = settings.key_guide;
                 view.color_correction = settings.color_correction;
                 view.state_slot = settings.state_slot;
                 view.window_place = settings.window_place;
@@ -1510,12 +1505,13 @@ impl EmulatorView {
             .read(cx)
             .title_of(&rom)
             .unwrap_or_else(|| file_name(&rom));
+        let controls = key_guide::columns(session.info.system, &self.bindings);
         // Let go at once, before pausing, so no quick tap waits under the
         // menu to reach the game when it resumes.
         self.release_all();
         self.send_debug(debugger::Command::Pause);
         let cheats = self.menu_cheats();
-        let menu = cx.new(|_| GameMenu::new(title, cheats));
+        let menu = cx.new(|_| GameMenu::new(title, cheats, controls));
         let subscription = cx.subscribe_in(&menu, window, Self::menu_event);
         self.menu = Some((menu, subscription));
         // The menu says progress is saved; make it so.
@@ -1879,7 +1875,6 @@ impl EmulatorView {
             state_slot: self.state_slot,
             dmg_colors: self.dmg_colors,
             window_controls: self.window_controls,
-            key_guide: self.key_guide,
             window_place: self.window_place,
         }
     }
@@ -1929,9 +1924,6 @@ impl EmulatorView {
         if settings.window_controls != self.window_controls {
             self.set_window_controls(settings.window_controls, cx);
         }
-        if settings.key_guide != self.key_guide {
-            self.set_key_guide(settings.key_guide, cx);
-        }
     }
 
     /// Fills the window around the screens with `backdrop` from now on,
@@ -1950,14 +1942,6 @@ impl EmulatorView {
     /// bar they sit in, and saves that for next launch.
     fn set_window_controls(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.window_controls = shown;
-        cx.notify();
-        self.save_settings(cx);
-    }
-
-    /// Shows or hides the key guide, and saves that for next launch.
-    fn set_key_guide(&mut self, shown: bool, cx: &mut Context<Self>) {
-        self.key_guide = shown;
-        self.refresh_menus(cx);
         cx.notify();
         self.save_settings(cx);
     }
@@ -2041,7 +2025,6 @@ impl EmulatorView {
         cx.set_menus(crate::app::menus(MenuChecks {
             fast_forward: self.speeds.fast_forward,
             show_fps: self.show_fps,
-            key_guide: self.key_guide,
         }));
     }
 
@@ -2415,22 +2398,8 @@ impl Render for EmulatorView {
             window_chrome::set_controls_visible(window, show_controls);
             self.shown_controls = Some(show_controls);
         }
-        // The key guide floats in a strip at the foot, and the screens fit
-        // above it; the backdrop fills the whole window, under it too.
-        let guide = self
-            .session
-            .as_ref()
-            .filter(|_| self.key_guide && !fullscreen)
-            .map(|session| key_guide::groups(session.info.system, &self.bindings));
         let viewport = window.viewport_size();
-        let footer = guide.as_ref().map_or(0.0, |guide| {
-            key_guide::height(guide, f32::from(viewport.width))
-        });
-        let window_size = (f32::from(viewport.width), f32::from(viewport.height));
-        let viewport = (
-            f32::from(viewport.width),
-            (f32::from(viewport.height) - footer).max(0.0),
-        );
+        let viewport = (f32::from(viewport.width), f32::from(viewport.height));
         let scale_factor = window.scale_factor();
 
         let mut root = div()
@@ -2534,9 +2503,6 @@ impl Render for EmulatorView {
             }))
             .on_action(cx.listener(|this, _: &ToggleWindowControls, _, cx| {
                 this.set_window_controls(!this.window_controls, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleKeyGuide, _, cx| {
-                this.set_key_guide(!this.key_guide, cx);
             }))
             .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
                 this.set_resolution_3d(1, cx);
@@ -2666,7 +2632,7 @@ impl Render for EmulatorView {
                     }
                 }
                 if let Some(glow) = &session.ambient {
-                    root = root.child(ambient_layer(glow, window_size));
+                    root = root.child(ambient_layer(glow, viewport));
                 }
             }
             root = root.children(
@@ -2712,16 +2678,15 @@ impl Render for EmulatorView {
         }
         // Only over a game: the last game's reading would otherwise stay
         // over the library, as the readout's timer stops with the game.
+        // Not under the game menu, where the game is paused.
         if self.show_fps
             && self.session.is_some()
+            && self.menu.is_none()
             && let Some(readout) = &self.speed_readout
         {
-            root = root.child(speed_readout(readout.clone(), footer));
+            root = root.child(speed_readout(readout.clone()));
         }
 
-        if let Some(guide) = &guide {
-            root = root.child(key_guide::guide(guide, footer));
-        }
         if let Some((menu, _)) = &self.menu {
             root = root.child(menu.clone());
         }
@@ -2739,7 +2704,7 @@ impl Render for EmulatorView {
             let card = if self.menu.is_some() {
                 card.top(px(TOP_BAR + 4.0))
             } else {
-                card.bottom(px(INSET + footer))
+                card.bottom(px(INSET))
             };
             let mut card = overlay_plate(card).flex_col().gap_1();
             if let Some(image) = &self.slot_image {
@@ -2982,12 +2947,11 @@ fn slot_image(width: u16, height: u16, rgb: &[u8]) -> Arc<RenderImage> {
     video::render_image(&frame, 2)
 }
 
-/// The speed readout, small in the window's bottom right corner, above a
-/// key guide `footer` logical pixels tall.
-fn speed_readout(text: SharedString, footer: f32) -> impl IntoElement {
+/// The speed readout, small in the window's bottom right corner.
+fn speed_readout(text: SharedString) -> impl IntoElement {
     overlay_plate(div())
         .absolute()
-        .bottom(px(INSET + footer))
+        .bottom(px(INSET))
         .right(px(INSET))
         .font_family("Menlo")
         .child(text)

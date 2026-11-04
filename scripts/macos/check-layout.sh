@@ -102,8 +102,9 @@ seed_store() {
 # State: what to open it with, then the keys and menu items to press there.
 # Library, search and empty are the library: seeded, searched for "po" and
 # empty; context is the chosen game's menu, opened with ⌘I. Game
-# runs a test ROM with the key guide and the speed readout; menu, cheats and
-# restart are its game menu's pages; settings is the settings window; store
+# runs a test ROM with the speed readout; menu, cheats and restart are its
+# game menu's pages, the first with the key guide; settings is the settings
+# window; store
 # and page are the store and a game's page in it; randomize is the randomize
 # window, listing the library's Pokémon games.
 failed=0

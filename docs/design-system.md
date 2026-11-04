@@ -59,9 +59,9 @@ drives the app through its menus and with keys posted to it alone, so it
 never takes over the screen. Each state is captured at the default and the
 minimum window size: the library, empty and searched, and with a game's
 menu open (at the default size, as the menu is taller than the smallest
-window); a running game with
-the key guide and speed readout; the game menu and its Cheats and Restart
-pages; the settings window; and the randomize window, listing the
+window); a running game with the speed readout; the game menu with the key
+guide under its tiles, and its Cheats and Restart pages; the settings
+window; and the randomize window, listing the
 library's Pokémon games. Captures and reports are left in
 `/tmp/ds-emulator-layout`; look at them as well, since the checks catch
 geometry, not taste.

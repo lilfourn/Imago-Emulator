@@ -1,6 +1,7 @@
 //! The game menu: a sheet that slides up over the paused game when the
 //! player presses Escape. Four tiles: resume, cheats, restart and back to
-//! the library. Cheats and restarting open pages of their own in the
+//! the library, with the keys that play the game under them (see
+//! [`key_guide`]). Cheats and restarting open pages of their own in the
 //! sheet; restarting asks first, since it erases the game's progress.
 //!
 //! Progress needs no saving here: the main window keeps a checkpoint of
@@ -19,6 +20,7 @@ use gpui::{
 };
 
 use crate::icons;
+use crate::key_guide::{self, Control};
 use crate::probe;
 use crate::theme::{ACCENT, INSET, LINE, MUTED as DIM, ON_ACCENT, TEXT, with_alpha};
 
@@ -173,6 +175,8 @@ pub struct GameMenu {
     /// The game's name, over the menu.
     title: SharedString,
     cheats: Vec<CheatRow>,
+    /// The keys that play the game, under the tiles.
+    controls: [Vec<Control>; 2],
     page: Page,
     /// How many tiles go in a row, as last drawn.
     columns: usize,
@@ -183,11 +187,17 @@ pub struct GameMenu {
 impl EventEmitter<MenuEvent> for GameMenu {}
 
 impl GameMenu {
-    /// A menu for the game called `title`, with its `cheats`.
-    pub fn new(title: impl Into<SharedString>, cheats: Vec<CheatRow>) -> Self {
+    /// A menu for the game called `title`, with its `cheats` and the
+    /// `controls` that play it (see [`key_guide::columns`]).
+    pub fn new(
+        title: impl Into<SharedString>,
+        cheats: Vec<CheatRow>,
+        controls: [Vec<Control>; 2],
+    ) -> Self {
         Self {
             title: title.into(),
             cheats,
+            controls,
             page: Page::Tiles(Tile::Resume),
             columns: TILES.len(),
             scroll: ScrollHandle::new(),
@@ -332,13 +342,24 @@ impl GameMenu {
             .into_any_element()
     }
 
-    /// The tiles, in rows of `columns`, each `side` wide.
-    fn tiles(&self, columns: usize, side: f32, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The tiles, in rows of `columns`, each `side` wide, then the keys
+    /// that play the game across `width`.
+    fn tiles(
+        &self,
+        columns: usize,
+        side: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
         for row in TILES.chunks(columns.max(1)) {
             let tiles: Vec<AnyElement> =
                 row.iter().map(|&tile| self.tile(tile, side, cx)).collect();
             rows.push(div().flex().gap(px(GAP)).children(tiles).into_any_element());
+        }
+        // After the rows, so `focused_item` counts them alone.
+        if self.controls.iter().any(|column| !column.is_empty()) {
+            rows.push(key_guide::guide(&self.controls, width));
         }
         rows
     }
@@ -458,7 +479,7 @@ impl gpui::Render for GameMenu {
         let (columns, side) = tile_grid(inner);
         self.columns = columns;
         let (subtitle, gap, items) = match self.page {
-            Page::Tiles(_) => (None, GAP, self.tiles(columns, side, cx)),
+            Page::Tiles(_) => (None, GAP, self.tiles(columns, side, inner, cx)),
             Page::Cheats(_) => (Some("Cheats"), 6.0, self.cheats(cx)),
             Page::Restart(_) => (Some("Start over?"), 12.0, self.restart(cx)),
         };

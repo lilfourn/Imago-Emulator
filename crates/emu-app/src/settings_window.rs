@@ -176,12 +176,6 @@ fn rows(settings: &Settings) -> Vec<Row> {
             |settings, shown| settings.window_controls = shown,
         )
         .under("Window"),
-        Row::new(
-            "Key Guide",
-            vec![("Shown".into(), true), ("Hidden".into(), false)],
-            settings.key_guide,
-            |settings, shown| settings.key_guide = shown,
-        ),
     ]
 }
 

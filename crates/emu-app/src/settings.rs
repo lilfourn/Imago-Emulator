@@ -37,7 +37,6 @@
 //!
 //! [window]
 //! controls = true         # the close, minimise and zoom buttons
-//! key_guide = true        # the keys that play the game, along the foot
 //! fullscreen = false
 //! display = "37d8832a…"   # the display it was on, by its UUID
 //! x = 320.0               # where the window was on it and its size outside
@@ -106,9 +105,6 @@ pub struct Settings {
     /// Whether the main window shows its close, minimise and zoom buttons
     /// and the bar they sit in.
     pub window_controls: bool,
-    /// Whether the keys that play the game show along the foot of the
-    /// window.
-    pub key_guide: bool,
     /// Where the main window was left, if it has been placed.
     pub window_place: Option<WindowPlace>,
 }
@@ -146,7 +142,6 @@ impl Default for Settings {
             state_slot: 1,
             dmg_colors: DmgColors::ByTitle,
             window_controls: true,
-            key_guide: true,
             window_place: None,
         }
     }
@@ -181,7 +176,11 @@ impl Default for StatesSection {
 #[serde(default, deny_unknown_fields)]
 struct WindowSection {
     controls: bool,
-    key_guide: bool,
+    /// Read and dropped: files saved while the keys that play the game
+    /// showed along the window's foot say whether they did. They show in
+    /// the game menu now.
+    #[serde(skip_serializing)]
+    key_guide: Option<bool>,
     fullscreen: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     x: Option<f32>,
@@ -206,7 +205,7 @@ impl From<&Settings> for WindowSection {
         let place = settings.window_place;
         Self {
             controls: settings.window_controls,
-            key_guide: settings.key_guide,
+            key_guide: None,
             fullscreen: place.is_some_and(|place| place.fullscreen),
             x: place.map(|place| place.x),
             y: place.map(|place| place.y),
@@ -460,7 +459,6 @@ impl Settings {
             state_slot,
             dmg_colors,
             window_controls: file.window.controls,
-            key_guide: file.window.key_guide,
             window_place: file.window.place(),
         })
     }
@@ -590,7 +588,6 @@ mod tests {
             state_slot: 3,
             dmg_colors: DmgColors::Buttons(9),
             window_controls: false,
-            key_guide: false,
             window_place: Some(WindowPlace {
                 x: -1200.0,
                 y: 40.5,
@@ -610,7 +607,7 @@ mod tests {
         assert!(text.contains("rotation = 270"), "{text}");
         assert!(text.contains("fast_forward = 3.0"), "{text}");
         assert!(text.contains("controls = false"), "{text}");
-        assert!(text.contains("key_guide = false"), "{text}");
+        assert!(!text.contains("key_guide"), "{text}");
         assert!(text.contains("fast_forward_on = true"), "{text}");
         assert!(text.contains("color_correction = false"), "{text}");
         assert!(text.contains("slot = 3"), "{text}");
@@ -699,6 +696,14 @@ mod tests {
                 ..Speeds::default()
             }
         );
+    }
+
+    #[test]
+    fn files_from_when_the_key_guide_had_a_setting_still_load() {
+        let settings = Settings::from_toml("[window]\ncontrols = false\nkey_guide = true\n")
+            .expect("valid file");
+        assert!(!settings.window_controls);
+        assert!(!settings.to_toml().contains("key_guide"));
     }
 
     #[test]

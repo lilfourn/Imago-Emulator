@@ -221,7 +221,8 @@ print("window \(Int(win.width))x\(Int(win.height)) pt, capture at \(f(scale))x, 
 // 1. Nothing but the screens and the traffic lights comes within 16pt of
 //    the window's sides. A side's commonest colour on a row is its
 //    background there.
-let screensShown = parts.isEmpty || part("guide.island") != nil || part("sheet") != nil
+// A running game shows the speed readout in these checks' settings.
+let screensShown = parts.isEmpty || part("speed") != nil || part("sheet") != nil
 if !screensShown {
     var touching: [Double] = []
     var y = 40.0
@@ -380,7 +381,7 @@ if let sheet = part("sheet") {
     }
     // What is scrolled out of the sheet's view doesn't count.
     let content = (parts("tile:").map { $0.1 } + parts("row:").map { $0.1 } + parts("button:").map { $0.1 }
-        + [part("menu.header")].compactMap { $0 })
+        + [part("menu.header"), part("controls")].compactMap { $0 })
         .filter { sheet.contains($0) }
     if let first = content.first {
         let all = content.dropFirst().reduce(first) { $0.union($1) }
@@ -481,26 +482,29 @@ if !names.isEmpty {
     }
 }
 
-// 9. The key guide: a centred island whose keys sit evenly inside it, each
-//    key's letter centred on its cap, and each divider midway between its
-//    groups. Under the game menu, the sheet covers it.
-if let island = part("guide.island"), part("sheet") == nil {
-    let outer = island
-    even("key guide is centred", outer.minX, win.width - outer.maxX, ("left", "right"))
-    if let content = ink(in: island.insetBy(dx: 2, dy: 2)) {
-        even("key guide's keys are inset evenly across", content.minX - outer.minX, outer.maxX - content.maxX, ("left", "right"))
-        even("key guide's keys are inset evenly down", content.minY - outer.minY, outer.maxY - content.maxY, ("top", "bottom"), textTolerance)
+// 9. The key guide, under the game menu's tiles: each key's letter
+//    centred on its cap, and each row's keys ending where it does, so a
+//    column's keys end on one line. What is scrolled out of the sheet's
+//    view doesn't count.
+if part("controls") != nil, let sheet = part("sheet") {
+    let shown = sheet.insetBy(dx: 17, dy: 17)
+    // In from the rounded corners, which show the sheet.
+    let caps = parts("controls.cap:").filter { shown.contains($0.1) }.compactMap { name, cap -> (String, CGRect, CGRect)? in
+        let inside = cap.insetBy(dx: 3, dy: 3)
+        return ink(in: inside, on: background(inside)).map { (name, inside, $0) }
     }
-    for (name, cap) in parts("guide.cap:") {
-        if let glyphs = ink(in: cap.insetBy(dx: 1.5, dy: 1.5), on: background(cap.insetBy(dx: 1.5, dy: 1.5))) {
-            centered("\(name) key", cap, glyphs, across: textTolerance, down: textTolerance)
+    // Letters are centred down by their capitals: as tall as most keys'
+    // ink, which a Q's tail or the p of Space runs under.
+    let heights = Dictionary(grouping: caps.map { ($0.2.height * 2).rounded() / 2 }, by: { $0 })
+    let capitals = heights.max { $0.value.count < $1.value.count }?.key ?? 0
+    for (name, inside, glyphs) in caps {
+        let letters = CGRect(x: glyphs.minX, y: glyphs.minY, width: glyphs.width, height: min(glyphs.height, capitals))
+        centered("\(name) key", inside, letters, across: textTolerance, down: textTolerance)
+    }
+    for (name, row) in parts("controls.row:") where shown.contains(row) {
+        if let last = parts("controls.cap:\(name).").map({ $0.1 }).max(by: { $0.maxX < $1.maxX }) {
+            even("\(name)'s keys end where its row does", last.maxX, row.maxX, ("keys", "row"))
         }
-    }
-    let groups = parts("guide.group:")
-    for (index, divider) in parts("guide.divider:") {
-        guard let next = part("guide.group:\(index)"),
-              let previous = groups.last(where: { $0.1.maxX <= divider.minX && abs($0.1.midY - divider.midY) < 20 })?.1 else { continue }
-        even("divider \(index) is midway between its groups", divider.minX - previous.maxX, next.minX - divider.maxX, ("before", "after"))
     }
 }
 
