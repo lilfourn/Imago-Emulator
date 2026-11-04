@@ -73,10 +73,13 @@ actions!(
         DebugStepOver,
         DebugNextFrame,
         ToggleFullScreen,
+        Resolution3dMatchDisplay,
         Resolution3d1x,
         Resolution3d2x,
         Resolution3d3x,
         Resolution3d4x,
+        Resolution3d6x,
+        Resolution3d8x,
         ToggleMicrophone,
         CloseWindow,
         Minimize,
@@ -401,10 +404,13 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                 MenuItem::submenu(Menu {
                     name: "3D Resolution".into(),
                     items: vec![
+                        MenuItem::action("Match Display", Resolution3dMatchDisplay),
                         MenuItem::action("Native (1×)", Resolution3d1x),
                         MenuItem::action("2×", Resolution3d2x),
                         MenuItem::action("3×", Resolution3d3x),
                         MenuItem::action("4×", Resolution3d4x),
+                        MenuItem::action("6×", Resolution3d6x),
+                        MenuItem::action("8×", Resolution3d8x),
                     ],
                 }),
                 MenuItem::submenu(Menu {

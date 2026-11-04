@@ -16,7 +16,7 @@ use gpui::{
 use crate::ambient::Backdrop;
 use crate::app::{TOP_BAR, top_bar};
 use crate::layout::{Arrangement, GAPS, HINGE_GAP, Rotation};
-use crate::picture::Picture;
+use crate::picture::{Picture, RESOLUTIONS_3D};
 use crate::probe;
 use crate::settings::Settings;
 use crate::theme::{ACCENT, BACKGROUND, MUTED as DIM, PANEL, TEXT, with_alpha};
@@ -157,11 +157,12 @@ fn rows(settings: &Settings) -> Vec<Row> {
         ),
         Row::new(
             "3D Resolution",
-            (1..=4)
-                .map(|scale| (format!("{scale}×").into(), scale))
+            RESOLUTIONS_3D
+                .into_iter()
+                .map(|resolution| (resolution.label().into(), resolution))
                 .collect(),
             settings.resolution_3d,
-            |settings, scale| settings.resolution_3d = scale,
+            |settings, resolution| settings.resolution_3d = resolution,
         ),
         Row::new(
             "Window Controls",
@@ -446,6 +447,7 @@ fn moved_choice(chosen: Option<usize>, choices: usize, key: &str) -> Option<usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::picture::Resolution3d;
 
     #[test]
     fn up_and_down_move_between_rows_and_stop_at_the_ends() {
@@ -480,10 +482,11 @@ mod tests {
         (arrangement.choose)(&mut settings, 1);
         assert_eq!(settings.layout.arrangement, Arrangement::Horizontal);
         // A 3D scale the row does not offer leaves none of it chosen.
-        settings.resolution_3d = 8;
+        assert_eq!(row_named(&settings, "3D Resolution").chosen, Some(0));
+        settings.resolution_3d = Resolution3d::Times(5);
         assert_eq!(row_named(&settings, "3D Resolution").chosen, None);
-        settings.resolution_3d = 2;
-        assert_eq!(row_named(&settings, "3D Resolution").chosen, Some(1));
+        settings.resolution_3d = Resolution3d::Times(2);
+        assert_eq!(row_named(&settings, "3D Resolution").chosen, Some(2));
     }
 
     /// The row called `name` for `settings`.

@@ -340,8 +340,24 @@ or shader hook. Each screen is placed on whole device pixels
    bilinear" technique: crisp pixels without uneven pixel widths at
    non-integer sizes.
 
-Pixel Art would smear DS frames drawn at a higher 3D resolution, so they
-get Smooth until the DS says which pixels are 3D (PRD-upscaler UP-13).
+On a DS frame drawn with larger 3D, Pixel Art works on the 2D only, on
+the GPU, in one more pass each way (`shaders/beside_3d.metal`): the frame
+is split into console pixels, those whose square of the larger frame is
+all one colour carry no 3D detail; those within two console pixels of
+one that does are drawn from the larger frame, smooth (MetalFX when it
+enlarges by a quarter or more), and the rest by OmniScale from the
+console pixels. So menus, text and the touch screen are rebuilt as pixel
+art beside the 3D's own detail, with no change to the core. All of a
+frame's screens go to the GPU in one command buffer and one wait, which
+is most of an upscale's time: in Pokémon Platinum at 4× 3D, both screens'
+images took 1.6 ms a frame in the app.
+
+Match Display, the default 3D resolution (`picture::matched_resolution`),
+draws DS and 3DS 3D about as large as the screens are shown: for each
+screen, its device pixels over its console pixels, rounded up unless a
+quarter or less above a whole number, at most 4×. The view sends the
+core a new render scale only when that changes, with the window, the
+display or the layout.
 
 DS 3D upscaling is the core's job, as that decision planned. At a render
 scale above 1, the DS draws each 3D frame twice: at the native

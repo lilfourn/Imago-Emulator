@@ -7,8 +7,12 @@
 //!
 //! An upscaled screen is drawn at its exact size in device pixels, so it
 //! fits every display: 1× or Retina, any size, in a window or full screen.
+//!
+//! The DS and 3DS also draw their 3D larger (View > 3D Resolution). Match
+//! Display, the default, draws it as large as the screens are shown, up
+//! to [`MATCH_DISPLAY_CAP`], and the upscaler covers the rest.
 
-use emu_core::System;
+use emu_core::{ScreenSize, System};
 
 use crate::gpu_upscale::Method;
 
@@ -52,6 +56,68 @@ const NAMES: [(Picture, &str); 6] = [
     (Picture::LcdGrid, "lcd-grid"),
     (Picture::Scanlines, "scanlines"),
 ];
+
+/// How many times its own resolution DS and 3DS 3D is drawn at, chosen
+/// from View > 3D Resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Resolution3d {
+    /// As large as the screens are shown ([`matched_resolution`]).
+    #[default]
+    MatchDisplay,
+    /// So many times, 1 to `MAX_RESOLUTION_3D`.
+    Times(u32),
+}
+
+impl Resolution3d {
+    /// The choice as the View menu and settings window name it.
+    pub fn label(self) -> String {
+        match self {
+            Self::MatchDisplay => "Match Display".to_owned(),
+            Self::Times(1) => "Native (1×)".to_owned(),
+            Self::Times(scale) => format!("{scale}×"),
+        }
+    }
+}
+
+/// The 3D resolutions View > 3D Resolution and the settings window offer.
+pub const RESOLUTIONS_3D: [Resolution3d; 7] = [
+    Resolution3d::MatchDisplay,
+    Resolution3d::Times(1),
+    Resolution3d::Times(2),
+    Resolution3d::Times(3),
+    Resolution3d::Times(4),
+    Resolution3d::Times(6),
+    Resolution3d::Times(8),
+];
+
+/// The most Match Display draws 3D at. The DS's 3D costs the most CPU of
+/// anything the app does: in Pokémon White's bedroom, headless on an M5
+/// Max, the DS ran at 3.2× full speed with 3D at 2× and 2.7× at 4×, so 4×
+/// keeps fast-forward near 3×. The 3DS's helper reads back at most 4×
+/// (`emu-3ds` `host.rs`). The upscaler enlarges past it.
+pub const MATCH_DISPLAY_CAP: u32 = 4;
+
+/// The 3D resolution that draws each screen at least about as large as it
+/// is shown: for each `(target, native)` pair, a screen shown `target`
+/// device pixels across whose console draws it `native` pixels across
+/// (turned as shown), the whole factor its device pixels need, rounded up
+/// unless a quarter or less above a whole number, as the upscaler covers
+/// that much; the largest, from 1 to [`MATCH_DISPLAY_CAP`].
+pub fn matched_resolution(screens: impl IntoIterator<Item = ((u32, u32), ScreenSize)>) -> u32 {
+    let factor = |device: u32, console: u16| {
+        let console = u32::from(console.max(1));
+        // ceil(device / console - 1/4), in whole numbers.
+        (4 * device).saturating_sub(console).div_ceil(4 * console)
+    };
+    screens
+        .into_iter()
+        .map(|((width, height), native)| {
+            factor(width, native.width).max(factor(height, native.height))
+        })
+        .max()
+        .unwrap_or(1)
+        .clamp(1, MATCH_DISPLAY_CAP)
+}
 
 /// The most pixels the GPU draws in all a frame's screens together. Past
 /// it, screens are drawn as large as fits, and GPUI's linear filter
@@ -206,6 +272,39 @@ mod tests {
         assert_eq!(Picture::Smooth.look(System::Gb), smooth);
         assert_eq!(Picture::PixelArt.look(System::N3ds), pixel_art);
         assert_eq!(Picture::LcdGrid.look(System::Nds), Look::LcdGrid);
+    }
+
+    #[test]
+    fn match_display_follows_the_displays_pixels() {
+        let ds = ScreenSize::new(256, 192);
+        let three_ds_top = ScreenSize::new(400, 240);
+        // A stacked DS filling the MacBook Pro's height wants 5.1×, the
+        // external display's 6.75×: both capped.
+        assert_eq!(matched_resolution([((1309, 982), ds)]), 4);
+        assert_eq!(matched_resolution([((1728, 1296), ds)]), 4);
+        // On a 1080p 1× monitor, 2.8× rounds up to 3×.
+        assert_eq!(matched_resolution([((720, 540), ds)]), 3);
+        // A quarter or less above a whole number rounds down: the 3DS's
+        // top screen at 4.09× draws at 4×, a small DS window at 2.08× at 2×.
+        assert_eq!(matched_resolution([((1636, 982), three_ds_top)]), 4);
+        assert_eq!(matched_resolution([((533, 400), ds)]), 2);
+        // The largest screen decides; nothing shown, or tiny, draws at 1×.
+        assert_eq!(matched_resolution([((256, 192), ds), ((720, 540), ds)]), 3);
+        assert_eq!(matched_resolution([]), 1);
+        assert_eq!(matched_resolution([((40, 30), ds)]), 1);
+        // A turned screen compares across its turned sides.
+        assert_eq!(
+            matched_resolution([((540, 720), ScreenSize::new(192, 256))]),
+            3
+        );
+    }
+
+    #[test]
+    fn resolution_labels() {
+        assert_eq!(Resolution3d::MatchDisplay.label(), "Match Display");
+        assert_eq!(Resolution3d::Times(1).label(), "Native (1×)");
+        assert_eq!(Resolution3d::Times(6).label(), "6×");
+        assert_eq!(Resolution3d::default(), Resolution3d::MatchDisplay);
     }
 
     #[test]
