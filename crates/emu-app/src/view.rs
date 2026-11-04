@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
-    App, BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths, FocusHandle, KeyDownEvent,
-    KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, PathPromptOptions, RenderImage, SharedString, Subscription, Task, Window,
-    WindowBounds, WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
-    rgba,
+    Animation, AnimationExt, App, BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths,
+    FocusHandle, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, RenderImage, SharedString,
+    Subscription, Task, Window, WindowBounds, WindowHandle, div, img, linear_color_stop,
+    linear_gradient, prelude::*, px, rgb, rgba,
 };
 
 use crate::ambient::{self, Backdrop};
@@ -60,6 +60,7 @@ use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
 use crate::speed::{self, Pace, Speed, Speeds};
+use crate::store_view::pulse;
 use crate::theme::{BACKGROUND, INSET};
 use crate::trace;
 use crate::video;
@@ -294,6 +295,14 @@ impl EmulatorView {
         let library = cx.new(|cx| LibraryView::new(games, library_path, cx));
         let subscriptions = vec![
             cx.subscribe_in(&library, window, Self::library_event),
+            // Over a game, the library's games being added show in the
+            // corner (see `adding_card`), drawn anew as the library is, even
+            // while the game is paused.
+            cx.observe(&library, |this, _, cx| {
+                if this.session.is_some() {
+                    cx.notify();
+                }
+            }),
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     // Keys released while another window has focus never
@@ -525,35 +534,37 @@ impl EmulatorView {
 
     /// Unpacks the archives among `paths` and makes the game of a ROM-hack
     /// patch among them, off the UI thread, then opens the games in their
-    /// place (see [`prepare`]). A patch whose game is not found asks for
-    /// it.
+    /// place (see [`prepare`]). Meanwhile the library shows the archive, or
+    /// else the patch, as a game being added. A patch whose game is not
+    /// found asks for it.
     fn prepare_and_open(
         &mut self,
         paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = paths
+        let slow = paths
             .iter()
-            .map(|path| file_name(path))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        let doing = if paths.iter().any(|path| archive::is_archive(path)) {
-            "Unpacking"
-        } else {
-            "Patching"
-        };
-        self.show_notice(format!("{doing} {name}…"), cx);
+            .find(|path| archive::is_archive(path))
+            .or_else(|| paths.iter().find(|path| romhack::is_patch(path)))
+            .map_or_else(|| paths[0].clone(), |path| library::absolute(path));
+        let (key, progress) = self
+            .library
+            .update(cx, |library, cx| library.start_adding(&slow, cx));
         let known = self.library.read(cx).checksums();
         let prepare = cx
             .background_executor()
-            .spawn(async move { prepare(paths, &known) });
+            .spawn(async move { prepare(paths, &known, &progress) });
         cx.spawn_in(window, async move |this, cx| {
             let prepared = prepare.await;
-            this.update_in(cx, |this, window, cx| match prepared {
-                Ok(paths) => this.open(paths, window, cx),
-                Err(MakeError::NoBase(patch)) => this.choose_base(patch, window, cx),
-                Err(MakeError::Failed(error)) => this.show_notice(error, cx),
+            this.update_in(cx, |this, window, cx| {
+                this.library
+                    .update(cx, |library, cx| library.added(key, cx));
+                match prepared {
+                    Ok(paths) => this.open(paths, window, cx),
+                    Err(MakeError::NoBase(patch)) => this.choose_base(patch, window, cx),
+                    Err(MakeError::Failed(error)) => this.show_notice(error, cx),
+                }
             })
             .ok();
         })
@@ -1488,7 +1499,7 @@ impl EmulatorView {
                 return;
             };
             library
-                .update(cx, |library, cx| library.add(paths, cx))
+                .update(cx, |library, cx| library.add_chosen(paths, cx))
                 .ok();
         })
         .detach();
@@ -2733,15 +2744,15 @@ impl Render for EmulatorView {
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
         }
-        if let Some(notice) = &self.notice {
-            let card = div().absolute().left(px(INSET));
-            // Over the game menu, notices go to the top, clear of it.
-            let card = if self.menu.is_some() {
-                card.top(px(TOP_BAR + 4.0))
-            } else {
-                card.bottom(px(INSET + footer))
-            };
-            let mut card = overlay_plate(card).flex_col().gap_1();
+        // Over a game, which hides the library's tiles of games being
+        // added, what is being added shows over any notice.
+        let adding = self
+            .session
+            .as_ref()
+            .and_then(|_| self.library.read(cx).adding_status())
+            .map(adding_card);
+        let notice = self.notice.as_ref().map(|notice| {
+            let mut card = overlay_plate(div()).flex_col().gap_1();
             if let Some(image) = &self.slot_image {
                 card = card.child(
                     img(Arc::clone(image))
@@ -2749,7 +2760,23 @@ impl Render for EmulatorView {
                         .object_fit(ObjectFit::Contain),
                 );
             }
-            root = root.child(card.child(notice.clone()).children(probe::part("notice")));
+            card.child(notice.clone()).children(probe::part("notice"))
+        });
+        if adding.is_some() || notice.is_some() {
+            let cards = div()
+                .absolute()
+                .left(px(INSET))
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(6.0));
+            // Over the game menu, notices go to the top, clear of it.
+            let cards = if self.menu.is_some() {
+                cards.top(px(TOP_BAR + 4.0))
+            } else {
+                cards.bottom(px(INSET + footer))
+            };
+            root = root.child(cards.children(adding).children(notice));
         }
         root.children(probe::end("main"))
     }
@@ -2926,6 +2953,18 @@ fn overlay_plate(plate: Div) -> Div {
         .line_height(px(16.0))
 }
 
+/// What the library is adding, said over a game: `Unpacking Game · 42%`,
+/// its words breathing while it is under way.
+fn adding_card(status: String) -> Div {
+    overlay_plate(div())
+        .child(div().child(status).with_animation(
+            "adding",
+            Animation::new(Duration::from_millis(1600)).repeat(),
+            |words, delta| words.opacity(0.45 + 0.55 * pulse(delta)),
+        ))
+        .children(probe::part("adding"))
+}
+
 /// A red dot and "REC" in the window's corner, on the traffic lights'
 /// midline, while a recording is under way. The recording is of the core's
 /// frames, so it never shows this.
@@ -3025,15 +3064,20 @@ fn consoles(info: &CoreInfo) -> usize {
 
 /// The games to open for `paths`, unpacking archives and making the game
 /// of a patch among them (see [`romhack::pair`]), from the one ROM with
-/// it or else the game among `known` (checksum and path) it names.
+/// it or else the game among `known` (checksum and path) it names. Tells
+/// `progress` how far unpacking has got.
 ///
 /// Blocking file I/O; call it off the UI thread.
-fn prepare(paths: Vec<PathBuf>, known: &[(u32, PathBuf)]) -> Result<Vec<PathBuf>, MakeError> {
+fn prepare(
+    paths: Vec<PathBuf>,
+    known: &[(u32, PathBuf)],
+    progress: &archive::Progress,
+) -> Result<Vec<PathBuf>, MakeError> {
     let files = paths
         .into_iter()
         .map(|path| {
             if archive::is_archive(&path) {
-                archive::unpack(&path)
+                archive::unpack(&path, progress)
             } else {
                 Ok(vec![path])
             }
