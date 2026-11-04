@@ -1394,7 +1394,7 @@ fn thousands(count: usize) -> String {
 
 /// Up and down once each time `delta` goes from 0 to 1, from 0 to 1 and
 /// back.
-fn pulse(delta: f32) -> f32 {
+pub fn pulse(delta: f32) -> f32 {
     1.0 - (2.0 * delta - 1.0).abs()
 }
 
