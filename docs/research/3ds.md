@@ -48,6 +48,7 @@ build:
 - **Files:** it opens `.3ds`, `.cci`, `.cxi`, `.3dsx`, `.elf`, `.axf` and
   `.app`, plus zstd-compressed `z3dsx`, `zcci` and `zcxi`. It can't open
   `.cia`: a CIA is a title to install, and the core can't install one.
+  The app plays one as the executable it holds (see the plan).
 - **Picture:** 60 fps, as one 400×480 picture. The top screen is 400×240,
   and the 320×240 bottom screen sits under it, centred between 40-pixel
   bars. At higher internal resolutions the picture grows; the largest
@@ -191,7 +192,7 @@ Universal-DB lists 126 games for the 3DS alone:
 | Download | Games |
 |---|---:|
 | A `.3dsx`, which the core opens directly | 69 |
-| Only a `.cia`, which it can't open | 22 |
+| Only a `.cia`, which the app opens as the executable it holds | 22 |
 | Only archives (`.zip`, `.7z`, `.rar`), which may hold a `.3dsx` | 25 |
 | Nothing | 10 |
 
@@ -221,16 +222,23 @@ Azahar makes the rebuilt renderer's pipeline cache only for a title it
 can name. The helper refuses those states; this is worth reporting
 upstream.
 
+Later the same day, `.cia` homebrew opens too. The app writes out an
+unencrypted CIA's first content, a plain NCCH, as a `.cxi` in the games
+folder and plays that (`emu_3ds::cia`); an encrypted one is refused, and
+nothing is decrypted. Craftus Reloaded and Button Tester played from
+their `.cia`s. A game's extdata is now watched beside its save data, so a
+checkpoint is never picked up over a newer save kept there.
+
 1. ~~**Prototype Vulkan outside the app.**~~ Done, with `ash` and
    MoltenVK 1.4.2.
 2. ~~**Build the helper and its `Core` in the app.**~~ Done.
 3. ~~**Add input:** the circle pad, ZL, ZR and touch.~~ Done.
 4. ~~**Wire up the library:** 3DS files, the encrypted check and the core
    download.~~ Done.
-5. **Add 3DS homebrew to the store,** and run the compatibility sweep. Also
-   open `.cia` homebrew by taking out its executable: an unencrypted
-   CIA's first content is a plain NCCH that the core opens, and 22 of the
-   store's 3DS games ship only a `.cia`.
+5. **Add 3DS homebrew to the store,** and run the compatibility sweep.
+   ~~Also open `.cia` homebrew by taking out its executable.~~ Done: an
+   unencrypted CIA's first content is a plain NCCH that the core opens,
+   and 22 of the store's 3DS games ship only a `.cia`.
 6. ~~**Write decision record 0011,** and update PRD section 4 and roadmap
    Phase 5 to match.~~ Done.
 

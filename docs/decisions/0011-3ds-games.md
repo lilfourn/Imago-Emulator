@@ -72,17 +72,43 @@ title at 28.
 7. **The helper keeps the app's scheduling role.** Every eight frames it
    takes the app's `PRIO_DARWIN_ROLE`, so Game Mode cannot run it as a
    background process, as it did RPG Maker's player (decision 0008).
+8. **An installable title plays as the executable it holds.** The core
+   cannot install a `.cia`, but an unencrypted one's first content is a
+   plain executable (NCCH), which the core opens as a `.cxi`. The app
+   finds that content through the CIA's header and title metadata
+   (`emu_3ds::cia`, after 3dbrew's CIA and title metadata pages) and,
+   on the loading thread, writes it a piece at a time into the games
+   folder as `<name>.cxi`, through a temporary file. It is written once
+   and used again while it is the same executable: as long, and alike in
+   its first MiB, which holds its header and the hashes over the rest. A
+   title whose executable is encrypted, with its title key or with its
+   NoCrypto flag clear, is refused with a message saying so; nothing is
+   decrypted. The session stays the `.cia`'s: its states and checkpoint
+   sit beside it and are known by its checksum, as every other game's
+   are, and the library titles it from its executable's icon without
+   writing anything.
+9. **A game's extra data counts as its saves too.** Some games keep
+   saves in extdata on the SD card as well as in their save data. Its ID
+   is in the executable's extended header, in the storage info, and
+   Azahar keeps it in `extdata/<HIGH>/<LOW>/`, in capitals. An ID of zero
+   means none: the 3DS lets an application open only the extdata its
+   extended header names. With extended save data access, the field lists
+   save IDs instead, and the app takes the first, as Azahar does.
 
 ## Consequences
 
-- A 3DS game opens from its file (`.3ds`, `.cci`, `.cxi`, `.3dsx` and
-  Azahar's compressed forms), the library, drag and drop or an archive,
-  and plays in the window with the app's bindings, pause, fast-forward,
-  screenshots, recordings, save-state slots and checkpoint. The first one
-  waits for a 67 MB download.
+- A 3DS game opens from its file (`.3ds`, `.cci`, `.cxi`, `.3dsx`,
+  Azahar's compressed forms and `.cia`), the library, drag and drop or an
+  archive, and plays in the window with the app's bindings, pause,
+  fast-forward, screenshots, recordings, save-state slots and checkpoint.
+  The first one waits for a 67 MB download.
 - Games must be the player's own decrypted dumps. The core refuses an
   encrypted game and the app holds no keys (PRD 9.5); the app passes on
-  the core's words. It cannot open an installable title (`.cia`).
+  the core's words. It refuses an encrypted `.cia` itself, before the
+  helper starts.
+- A `.cia` takes as much disk again as its executable, which is kept in
+  the games folder. If the `.cia` is in the games folder too, the two
+  share a name, so its states keep its extension: `Game.cia.ss1`.
 - `.3dsx` homebrew has no save states under Vulkan. Loading a state
   rebuilds the core's renderer, and Azahar 2126.2 makes the new
   renderer's Vulkan pipeline cache only for a game with a title ID;
@@ -94,8 +120,8 @@ title at 28.
 - A game's own saves are the core's: they live in its NAND and SD card in
   `3DS/Azahar`, whatever the app does with states. A checkpoint is not
   picked up once the game's save data (`title/<id>/data/` on the SD card)
-  has changed since; saves a game keeps in extra data (extdata) are not
-  watched.
+  or its extdata (`extdata/<id>/`) has changed since. An encrypted game's
+  extended header can't be read, so its extdata is not watched.
 - The helper's log is `3DS/helper.log`, and the start before's is kept as
   `helper.previous.log`. Once the helper stops, the game ends with why,
   and nothing more is asked of it.
@@ -124,3 +150,9 @@ exited; opening it again picked the checkpoint up. emu-headless, starting
 with nothing installed, downloaded and installed the core and MoltenVK and
 played 900 frames in 15 s, most of it the download. Holding Right from a Lua
 script moved 3d-platformer's player and scrolled its level.
+
+Two free homebrew `.cia`s, Craftus Reloaded's and Button Tester's, each
+gave an executable byte for byte the same as a reference extractor's, and
+emu-headless played each for 300 frames from its `.cia`. Craftus's title
+screen showed, and opening it again used the executable already written.
+Neither names extdata.

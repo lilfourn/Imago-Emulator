@@ -5,10 +5,12 @@
 //!   Game Boy Color and Game Boy Advance homebrew, which hosts each game's
 //!   ROM and screenshots and has an API for apps.
 //! - [Universal-DB](https://db.universal-team.net), the DS and 3DS homebrew
-//!   catalog, whose DS games download from their authors' own releases.
+//!   catalog, whose games download from their authors' own releases.
 //!
 //! Nothing here is ever a commercial game: both catalogs list only homebrew
-//! that its authors let be shared (see `docs/decisions/0010-game-store.md`).
+//! that its authors let be shared, and the entries that port a commercial
+//! game or carry its data are withheld (see
+//! `docs/decisions/0010-game-store.md`).
 //! Games that `scripts/store-compat.py` found not to start in the app are
 //! left out, by the verdicts in `store_compat.toml`.
 //!
@@ -36,12 +38,22 @@ use crate::rom_info::Platform;
 const HOMEBREW_HUB: &str = "https://hh3.gbdev.io";
 /// How many entries to ask Homebrew Hub for at once.
 const PAGE: usize = 500;
-/// Catalog entries the store never offers: crack groups' intros and
-/// trainers named after, shipped with or holding the commercial game they
-/// were attached to, and a port of a commercial game. Judged by their
-/// ROMs' headers, sizes and contents; `scripts/store-compat.py` reads this
-/// list too.
-const WITHHELD: [&str; 17] = [
+/// Catalog entries the store never offers, whatever the catalog or the
+/// checks say:
+///
+/// - crack groups' intros and trainers named after, shipped with or
+///   holding the commercial game they were attached to;
+/// - ports of commercial games, and engines that need one's data, such as
+///   Raptor's DS and 3DS port, which carries its shareware data;
+/// - fan ports and remakes that carry a commercial game's own art, sound
+///   or music (Balatro's, Cookie Clicker's, Mario Kart's, Super Photo
+///   Studio's cast), or a whole game that is not their porter's to share
+///   (OFF, Doki Doki Literature Club);
+/// - an installer that patches the console's boot firmware.
+///
+/// Judged by their ROMs' headers, sizes and contents, or by what their own
+/// pages and files say; `scripts/store-compat.py` reads this list too.
+const WITHHELD: [&str; 56] = [
     "hh:benjamin-bluemchen-2",
     "hh:bounced-5",
     "hh:bounced-5-trainer",
@@ -59,6 +71,45 @@ const WITHHELD: [&str; 17] = [
     "hh:vip",
     "hh:vip-5",
     "hh:wwf-betrayal-5-are-you-real",
+    "udb:3d-pinball---space-cadet",
+    "udb:3dscookieclicker",
+    "udb:balatro3ds",
+    "udb:bart-bash",
+    "udb:bugdom",
+    "udb:cro-mag-rally",
+    "udb:ctgp-7-downloader",
+    "udb:ctrquake",
+    "udb:ddlc-love",
+    "udb:devilutionx",
+    "udb:dungeons-of-daggorath-3ds",
+    "udb:eduke3d",
+    "udb:emerald-online-3ds",
+    "udb:geometry-dash-3ds",
+    "udb:halo-renewed-solitude",
+    "udb:halo-revamped",
+    "udb:ioquake3ds",
+    "udb:lego-island",
+    "udb:level256-installer",
+    "udb:mario-kart-64-3ds",
+    "udb:off",
+    "udb:omnispeak-3ds",
+    "udb:opentitus-3ds",
+    "udb:papas-pizzeria",
+    "udb:postal-1-3ds",
+    "udb:prboom",
+    "udb:prboom3ds",
+    "udb:quake2ctr",
+    "udb:raptor-ds3ds",
+    "udb:sonic-1--2",
+    "udb:sonic-cd",
+    "udb:sonic-mania",
+    "udb:super-photo-studio",
+    "udb:thextech",
+    "udb:xash3ds",
+    "udb:xrick-3ds",
+    "udb:yet-another-mario-kart-clone-3ds",
+    "udb:zelda-alttp-3ds",
+    "udb:zelda-tmc-3ds",
 ];
 /// Universal-DB's whole catalog, as one JSON list.
 const UNIVERSAL_DB: &str = "https://db.universal-team.net/data/full.json";
@@ -76,7 +127,7 @@ const COVER_WIDTH: u32 = 480;
 pub enum Source {
     /// gbdev's Homebrew Hub: Game Boy, Game Boy Color and GBA games.
     HomebrewHub,
-    /// Universal-DB: DS games.
+    /// Universal-DB: DS and 3DS games.
     UniversalDb,
 }
 
@@ -422,22 +473,35 @@ fn homebrew_hub_offer(entry: &Value) -> Option<Offer> {
     })
 }
 
-/// A Universal-DB entry, if it is a DS game with a ROM, or an archive of
-/// one, to download.
+/// A Universal-DB entry, if it is a DS or 3DS game with a game, or an
+/// archive of one, to download. An entry for both systems is offered once:
+/// as a DS game if it has a DS build, else as a 3DS game.
 fn universal_db_offer(entry: &Value) -> Option<Offer> {
     let systems = strings(&entry["systems"]);
     let categories = strings(&entry["categories"]);
-    if !systems.iter().any(|system| system == "DS") || !categories.iter().any(|c| c == "game") {
+    if !categories.iter().any(|c| c == "game") {
         return None;
     }
+    let for_ds = systems.iter().any(|system| system == "DS");
+    let for_3ds = systems.iter().any(|system| system == "3DS");
     let slug = entry["slug"].as_str()?;
     let downloads = entry["downloads"].as_object()?;
-    let (file, download) = downloads
-        .iter()
-        .filter(|(name, _)| download_score(name).is_some())
-        // The first of the best, as `max_by_key` would give the last.
-        .rev()
-        .max_by_key(|(name, _)| download_score(name))?;
+    let best = |score: &dyn Fn(&str) -> Option<i32>| {
+        downloads
+            .iter()
+            .filter(|(name, _)| score(name).is_some())
+            // The first of the best, as `max_by_key` would give the last.
+            .rev()
+            .max_by_key(|(name, _)| score(name))
+    };
+    // An archive named for the 3DS is an entry's 3DS build, not a DS one.
+    let ds_build = |name: &str| download_score(name).filter(|_| !(for_3ds && names_3ds(name)));
+    let ds = if for_ds { best(&ds_build) } else { None };
+    let (platform, (file, download)) = match ds {
+        Some(chosen) => (Platform::Nds, chosen),
+        None if for_3ds => (Platform::N3ds, best(&download_score_3ds)?),
+        None => return None,
+    };
     let screenshots: Vec<String> = entry["screenshots"]
         .as_array()
         .into_iter()
@@ -453,7 +517,7 @@ fn universal_db_offer(entry: &Value) -> Option<Offer> {
         slug: slug.to_owned(),
         title: text(&entry["title"]).unwrap_or_else(|| slug.to_owned()),
         developer: text(&entry["author"]).unwrap_or_default(),
-        platform: Platform::Nds,
+        platform,
         kind: Kind::Game,
         description,
         tags: Vec::new(),
@@ -476,15 +540,10 @@ fn universal_db_offer(entry: &Value) -> Option<Offer> {
 fn download_score(name: &str) -> Option<i32> {
     let lower = name.to_lowercase();
     let rom = lower.ends_with(".nds");
-    if !rom && !lower.ends_with(".zip") && !lower.ends_with(".7z") {
+    if !rom && !is_archive_name(&lower) {
         return None;
     }
-    let stem = Path::new(&lower).file_stem().and_then(|stem| stem.to_str());
-    let words: Vec<&str> = stem
-        .unwrap_or_default()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
+    let words = words(&lower);
     let mut score = i32::from(rom);
     if lower.contains("emulator") {
         score += 2;
@@ -502,6 +561,72 @@ fn download_score(name: &str) -> Option<i32> {
         score -= 1;
     }
     Some(score)
+}
+
+/// Systems other than the 3DS that a download's name may be for.
+const OTHER_SYSTEMS: [&str; 19] = [
+    "android", "gamecube", "linux", "mac", "macos", "nds", "pc", "ps3", "psp", "switch", "vita",
+    "wii", "wiiu", "win", "win32", "win64", "windows", "x64", "x86",
+];
+
+/// How good a choice the Universal-DB download called `name` is for a 3DS
+/// game: homebrew's own `.3dsx` over an installable title (`.cia`) over an
+/// archive of either. Of archives, one named for a `.3dsx` over one named
+/// for the 3DS over one named for a `.cia`, any of them over one named for
+/// another system, and of equals a ZIP over a 7-Zip file, which macOS's
+/// `tar` cannot always unpack. `None` if it holds no 3DS game.
+fn download_score_3ds(name: &str) -> Option<i32> {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".3dsx") {
+        return Some(20);
+    }
+    if lower.ends_with(".cia") {
+        return Some(10);
+    }
+    if !is_archive_name(&lower) {
+        return None;
+    }
+    let words = words(&lower);
+    let mut score = 0;
+    if words.contains(&"3dsx") {
+        score += 2;
+    }
+    if words.contains(&"3ds") {
+        score += 1;
+    }
+    if words.contains(&"cia") {
+        score -= 1;
+    }
+    if words.iter().any(|word| OTHER_SYSTEMS.contains(word)) {
+        score -= 3;
+    }
+    Some(2 * score + i32::from(lower.ends_with(".zip")))
+}
+
+/// Whether the download called `name` is named as a 3DS build.
+fn names_3ds(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    words(&lower)
+        .iter()
+        .any(|word| ["3ds", "3dsx", "cia"].contains(word))
+}
+
+/// Whether `lower`, a lower-case file name, is an archive the store
+/// unpacks.
+fn is_archive_name(lower: &str) -> bool {
+    lower.ends_with(".zip") || lower.ends_with(".7z")
+}
+
+/// The words of `lower`'s name without its extension: its runs of letters
+/// and digits.
+fn words(lower: &str) -> Vec<&str> {
+    Path::new(lower)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
 }
 
 /// Whether `name` is a ROM the app plays: a Game Boy, Game Boy Color or
@@ -624,7 +749,8 @@ pub fn install_dir(games: &Path, offer: &Offer) -> PathBuf {
 }
 
 /// Downloads `offer` into its [`install_dir`] in `games`, unpacking it if
-/// it comes as an archive, and returns its ROMs.
+/// it comes as an archive, and returns its ROMs: for a 3DS game, only the
+/// best of those in its archive (see [`best_3ds_game`]).
 ///
 /// # Errors
 ///
@@ -651,7 +777,11 @@ pub fn install(offer: &Offer, games: &Path) -> Result<Vec<PathBuf>, String> {
             .map_err(|error| format!("Cannot keep {}: {error}", offer.title))
             .and_then(|()| archive::unpack_to(&download, &folder));
         fs::remove_dir_all(&scratch).ok();
-        return unpacked.map_err(|_| format!("{} holds no game the app plays", offer.title));
+        let games = unpacked.map_err(|_| format!("{} holds no game the app plays", offer.title))?;
+        return Ok(match offer.platform {
+            Platform::N3ds => best_3ds_game(games),
+            _ => games,
+        });
     }
     if emu_cores::system_for_path(&path).is_none() {
         return Err(format!("{} is not a game the app plays", offer.title));
@@ -659,6 +789,29 @@ pub fn install(offer: &Offer, games: &Path) -> Result<Vec<PathBuf>, String> {
     boxart::write(&path, &bytes)
         .map_err(|error| format!("Cannot keep {}: {error}", offer.title))?;
     Ok(vec![path])
+}
+
+/// The one of `games`, unpacked from a 3DS game's archive, to add to the
+/// library: its `.3dsx`, else its `.cia`, else another 3DS file, the first
+/// of equals in the archive. Such an archive often holds the game twice, as
+/// a `.3dsx` and a `.cia`, and it is one game. The others stay in its
+/// folder, unused, as a file there may be one the library already has.
+fn best_3ds_game(mut games: Vec<PathBuf>) -> Vec<PathBuf> {
+    // Stable, so equals keep the archive's order.
+    games.sort_by_key(|game| {
+        let extension = game
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase);
+        match extension.as_deref() {
+            Some("3dsx") => 0,
+            Some("cia") => 1,
+            _ if emu_3ds::is_game(game) => 2,
+            _ => 3,
+        }
+    });
+    games.truncate(1);
+    games
 }
 
 /// Whether `bytes` are a ZIP file, by how it starts.
@@ -849,7 +1002,8 @@ mod tests {
     fn universal_db_offers_ds_games_choosing_the_best_download() {
         let offers = read_offers(Source::UniversalDb, UDB, &HashMap::new()).expect("parses");
         let slugs: Vec<&str> = offers.iter().map(|offer| offer.slug.as_str()).collect();
-        assert_eq!(slugs, ["dscraft", "cs", "ludo"]);
+        assert_eq!(slugs, ["dscraft", "cs", "ludo", "3ds-only"], "not the tool");
+        assert_eq!(by_slug(&offers, "3ds-only").platform, Platform::N3ds);
         let dscraft = by_slug(&offers, "dscraft");
         assert_eq!(
             dscraft.file, "DScraft_310811.7z",
@@ -893,6 +1047,156 @@ mod tests {
     }
 
     #[test]
+    fn three_ds_downloads_are_scored_3dsx_then_cia_then_archives() {
+        assert_eq!(download_score_3ds("game.nds"), None);
+        assert_eq!(download_score_3ds("game.rar"), None);
+        assert_eq!(download_score_3ds("qrcode.png"), None);
+        assert!(download_score_3ds("game.3dsx") > download_score_3ds("game.cia"));
+        assert!(download_score_3ds("game.cia") > download_score_3ds("Game-3DSX.zip"));
+        assert!(
+            download_score_3ds("SuperHaxagon-3DS-armhf.3dsx.zip")
+                > download_score_3ds("SuperHaxagon-3DS-armhf.cia.zip")
+        );
+        assert!(
+            download_score_3ds("Trogdor-v2.4-3ds.zip")
+                > download_score_3ds("Trogdor-v2.4-3ds-cia.zip")
+        );
+        assert!(download_score_3ds("CrossCraft-3DS.zip") > download_score_3ds("Hax0r.zip"));
+        for other in [
+            "CrossCraft-Linux.zip",
+            "SuDokuL-v1.5-psp.zip",
+            "Snake2DS-PC-v1.0.zip",
+        ] {
+            assert!(
+                download_score_3ds(other) < download_score_3ds("Hax0r.zip"),
+                "{other} is for another system"
+            );
+        }
+        assert!(
+            download_score_3ds("srb2_3dsv1.1.3.zip") > download_score_3ds("srb2_3dsv1.1.3.7z"),
+            "a ZIP over a 7-Zip file"
+        );
+        assert!(download_score_3ds("Game-3ds.7z") > download_score_3ds("Game.zip"));
+    }
+
+    #[test]
+    fn a_3ds_archive_adds_its_3dsx_or_else_its_cia() {
+        let paths = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(
+            best_3ds_game(paths(&["G/game.cia", "G/game.3dsx"])),
+            paths(&["G/game.3dsx"])
+        );
+        assert_eq!(
+            best_3ds_game(paths(&["G/Game.nds", "G/Game.3ds", "G/Game.CIA"])),
+            paths(&["G/Game.CIA"])
+        );
+        assert_eq!(
+            best_3ds_game(paths(&["G/Game.nds", "G/Game.3ds"])),
+            paths(&["G/Game.3ds"])
+        );
+        assert_eq!(
+            best_3ds_game(paths(&["G/ANARCH.3dsx", "G/ANARCH_QS.3dsx"])),
+            paths(&["G/ANARCH.3dsx"]),
+            "the first of equals"
+        );
+    }
+
+    /// Universal-DB's 3DS entries, and entries for both the DS and the 3DS.
+    const UDB_3DS: &str = r#"[
+        {"slug": "craftus-reloaded", "title": "Craftus Reloaded", "author": "Kemal Afzal",
+         "systems": ["3DS"], "categories": ["game"], "created": "2020-05-03T12:00:00Z",
+         "license_name": "Other",
+         "downloads": {
+            "craftus-3ds.zip": {"url": "https://x/craftus-3ds.zip"},
+            "craftus.cia": {"url": "https://x/craftus.cia"},
+            "craftus.3dsx": {"url": "https://x/craftus.3dsx"}}},
+        {"slug": "ludo3ds", "title": "Ludo3DS", "systems": ["3DS"], "categories": ["game"],
+         "downloads": {
+            "Ludo3DS-PC.zip": {"url": "https://x/Ludo3DS-PC.zip"},
+            "Ludo3DS.cia": {"url": "https://x/Ludo3DS.cia"}}},
+        {"slug": "super-haxagon", "title": "Super-Haxagon", "systems": ["3DS"],
+         "categories": ["game"],
+         "downloads": {
+            "SuperHaxagon-3DS-armhf.cia.zip": {"url": "https://x/h.cia.zip"},
+            "SuperHaxagon-3DS-armhf.3dsx.zip": {"url": "https://x/h.3dsx.zip"},
+            "SuperHaxagon-Linux.zip": {"url": "https://x/h-linux.zip"}}},
+        {"slug": "rar-only", "title": "RAR", "systems": ["3DS"], "categories": ["game"],
+         "downloads": {"game.rar": {"url": "https://x/game.rar"},
+                       "qrcode.png": {"url": "https://x/qrcode.png"}}},
+        {"slug": "balatro3ds", "title": "Balatro3DS", "systems": ["3DS"], "categories": ["game"],
+         "downloads": {"Balatro3DS.3dsx": {"url": "https://x/Balatro3DS.3dsx"}}},
+        {"slug": "a-theme", "title": "Theme", "systems": ["3DS"], "categories": ["theme"],
+         "downloads": {"theme.3dsx": {"url": "https://x/theme.3dsx"}}},
+        {"slug": "dual", "title": "Dual", "systems": ["3DS", "DS"], "categories": ["game"],
+         "downloads": {"Dual.cia": {"url": "https://x/Dual.cia"},
+                       "Dual.nds": {"url": "https://x/Dual.nds"}}},
+        {"slug": "dual-3ds-build", "title": "Dual 3DS", "systems": ["DS", "3DS"],
+         "categories": ["game"],
+         "downloads": {"Game-3DS.zip": {"url": "https://x/Game-3DS.zip"},
+                       "Game.cia": {"url": "https://x/Game.cia"}}}
+    ]"#;
+
+    #[test]
+    fn universal_db_offers_3ds_games_choosing_3dsx_then_cia_then_an_archive() {
+        let offers = read_offers(Source::UniversalDb, UDB_3DS, &HashMap::new()).expect("parses");
+        let craftus = by_slug(&offers, "craftus-reloaded");
+        assert_eq!(craftus.platform, Platform::N3ds);
+        assert_eq!(craftus.kind, Kind::Game);
+        assert_eq!(craftus.id(), "udb:craftus-reloaded");
+        assert_eq!(craftus.file, "craftus.3dsx");
+        assert_eq!(craftus.url, "https://x/craftus.3dsx");
+        assert_eq!(craftus.developer, "Kemal Afzal");
+        assert_eq!(by_slug(&offers, "ludo3ds").file, "Ludo3DS.cia");
+        let haxagon = by_slug(&offers, "super-haxagon");
+        assert_eq!(
+            haxagon.file, "SuperHaxagon-3DS-armhf.3dsx.zip",
+            "the archive of the .3dsx, not of the .cia or the Linux build"
+        );
+        assert_eq!(haxagon.platform, Platform::N3ds);
+        assert!(
+            offers.iter().all(|offer| offer.slug != "rar-only"),
+            "nothing it opens"
+        );
+        assert!(
+            offers.iter().all(|offer| offer.slug != "a-theme"),
+            "not a game"
+        );
+    }
+
+    #[test]
+    fn withheld_3ds_entries_are_never_offered_whatever_the_checks_say() {
+        let verdicts = parse_verdicts("[verdicts]\n\"udb:balatro3ds\" = \"ok\"\n");
+        let offers = read_offers(Source::UniversalDb, UDB_3DS, &verdicts).expect("parses");
+        assert!(WITHHELD.contains(&"udb:balatro3ds"));
+        assert!(offers.iter().all(|offer| offer.slug != "balatro3ds"));
+        for id in WITHHELD {
+            assert!(
+                offers.iter().all(|offer| offer.id() != id),
+                "{id} is withheld"
+            );
+        }
+    }
+
+    #[test]
+    fn entries_for_both_systems_are_offered_once_as_ds_games_if_they_have_a_ds_build() {
+        let offers = read_offers(Source::UniversalDb, UDB_3DS, &HashMap::new()).expect("parses");
+        let dual: Vec<&Offer> = offers.iter().filter(|offer| offer.slug == "dual").collect();
+        assert_eq!(dual.len(), 1, "once");
+        assert_eq!(dual[0].platform, Platform::Nds);
+        assert_eq!(dual[0].file, "Dual.nds", "the DS build");
+        let three_ds = by_slug(&offers, "dual-3ds-build");
+        assert_eq!(
+            three_ds.platform,
+            Platform::N3ds,
+            "an archive named for the 3DS is not a DS build"
+        );
+        assert_eq!(three_ds.file, "Game.cia");
+        let ids: Vec<String> = arrange(offers.clone()).iter().map(Offer::id).collect();
+        let unique: HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "each game once: {ids:?}");
+    }
+
+    #[test]
     fn games_sort_newest_first_once_each() {
         let mut offers = read_offers(Source::HomebrewHub, HUB, &HashMap::new()).expect("parses");
         offers.extend(read_offers(Source::UniversalDb, UDB, &HashMap::new()).expect("parses"));
@@ -907,7 +1211,8 @@ mod tests {
                 "udb:cs",
                 "hh:no-platform",
                 "hh:2048gb",
-                "udb:dscraft"
+                "udb:dscraft",
+                "udb:3ds-only"
             ]
         );
     }
@@ -1023,7 +1328,7 @@ mod tests {
         )
         .expect("kept");
         let catalog = cached(&cache);
-        assert_eq!(catalog.offers.len(), 6);
+        assert_eq!(catalog.offers.len(), 7);
         assert!(catalog.fresh);
         fs::remove_dir_all(&cache).ok();
     }

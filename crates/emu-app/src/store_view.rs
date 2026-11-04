@@ -50,7 +50,8 @@ const TILE_PADDING: f32 = 6.0;
 /// The narrowest a game's tile gets before the grid drops a column.
 const MIN_TILE: f32 = 150.0;
 /// A cover's height for its width: screenshots are 10:9 (Game Boy), 3:2
-/// (GBA) or 4:3 (DS); each fits whole in a 4:3 frame.
+/// (GBA), 4:3 (DS) or 5:6 (3DS, both screens); each fits whole in a 4:3
+/// frame.
 const COVER_SHAPE: f32 = 0.75;
 /// Line heights of a tile's title and its maker.
 const TITLE_LINE: f32 = 18.0;
@@ -69,12 +70,13 @@ const SHOT_HEIGHT: f32 = 360.0;
 const PICTURE_WORKERS: usize = 6;
 
 /// The systems the filter offers, `None` being all of them.
-const PLATFORMS: [Option<Platform>; 5] = [
+const PLATFORMS: [Option<Platform>; 6] = [
     None,
     Some(Platform::Gb),
     Some(Platform::Gbc),
     Some(Platform::Gba),
     Some(Platform::Nds),
+    Some(Platform::N3ds),
 ];
 
 /// What the store asks of the library.
