@@ -134,10 +134,16 @@ to device pixels
   The view sends targets to the video stage when they change: a resize,
   full screen, a move to another display, or a layout, rotation, gap or
   swap change.
-- **The video stage runs as frames are published, not in `render()`.**
-  `refresh.rs` aims to have each frame ready 2 ms before its refresh. The
-  upscale (0.2–1.6 ms measured) counts toward that ready time, so frames
-  still meet their refresh.
+- **The video stage runs as frames are published, not in `render()`,**
+  on a thread at the window's quality of service (`qos.rs`), as the
+  emulation thread runs.
+- **The upscale counts in each frame's time.** `refresh.rs`'s `Lock`
+  times each frame from its start to publishing. From the last 120 times
+  it picks how long before its refresh a frame should be ready: 2 ms, or
+  more for games whose frames take uneven times (decision 0003, update
+  of 2026-11-04). `Lock` should time a frame to when its upscaled images
+  are ready. Its margin then grows by what the upscale takes
+  (0.2–1.6 ms measured), and frames still meet their refresh.
 - **Without Metal, today's CPU path runs unchanged:** correct, turn,
   filter, pre-scale. Its colour correction and filters stay as the
   reference the GPU versions are tested against.
@@ -306,7 +312,7 @@ is wanted, **P2** comes later. Phases are in section 9.
 | UP-S1 | Each placement's target is its rect × the window's current scale factor, rounded to whole device pixels. It is recomputed on resize, entering or leaving full screen, a move to another display, and a layout, rotation, gap or swap change, and the next frame drawn uses the new size. | P0 · 1 |
 | UP-S2 | Placement rects snap to whole device pixels, origin and size, so an image of the target size is drawn 1:1. Touch mapping uses the same snapped rects. | P0 · 1 |
 | UP-S3 | Correct at backing scale 1 and 2, at any window size, and in macOS's scaled display modes, where the target is the backing size. | P0 · 1 |
-| UP-S4 | One upscale per frame drawn, never per display refresh. At 60, 120, 144 and 240 Hz and with ProMotion's variable refresh, frames still last the same whole number of refreshes as with upscaling off (decision 0003). | P0 · 1 |
+| UP-S4 | One upscale per frame drawn, never per display refresh. At 60, 120, 144 and 240 Hz and with ProMotion's variable refresh, frames still last the same whole number of refreshes as with upscaling off (decision 0003). `refresh.rs`'s `Lock` counts the video stage in each frame's time. | P0 · 1 |
 | UP-S5 | A per-frame output budget in pixels, set from measurement so the stage stays within its time at 3× fast-forward on the 240 Hz display. Past it, the stage renders the largest size within budget and GPUI's linear filter covers the rest. | P0 · 1 |
 | UP-S6 | Screens of different sizes in one window (3DS 400 and 320 wide; hybrid large and small; RPG Maker games of any size) each get their own target. | P0 · 1 |
 | UP-S7 | Colours unchanged: sRGB in, sRGB out. Flat areas match upscaling off exactly on every display, wide-gamut and EDR panels included. | P0 · 1 |
@@ -350,6 +356,7 @@ Budgets, on this Mac (M5 Max) in release builds:
 | Video stage per frame, 3× fast-forward, 240 Hz external full screen | within UP-S5's budget; UI thread under 4 ms per frame (PRD section 7) |
 | Frame pacing (`scripts/macos/bench.sh`, `bench-report.py --refresh-hz 120` and `240`) | frames drawn for an uneven number of refreshes no more than with upscaling off, within run-to-run noise |
 | Frame start to window draw | no more than 1 ms later than with upscaling off |
+| `Lock`'s margin (the trace's `margin <µs>`) | larger by no more than the video stage's p50 |
 | DS 3D at Match Display | full speed at 1×; holds 3× fast-forward at the cap Auto uses |
 | Memory | flat over a 60 s run at the largest target, as measured when the one-image-per-screen design was adopted |
 
@@ -392,7 +399,7 @@ Acceptance tests:
 | GPUI's atlas upload of 20–40 MB images every frame is slow, or its atlas keeps growing | Missed refreshes on large displays; memory growth | Measure in phase 1. Budget per frame (UP-S5). Zero-copy surface (UP-16). Check memory stays flat over 60 s. |
 | Pixel-art scalers mangle text, dithering or 1-pixel UI lines | Worse than sharp pixels in menus | The bake-off scores text and dithering. Sharp Pixels is one menu choice away. |
 | High DS 3D resolution can't keep 3× fast-forward | Fast-forward slows | Upscaled 3D only for shown frames (UP-12); Auto's cap set from measurement. |
-| The video stage delays frames past their refresh | Uneven pacing on ProMotion | It runs as frames are published, and `refresh.rs`'s 2 ms margin includes it. Pacing benchmarks gate each phase. |
+| The video stage delays frames past their refresh | Uneven pacing on ProMotion | It runs as frames are published, at the window's quality of service. `Lock` times frames to when their upscaled images are ready, so its margin includes the upscale. Pacing benchmarks and the trace's `margin` gate each phase. |
 | `unsafe` Metal code | Memory bugs | One module, `// SAFETY:` comments, decision 0013, tests under the GPU. |
 | MetalFX behaves differently across macOS versions | Small visual differences | Display only (UP-N1); not part of any CRC. |
 | Shader licences | Legal | Port only the MIT sources named in the research; keep headers; no Azahar or xBRZ code. |
