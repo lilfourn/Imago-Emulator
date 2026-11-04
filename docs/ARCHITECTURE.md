@@ -472,7 +472,8 @@ order). A core's main loop:
 | Layer | Where | Run |
 |---|---|---|
 | Unit tests | `#[cfg(test)]` in each module | `cargo test --workspace` |
-| Determinism | headless runner, run twice and diff | M1 test-ROM script |
+| Determinism | headless runner, run twice and diff; `--digest` adds the sound's and the final save state's CRC-32s, and `emu-headless/tests/bench.rs` checks a run from a state matches one from power-on | M1 test-ROM script |
+| Core speed | `emu-headless --time`, from a game's checkpoint with `--state`; before and after a change, with `--digest` to show it changed nothing | by hand |
 | ROM-hack patches | `emu-patch/tests/formats.rs` applies patches made by Floating IPS and xdelta3 from made-up ROMs; `scripts/make-patch-fixtures.sh` makes them again | `cargo test` |
 | Scripts | `emu-script` unit tests against a test core; `emu-headless/tests/script.rs` runs a script twice on a ROM it builds and diffs the output | `cargo test` |
 | Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |
