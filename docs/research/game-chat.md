@@ -776,6 +776,44 @@ Techniques that matter for this use case:
    - No headings for short answers.
    - Use the game's own names for places, items and moves.
 
+## 7. Phase 0: what GPT-6 Luna did with real questions
+
+Asked through OpenRouter with the owner's key on 2026-11-04, from the
+`ask` example (`cargo run -p emu-guide --example ask`) and the app
+itself. Each question cost well under a cent.
+
+| Question | What happened |
+|---|---|
+| "What level does Ralts evolve into Kirlia?", no search, effort low | First text at 0.8 s, done at 0.85 s; right (level 20). Served by **Amazon Bedrock** under `provider.sort = "latency"`. $0.00001. |
+| "Where can I catch Ralts in Omega Ruby and how rare is it?", Exa search limited to Bulbapedia, Serebii and PokémonDB | One search; first text at 2.6 s. Right (Route 102, 4%). Five citations, one from **Bulbapedia** — Exa reaches it though `curl` gets Cloudflare's wall. $0.0074, of which $0.007 the search. |
+| Gardenia's gym plan, effort high, `summary: "detailed"`, web fetch on | 516 reasoning tokens, all as one `reasoning.encrypted` block; `delta.reasoning` stayed null. Right team and levels. |
+| In the app: "where am i" with a Platinum screenshot (the start menu open over Floaroma Town) | Named Floaroma Town and the Pokémon Center from the picture, cited Bulbapedia. 5 s. |
+| In the app: "list gardenia team with levels as a table" | A three-row Markdown table, right, cited. 4 s. |
+
+What this settles from §4:
+
+- **Citations stream** as `choices[0].delta.annotations` (the Chat
+  Completions shape, `url_citation` with `url`, `title` and a `content`
+  excerpt), in the chunk just before the answer's text, with
+  `start_index` and `end_index` both 0. So they can't place a chip in the
+  text; the model's own `[Site](url)` links do (the prompt asks for them).
+- **`reasoning.server_tool_call` entries did not stream.** While a search
+  runs the stream sends `: OPENROUTER PROCESSING` comments, which is all
+  there is to show it. The usage chunk counts searches
+  (`server_tool_use_details.web_search_requests`).
+- **Luna's reasoning is encrypted only**, even at high effort with a
+  summary asked for. The thinking line has no text to open onto, only the
+  searches and pages read.
+- **Bedrock is chosen by latency sorting**, so the app asks for
+  `provider.order = ["openai", "azure"]` instead (Bedrock bills on after a
+  stop, §4.1).
+- **A config file on `curl`'s standard input can carry the body too**
+  (`data-binary = "…"`, quotes and backslashes escaped), so the key and the
+  question share stdin and nothing is written to disk.
+- Not settled: the image size limit (one DS screenshot at 2×, 512 × 768,
+  went fine), and
+  Exa's fetch price (not itemised in the usage chunk).
+
 ## Sources
 
 - Imago, `~/Desktop/Imago` at its working tree on 2026-11-04 (paths above).

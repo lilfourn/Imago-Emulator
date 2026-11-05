@@ -84,6 +84,17 @@ pub fn config_header(header: &str) -> Option<String> {
     Some(format!("header = \"{quoted}\"\n"))
 }
 
+/// A `curl` config line sending `body` as the request's body, quoted as
+/// [`config_header`] quotes. `None` if `body` holds a control character,
+/// which compact JSON never does.
+pub fn config_body(body: &str) -> Option<String> {
+    if body.chars().any(char::is_control) {
+        return None;
+    }
+    let quoted = body.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(format!("data-binary = \"{quoted}\"\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +110,14 @@ mod tests {
             Some("header = \"X: a\\\"b\\\\c\"\n")
         );
         assert_eq!(config_header("X: a\nY: b"), None);
+    }
+
+    #[test]
+    fn config_bodies_are_quoted_the_same_way() {
+        assert_eq!(
+            config_body(r#"{"a":"b\"c\\n"}"#).as_deref(),
+            Some("data-binary = \"{\\\"a\\\":\\\"b\\\\\\\"c\\\\\\\\n\\\"}\"\n")
+        );
+        assert_eq!(config_body("{\n}"), None);
     }
 }

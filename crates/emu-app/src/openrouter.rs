@@ -113,6 +113,12 @@ impl OpenRouter {
         &self.status
     }
 
+    /// The key, if one is connected: read from its file, or the
+    /// environment, each time, so a disconnect elsewhere is seen.
+    pub fn key(&self) -> Option<emu_guide::key::Key> {
+        self.store.load()
+    }
+
     /// Connects an account: opens OpenRouter's page in the browser and
     /// waits, on a thread of its own, for the player to come back.
     pub fn connect(&mut self, cx: &mut Context<Self>) {

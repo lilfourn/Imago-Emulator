@@ -91,6 +91,11 @@ impl Endpoints {
         Self { site: site.into() }
     }
 
+    /// Where chat completions are asked for.
+    pub(crate) fn chat_url(&self) -> String {
+        format!("{}/api/v1/chat/completions", self.site)
+    }
+
     /// The page that asks the player to let this Mac have a key, sending
     /// the browser back to `http://localhost:{port}/callback`. The key is
     /// labelled `label` in their OpenRouter key list.

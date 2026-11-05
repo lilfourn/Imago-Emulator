@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Connect OpenRouter built (GC-10, GC-11); the rest planned (2026-11-04) |
+| Status | Phases 0–2 built (2026-11-04): the panel, streaming answers, screenshots, the source map and look-ups. Phase 3 partly (key usage, Thinking and Look Things Up settings). See 9. |
 | Date | 2026-11-04 |
 | Owner | Luke Fournier |
 | Research | [research/game-chat.md](research/game-chat.md) |
@@ -436,21 +436,18 @@ The client is one `curl` child per model call. It runs on a short-lived
 thread, as recordings and screenshots use their own threads.
 
 ```
-curl -sS -N --connect-timeout 10 -w '\n%{http_code}\n'
-     --config ~/Library/Application Support/ds-emulator/openrouter/curl.conf
+curl -sS --no-buffer --connect-timeout 10 --speed-limit 1 --speed-time 60
      -H 'Content-Type: application/json'
      -H 'HTTP-Referer: https://github.com/lilfourn/ds-emulator'
      -H 'X-OpenRouter-Title: DS Emulator'
-     -H 'X-OpenRouter-Categories: game'
-     --data-binary @-
+     --write-out '\n%{http_code}\n' --config -
      https://openrouter.ai/api/v1/chat/completions
-  curl.conf (0600):  header = "Authorization: Bearer sk-or-…", written
-                     from the key before each request
-  stdin:             the JSON body (screens make it too large for argv)
+  stdin, a curl config:  header = "Authorization: Bearer sk-or-…"
+                         data-binary = "{…the JSON body, quoted…}"
 ```
 
-- **Nothing secret in `ps`.** The key is in a 0600 file and the body
-  goes on stdin, so neither appears in the process list.
+- **Nothing secret in `ps`.** The key and the body go on stdin, so
+  neither appears in the process list, and nothing is written to disk.
 - **No `unsafe`.** Passing a second pipe would need it, and the
   workspace denies it.
 - **Status.** The trailing `-w` status tells a JSON error (non-200) from
@@ -974,6 +971,40 @@ Acceptance:
   - the pacing benchmarks with the panel streaming.
 
 ## 9. Phases
+
+**Built on 2026-11-04** ([decision 0014](decisions/0014-guide-through-openrouter.md),
+phase 0's findings in [research §7](research/game-chat.md#7-phase-0-what-gpt-6-luna-did-with-real-questions)):
+
+- Phase 0: the streaming client (`emu_guide::chat`) and the `ask`
+  example, tried on real questions.
+- Phase 1: GC-1 to GC-6, GC-10 to GC-14, GC-20 to GC-22, GC-30 to GC-35,
+  GC-37 and GC-38. The panel opens with ⌘J, View > Guide or the margin's
+  pill; ⌥⌘S and File > Screenshot for Guide take screenshots.
+- Phase 2: GC-23 to GC-27.
+- Phase 3: GC-16, and the Thinking and Look Things Up settings
+  (Settings > Guide).
+
+Changed from the plan, after phase 0:
+
+- Luna's reasoning is encrypted, so "Thought for Ns" opens onto the
+  searches and pages read, not reasoning summaries. While a search runs
+  the line reads "Searching Bulbapedia, Serebii".
+- Citations arrive before the text with no position, so the inline source
+  chips are the model's own `[Site](url)` links, which the prompt asks for.
+- `provider.order = ["openai", "azure"]` replaces `sort = "latency"`,
+  which chose Bedrock.
+- The key and the body both go to `curl` on its standard input as a config
+  file; nothing is written for a request.
+- Screenshots come from the frames the window last took, which the
+  emulation thread copied between frames; no `Command::CaptureScreens`.
+- The Escape menu has no Guide tile: its grid is built for four tiles,
+  and ⌘J, View > Guide and the margin's pill already open Guide.
+- `check-layout.sh` has no Guide states yet (GC-36).
+
+Not built: GC-7 (side, pause while typing), GC-8 (gamepad chord), GC-15
+(model picker), GC-28 (the app's own wiki and PokeAPI tools), and the
+pacing benchmarks with the panel streaming (section 8).
+
 
 0. **Spike (1–2 days).**
    - The `emu-guide` crate with the `curl` streaming client and the

@@ -76,11 +76,15 @@ impl GameContext {
     /// for a Pokémon game, otherwise the title before any subtitle colon.
     pub fn short_title(&self) -> String {
         let title = self.title.trim();
-        for prefix in ["Pokémon ", "Pokemon "] {
-            if let Some(rest) = title.strip_prefix(prefix)
-                && !rest.trim().is_empty()
-            {
-                return rest.trim().to_owned();
+        for prefix in ["Pokémon", "Pokemon"] {
+            let Some(rest) = title.strip_prefix(prefix) else {
+                continue;
+            };
+            // "Pokemon: Platinum Version", "Pokémon - Emerald Version"
+            let rest = rest.trim_start_matches([' ', ':', '-']).trim();
+            let rest = rest.strip_suffix(" Version").unwrap_or(rest).trim();
+            if !rest.is_empty() {
+                return rest.to_owned();
             }
         }
         title.to_owned()
@@ -128,6 +132,8 @@ mod tests {
     fn short_titles_drop_the_series_name_of_pokemon_games() {
         let omega = game("Pokémon Omega Ruby", None, Kind::Retail);
         assert_eq!(omega.short_title(), "Omega Ruby");
+        let platinum = game("Pokemon: Platinum Version", None, Kind::Retail);
+        assert_eq!(platinum.short_title(), "Platinum");
         let zelda = game("The Legend of Zelda: The Minish Cap", None, Kind::Retail);
         assert_eq!(zelda.short_title(), "The Legend of Zelda: The Minish Cap");
     }

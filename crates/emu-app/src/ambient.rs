@@ -111,6 +111,12 @@ impl Picture {
         self.size
     }
 
+    /// Its pixels' red, green and blue, 0 to 255, row by row: what Guide
+    /// takes its colours from.
+    pub fn colors(&self) -> &[[f32; 3]] {
+        &self.colors
+    }
+
     /// The picture as opaque pixels, with its edge pixels repeated
     /// `border` times on every side.
     pub fn frame(&self, border: u16) -> Frame {
