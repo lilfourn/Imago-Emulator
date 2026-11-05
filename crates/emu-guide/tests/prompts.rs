@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use emu_guide::game::{GameContext, Kind, Platform};
 use emu_guide::prompt::{VERSION, system_prompt};
-use emu_guide::sources::sources_for;
+use emu_guide::sources::{picture_wiki, sources_for};
 
 fn game(
     title: &str,
@@ -30,7 +30,12 @@ fn game(
 /// Compares the prompt for `game` with `tests/prompts/{name}.txt`, or
 /// rewrites the file when `UPDATE_PROMPTS` is set.
 fn check(name: &str, game: &GameContext, lookups: bool) {
-    let prompt = system_prompt(game, &sources_for(game), lookups);
+    let prompt = system_prompt(
+        game,
+        &sources_for(game),
+        lookups,
+        picture_wiki(game).as_ref(),
+    );
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/prompts")
         .join(format!("{name}.txt"));

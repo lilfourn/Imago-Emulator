@@ -10,6 +10,7 @@
 mod answer;
 pub mod composer;
 pub mod palette;
+mod pictures;
 mod render;
 pub mod shots;
 
@@ -24,6 +25,7 @@ use emu_guide::chat::{self, ChatError, Effort, Finish, Message, Request, Stop};
 use emu_guide::conversation::{Answer, Chat, ChatStore, Ending, Summary, Turn};
 use emu_guide::game::GameContext;
 use emu_guide::markdown::Document;
+use emu_guide::pictures::{PictureStore, Wiki};
 use emu_guide::{prompt, sources};
 use gpui::{
     App, AppContext, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
@@ -93,6 +95,23 @@ struct Shot {
     /// Drawn in the composer and on the sent question.
     image: Arc<RenderImage>,
     taken: Instant,
+}
+
+/// A picture shown large over the panel: a screenshot, or an answer's
+/// picture with its caption, its wiki's name and its page.
+#[derive(Clone)]
+struct Enlarged {
+    image: Arc<RenderImage>,
+    caption: Option<(String, String, String)>,
+}
+
+impl Enlarged {
+    fn shot(image: Arc<RenderImage>) -> Self {
+        Self {
+            image,
+            caption: None,
+        }
+    }
 }
 
 /// One row of the transcript.
@@ -227,8 +246,18 @@ pub struct GuidePanel {
     opened: HashSet<usize>,
     /// The turn whose sources are shown in the sheet.
     sheet: Option<usize>,
-    /// A screenshot shown large.
-    enlarged: Option<Arc<RenderImage>>,
+    /// A screenshot or picture shown large.
+    enlarged: Option<Enlarged>,
+    /// Where answers' pictures come from for this game, if anywhere.
+    wiki: Option<Wiki>,
+    /// Pictures fetched from the wiki, kept on disk.
+    picture_store: PictureStore,
+    /// Answers' pictures, by address.
+    pictures: HashMap<String, pictures::Shown>,
+    /// Bumped when the pictures are forgotten, so late ones are dropped.
+    picture_generation: u64,
+    /// The transcript's width when last laid out, which pictures fit.
+    column: f32,
     /// The list of earlier chats, while open.
     history: Option<Vec<Summary>>,
     /// The turn whose answer, or code block, was just copied.
@@ -307,6 +336,11 @@ impl GuidePanel {
             opened: HashSet::new(),
             sheet: None,
             enlarged: None,
+            wiki: None,
+            picture_store: pictures::store(),
+            pictures: HashMap::new(),
+            picture_generation: 0,
+            column: 0.0,
             history: None,
             copied: None,
             recall: None,
@@ -358,6 +392,9 @@ impl GuidePanel {
             .as_ref()
             .and_then(|game| self.store.latest(&game.key))
             .unwrap_or_default();
+        self.wiki = game
+            .as_ref()
+            .and_then(|game| sources::picture_wiki(&game.context));
         self.game = game;
         self.load_chat(chat, cx);
         if let Some(tint) = tint {
@@ -386,6 +423,8 @@ impl GuidePanel {
         for images in std::mem::take(&mut self.sent_images).into_values() {
             self.stale.extend(images);
         }
+        self.forget_pictures();
+        self.enlarged = None;
         self.documents = chat
             .turns
             .iter()
@@ -582,7 +621,8 @@ impl GuidePanel {
         self.recall = Some(question.clone());
         self.composer.update(cx, |composer, cx| composer.clear(cx));
         let sources = sources::sources_for(&game.context);
-        let system = prompt::system_prompt(&game.context, &sources, self.lookups);
+        let system =
+            prompt::system_prompt(&game.context, &sources, self.lookups, self.wiki.as_ref());
         let lookups = self.lookups.then(|| sources::domains(&sources));
         let session = format!("ds-emulator-{}", self.chat.id);
         let effort = self.effort;

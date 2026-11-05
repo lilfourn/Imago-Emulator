@@ -8,19 +8,26 @@
 use std::time::Duration;
 
 use crate::game::{GameContext, Kind};
+use crate::pictures::Wiki;
 use crate::sources::{Reach, Source};
 
 /// Bumped whenever the prompt's wording changes, so saved chats and tests
 /// can tell which prompt an answer came from.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// How many sources the prompt suggests checking when it can't look
 /// things up.
 const SUGGESTED: usize = 4;
 
 /// The system prompt for `game`. `sources` are the game's trusted sites in
-/// order; `lookups` says whether web search and fetch are on.
-pub fn system_prompt(game: &GameContext, sources: &[Source], lookups: bool) -> String {
+/// order; `lookups` says whether web search and fetch are on; `pictures`
+/// is the wiki answers' pictures come from, if the game has one.
+pub fn system_prompt(
+    game: &GameContext,
+    sources: &[Source],
+    lookups: bool,
+    pictures: Option<&Wiki>,
+) -> String {
     let mut lines = vec![
         format!(
             "You are Guide, the in-game helper inside DS Emulator. The player is playing {} on {}.{}",
@@ -43,6 +50,9 @@ pub fn system_prompt(game: &GameContext, sources: &[Source], lookups: bool) -> S
          as this version spells them."
             .to_owned(),
     ];
+    if let Some(wiki) = pictures {
+        lines.push(pictures_line(game, wiki));
+    }
     if lookups {
         lines.push(
             "- For facts about this game, such as locations, encounter rates, item spots, \
@@ -102,6 +112,32 @@ pub fn system_prompt(game: &GameContext, sources: &[Source], lookups: bool) -> S
     let mut prompt = lines.join("\n");
     prompt.push('\n');
     prompt
+}
+
+/// How to show pictures from `wiki` ([`crate::pictures`]).
+fn pictures_line(game: &GameContext, wiki: &Wiki) -> String {
+    let (what, example, row) = if game.is_pokemon() {
+        (
+            "a Pokémon, a character such as a Gym Leader, or a route, town, cave or building",
+            "![Route 210](wiki:Route_210)",
+            "a Gym Leader's team",
+        )
+    } else {
+        (
+            "a character, enemy, boss or item, or a place",
+            "![Page title](wiki:Page_title)",
+            "a boss and its weak point",
+        )
+    };
+    format!(
+        "- Pictures: whenever the answer is about {what}, show it; a place's picture is its map, \
+         so show the map of any place you send the player to or through. Put each picture after \
+         the text it goes with, on a line of its own, as a Markdown image whose address is wiki: \
+         and the page's title on the {}, spaces as underscores, such as {example}. The app shows \
+         that page's main picture. Several on one line sit side by side, such as {row}. At most \
+         four per answer, and never any other image address.",
+        wiki.name
+    )
 }
 
 /// Three starter questions for an empty chat about `game`.

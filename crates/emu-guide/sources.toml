@@ -17,6 +17,10 @@
 # - `domain` is what web search may use: a host, a host with a path, or a
 #   wildcard such as "*.fandom.com". A site has one name everywhere in the
 #   map, which is the text its citations carry.
+# - `pictures` names the wiki a series' pictures in answers come from
+#   (decision 0015), when it isn't the series' first "mediawiki" site on a
+#   host of its own. It needs MediaWiki's PageImages, and `curl` must reach
+#   it: Bulbapedia's bot check turns `curl` away.
 # - `games` gives where a site's page for a game starts. A game's name must
 #   begin with one of the `names` (the same words are ignored); the longest
 #   match wins. Every Serebii path here answered 200 on 2026-11-04.
@@ -130,6 +134,7 @@ games = [
 [[series]]
 id = "pokemon"
 titles = ["Pokemon", "Pocket Monsters"]
+pictures = { name = "Pokémon Wiki", domain = "pokemon.fandom.com", api = "/api.php" }
 
 [[series.sources]]
 name = "Bulbapedia"

@@ -1,5 +1,6 @@
 //! Asks Guide one question from the command line, as the panel would, and
-//! prints the stream, what it drew on, how long it took and what it cost.
+//! prints the stream, what it drew on, how long it took and what it cost,
+//! then finds the pictures the answer asked for on the game's wiki.
 //! Run by hand, never in CI: it spends the connected account's credits.
 //!
 //! ```text
@@ -20,6 +21,8 @@ use emu_guide::api::Endpoints;
 use emu_guide::chat::{self, Effort, Event, Message, Request, Stop};
 use emu_guide::game::{GameContext, Kind, Platform};
 use emu_guide::key::KeyStore;
+use emu_guide::markdown::{Block, Document};
+use emu_guide::pictures::PictureStore;
 use emu_guide::{prompt, sources};
 
 fn main() {
@@ -76,14 +79,16 @@ fn main() {
         .expect("connect OpenRouter in the app first");
     let sources = sources::sources_for(&context);
     let domains = sources::domains(&sources);
+    let wiki = sources::picture_wiki(&context);
     eprintln!("sources: {domains:?}");
+    eprintln!("pictures: {wiki:?}");
     let images: Vec<Arc<[u8]>> = screens
         .iter()
         .map(|path| Arc::from(std::fs::read(path).expect("screenshot").into_boxed_slice()))
         .collect();
     let request = Request {
         model: chat::MODEL.to_owned(),
-        system: prompt::system_prompt(&context, &sources, lookups),
+        system: prompt::system_prompt(&context, &sources, lookups, wiki.as_ref()),
         messages: vec![Message::user(question, images)],
         effort,
         lookups: lookups.then_some(domains),
@@ -91,6 +96,7 @@ fn main() {
     };
     let started = Instant::now();
     let mut first = None;
+    let mut answer = String::new();
     let mut stdout = std::io::stdout();
     chat::ask(
         &Endpoints::openrouter(),
@@ -100,6 +106,7 @@ fn main() {
         &mut |event| match event {
             Event::Text(text) => {
                 first.get_or_insert_with(|| started.elapsed());
+                answer.push_str(&text);
                 print!("{text}");
                 stdout.flush().ok();
             }
@@ -117,6 +124,36 @@ fn main() {
         first.unwrap_or_default(),
         started.elapsed()
     );
+    let Some(wiki) = wiki else {
+        return;
+    };
+    // Kept apart from the app's, so a run never fills its cache.
+    let store = PictureStore::new(std::env::temp_dir().join("emu-guide-ask-pictures"));
+    for block in Document::parse(&answer).blocks() {
+        for picture in pictures_in(block) {
+            let target = picture.target.as_deref().unwrap_or_default();
+            let fetched = Instant::now();
+            match store.fetch(&wiki, target) {
+                Ok(found) => eprintln!(
+                    "picture {target}: {} bytes, {} ({:.2?})",
+                    found.bytes.len(),
+                    found.page,
+                    fetched.elapsed()
+                ),
+                Err(error) => eprintln!("picture {target}: {error}"),
+            }
+        }
+    }
+}
+
+/// The pictures in `block` and the blocks inside it.
+fn pictures_in(block: &Block) -> Vec<&emu_guide::markdown::Picture> {
+    match block {
+        Block::Pictures(pictures) => pictures.iter().collect(),
+        Block::List { items, .. } => items.iter().flatten().flat_map(pictures_in).collect(),
+        Block::Quote(blocks) => blocks.iter().flat_map(pictures_in).collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn dirs_home() -> PathBuf {

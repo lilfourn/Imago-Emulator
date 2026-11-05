@@ -846,7 +846,9 @@ Behaviour, copied value for value from Imago (research §2):
   - blockquotes with a 2 px accent border;
   - flat hairline tables, scrolling sideways in the narrow panel;
   - fenced code with a copy button, unhighlighted.
-  - Images in Markdown are never drawn.
+  - A paragraph of nothing but `wiki:` images shows pictures from the
+    game's wiki, captioned, side by side when several; an image amid text
+    shows its alt text ([decision 0015](decisions/0015-guide-pictures-from-wikis.md)).
 - **Scroll.** Pinned to the bottom while streaming. Only the wheel
   unpins it; scrolling back to within 70 pt re-pins it. A jump-to-bottom
   button shows past 320 pt. A 24 pt fade sits at the top edge.
@@ -856,7 +858,7 @@ Behaviour, copied value for value from Imago (research §2):
 - **Probe.** Probe part names for `check-layout`: `panel:guide`,
   `field:guide`, `button:send`, `button:stop`, `button:screenshot`,
   `thumb:shot.N`, `line:thought`, `chip:source`, `button:sources`,
-  `button:connect`.
+  `button:connect`, `sheet:enlarged`.
 
 ### 6.8 Staying free in play
 

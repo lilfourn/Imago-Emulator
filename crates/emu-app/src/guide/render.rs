@@ -15,7 +15,7 @@ use gpui::{
 use super::answer::{self, BODY, Drawing, Ink};
 use super::composer;
 use super::palette::hsla;
-use super::{FRESH, GuideEvent, GuidePanel, MOST_SHOTS, Row};
+use super::{Enlarged, FRESH, GuideEvent, GuidePanel, MOST_SHOTS, Row};
 use crate::icons;
 use crate::openrouter::Status;
 use crate::probe;
@@ -24,7 +24,7 @@ use crate::probe;
 /// traffic lights' midline.
 const HEADER: f32 = 40.0;
 /// Side padding of the transcript.
-const SIDE: f32 = 20.0;
+pub(super) const SIDE: f32 = 20.0;
 /// How many lines of readable thinking show before the rest folds away.
 const THINKING_LINES: usize = 24;
 
@@ -41,9 +41,11 @@ impl Render for GuidePanel {
             .veil
             .as_ref()
             .is_some_and(|(_, veil)| !veil.settled(now))
+            || self.pictures_fading()
         {
             window.request_animation_frame();
         }
+        self.follow_column(window);
         let ink = Ink::new(&self.palette);
         let mut glass = ink.glass;
         glass.a = 0.94;
@@ -354,6 +356,11 @@ impl GuidePanel {
                 else {
                     return div().into_any_element();
                 };
+                self.request_pictures(&content, cx);
+                // Pictures the wiki lacks leave no gap.
+                if self.pictures_all_failed(&content) {
+                    return div().into_any_element();
+                }
                 let veil = self
                     .veil
                     .as_ref()
@@ -397,7 +404,7 @@ impl GuidePanel {
                                 .object_fit(ObjectFit::Contain),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.enlarged = Some(image.clone());
+                            this.enlarged = Some(Enlarged::shot(image.clone()));
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -807,7 +814,7 @@ impl GuidePanel {
                                 .object_fit(ObjectFit::Contain),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.enlarged = Some(image.clone());
+                            this.enlarged = Some(Enlarged::shot(image.clone()));
                             cx.notify();
                         }))
                         .children(probe::part(format!("thumb:shot.{index}"))),
@@ -1178,17 +1185,68 @@ impl GuidePanel {
         )
     }
 
+    /// A screenshot or picture shown large; a picture says what it is and
+    /// links to the wiki page it came from.
     fn enlarged_shot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let image = self.enlarged.clone()?;
+        let Enlarged { image, caption } = self.enlarged.clone()?;
+        let caption = caption.map(|(alt, wiki, page)| {
+            let link = (!page.is_empty()).then(|| {
+                div()
+                    .id("guide-enlarged-page")
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(8.0))
+                    .text_color(hsla([1.0; 3], 0.6))
+                    .hover(|style| style.bg(hsla([1.0; 3], 0.1)))
+                    .child(if wiki.is_empty() {
+                        "Open page".to_owned()
+                    } else {
+                        format!("On {wiki}")
+                    })
+                    .child(icons::icon(icons::GLOBE, 13.0, 0).text_color(hsla([1.0; 3], 0.6)))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.open_url(&page);
+                    })
+            });
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .pt(px(10.0))
+                .text_size(px(13.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(hsla([1.0; 3], 0.92))
+                        .child(alt),
+                )
+                .children(link)
+        });
         Some(
             div()
                 .id("guide-enlarged")
                 .absolute()
                 .inset_0()
+                .flex()
+                .flex_col()
                 .bg(hsla([0.0; 3], 0.85))
                 .p(px(16.0))
                 .cursor_pointer()
-                .child(img(image).size_full().object_fit(ObjectFit::Contain))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(img(image).size_full().object_fit(ObjectFit::Contain)),
+                )
+                .children(caption)
+                .children(probe::part("sheet:enlarged"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.enlarged = None;
                     cx.notify();
