@@ -31,14 +31,14 @@ impl Meter {
 }
 
 /// `fps` as the readout shows it, with the speed that is for a system
-/// whose own rate is `native` frames a second: "59.8 fps · 100%".
+/// whose own rate is `native` frames a second: "60 fps · 100%".
 pub fn readout(fps: f64, native: f64) -> String {
     let percent = if native > 0.0 {
         fps / native * 100.0
     } else {
         0.0
     };
-    format!("{fps:.1} fps · {percent:.0}%")
+    format!("{fps:.0} fps · {percent:.0}%")
 }
 
 #[cfg(test)]
@@ -60,8 +60,8 @@ mod tests {
 
     #[test]
     fn readout_gives_the_rate_and_the_speed() {
-        assert_eq!(readout(59.826, 59.8261), "59.8 fps · 100%");
-        assert_eq!(readout(119.65, 59.8261), "119.7 fps · 200%");
-        assert_eq!(readout(0.0, 59.7275), "0.0 fps · 0%");
+        assert_eq!(readout(59.826, 59.8261), "60 fps · 100%");
+        assert_eq!(readout(179.0, 59.8261), "179 fps · 299%");
+        assert_eq!(readout(0.0, 59.7275), "0 fps · 0%");
     }
 }

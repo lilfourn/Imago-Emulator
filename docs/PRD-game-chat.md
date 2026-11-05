@@ -235,8 +235,9 @@ flush to the window's side as below.
    - the reasoning summaries.
 
    Partial Markdown is mended and new text fades in.
-7. **Done.** Under the answer, an action row in grey icons: copy, good,
-   bad, ask again, then **Sources** with the sites' icons stacked.
+7. **Done.** Under the answer, an action row in grey icons: copy, ask
+   again, then **Sources** with the sites' icons stacked. (Good and bad
+   ratings were dropped at the owner's request on 2026-11-04.)
    - Sources opens a sheet over the panel listing each page: the site,
      the page title and a line from it. A page opens in the browser.
    - Small grey chips after a sentence ("Serebii", "Bulbapedia +1")
@@ -791,8 +792,8 @@ Layout, from ChatGPT's iOS app, which is about the panel's width:
   the screen) and 13/19 text per step.
 - **Source chips.** 18 pt high, radius 9, 11 pt muted type on raised
   fill, after the sentence they back.
-- **The action row.** 16 pt icons in 28 pt buttons (copy, good, bad, ask
-  again), then "Sources" with up to three 16 pt site icons stacked.
+- **The action row.** 16 pt icons in 28 pt buttons (copy, ask again),
+  then "Sources" with up to three 16 pt site icons stacked.
 - **The Sources sheet.** It slides up over the panel, which dims to
   35%, with radius 18 at the top. Each row has the site (12 pt) and the
   title (13.5 semibold) over one line from the page.

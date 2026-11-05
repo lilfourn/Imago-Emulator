@@ -685,7 +685,6 @@ impl GuidePanel {
             .copied
             .is_some_and(|(copied, block, _)| copied == turn && block.is_none());
         let text = answer.text.clone();
-        let rating = answer.rating;
         let meta = {
             let secs = answer.thought_for.unwrap_or(0.0);
             let cost = answer
@@ -711,16 +710,6 @@ impl GuidePanel {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.copy(text.clone(), turn, None, cx);
                 })),
-            )
-            .child(
-                icon_action(("guide-good", turn), icons::LIKE, ink)
-                    .when(rating == Some(true), |button| button.bg(ink.raised))
-                    .on_click(cx.listener(move |this, _, _, cx| this.rate(turn, true, cx))),
-            )
-            .child(
-                icon_action(("guide-bad", turn), icons::DISLIKE, ink)
-                    .when(rating == Some(false), |button| button.bg(ink.raised))
-                    .on_click(cx.listener(move |this, _, _, cx| this.rate(turn, false, cx))),
             );
         if last {
             actions = actions.child(

@@ -4,17 +4,18 @@
 use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
     Animation, AnimationExt, App, BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths,
-    FocusHandle, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, RenderImage, SharedString,
-    StyleRefinement, Subscription, Task, Window, WindowBounds, WindowHandle, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
+    FocusHandle, Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent, KeyUpEvent,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, RenderImage, SharedString, StyleRefinement, Subscription, Task, Window,
+    WindowBounds, WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+    rgba,
 };
 
 use crate::ambient::{self, Backdrop};
@@ -77,6 +78,9 @@ const NOTICE_DURATION: Duration = Duration::from_secs(3);
 /// How long the pill that opens Guide stays once the pointer rests.
 const GUIDE_PILL_REST: Duration = Duration::from_secs(2);
 
+/// The speed readout's grey: Apple's system grey, which reads on the
+/// dark stage and on a light game alike.
+const READOUT: u32 = 0x008E_8E93;
 /// How often the speed readout measures.
 const READOUT_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -3317,17 +3321,6 @@ impl Render for EmulatorView {
         {
             root = root.child(recording_mark());
         }
-        // Only over a game: the last game's reading would otherwise stay
-        // over the library, as the readout's timer stops with the game.
-        // Not under the game menu, where the game is paused.
-        if self.show_fps
-            && self.session.is_some()
-            && self.menu.is_none()
-            && let Some(readout) = &self.speed_readout
-        {
-            root = root.child(speed_readout(readout.clone(), guide_width.is_some()));
-        }
-
         if let Some((menu, _)) = &self.menu {
             root = root.child(menu.clone());
         }
@@ -3346,6 +3339,14 @@ impl Render for EmulatorView {
             .as_ref()
             .and_then(|_| self.library.read(cx).adding_status())
             .map(adding_card);
+        // Only over a game: the last game's reading would otherwise stay
+        // over the library, as the readout's timer stops with the game.
+        // Not under the game menu, where the game is paused.
+        let speed = self
+            .speed_readout
+            .clone()
+            .filter(|_| self.show_fps && self.session.is_some() && self.menu.is_none())
+            .map(speed_readout);
         let notice = self.notice.as_ref().map(|notice| {
             let mut card = overlay_plate(div()).flex_col().gap_1();
             if let Some(image) = &self.slot_image {
@@ -3357,7 +3358,9 @@ impl Render for EmulatorView {
             }
             card.child(notice.clone()).children(probe::part("notice"))
         });
-        if adding.is_some() || notice.is_some() {
+        // Down the left side's foot, clear of Guide in the right margin:
+        // what is being added, the notice, then the speed readout.
+        if adding.is_some() || notice.is_some() || speed.is_some() {
             let cards = div()
                 .absolute()
                 .left(px(INSET))
@@ -3371,7 +3374,7 @@ impl Render for EmulatorView {
             } else {
                 cards.bottom(px(INSET))
             };
-            root = root.child(cards.children(adding).children(notice));
+            root = root.child(cards.children(adding).children(notice).children(speed));
         }
         root.children(probe::end("main"))
     }
@@ -3534,9 +3537,8 @@ fn top_bar_shade() -> impl IntoElement {
         ))
 }
 
-/// The plate under words over the game: the notice, the speed readout and
-/// the recording mark. Its 12-pixel words on 16-pixel lines sit evenly in
-/// it.
+/// The plate under words over the game: the notice and the recording
+/// mark. Its 12-pixel words on 16-pixel lines sit evenly in it.
 fn overlay_plate(plate: Div) -> Div {
     plate
         .flex()
@@ -3616,18 +3618,22 @@ fn slot_image(width: u16, height: u16, rgb: &[u8]) -> Arc<RenderImage> {
     video::render_image(&frame, 2)
 }
 
-/// The speed readout, small in the window's bottom right corner.
-fn speed_readout(text: SharedString, guide_open: bool) -> impl IntoElement {
-    let plate = overlay_plate(div()).absolute();
-    // Guide takes the right margin; the readout moves to the left one's
-    // top, clear of the notices at its bottom.
-    let plate = if guide_open {
-        plate.top(px(TOP_BAR + 4.0)).left(px(INSET))
-    } else {
-        plate.bottom(px(INSET)).right(px(INSET))
-    };
-    plate
-        .font_family("Menlo")
+/// The speed readout at the foot of the window's left side: grey words
+/// on nothing, in figures of one width so they hold still as they change.
+fn speed_readout(text: SharedString) -> Div {
+    static FIGURES: LazyLock<FontFeatures> =
+        LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    div()
+        .font(Font {
+            family: ".SystemUIFont".into(),
+            features: FIGURES.clone(),
+            fallbacks: None,
+            weight: FontWeight::MEDIUM,
+            style: FontStyle::Normal,
+        })
+        .text_xs()
+        .line_height(px(16.0))
+        .text_color(rgb(READOUT))
         .child(text)
         .children(probe::part("speed"))
 }

@@ -832,14 +832,6 @@ impl GuidePanel {
         self.send(asked, window, cx);
     }
 
-    fn rate(&mut self, turn: usize, good: bool, cx: &mut Context<Self>) {
-        if let Some(entry) = self.chat.turns.get_mut(turn) {
-            entry.answer.rating = (entry.answer.rating != Some(good)).then_some(good);
-            self.after_change(Some(Row::Ending(turn)), cx);
-            self.save(cx);
-        }
-    }
-
     fn copy(&mut self, text: String, turn: usize, block: Option<usize>, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.copied = Some((turn, block, Instant::now()));
