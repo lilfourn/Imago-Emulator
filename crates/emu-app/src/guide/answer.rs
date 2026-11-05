@@ -110,6 +110,7 @@ impl GuidePanel {
         let ink = drawing.ink;
         match block {
             Block::Paragraph(spans) => text_block(spans, BODY, false, drawing, path, cx),
+            Block::Pictures(pictures) => self.pictures_element(pictures, drawing, path, cx),
             Block::Heading { level, spans } => {
                 let size = HEADINGS[usize::from(level.saturating_sub(1)).min(2)];
                 text_block(spans, size, true, drawing, path, cx)

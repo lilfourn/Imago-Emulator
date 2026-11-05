@@ -13,10 +13,12 @@
 //! parses the last block again as written, so a marker that never closed
 //! shows as written.
 //!
-//! An image is never drawn: its alt text shows in its place, as text. Raw
-//! HTML shows as written. A link reference definition links text before
-//! it too, so a document with any is parsed whole once more when it
-//! settles; while streaming, only text parsed with the definition links.
+//! A paragraph of nothing but images is a [`Block::Pictures`], which the
+//! panel draws from the game's wiki ([`crate::pictures`]); an image amid
+//! text shows its alt text in its place, as text. Raw HTML shows as
+//! written. A link reference definition links text before it too, so a
+//! document with any is parsed whole once more when it settles; while
+//! streaming, only text parsed with the definition links.
 
 use std::ops::Range;
 
@@ -75,11 +77,26 @@ pub enum Align {
     Right,
 }
 
+/// A Markdown image on a line of its own, such as
+/// `![Route 210](wiki:Route_210)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    /// Its alt text: what it shows, which the panel puts under it.
+    pub alt: String,
+    /// Its address as written, such as `wiki:Route_210`; `None` while the
+    /// address is still streaming.
+    pub target: Option<String>,
+    /// The bytes of the document's source it came from.
+    pub range: Range<usize>,
+}
+
 /// One block of an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     /// A paragraph.
     Paragraph(Vec<Span>),
+    /// A paragraph of nothing but images, shown side by side.
+    Pictures(Vec<Picture>),
     /// A heading, level 1 to 6.
     Heading {
         /// 1 to 6.
@@ -282,12 +299,20 @@ fn parse_events<'a>(
     let defines = definitions.iter().next().is_some();
     if streaming && defines {
         for (event, _) in &mut events {
-            if let Event::Start(Tag::Link {
-                link_type: LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut,
-                dest_url,
-                id,
-                ..
-            }) = event
+            if let Event::Start(
+                Tag::Link {
+                    link_type: LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut,
+                    dest_url,
+                    id,
+                    ..
+                }
+                | Tag::Image {
+                    link_type: LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut,
+                    dest_url,
+                    id,
+                    ..
+                },
+            ) = event
                 && definitions
                     .get(id)
                     .is_some_and(|definition| !text[definition.span.end..].contains('\n'))
@@ -419,7 +444,7 @@ fn last_spans(block: &mut Block) -> Option<&mut Vec<Span>> {
             Some(row) => row.last_mut(),
             None => head.last_mut(),
         },
-        Block::Code { .. } | Block::Rule => None,
+        Block::Pictures(_) | Block::Code { .. } | Block::Rule => None,
     }
 }
 
@@ -486,7 +511,11 @@ impl<'a, 'e> Builder<'a, 'e> {
     /// The block whose start was just read, through its end.
     fn started(&mut self, tag: &'a Tag<'e>) -> Block {
         match tag {
-            Tag::Paragraph => Block::Paragraph(self.leaf()),
+            Tag::Paragraph => {
+                let block = self.run();
+                self.finish();
+                block
+            }
             Tag::Heading { level, .. } => Block::Heading {
                 level: *level as u8,
                 spans: self.leaf(),
@@ -546,7 +575,7 @@ impl<'a, 'e> Builder<'a, 'e> {
         let mut blocks = Vec::new();
         while let Some((event, _)) = self.peek() {
             match event {
-                event if is_inline(event) => blocks.push(Block::Paragraph(self.spans())),
+                event if is_inline(event) => blocks.push(self.run()),
                 Event::Start(tag) => {
                     self.next += 1;
                     blocks.push(self.started(tag));
@@ -638,11 +667,31 @@ impl<'a, 'e> Builder<'a, 'e> {
         cells
     }
 
-    /// The run of text from here, as spans. An image adds nothing of its
-    /// own, so its alt text reads as text.
+    /// A run of text as a block: its pictures, if it holds nothing but
+    /// images and the space between them, else a paragraph.
+    fn run(&mut self) -> Block {
+        let (spans, pictures) = self.inline_run();
+        match pictures {
+            Some(pictures) => Block::Pictures(pictures),
+            None => Block::Paragraph(spans),
+        }
+    }
+
+    /// The run of text from here, as spans.
     fn spans(&mut self) -> Vec<Span> {
+        self.inline_run().0
+    }
+
+    /// The run of text from here, as spans, in which an image shows its alt
+    /// text; and its images, if it is nothing but images and space.
+    fn inline_run(&mut self) -> (Vec<Span>, Option<Vec<Picture>>) {
         let mut inline = Inline::default();
         let mut spans = Vec::new();
+        let mut pictures: Vec<Picture> = Vec::new();
+        // Inside an image's alt text.
+        let mut images = 0u32;
+        // Text that isn't an image's, or space.
+        let mut other = false;
         while let Some((event, range)) = self.peek()
             && is_inline(event)
         {
@@ -658,6 +707,17 @@ impl<'a, 'e> Builder<'a, 'e> {
                             dest_url,
                             ..
                         } => inline.links.push(self.link(*link_type, dest_url)),
+                        Tag::Image { dest_url, .. } => {
+                            if images == 0 {
+                                pictures.push(Picture {
+                                    alt: String::new(),
+                                    target: (!self.streaming || dest_url.as_ref() != mend::PENDING)
+                                        .then(|| dest_url.to_string()),
+                                    range: range.clone(),
+                                });
+                            }
+                            images += 1;
+                        }
                         _ => {}
                     }
                     continue;
@@ -670,14 +730,12 @@ impl<'a, 'e> Builder<'a, 'e> {
                         TagEnd::Link => {
                             inline.links.pop();
                         }
+                        TagEnd::Image => images = images.saturating_sub(1),
                         _ => {}
                     }
                     continue;
                 }
-                Event::Code(code) => {
-                    push(&mut spans, code, inline.style(true), &inline, range);
-                    continue;
-                }
+                Event::Code(code) => code.as_ref(),
                 Event::Text(text)
                 | Event::Html(text)
                 | Event::InlineHtml(text)
@@ -688,9 +746,20 @@ impl<'a, 'e> Builder<'a, 'e> {
                 Event::HardBreak => "\n",
                 Event::Rule | Event::TaskListMarker(_) => continue,
             };
-            push(&mut spans, text, inline.style(false), &inline, range);
+            match pictures.last_mut() {
+                Some(picture) if images > 0 => picture.alt.push_str(text),
+                _ => other |= !text.trim().is_empty(),
+            }
+            let code = matches!(event, Event::Code(_));
+            push(&mut spans, text, inline.style(code), &inline, range);
         }
-        spans
+        let pictures = (!pictures.is_empty() && !other).then(|| {
+            for picture in &mut pictures {
+                picture.alt = picture.alt.trim().to_owned();
+            }
+            pictures
+        });
+        (spans, pictures)
     }
 
     fn link(&self, link_type: LinkType, url: &str) -> Link {
@@ -778,12 +847,35 @@ mod tests {
                     out.extend(head.iter().flatten());
                     out.extend(rows.iter().flatten().flatten());
                 }
-                Block::Code { .. } | Block::Rule => {}
+                Block::Pictures(_) | Block::Code { .. } | Block::Rule => {}
             }
         }
         let mut out = Vec::new();
         blocks.iter().for_each(|b| walk(b, &mut out));
         out
+    }
+
+    /// Every picture in `blocks`, in order.
+    fn all_pictures(blocks: &[Block]) -> Vec<&Picture> {
+        fn walk<'b>(block: &'b Block, out: &mut Vec<&'b Picture>) {
+            match block {
+                Block::Pictures(pictures) => out.extend(pictures),
+                Block::List { items, .. } => items.iter().flatten().for_each(|b| walk(b, out)),
+                Block::Quote(blocks) => blocks.iter().for_each(|b| walk(b, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        blocks.iter().for_each(|b| walk(b, &mut out));
+        out
+    }
+
+    fn picture(alt: &str, target: Option<&str>, range: Range<usize>) -> Picture {
+        Picture {
+            alt: alt.to_owned(),
+            target: target.map(str::to_owned),
+            range,
+        }
     }
 
     /// `text` in pieces of about `size` bytes, cut on char boundaries.
@@ -1016,6 +1108,76 @@ mod tests {
     }
 
     #[test]
+    fn images_on_a_line_of_their_own_are_pictures() {
+        assert_eq!(
+            parsed("Here:\n\n![Route 210](wiki:Route_210)\n\nGo north."),
+            [
+                Block::Paragraph(vec![plain("Here:", 0..5)]),
+                Block::Pictures(vec![picture("Route 210", Some("wiki:Route_210"), 7..35)]),
+                Block::Paragraph(vec![plain("Go north.", 37..46)]),
+            ]
+        );
+        // Side by side, across a soft break too.
+        assert_eq!(
+            parsed("![Turtwig](wiki:Turtwig) ![*Chimchar*](wiki:Chimchar)\n![Piplup](wiki:Piplup)"),
+            [Block::Pictures(vec![
+                picture("Turtwig", Some("wiki:Turtwig"), 0..24),
+                picture("Chimchar", Some("wiki:Chimchar"), 25..53),
+                picture("Piplup", Some("wiki:Piplup"), 54..76),
+            ])]
+        );
+        // In a list item, or a quote.
+        assert_eq!(
+            parsed("- ![Cynthia](wiki:Cynthia)\n\n> ![Map](wiki:Sinnoh)"),
+            [
+                Block::List {
+                    start: None,
+                    items: vec![vec![Block::Pictures(vec![picture(
+                        "Cynthia",
+                        Some("wiki:Cynthia"),
+                        2..26
+                    )])]],
+                },
+                Block::Quote(vec![Block::Pictures(vec![picture(
+                    "Map",
+                    Some("wiki:Sinnoh"),
+                    30..49
+                )])]),
+            ]
+        );
+        // Amid text, an image is its alt text.
+        assert_eq!(
+            parsed("Catch ![Ralts](wiki:Ralts) here."),
+            [Block::Paragraph(vec![plain("Catch Ralts here.", 0..32)])]
+        );
+    }
+
+    #[test]
+    fn a_picture_streaming_its_address_has_none() {
+        let mut doc = Document::new();
+        doc.push("![Route 210](wiki:Rou");
+        let [Block::Pictures(pictures)] = doc.blocks() else {
+            panic!("{:?}", doc.blocks());
+        };
+        assert_eq!(
+            pictures
+                .iter()
+                .map(|picture| (picture.alt.as_str(), picture.target.as_deref()))
+                .collect::<Vec<_>>(),
+            [("Route 210", None)]
+        );
+        doc.push("te_210)\n");
+        assert_eq!(
+            doc.blocks(),
+            [Block::Pictures(vec![picture(
+                "Route 210",
+                Some("wiki:Route_210"),
+                0..28
+            )])]
+        );
+    }
+
+    #[test]
     fn hanging_markers_are_mended_while_streaming() {
         let mut doc = Document::new();
         doc.push("Use **Surf");
@@ -1138,6 +1300,7 @@ mod tests {
         "> **Tip:** save before the gym.\n> It *really* helps.\n\n## Gym 1\n\nBrock uses Rock types\n---\n\nAfter a rule, ![badge](https://x.dev/b.png) and <b>html</b>, a hard  \nbreak, é and 🦀.\n\n# Done",
         "para\n#b and > a\n#c\n\n> a quote\n#d still in it",
         "Read the guide [1] and the [map][m].\n\n[1]: https://x.dev/guide\n[m]: https://x.dev/map 'Map'\n",
+        "**Route 210** is north of Solaceon Town.\n\n![Route 210](wiki:Route_210)\n\nYour team:\n\n![Garchomp](wiki:Garchomp) ![Roserade](wiki:Roserade)\n\n- ![Cynthia][c]\n\n[c]: wiki:Cynthia\n",
     ];
 
     #[test]
@@ -1151,11 +1314,21 @@ mod tests {
                     _ => None,
                 })
                 .collect();
+            let targets: Vec<&String> = all_pictures(&whole)
+                .into_iter()
+                .filter_map(|picture| picture.target.as_ref())
+                .collect();
             for size in [1, 2, 3, 7, 13, 64] {
                 let mut doc = Document::new();
                 for piece in chunks(answer, size) {
                     doc.push(piece);
                     let source = doc.source();
+                    // A picture's address is never cut short.
+                    for picture in all_pictures(doc.blocks()) {
+                        if let Some(target) = &picture.target {
+                            assert!(targets.contains(&target), "{target:?} in {source:?}");
+                        }
+                    }
                     for span in all_spans(doc.blocks()) {
                         let Range { start, end } = span.range;
                         assert!(

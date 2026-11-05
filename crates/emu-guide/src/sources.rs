@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 use crate::game::{GameContext, Kind};
+use crate::pictures::Wiki;
 
 /// The most sources a game gets. Web search's domain list stays short,
 /// and so does the system prompt, which lists every source.
@@ -78,9 +79,7 @@ pub struct Source {
 pub fn sources_for(game: &GameContext) -> Vec<Source> {
     let map = map();
     let names = [words(&game.lookup_name()), words(&game.title)];
-    let series = names
-        .iter()
-        .find_map(|name| map.series.iter().find(|series| series.matches(name)));
+    let series = series_of(map, &names);
     let series_sources = series.map_or(&[][..], |series| &series.sources[..]);
     let hack = game.kind == Kind::Unlisted
         && series.is_some_and(|series| map.hacks_of.contains(&series.id));
@@ -110,6 +109,37 @@ pub fn sources_for(game: &GameContext) -> Vec<Source> {
     }
     add(&map.fallback, &mut sources);
     sources
+}
+
+/// The wiki whose pictures answers about `game` show
+/// ([`crate::pictures`]): its series' `pictures` wiki if the map names
+/// one, else the series' first MediaWiki site on a host of its own. `None`
+/// for a game in no series, as the fallback sites' pictures are of whole
+/// games, not what is in them.
+pub fn picture_wiki(game: &GameContext) -> Option<Wiki> {
+    let map = map();
+    let series = series_of(map, &[words(&game.lookup_name()), words(&game.title)])?;
+    if let Some(wiki) = &series.pictures {
+        return Some(wiki.clone());
+    }
+    series.sources.iter().find_map(|entry| {
+        let source = &entry.source;
+        match &source.reach {
+            Reach::MediaWiki { api } if !source.domain.contains(['*', '/']) => Some(Wiki {
+                name: source.name.clone(),
+                api: format!("https://{}{api}", source.domain),
+            }),
+            _ => None,
+        }
+    })
+}
+
+/// The first series in the map with a title in one of `names`, tried in
+/// order.
+fn series_of<'m>(map: &'m Map, names: &[Vec<String>]) -> Option<&'m Series> {
+    names
+        .iter()
+        .find_map(|name| map.series.iter().find(|series| series.matches(name)))
 }
 
 /// The domains web search and fetch may use for these sources, in order.
@@ -173,6 +203,8 @@ struct Series {
     titles: Vec<Vec<String>>,
     /// Its sources, most trusted first.
     sources: Vec<Entry>,
+    /// Where its pictures come from, if not its first MediaWiki site.
+    pictures: Option<Wiki>,
 }
 
 impl Series {
@@ -224,7 +256,17 @@ struct RawMap {
 struct RawSeries {
     id: String,
     titles: Vec<String>,
+    pictures: Option<RawPictures>,
     sources: Vec<RawSource>,
+}
+
+/// A series' picture wiki, as `sources.toml` writes it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPictures {
+    name: String,
+    domain: String,
+    api: String,
 }
 
 #[derive(Deserialize)]
@@ -290,10 +332,26 @@ fn parse(text: &str) -> Result<Map, String> {
                 })
                 .collect::<Result<_, _>>()?;
             let sources = entries(series.sources, &series.id)?;
+            let pictures = series
+                .pictures
+                .map(|raw| {
+                    let fits = !raw.name.trim().is_empty()
+                        && raw.api.starts_with('/')
+                        && !raw.domain.is_empty()
+                        && raw.domain == raw.domain.to_ascii_lowercase()
+                        && !raw.domain.contains(['*', '/', ':']);
+                    fits.then(|| Wiki {
+                        name: raw.name,
+                        api: format!("https://{}{}", raw.domain, raw.api),
+                    })
+                    .ok_or_else(|| format!("{}: a bad pictures wiki", series.id))
+                })
+                .transpose()?;
             Ok(Series {
                 id: series.id,
                 titles,
                 sources,
+                pictures,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -770,6 +828,30 @@ mod tests {
         let mario = sources_for(&game("Super Mario Bros Hack", None, Kind::Unlisted));
         assert_eq!(mario[0].name, "Super Mario Wiki");
         assert!(mario.iter().all(|source| source.name != "PokéCommunity"));
+    }
+
+    #[test]
+    fn pictures_come_from_the_series_wiki() {
+        let wiki = |title: &str, kind: Kind| {
+            picture_wiki(&game(title, None, kind)).map(|wiki| (wiki.name, wiki.api))
+        };
+        let pokemon = Some((
+            "Pokémon Wiki".to_owned(),
+            "https://pokemon.fandom.com/api.php".to_owned(),
+        ));
+        assert_eq!(wiki("Pokémon Platinum", Kind::Retail), pokemon);
+        assert_eq!(wiki("Pokémon Reborn", Kind::FanGame), pokemon);
+        assert_eq!(wiki("Pokemon Emerald Rogue", Kind::Unlisted), pokemon);
+        // Without a `pictures` wiki, the series' first MediaWiki site.
+        assert_eq!(
+            wiki("The Legend of Zelda: The Minish Cap", Kind::Retail),
+            Some((
+                "Zelda Wiki".to_owned(),
+                "https://zeldawiki.wiki/w/api.php".to_owned()
+            ))
+        );
+        // A game in no series has none.
+        assert_eq!(wiki("Tetris", Kind::Retail), None);
     }
 
     #[test]

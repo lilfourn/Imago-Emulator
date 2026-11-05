@@ -35,6 +35,12 @@ impl Request {
 /// Serves on a loopback port, answering each request with the status and
 /// JSON `reply` makes of it, and returns where it is.
 pub fn openrouter(reply: fn(&Request) -> (u16, String)) -> Endpoints {
+    Endpoints::at(serve(reply))
+}
+
+/// Serves on a loopback port as [`openrouter`] does, and returns its
+/// address, such as `http://127.0.0.1:50123`.
+pub fn serve(reply: fn(&Request) -> (u16, String)) -> String {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
@@ -52,7 +58,7 @@ pub fn openrouter(reply: fn(&Request) -> (u16, String)) -> Endpoints {
             stream.write_all(response.as_bytes()).ok();
         }
     });
-    Endpoints::at(format!("http://127.0.0.1:{port}"))
+    format!("http://127.0.0.1:{port}")
 }
 
 /// The request on `stream`, whole.

@@ -1,5 +1,6 @@
-//! Just enough of URL encoding for OpenRouter's sign-in: query values out,
-//! and the browser's query back.
+//! Just enough of URL encoding for OpenRouter's sign-in (query values out,
+//! and the browser's query back) and for wiki titles in pictures'
+//! addresses.
 
 /// `text` percent-encoded as a URL query value: unreserved characters as
 /// they are, every other byte as `%XX`.
@@ -27,6 +28,16 @@ pub fn query_value(query: &str, name: &str) -> Option<String> {
 /// `text` with `+` as a space and each `%XX` as its byte; a `%` not
 /// followed by two hex digits stays as it is.
 fn decode(text: &str) -> String {
+    decode_with(text, true)
+}
+
+/// `text` with each `%XX` as its byte, as in a URL's path, where `+` is
+/// itself.
+pub fn percent_decode(text: &str) -> String {
+    decode_with(text, false)
+}
+
+fn decode_with(text: &str, plus_is_space: bool) -> String {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -41,7 +52,7 @@ fn decode(text: &str) -> String {
                 decoded.push(value);
                 at += 3;
             }
-            (b'+', _) => {
+            (b'+', _) if plus_is_space => {
                 decoded.push(b' ');
                 at += 1;
             }
@@ -79,5 +90,6 @@ mod tests {
         assert_eq!(query_value("", "code"), None);
         assert_eq!(decode("100%"), "100%");
         assert_eq!(decode("%zz%C3%A9"), "%zzé");
+        assert_eq!(percent_decode("a+b%20c%2B"), "a+b c+");
     }
 }

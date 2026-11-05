@@ -12,6 +12,7 @@
 //! - [`game`], [`sources`] and [`prompt`] say which game is being played,
 //!   which sites players trust for it, and how the model should answer.
 //! - [`markdown`] parses answers into blocks as they stream.
+//! - [`pictures`] finds the pictures answers show on the game's wiki.
 //! - [`conversation`] keeps each game's chats, with their screenshots.
 //!
 //! Nothing here touches the network until the player asks to connect.
@@ -26,6 +27,7 @@ pub mod game;
 pub mod key;
 pub mod login;
 pub mod markdown;
+pub mod pictures;
 pub mod pkce;
 pub mod prompt;
 pub mod sources;
