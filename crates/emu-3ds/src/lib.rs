@@ -271,7 +271,10 @@ impl ThreeDs {
 }
 
 /// The libretro joypad bits for `input`'s buttons. The D-pad also tilts
-/// the circle pad all the way (see [`circle_pad`]).
+/// the circle pad all the way (see [`circle_pad`]). Tilting gently, the
+/// directions tilt only the circle pad, as a thumb on the circle pad
+/// presses nothing else; a game that gives the D-pad other work would
+/// otherwise do it too.
 fn joypad_bits(input: &Input) -> u16 {
     use libretro::{
         JOYPAD_A, JOYPAD_B, JOYPAD_DOWN, JOYPAD_L, JOYPAD_L2, JOYPAD_LEFT, JOYPAD_R, JOYPAD_R2,
@@ -293,17 +296,31 @@ fn joypad_bits(input: &Input) -> u16 {
         (Button::Left, JOYPAD_LEFT),
         (Button::Right, JOYPAD_RIGHT),
     ];
+    let pressed = |button: Button| {
+        let direction = matches!(
+            button,
+            Button::Up | Button::Down | Button::Left | Button::Right
+        );
+        input.buttons.contains(button) && !(direction && input.gentle)
+    };
     map.iter()
-        .filter(|(button, _)| input.buttons.contains(*button))
+        .filter(|(button, _)| pressed(*button))
         .fold(0, |bits, (_, id)| bits | 1 << id)
 }
+
+/// How far a gentle tilt takes the circle pad, in percent of the way to
+/// its edge. In Omega Ruby, from where a hidden Pokémon shows on Route
+/// 102, 30% did not move the player, 35% to 60% sneaked and 70% walked;
+/// half is in the middle of the sneak.
+const GENTLE_PERCENT: i32 = 50;
 
 /// The circle pad's tilt for `input`, from -32,767 to 32,767 on each axis
 /// with up negative, as libretro has it. The 3DS moves with the circle pad
 /// where the DS moved with the D-pad, so the D-pad's bindings (WASD, the
 /// arrow keys and a gamepad's left stick) tilt it all the way, as well as
 /// pressing the D-pad itself; a diagonal tilts it as far along each axis
-/// as a real stick would reach.
+/// as a real stick would reach. Tilting [`Input::gentle`], they tilt it
+/// [`GENTLE_PERCENT`] of the way.
 fn circle_pad(input: &Input) -> (i16, i16) {
     const FULL: i32 = i16::MAX as i32;
     const DIAGONAL: i32 = 23_170; // FULL / √2
@@ -314,7 +331,10 @@ fn circle_pad(input: &Input) -> (i16, i16) {
         axis(Button::Left, Button::Right),
         axis(Button::Up, Button::Down),
     );
-    let reach = if x != 0 && y != 0 { DIAGONAL } else { FULL };
+    let mut reach = if x != 0 && y != 0 { DIAGONAL } else { FULL };
+    if input.gentle {
+        reach = reach * GENTLE_PERCENT / 100;
+    }
     let tilt = |direction: i32| i16::try_from(direction * reach).unwrap_or_default();
     (tilt(x), tilt(y))
 }
@@ -530,5 +550,33 @@ mod tests {
             ..Input::default()
         };
         assert_eq!(circle_pad(&touching), (0, 0));
+    }
+
+    #[test]
+    fn a_gentle_tilt_is_half_way_and_presses_no_d_pad() {
+        let gently = |buttons: &[Button]| Input {
+            gentle: true,
+            ..holding(buttons)
+        };
+        assert_eq!(circle_pad(&gently(&[Button::Left])), (-16_383, 0));
+        assert_eq!(
+            circle_pad(&gently(&[Button::Up, Button::Right])),
+            (11_585, -11_585)
+        );
+        assert_eq!(
+            joypad_bits(&gently(&[Button::Left])),
+            0,
+            "only the circle pad"
+        );
+        assert_eq!(
+            joypad_bits(&gently(&[Button::Down, Button::B])),
+            1,
+            "B still presses"
+        );
+        assert_eq!(
+            joypad_bits(&holding(&[Button::Left])),
+            1 << 6,
+            "without it, the D-pad presses too"
+        );
     }
 }

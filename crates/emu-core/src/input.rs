@@ -175,6 +175,11 @@ pub struct Input {
     /// games listening for blowing or shouting look for; no voice comes
     /// through.
     pub microphone: u8,
+    /// Whether the directions held tilt the 3DS's circle pad only gently,
+    /// and press nothing else: how a 3DS game is walked slowly, as Omega
+    /// Ruby's player sneaks up on a Pokémon. Other systems ignore it and
+    /// press the D-pad as usual.
+    pub gentle: bool,
 }
 
 impl Input {
