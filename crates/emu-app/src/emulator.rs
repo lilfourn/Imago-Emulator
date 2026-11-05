@@ -2063,6 +2063,7 @@ mod tests {
         buttons: Buttons::NONE,
         touch: Some(TouchPoint { x: 10, y: 20 }),
         microphone: 0,
+        gentle: false,
     };
 
     #[test]

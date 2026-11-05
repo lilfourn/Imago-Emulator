@@ -120,11 +120,13 @@ impl Latch {
             None if self.touch_frames > 0 => self.shown.touch,
             None => None,
         };
-        // Blowing reaches the game as it is, without a minimum hold.
+        // Blowing and tilting gently reach the game as they are, without
+        // a minimum hold.
         self.shown = Input {
             buttons,
             touch,
             microphone: self.held.microphone,
+            gentle: self.held.gentle,
         };
     }
 }
@@ -417,12 +419,30 @@ mod tests {
     }
 
     #[test]
+    fn tilting_gently_comes_and_goes_at_once() {
+        let mut latch = Latch::default();
+        let gently = Input {
+            gentle: true,
+            ..buttons(&[Button::Left])
+        };
+        latch.set(gently);
+        assert_eq!(latch.input(), gently);
+        latch.set(buttons(&[Button::Left]));
+        assert_eq!(
+            latch.input(),
+            buttons(&[Button::Left]),
+            "the next frame walks on at full tilt"
+        );
+    }
+
+    #[test]
     fn release_lets_go_of_everything_at_once() {
         let mut latch = Latch::default();
         latch.set(Input {
             buttons: [Button::A, Button::Left].into_iter().collect(),
             touch: Some(POINT),
             microphone: Input::LOUDEST,
+            gentle: true,
         });
         latch.set(buttons(&[Button::Left]));
         latch.release();

@@ -1,9 +1,10 @@
 //! The key guide: the keys that play the running game, read from the
 //! player's own bindings, so it stays right when they rebind. It shows in
 //! the game menu, under its tiles, as a list in two columns: what a row
-//! presses on the left, its keys on flat caps on the right. Moving and the
-//! face buttons go in the first column; the shoulders, Start and Select in
-//! the second. It only shows; it takes no clicks.
+//! presses on the left, its keys on flat caps on the right. Moving (and on
+//! a 3DS, tilting the circle pad gently) and the face buttons go in the
+//! first column; the shoulders, Start and Select in the second. It only
+//! shows; it takes no clicks.
 
 use emu_core::{Button, System};
 use gpui::{AnyElement, Div, div, prelude::*, px, rgb, rgba};
@@ -34,8 +35,9 @@ pub struct Control {
 }
 
 /// The guide's two columns for a `system` game played with `bindings`:
-/// moving and the face buttons the system has, then its shoulders, Start
-/// and Select. Unbound buttons are left out.
+/// moving, on a 3DS the key held with the moving keys to tilt the circle
+/// pad gently, and the face buttons the system has; then its shoulders,
+/// Start and Select. Unbound buttons are left out.
 pub fn columns(system: System, bindings: &Bindings) -> [Vec<Control>; 2] {
     let key = |button: Button| preferred(&bindings.keys_for(Held::Button(button)));
     let rows = |buttons: &[(Button, &'static str)]| -> Vec<Control> {
@@ -69,12 +71,19 @@ pub fn columns(system: System, bindings: &Bindings) -> [Vec<Control>; 2] {
             (Button::Zr, "ZR"),
         ],
     };
+    let gently = preferred(&bindings.keys_for(Held::TiltGently))
+        .filter(|_| system == System::N3ds)
+        .map(|key| Control {
+            label: "Tilt gently",
+            keys: vec![key],
+        });
     let first = (!moving.is_empty())
         .then_some(Control {
             label: "Move",
             keys: moving,
         })
         .into_iter()
+        .chain(gently)
         .chain(rows(&face))
         .collect();
     let mut second = rows(shoulders);
@@ -105,6 +114,7 @@ fn key_name(key: &str) -> String {
         "backspace" => "⌫".to_owned(),
         "space" => "Space".to_owned(),
         "tab" => "⇥".to_owned(),
+        "shift" => "⇧".to_owned(),
         "escape" => "esc".to_owned(),
         other if other.chars().count() == 1 => other.to_uppercase(),
         other => other.to_owned(),
@@ -257,7 +267,11 @@ mod tests {
     fn a_3ds_game_shows_the_ds_s_buttons_and_zl_and_zr() {
         let n3ds = columns(System::N3ds, &Bindings::default());
         let [first, second] = labels(&n3ds);
-        assert_eq!(first.len(), 5);
+        assert_eq!(
+            first[..2],
+            [row("Move", "W A S D"), row("Tilt gently", "⇧")]
+        );
+        assert_eq!(first.len(), 6);
         assert_eq!(
             second,
             [

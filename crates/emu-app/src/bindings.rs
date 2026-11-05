@@ -1,7 +1,7 @@
 //! Bindings for held inputs: emulated buttons and their turbo versions,
 //! fast-forward, slow motion, rewind, touching the screen at the gamepad
-//! cursor and blowing into the DS microphone, from the keyboard or
-//! gamepads; and gamepad hotkeys.
+//! cursor, blowing into the DS microphone and tilting the 3DS's circle
+//! pad gently, from the keyboard or gamepads; and gamepad hotkeys.
 //!
 //! One-shot commands (Open, Pause, Save State, ...) are GPUI actions bound
 //! to menu shortcuts in `app.rs`. This module covers inputs that are held
@@ -72,6 +72,9 @@ pub enum Held {
     Touch,
     /// Blows into the microphone while held (DS).
     Blow,
+    /// Makes the directions tilt the circle pad only gently while held,
+    /// to sneak (3DS).
+    TiltGently,
 }
 
 /// What `turbo_a` and the like start with.
@@ -87,6 +90,7 @@ impl fmt::Display for Held {
             Self::Rewind => f.write_str("rewind"),
             Self::Touch => f.write_str("touch"),
             Self::Blow => f.write_str("blow"),
+            Self::TiltGently => f.write_str("tilt_gently"),
         }
     }
 }
@@ -102,6 +106,7 @@ impl FromStr for Held {
             "rewind" => Ok(Self::Rewind),
             "touch" => Ok(Self::Touch),
             "blow" => Ok(Self::Blow),
+            "tilt_gently" => Ok(Self::TiltGently),
             _ => match s.strip_prefix(TURBO_PREFIX) {
                 Some(button) => button.parse().map(Self::Turbo).map_err(|_| unknown()),
                 None => s.parse().map(Self::Button).map_err(|_| unknown()),
@@ -216,8 +221,9 @@ pub struct Bindings {
 /// them, the right hand on a square of four keys in the DS face-button
 /// positions (Y and X on top, B and A below). The arrow keys steer too,
 /// Return presses A as well, as it confirms everywhere else, and B, for
-/// blow, blows into the microphone.
-const KEY_DEFAULTS: [(Held, &str); 23] = [
+/// blow, blows into the microphone. Shift with the moving keys tilts the
+/// 3DS's circle pad gently, as Shift walks quietly in PC games.
+const KEY_DEFAULTS: [(Held, &str); 24] = [
     (Held::Button(Button::Up), "w"),
     (Held::Button(Button::Left), "a"),
     (Held::Button(Button::Down), "s"),
@@ -241,6 +247,7 @@ const KEY_DEFAULTS: [(Held, &str); 23] = [
     (Held::SlowMotion, "1"),
     (Held::Rewind, "r"),
     (Held::Blow, "b"),
+    (Held::TiltGently, "shift"),
 ];
 
 /// Nintendo layout by position: A is the right face button, B the bottom.
@@ -535,8 +542,9 @@ pub enum BindingsError {
     #[error("invalid bindings file: {0}")]
     Syntax(String),
     /// An action name is not a button, a turbo button such as `turbo_a`,
-    /// `fast_forward`, `slow_motion`, `rewind`, `touch` or `blow`, nor in
-    /// `[hotkeys]` one of the shortcuts or `modifier`.
+    /// `fast_forward`, `slow_motion`, `rewind`, `touch`, `blow` or
+    /// `tilt_gently`, nor in `[hotkeys]` one of the shortcuts or
+    /// `modifier`.
     #[error("unknown action {0:?} in bindings")]
     UnknownAction(String),
     /// One input is bound to two different actions.
@@ -629,6 +637,21 @@ mod tests {
         assert_eq!(key("tab"), Some(Held::FastForward));
         assert_eq!(key("r"), Some(Held::Rewind));
         assert_eq!(key("b"), Some(Held::Blow));
+        // Held with the moving keys to sneak on a 3DS.
+        assert_eq!(key("shift"), Some(Held::TiltGently));
+    }
+
+    #[test]
+    fn tilting_gently_can_be_rebound() {
+        let text = "[keys]\ntilt_gently = [\"f\"]\n\n[gamepad]\ntilt_gently = [\"LeftThumb\"]\n";
+        let bindings = Bindings::from_toml(text).expect("valid file");
+        assert_eq!(bindings.key_action("f"), Some(Held::TiltGently));
+        assert_eq!(bindings.key_action("shift"), None);
+        assert_eq!(
+            bindings.pad_action("any", "LeftThumb"),
+            Some(Held::TiltGently)
+        );
+        assert_eq!(Held::TiltGently.to_string(), "tilt_gently");
     }
 
     #[test]

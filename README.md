@@ -146,7 +146,7 @@ SPEED=normal FRONT=1 scripts/macos/bench.sh ~/Games/My\ Fan\ Game
 | Rewind | Hold R | Left trigger | | Rotate clockwise / anticlockwise | ⌘⌥→ / ⌘⌥← |
 | Blow into the microphone (DS) | Hold B | | | Screen gap: 0, 16, 48 or 90 px | ⌘G |
 | ZL / ZR (3DS) | Z / C | Unbound; bind them in bindings.toml | | Full screen | ⌃⌘F |
-| | | | | Switch player (link play) | ⌘T or click a screen |
+| Tilt the circle pad gently, to sneak (3DS) | Hold Shift while moving | Unbound; bind `tilt_gently` | | Switch player (link play) | ⌘T or click a screen |
 | | | | | Save screenshot | ⌘⇧S |
 | | | | | Start / stop recording | ⌘⇧R |
 | | | | | Run / stop a Lua script | ⌘⇧L / ⌘⌥L |
@@ -165,7 +165,10 @@ The keys are laid out for playing on a keyboard: the left hand on W A S D
 with the shoulders on Q and E and the 3DS's ZL and ZR on Z and C below
 them, the right hand on a square of four keys shaped like the DS face
 buttons, U and I (Y and X) above J and K (B and A). On a 3DS the D-pad's
-keys and the left stick also tilt the circle pad.
+keys and the left stick also tilt the circle pad, all the way; with Shift
+held they tilt it only half way and leave the D-pad alone, which is how
+Pokémon Omega Ruby and Alpha Sapphire sneak up on a Pokémon the DexNav
+shows hiding in the grass.
 
 Fast-forward runs at twice normal speed. Emulation > Fast-Forward Speed
 picks 2×, 3×, 4× or Unlimited, as fast as the computer goes; it is kept
@@ -514,8 +517,8 @@ one, and the app holds no keys. Azahar's core can't install a title, so a
 `.cia` plays as the executable it holds, which the app writes into
 `~/Library/Application Support/ds-emulator/Games` the first time; an
 encrypted `.cia` is refused. The controls are the app's own (see above),
-with the D-pad's keys also tilting the circle pad, ZL and ZR on Z and C,
-and the mouse on the bottom screen. Save states work anywhere and the app
+with the D-pad's keys also tilting the circle pad (gently with Shift
+held), ZL and ZR on Z and C, and the mouse on the bottom screen. Save states work anywhere and the app
 keeps where you left off, but there is no rewind, link play, cheats,
 debugger or memory viewer, and `.3dsx` homebrew has no save states
 (Azahar's core can't load them for a game without a title ID). A game's own saves, its save data and any
