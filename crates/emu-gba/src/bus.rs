@@ -2,8 +2,9 @@
 //! counting and the event scheduler.
 //!
 //! Every CPU access adds the region's wait states to the cycle count and
-//! advances the scheduler, which raises PPU line events (and, later, timer
-//! and DMA events) at the exact cycle they are due.
+//! advances the scheduler, which raises the PPU's line events, timer
+//! overflows, DMA starts, interrupt changes, serial transfers' ends and
+//! audio samples at the exact cycle they are due.
 
 use emu_arm::{Access, Bus as CpuBus};
 use emu_core::RomPatch;
@@ -258,6 +259,7 @@ impl Bus {
 
     /// Wakes from HALT when any enabled interrupt is requested, whatever
     /// IME says; waking takes a cycle. Returns whether the CPU is running.
+    #[inline]
     pub(crate) fn wake_if_requested(&mut self) -> bool {
         if self.halted && self.interrupts.requested() {
             self.halted = false;
@@ -332,10 +334,24 @@ impl Bus {
     }
 
     /// Advances time by `cycles` and runs every event that came due.
+    ///
+    /// Every access calls this, and most find nothing due, so it stays
+    /// small: the events run out of line in [`Bus::run_due_events`], since
+    /// rendering a line, one of them, needs a large stack frame that every
+    /// call would otherwise set up.
+    #[inline]
     fn tick(&mut self, cycles: u32) {
         self.prefetch.run(cycles, self.prefetch_enabled());
         self.cycles += u64::from(cycles);
         self.scheduler.advance(u64::from(cycles));
+        if self.scheduler.has_due() {
+            self.run_due_events();
+        }
+    }
+
+    /// Runs every event that has come due, in order.
+    #[inline(never)]
+    fn run_due_events(&mut self) {
         while let Some(due) = self.scheduler.pop_due() {
             match due.event {
                 Event::HBlank => {
@@ -715,6 +731,27 @@ impl Bus {
         }
     }
 
+    /// The word at `address` (aligned): read whole from work RAM, as two
+    /// halfwords elsewhere.
+    fn read_32_raw(&mut self, address: u32) -> u32 {
+        let word = |memory: &[u8], index: usize| {
+            u32::from_le_bytes([
+                memory[index],
+                memory[index + 1],
+                memory[index + 2],
+                memory[index + 3],
+            ])
+        };
+        match address >> 24 {
+            0x02 => word(&self.ewram, (address & 0x3_FFFC) as usize),
+            0x03 => word(&self.iwram, (address & 0x7FFC) as usize),
+            _ => {
+                u32::from(self.read_16_raw(address))
+                    | u32::from(self.read_16_raw(address | 2)) << 16
+            }
+        }
+    }
+
     fn write_16_raw(&mut self, address: u32, value: u16) {
         let put = |memory: &mut [u8], index: usize| {
             memory[index..index + 2].copy_from_slice(&value.to_le_bytes());
@@ -732,6 +769,22 @@ impl Bus {
                 .cartridge
                 .write_backup(address, (value >> ((address & 1) * 8)) as u8),
             _ => {}
+        }
+    }
+
+    /// Writes the word at `address` (aligned): whole to work RAM, as two
+    /// halfwords, low first, elsewhere.
+    fn write_32_raw(&mut self, address: u32, value: u32) {
+        let put = |memory: &mut [u8], index: usize| {
+            memory[index..index + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        match address >> 24 {
+            0x02 => put(&mut self.ewram, (address & 0x3_FFFC) as usize),
+            0x03 => put(&mut self.iwram, (address & 0x7FFC) as usize),
+            _ => {
+                self.write_16_raw(address, value as u16);
+                self.write_16_raw(address | 2, (value >> 16) as u16);
+            }
         }
     }
 
@@ -984,7 +1037,7 @@ impl CpuBus for Bus {
         let value = if address < 0x4000 && !self.executing_bios {
             self.bios_open_bus
         } else {
-            u32::from(self.read_16_raw(address)) | u32::from(self.read_16_raw(address | 2)) << 16
+            self.read_32_raw(address)
         };
         if code {
             self.note_fetch(value);
@@ -1029,8 +1082,7 @@ impl CpuBus for Bus {
         }
         let address = address & !3;
         self.wait_for_access(address, Width::Word, access);
-        self.write_16_raw(address, value as u16);
-        self.write_16_raw(address | 2, (value >> 16) as u16);
+        self.write_32_raw(address, value);
     }
 
     fn write_16(&mut self, address: u32, value: u16, access: Access) {

@@ -121,8 +121,8 @@ impl Apu {
         Some(pair(&psg) & readable)
     }
 
-    /// Writes the byte at `offset` from 0x04000060. Returns which FIFOs
-    /// were reset, as bits 0 (A) and 1 (B).
+    /// Writes the byte at `offset` from 0x04000060. SOUNDCNT_H's reset
+    /// bits empty their FIFOs.
     pub(crate) fn write_8(&mut self, offset: u32, value: u8) {
         match offset {
             0x22 => self.control = (self.control & 0xFF00) | u16::from(value),
@@ -179,18 +179,6 @@ impl Apu {
             self.psg.clock_frame_sequencer();
         }
 
-        let channels = self.psg.outputs();
-        let panning = self.psg.panning();
-        let master = self.psg.master_volume();
-        let psg_side = |shift: u8, volume: u8| -> i32 {
-            let sum: i32 = channels
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| panning & (1 << (index + usize::from(shift))) != 0)
-                .map(|(_, value)| *value)
-                .sum();
-            sum * (i32::from(volume & 7) + 1)
-        };
         // SOUNDCNT_H bits 0-1: PSG at 25%, 50% or 100%.
         let psg_shift = match self.control & 3 {
             0 => 2,
@@ -200,8 +188,7 @@ impl Apu {
         let enabled = self.psg.powered();
         let mut sides = [0i32; 2];
         if enabled {
-            sides[0] = psg_side(4, master >> 4) >> psg_shift;
-            sides[1] = psg_side(0, master) >> psg_shift;
+            sides = self.psg.mixed().map(|side| side >> psg_shift);
             for fifo in 0..2 {
                 let full_volume = self.control & (1 << (2 + fifo)) != 0;
                 let sample = i32::from(self.fifos[fifo].current) << if full_volume { 2 } else { 1 };

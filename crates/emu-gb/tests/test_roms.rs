@@ -504,7 +504,10 @@ fn test_roms() {
         }
         .expect("writing to a String");
     }
+    // Beside the workspace's sources, where a checkout may have no
+    // `target/` yet if it builds elsewhere (CARGO_TARGET_DIR).
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gb-test-roms.txt");
+    fs::create_dir_all(target.parent().expect("a folder")).expect("making target/");
     fs::write(&target, &report).expect("writing the report");
 
     let passing: Vec<&str> = results

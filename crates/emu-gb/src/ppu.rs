@@ -214,15 +214,22 @@ impl Ppu {
         }
         let dots = u16::from(dots);
         if self.dot + dots < self.next_event_dot() {
-            // Most M-cycles change nothing but the dot counter.
+            // Most M-cycles change nothing but the dot counter. Away from a
+            // line's first dot, that leaves the STAT line as it was: its
+            // inputs only change at mode and line changes and register
+            // writes, which update it themselves.
+            let line_start = self.dot == 0;
             self.dot += dots;
             self.reported_mode = self.mode;
+            if line_start {
+                self.update_stat_line(interrupt_flag);
+            }
         } else {
             for _ in 0..dots {
                 self.advance_dot(interrupt_flag);
             }
+            self.update_stat_line(interrupt_flag);
         }
-        self.update_stat_line(interrupt_flag);
     }
 
     /// The next dot at which [`Ppu::advance_dot`] changes the mode or line.
@@ -417,10 +424,28 @@ impl Ppu {
         }
     }
 
-    /// The background or window pixel at (`x`, `y`) of the tile map at VRAM
-    /// offset `map`.
-    fn map_pixel(&self, map: usize, x: usize, y: usize) -> BgPixel {
-        let entry = map + (y / 8) * 32 + x / 8;
+    /// Fills `pixels` from the tile map at VRAM offset `map`, starting at
+    /// map position (`x`, `y`) and going right, wrapping around the map's
+    /// 256-pixel width.
+    fn draw_map(&self, map: usize, x: usize, y: usize, pixels: &mut [BgPixel]) {
+        // The tile row last decoded and its map column: neighbouring
+        // pixels mostly share one.
+        let (mut row, mut row_column) = ([BgPixel::default(); 8], usize::MAX);
+        for (offset, pixel) in pixels.iter_mut().enumerate() {
+            let x = (x + offset) & 0xFF;
+            if x / 8 != row_column {
+                row_column = x / 8;
+                row = self.tile_row(map, row_column, y);
+            }
+            *pixel = row[x % 8];
+        }
+    }
+
+    /// The eight pixels of line `y` (in map pixels) of the tile in map
+    /// column `column` of the tile map at VRAM offset `map`, left to right
+    /// after flipping.
+    fn tile_row(&self, map: usize, column: usize, y: usize) -> [BgPixel; 8] {
+        let entry = map + (y / 8) * 32 + column;
         let index = self.vram[entry];
         // Attributes live at the same offset in bank 1.
         let attributes = if self.cgb() {
@@ -434,16 +459,19 @@ impl Ppu {
         } else {
             y % 8
         };
-        let column = if attributes & 0x20 != 0 {
-            7 - x % 8
-        } else {
-            x % 8
-        };
-        BgPixel {
-            color: self.tile_pixel(bank + self.bg_tile_address(index), row, column),
-            palette: attributes & 7,
-            priority: attributes & 0x80 != 0,
-        }
+        let tile_address = bank + self.bg_tile_address(index);
+        std::array::from_fn(|pixel| {
+            let column = if attributes & 0x20 != 0 {
+                7 - pixel
+            } else {
+                pixel
+            };
+            BgPixel {
+                color: self.tile_pixel(tile_address, row, column),
+                palette: attributes & 7,
+                priority: attributes & 0x80 != 0,
+            }
+        })
     }
 
     fn render_line(&mut self) {
@@ -458,9 +486,7 @@ impl Ppu {
                 0x1800
             };
             let y = usize::from(self.ly.wrapping_add(self.scy));
-            for (x, pixel) in background.iter_mut().enumerate() {
-                *pixel = self.map_pixel(map, (x + usize::from(self.scx)) & 0xFF, y);
-            }
+            self.draw_map(map, usize::from(self.scx), y, &mut background);
 
             if self.window_visible_on_line() {
                 let map = if self.lcdc & 0x40 != 0 {
@@ -471,20 +497,26 @@ impl Ppu {
                 let start = usize::from(self.wx).saturating_sub(7);
                 let skip = 7usize.saturating_sub(usize::from(self.wx));
                 let y = usize::from(self.window_line);
-                for (x, pixel) in background.iter_mut().enumerate().skip(start) {
-                    *pixel = self.map_pixel(map, x - start + skip, y);
+                if let Some(pixels) = background.get_mut(start..) {
+                    self.draw_map(map, skip, y, pixels);
                 }
                 self.window_line += 1;
             }
         }
 
+        // Each palette's colours, worked out once for the line: by palette
+        // (always 0 outside CGB mode) and colour index.
+        let colors: [u32; 32] = std::array::from_fn(|index| {
+            let (palette, color) = ((index / 4) as u8, (index % 4) as u8);
+            if self.cgb() {
+                cgb_color(&self.bg_palettes, palette, color)
+            } else {
+                self.dmg_color(0, palette_shade(self.bgp, color))
+            }
+        });
         let mut row = [WHITE; WIDTH];
         for (out, pixel) in row.iter_mut().zip(&background) {
-            *out = if self.cgb() {
-                cgb_color(&self.bg_palettes, pixel.palette, pixel.color)
-            } else {
-                self.dmg_color(0, palette_shade(self.bgp, pixel.color))
-            };
+            *out = colors[usize::from(pixel.palette) * 4 + usize::from(pixel.color)];
         }
         if self.lcdc & 0x02 != 0 {
             self.draw_sprites(&background, &mut row);
@@ -724,7 +756,7 @@ impl Ppu {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct BgPixel {
     /// Colour index 0–3 before the palette.
     color: u8,
@@ -846,6 +878,54 @@ mod tests {
     }
 
     #[test]
+    fn skipping_quiet_stat_updates_changes_nothing() {
+        let mut seed = 3_u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as u8
+        };
+        for model in [Model::Dmg, Model::Cgb] {
+            let mut ppu = Ppu::after_boot(model);
+            // Objects on most lines, so mode 3 lengths vary.
+            for byte in ppu.oam.iter_mut() {
+                *byte = next();
+            }
+            let mut every = ppu.clone();
+            let (mut flags, mut every_flags) = (0, 0);
+            for step in 0..300_000 {
+                // Now and then a write to STAT, LYC, the scroll or window
+                // registers, or LCDC (sometimes switching the LCD off).
+                if step % 61 == 0 {
+                    let address =
+                        [0xFF40, 0xFF41, 0xFF45, 0xFF43, 0xFF4A, 0xFF4B][usize::from(next() % 6)];
+                    let value = if address == 0xFF40 {
+                        next() | 0x80
+                    } else {
+                        next()
+                    };
+                    let value = if step % 4_000 == 0 { 0x11 } else { value };
+                    ppu.write_register(address, value, &mut flags);
+                    every.write_register(address, value, &mut every_flags);
+                }
+                let dots = if model == Model::Cgb && step % 2 == 0 {
+                    2
+                } else {
+                    4
+                };
+                ppu.tick(dots, &mut flags);
+                // What ticking did before: update the STAT line every time.
+                every.tick(dots, &mut every_flags);
+                if every.lcd_enabled() {
+                    every.update_stat_line(&mut every_flags);
+                }
+                let state = |ppu: &Ppu| (ppu.stat_line, ppu.lyc_match, ppu.mode, ppu.dot, ppu.ly);
+                assert_eq!(flags, every_flags, "{model:?} step {step}");
+                assert_eq!(state(&ppu), state(&every), "{model:?} step {step}");
+            }
+        }
+    }
+
+    #[test]
     fn ly_lyc_reads_0_as_ly_changes_and_holds_while_the_lcd_is_off() {
         let mut ppu = Ppu::after_boot(Model::Dmg);
         let mut flags = 0;
@@ -915,6 +995,60 @@ mod tests {
             flags = 0;
             ppu.write_register(0xFF41, 0x00, &mut flags);
             assert_eq!((stat_mode(&ppu), flags), (1, expected));
+        }
+    }
+
+    /// The background or window pixel at (`x`, `y`) of the tile map at
+    /// VRAM offset `map`, looked up on its own: what [`Ppu::draw_map`]
+    /// does a tile row at a time.
+    fn map_pixel(ppu: &Ppu, map: usize, x: usize, y: usize) -> BgPixel {
+        let entry = map + (y / 8) * 32 + x / 8;
+        let attributes = if ppu.cgb() {
+            ppu.vram[0x2000 + entry]
+        } else {
+            0
+        };
+        let bank = if attributes & 0x08 != 0 { 0x2000 } else { 0 };
+        let row = if attributes & 0x40 != 0 {
+            7 - y % 8
+        } else {
+            y % 8
+        };
+        let column = if attributes & 0x20 != 0 {
+            7 - x % 8
+        } else {
+            x % 8
+        };
+        BgPixel {
+            color: ppu.tile_pixel(bank + ppu.bg_tile_address(ppu.vram[entry]), row, column),
+            palette: attributes & 7,
+            priority: attributes & 0x80 != 0,
+        }
+    }
+
+    #[test]
+    fn drawing_a_map_by_tile_rows_matches_drawing_it_pixel_by_pixel() {
+        for model in [Model::Dmg, Model::Cgb] {
+            let mut ppu = Ppu::after_boot(model);
+            // Pseudo-random VRAM: every flip, bank, palette and priority.
+            let mut seed = 0x1234_5678_u32;
+            for byte in ppu.vram.iter_mut() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (seed >> 24) as u8;
+            }
+            for (lcdc, map) in [(0x91, 0x1800), (0x81, 0x1C00)] {
+                ppu.lcdc = lcdc;
+                for y in 0..256 {
+                    for x in (0..256).step_by(3) {
+                        let mut pixels = [BgPixel::default(); WIDTH];
+                        ppu.draw_map(map, x, y, &mut pixels);
+                        for (offset, pixel) in pixels.iter().enumerate() {
+                            let expected = map_pixel(&ppu, map, (x + offset) & 0xFF, y);
+                            assert_eq!(*pixel, expected, "{model:?} x {x} + {offset}, y {y}");
+                        }
+                    }
+                }
+            }
         }
     }
 
