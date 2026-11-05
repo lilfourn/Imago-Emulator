@@ -173,9 +173,11 @@ flush to the window's side as below.
 - **Notices and the speed readout move to the other margin** while the
   panel is open. Nothing is drawn over the screens.
 - **Closed.** No panel, and no leftover chrome in the margins. Moving
-  the mouse into an empty margin shows a quiet pill, "Ask about Omega
-  Ruby ⌘J", in the margin's top corner. It fades after 2 s without
-  movement. This is the visible way in (memory: every action needs one).
+  the mouse into the right margin fades in "Ask about Omega Ruby ⌘J" in
+  quiet grey words in the window's top right corner, on the traffic
+  lights' midline; under the pointer they light up on a faint pill. It
+  goes after 2 s without movement. This is the visible way in (memory:
+  every action needs one).
 
 ### 5.2 Ways in and out
 

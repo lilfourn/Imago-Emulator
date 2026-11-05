@@ -81,6 +81,10 @@ const GUIDE_PILL_REST: Duration = Duration::from_secs(2);
 /// The speed readout's grey: Apple's system grey, which reads on the
 /// dark stage and on a light game alike.
 const READOUT: u32 = 0x008E_8E93;
+/// The height of the pill that opens Guide and of the recording mark,
+/// which sit in the window's top right corner on the traffic lights'
+/// midline.
+const CORNER_PLATE: f32 = 24.0;
 /// How often the speed readout measures.
 const READOUT_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -212,6 +216,8 @@ pub struct EmulatorView {
     guide_pill: Option<Instant>,
     /// Hides the pill once the pointer has rested.
     guide_pill_hide: Option<Task<()>>,
+    /// Whether the pointer is on the pill, which keeps it and lights it.
+    guide_pill_hovered: bool,
     /// How hard Guide's model thinks, from the settings.
     guide_thinking: emu_guide::chat::Effort,
     /// Whether Guide looks answers up, from the settings.
@@ -582,6 +588,7 @@ impl EmulatorView {
             guide_open: false,
             guide_pill: None,
             guide_pill_hide: None,
+            guide_pill_hovered: false,
             guide_thinking: Settings::default().guide_thinking,
             guide_lookups: Settings::default().guide_lookups,
             _gamepad: gamepad_task,
@@ -1753,6 +1760,7 @@ impl EmulatorView {
         });
         self.guide_open = true;
         self.guide_pill = None;
+        self.guide_pill_hovered = false;
         self.release_all();
         cx.notify();
     }
@@ -1827,48 +1835,75 @@ impl EmulatorView {
         let shown = self.guide_pill.is_some();
         self.guide_pill = Some(Instant::now());
         if !shown {
+            // A pill taken away under the pointer never heard it leave.
+            self.guide_pill_hovered = false;
             cx.notify();
         }
+        self.hide_guide_pill_later(cx);
+    }
+
+    /// Hides the pill after [`GUIDE_PILL_REST`], unless the pointer is on
+    /// it then.
+    fn hide_guide_pill_later(&mut self, cx: &mut Context<Self>) {
         self.guide_pill_hide = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(GUIDE_PILL_REST).await;
             this.update(cx, |this, cx| {
-                this.guide_pill = None;
-                cx.notify();
+                if !this.guide_pill_hovered {
+                    this.guide_pill = None;
+                    cx.notify();
+                }
             })
             .ok();
         }));
     }
 
-    /// "Ask about Omega Ruby ⌘J", in the right margin's top corner.
+    /// "Ask about Omega Ruby ⌘J", quiet grey words in the window's top
+    /// right corner that light up under the pointer.
     fn guide_pill_element(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let title = self
             .guide
             .read(cx)
             .short_title()
             .or_else(|| self.guide_game(cx).map(|game| game.context.short_title()))?;
+        let quiet = |alpha: u8| rgba(crate::theme::with_alpha(0x00FF_FFFF, alpha));
+        // Lit by state, not a hover style: text takes its colour when laid
+        // out, before a hover style applies.
+        let lit = self.guide_pill_hovered;
         Some(
             div()
                 .id("guide-pill")
-                .absolute()
-                .top(px(TOP_BAR + 4.0))
-                .right(px(INSET))
                 .flex()
                 .items_center()
-                .gap(px(8.0))
-                .px(px(12.0))
-                .py(px(6.0))
+                .gap(px(6.0))
+                .h(px(CORNER_PLATE))
+                .px(px(CORNER_PLATE / 3.0))
                 .rounded_full()
-                .bg(rgba(0x0000_00A6))
-                .border_1()
-                .border_color(rgba(0xFFFF_FF1A))
-                .text_size(px(13.0))
-                .text_color(rgb(0x00ED_EDF0))
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if lit { rgb(0x00ED_EDF0) } else { rgb(READOUT) })
+                .when(lit, |pill| pill.bg(quiet(0x14)))
                 .cursor_pointer()
                 .child(format!("Ask about {title}"))
-                .child(div().text_color(rgb(0x00A1_A1AA)).child("⌘J"))
+                .child(
+                    div()
+                        .text_color(quiet(if lit { 0x8C } else { 0x59 }))
+                        .child("⌘J"),
+                )
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.guide_pill_hovered = *hovered;
+                    if !*hovered {
+                        this.hide_guide_pill_later(cx);
+                    }
+                    cx.notify();
+                }))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, window, cx| this.open_guide(window, cx)))
-                .children(probe::part("pill:guide")),
+                .children(probe::part("pill:guide"))
+                .with_animation(
+                    "guide-pill-in",
+                    Animation::new(Duration::from_millis(160)),
+                    |pill, delta| pill.opacity(delta),
+                ),
         )
     }
 
@@ -3311,15 +3346,36 @@ impl Render for EmulatorView {
                             .cached(StyleRefinement::default().size_full()),
                     ),
             );
-        } else if self.session.is_some() && self.guide_pill.is_some() && self.menu.is_none() {
-            root = root.children(self.guide_pill_element(cx));
         }
-        if self
+        // The top right corner, on the traffic lights' midline and clear
+        // of Guide's panel: the pill that opens Guide, then the recording
+        // mark.
+        let pill = (guide_width.is_none()
+            && self.session.is_some()
+            && self.guide_pill.is_some()
+            && self.menu.is_none())
+        .then(|| self.guide_pill_element(cx))
+        .flatten();
+        let recording = self
             .session
             .as_ref()
             .is_some_and(|session| session.recording)
-        {
-            root = root.child(recording_mark());
+            .then(recording_mark);
+        if pill.is_some() || recording.is_some() {
+            // As far in from the right as down from the top, for the
+            // plates and, with their padding, for the words in them.
+            let corner = TOP_BAR / 2.0 - CORNER_PLATE / 2.0;
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(corner))
+                    .right(px(guide_width.unwrap_or(0.0) + corner))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children(pill)
+                    .children(recording),
+            );
         }
         if let Some((menu, _)) = &self.menu {
             root = root.child(menu.clone());
@@ -3565,11 +3621,8 @@ fn adding_card(status: String) -> Div {
 /// A red dot and "REC" in the window's corner, on the traffic lights'
 /// midline, while a recording is under way. The recording is of the core's
 /// frames, so it never shows this.
-fn recording_mark() -> impl IntoElement {
+fn recording_mark() -> Div {
     overlay_plate(div())
-        .absolute()
-        .top(px(TOP_BAR / 2.0 - 12.0))
-        .right(px(INSET))
         .items_center()
         .gap_1()
         .child(div().size(px(8.0)).rounded_full().bg(rgb(0x00E5_3935)))
