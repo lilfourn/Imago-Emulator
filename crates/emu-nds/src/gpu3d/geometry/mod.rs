@@ -341,17 +341,25 @@ impl Geometry {
 
     /// Emits a polygon once enough vertices are pending.
     fn assemble(&mut self) {
+        let complete = match self.primitive {
+            Primitive::Triangles | Primitive::TriangleStrip => 3,
+            Primitive::Quads | Primitive::QuadStrip => 4,
+        };
+        if self.pending_len != complete {
+            return;
+        }
+        // Copied, as emitting changes `self`.
         let v = self.pending;
-        match (self.primitive, self.pending_len) {
-            (Primitive::Triangles, 3) => {
+        match self.primitive {
+            Primitive::Triangles => {
                 self.pending_len = 0;
                 self.emit(&v[..3], 0);
             }
-            (Primitive::Quads, 4) => {
+            Primitive::Quads => {
                 self.pending_len = 0;
                 self.emit(&v, 0);
             }
-            (Primitive::TriangleStrip, 3) => {
+            Primitive::TriangleStrip => {
                 let triangle = if self.strip_odd {
                     [v[1], v[0], v[2]]
                 } else {
@@ -362,12 +370,11 @@ impl Geometry {
                 self.pending_len = 2;
                 self.emit(&triangle, 2);
             }
-            (Primitive::QuadStrip, 4) => {
+            Primitive::QuadStrip => {
                 self.pending[..2].copy_from_slice(&v[2..4]);
                 self.pending_len = 2;
                 self.emit(&[v[0], v[1], v[3], v[2]], 2);
             }
-            _ => {}
         }
     }
 

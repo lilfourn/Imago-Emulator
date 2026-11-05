@@ -20,34 +20,38 @@
 //! For upscaling (NDS-9) the renderer can also draw each frame `scale`
 //! times larger in each direction, for the screen alone: the native frame
 //! is still drawn, because display capture puts it in VRAM where the game
-//! reads it. The larger frame is drawn in horizontal bands, each on its
-//! own thread. A band also draws `scale` rows beyond its own on either
-//! side, which is as far as edge marking looks, so every band's rows come
-//! out as if the frame were drawn whole.
+//! reads it. A band of the larger frame also draws `scale` rows beyond its
+//! own on either side, which is as far as edge marking looks, so every
+//! band's rows come out as if the frame were drawn whole.
 //!
-//! The native frame is drawn in bands too, a few, each on its own thread.
-//! At the native resolution alone, it draws while the machine runs on:
-//! textures are copied and polygons sorted first, so the drawing reads
-//! nothing the machine can change, and the frame is waited for when its
-//! first line is needed, about 50 lines later. It comes out the same as
-//! if it were drawn at once.
+//! Both frames draw in bands on a few [`workers`] threads, while the
+//! machine runs on: textures are copied and polygons sorted first, so the
+//! drawing reads nothing the machine can change. A native band is waited
+//! for when its first line is needed, the first about 50 lines later, and
+//! the larger frame when the screens are finished at the next VBlank. Each
+//! comes out the same as if it were drawn at once.
 
 mod pixel;
 mod post;
 mod raster;
 mod shade;
 mod texture;
+mod workers;
 
+use std::any::Any;
 use std::ops::Range;
-use std::thread::JoinHandle;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use self::pixel::{Buffers, Kind, PixelAttr, PolygonTarget};
 use self::raster::{Area, HEIGHT, WIDTH};
 use self::shade::Shader;
 use self::texture::TextureMemory;
+use self::workers::{Job, Workers};
 use super::color;
 use super::polygon::{Mode, Polygon, PolygonList};
-use super::registers::{RenderConfig, expand_depth};
+use super::registers::{RenderConfig, RenderRegisters, expand_depth};
 use crate::vram::Vram;
 
 /// Rear-plane bitmaps: colour in texture slot 2, depth in slot 3.
@@ -57,73 +61,102 @@ const REAR_DEPTH: u32 = 0x6_0000;
 /// The most times the native resolution the renderer draws at.
 pub(crate) const MAX_SCALE: usize = 8;
 
-/// Bands the larger frame is split into, each drawn on its own thread.
+/// Bands the larger frame is split into.
 const BANDS: usize = 16;
 
-/// Bands the native frame is split into, so it is drawn by the time its
-/// first line is needed.
-const NATIVE_BANDS: usize = 4;
+/// Bands the native frame is split into, so its first lines are drawn
+/// soon. On Platinum's overworld the machine waited 30–90 µs a frame for
+/// them with 4 bands, and about 3 µs with 8.
+const NATIVE_BANDS: usize = 8;
 
-/// What every polygon of a frame shares.
-struct Frame<'a> {
-    list: &'a PolygonList,
-    config: &'a RenderConfig,
-    /// Every texture the polygons use, already copied from VRAM.
-    memory: &'a TextureMemory,
+/// Everything a frame's polygons are drawn from, copied when the frame
+/// starts.
+#[derive(Debug, Clone)]
+struct Scene {
+    list: PolygonList,
+    config: RenderConfig,
+    /// Every texture the polygons use, copied from VRAM.
+    memory: TextureMemory,
     /// The toon table, 6 bits per channel.
     toon: [[u8; 3]; 32],
-    /// Polygon indices in drawing order.
-    order: &'a [usize],
-}
-
-/// Rows `owned` of a frame, drawn in buffers that reach a little beyond
-/// them.
-#[derive(Debug, Clone)]
-struct Band {
-    owned: Range<usize>,
-    buffers: Buffers,
-}
-
-/// The frame at the native resolution, which the game sees, and the
-/// scratch space for drawing it.
-#[derive(Debug)]
-struct Canvas {
-    /// The native frame, in [`NATIVE_BANDS`] bands.
-    bands: Vec<Band>,
-    memory: TextureMemory,
     /// Polygon indices in drawing order.
     order: Vec<usize>,
 }
 
-impl Default for Canvas {
+impl Default for Scene {
     fn default() -> Self {
         Self {
-            bands: bands(1, NATIVE_BANDS),
+            list: PolygonList::default(),
+            config: RenderRegisters::default().config(),
             memory: TextureMemory::default(),
+            toon: [[0; 3]; 32],
             order: Vec::new(),
         }
     }
 }
 
-/// A native frame drawing on a worker thread: everything it reads, owned.
-struct Job {
-    canvas: Box<Canvas>,
-    list: PolygonList,
-    config: RenderConfig,
-    toon: [[u8; 3]; 32],
+/// Rows `owned` of a frame, drawn in buffers that reach a little beyond
+/// them.
+#[derive(Debug)]
+struct Band {
+    owned: Range<usize>,
+    /// `None` while a worker draws the band.
+    buffers: Option<Buffers>,
 }
 
-/// The frame buffers and scratch space for drawing.
-#[derive(Debug, Default)]
+/// Which of the renderer's frames a band belongs to.
+#[derive(Debug, Clone, Copy)]
+enum Resolution {
+    Native,
+    Larger,
+}
+
+/// A band a worker has drawn, handed back.
+struct Drawn {
+    resolution: Resolution,
+    index: usize,
+    buffers: Buffers,
+    /// The panic that stopped the drawing, to raise on the machine's
+    /// thread.
+    panic: Option<Box<dyn Any + Send>>,
+}
+
+/// The frame buffers and the threads drawing them.
+#[derive(Debug)]
 pub(crate) struct Renderer {
-    /// The native frame, or `None` while `drawing` draws it.
-    canvas: Option<Box<Canvas>>,
-    /// The worker thread drawing the native frame, which hands the canvas
-    /// back.
-    drawing: Option<JoinHandle<Box<Canvas>>>,
+    /// What the last frame was drawn from, shared with the workers while
+    /// they draw it.
+    scene: Arc<Scene>,
+    /// The native frame, in [`NATIVE_BANDS`] bands; none before the first
+    /// frame.
+    native: Vec<Band>,
     /// The larger frame, for the screen only; none at the native
     /// resolution.
-    bands: Vec<Band>,
+    larger: Vec<Band>,
+    /// How many times larger than the native frame the larger one is.
+    scale: usize,
+    workers: Workers,
+    /// Where workers hand bands back.
+    sender: Sender<Drawn>,
+    receiver: Receiver<Drawn>,
+    /// Bands out with the workers.
+    drawing: usize,
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self {
+            scene: Arc::default(),
+            native: Vec::new(),
+            larger: Vec::new(),
+            scale: 1,
+            workers: Workers::default(),
+            sender,
+            receiver,
+            drawing: 0,
+        }
+    }
 }
 
 impl Renderer {
@@ -132,8 +165,10 @@ impl Renderer {
     /// `scale` is clamped to 1–[`MAX_SCALE`].
     pub(crate) fn set_scale(&mut self, scale: usize) {
         let scale = scale.clamp(1, MAX_SCALE);
-        if scale != self.scale() {
-            self.bands = if scale == 1 {
+        if scale != self.scale {
+            self.finish();
+            self.scale = scale;
+            self.larger = if scale == 1 {
                 Vec::new()
             } else {
                 bands(scale, BANDS)
@@ -144,134 +179,167 @@ impl Renderer {
     /// Draws the larger frame `scale` times larger in `count` bands.
     #[cfg(test)]
     pub(crate) fn split(&mut self, scale: usize, count: usize) {
-        self.bands = bands(scale, count);
+        self.finish();
+        self.scale = scale;
+        self.larger = bands(scale, count);
     }
 
     /// Draws the native frame in `count` bands.
     #[cfg(test)]
     pub(crate) fn split_native(&mut self, count: usize) {
-        self.canvas().bands = bands(1, count);
-    }
-
-    /// How many times larger than the native frame the larger one is; 1
-    /// when there is none.
-    pub(crate) fn scale(&self) -> usize {
-        self.bands.first().map_or(1, |band| band.buffers.area.scale)
-    }
-
-    /// The native frame, waiting for the worker thread drawing it if
-    /// there is one.
-    fn canvas(&mut self) -> &mut Canvas {
-        if let Some(drawing) = self.drawing.take() {
-            let canvas = drawing
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            self.canvas = Some(canvas);
-        }
-        self.canvas.get_or_insert_default()
+        self.finish();
+        self.native = bands(1, count);
     }
 
     /// Draws `list` with the rendering registers in `config`, reading
-    /// textures from `vram`. At the native resolution alone the drawing
-    /// finishes on a worker thread; [`Renderer::line`] waits for it.
+    /// textures from `vram` now. The drawing finishes on the workers;
+    /// [`Renderer::line`] and [`Renderer::scaled_frame`] wait for it.
     pub(crate) fn render(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) {
-        let toon = config.toon.map(|entry| color::rgb6(u32::from(entry)));
-        let canvas = self.canvas();
-        canvas.load_textures(list, config, &toon, vram);
-        canvas.sort(list);
-        if self.bands.is_empty() {
-            let job = Job {
-                canvas: self.canvas.take().expect("the canvas is back"),
-                list: list.clone(),
-                config: config.clone(),
-                toon,
-            };
-            self.drawing = Some(std::thread::spawn(move || job.draw()));
-            return;
+        self.finish();
+        if self.native.is_empty() {
+            self.native = bands(1, NATIVE_BANDS);
         }
-        let canvas = self.canvas.as_deref_mut().expect("the canvas is back");
-        let frame = Frame {
-            list,
-            config,
-            memory: &canvas.memory,
-            toon,
-            order: &canvas.order,
-        };
-        draw_bands(self.bands.iter_mut().chain(&mut canvas.bands), &frame);
+        // The workers have let go of the scene, so it is reused, not
+        // copied.
+        Arc::make_mut(&mut self.scene).load(list, config, vram);
+        // Native bands first: their lines are needed first.
+        let mut jobs = Vec::with_capacity(self.native.len() + self.larger.len());
+        for (resolution, bands) in [
+            (Resolution::Native, &mut self.native),
+            (Resolution::Larger, &mut self.larger),
+        ] {
+            for (index, band) in bands.iter_mut().enumerate() {
+                let buffers = band.buffers.take().expect("every band is back");
+                jobs.push(draw_job(
+                    Arc::clone(&self.scene),
+                    buffers,
+                    (resolution, index),
+                    self.sender.clone(),
+                ));
+            }
+        }
+        self.drawing = jobs.len();
+        self.workers.run(jobs);
     }
 
-    /// Row `y` of the last frame drawn, once it is drawn.
+    /// Row `y` of the last frame drawn, waiting for it if it is still
+    /// drawing.
     pub(crate) fn line(&mut self, y: usize) -> &[u32; WIDTH] {
         static BLANK: [u32; WIDTH] = [0; WIDTH];
-        band_row(&self.canvas().bands, y)
+        let Some(index) = self.native.iter().position(|band| band.owned.contains(&y)) else {
+            return &BLANK;
+        };
+        while self.native[index].buffers.is_none() {
+            self.receive();
+        }
+        band_row(&self.native[index], y)
             .and_then(|row| row.try_into().ok())
             .unwrap_or(&BLANK)
     }
 
-    /// Row `row` of the last larger frame drawn, `256 * scale` pixels, if
-    /// there is one.
-    pub(crate) fn scaled_row(&self, row: usize) -> Option<&[u32]> {
-        band_row(&self.bands, row)
-    }
-}
-
-impl Job {
-    /// Draws the frame and hands the canvas back.
-    fn draw(mut self) -> Box<Canvas> {
-        let canvas = &mut *self.canvas;
-        let frame = Frame {
-            list: &self.list,
-            config: &self.config,
-            memory: &canvas.memory,
-            toon: self.toon,
-            order: &canvas.order,
-        };
-        draw_bands(&mut canvas.bands, &frame);
-        self.canvas
-    }
-}
-
-/// Draws `frame` into every band, each on its own thread.
-fn draw_bands<'a>(bands: impl IntoIterator<Item = &'a mut Band>, frame: &Frame<'_>) {
-    std::thread::scope(|scope| {
-        for band in bands {
-            scope.spawn(move || draw_frame(&mut band.buffers, frame));
+    /// The last larger frame drawn, waiting for it if it is still drawing.
+    pub(crate) fn scaled_frame(&mut self) -> ScaledFrame<'_> {
+        while self.larger.iter().any(|band| band.buffers.is_none()) {
+            self.receive();
         }
-    });
+        ScaledFrame(&self.larger)
+    }
+
+    /// Waits for every band out with the workers.
+    fn finish(&mut self) {
+        while self.drawing > 0 {
+            self.receive();
+        }
+    }
+
+    /// Waits for a worker to hand a band back, and puts it in place. A
+    /// panic in the worker carries on here.
+    fn receive(&mut self) {
+        let drawn = self.receiver.recv().expect("the renderer keeps a sender");
+        self.drawing -= 1;
+        let bands = match drawn.resolution {
+            Resolution::Native => &mut self.native,
+            Resolution::Larger => &mut self.larger,
+        };
+        bands[drawn.index].buffers = Some(drawn.buffers);
+        if let Some(panic) = drawn.panic {
+            std::panic::resume_unwind(panic);
+        }
+    }
 }
 
-/// Row `row` of a frame drawn in `bands`, from the band that owns it.
-fn band_row(bands: &[Band], row: usize) -> Option<&[u32]> {
-    let band = bands.iter().find(|band| band.owned.contains(&row))?;
-    let area = band.buffers.area;
+/// A job drawing `scene` into `buffers`, band `index` of a frame, that
+/// hands them back through `sender`.
+fn draw_job(
+    scene: Arc<Scene>,
+    mut buffers: Buffers,
+    (resolution, index): (Resolution, usize),
+    sender: Sender<Drawn>,
+) -> Job {
+    Box::new(move || {
+        let drawing = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            draw_frame(&mut buffers, &scene);
+        }));
+        // Let go of the scene first, so the next frame can reuse it.
+        drop(scene);
+        // Nobody is waiting once the renderer is gone.
+        let _ = sender.send(Drawn {
+            resolution,
+            index,
+            buffers,
+            panic: drawing.err(),
+        });
+    })
+}
+
+/// The rows of a larger frame, which several threads can read at once.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScaledFrame<'a>(&'a [Band]);
+
+impl<'a> ScaledFrame<'a> {
+    /// Row `row`, `256 * scale` pixels; `None` without a larger frame.
+    pub(crate) fn row(self, row: usize) -> Option<&'a [u32]> {
+        let band = self.0.iter().find(|band| band.owned.contains(&row))?;
+        band_row(band, row)
+    }
+}
+
+/// Row `row` of a frame, from `band`, which owns it.
+fn band_row(band: &Band, row: usize) -> Option<&[u32]> {
+    let buffers = band.buffers.as_ref()?;
+    let area = buffers.area;
     let start = area.index(0, row);
-    band.buffers.color.get(start..start + area.width())
+    buffers.color.get(start..start + area.width())
 }
 
-impl Canvas {
+impl Scene {
+    /// Copies everything a frame of `list` reads, with the rendering
+    /// registers in `config`, and sorts its polygons.
+    fn load(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) {
+        self.list.copy_from(list);
+        self.config.clone_from(config);
+        self.toon = config.toon.map(|entry| color::rgb6(u32::from(entry)));
+        self.load_textures(vram);
+        self.sort();
+    }
+
     /// Copies every texture the frame reads from VRAM: the rear-plane
     /// bitmap and each polygon's texture and palette.
-    fn load_textures(
-        &mut self,
-        list: &PolygonList,
-        config: &RenderConfig,
-        toon: &[[u8; 3]; 32],
-        vram: &Vram,
-    ) {
+    fn load_textures(&mut self, vram: &Vram) {
         self.memory.invalidate();
-        if config.rear_bitmap {
+        if self.config.rear_bitmap {
             self.memory.load_texture(vram, REAR_COLOR, 0x4_0000);
         }
-        for polygon in &list.polygons {
-            if let Some(sampler) = Shader::new(polygon, config, toon).sampler() {
+        for polygon in &self.list.polygons {
+            if let Some(sampler) = Shader::new(polygon, &self.config, &self.toon).sampler() {
                 sampler.load(&mut self.memory, vram);
             }
         }
     }
 
     /// Opaque polygons by their Y range, then translucent ones.
-    fn sort(&mut self, list: &PolygonList) {
-        let polygons = &list.polygons;
+    fn sort(&mut self) {
+        let polygons = &self.list.polygons;
         let key = |&index: &usize| (polygons[index].bottom, polygons[index].top);
         self.order.clear();
         self.order
@@ -280,7 +348,7 @@ impl Canvas {
         let opaque = self.order.len();
         self.order
             .extend((0..polygons.len()).filter(|&i| polygons[i].translucent));
-        if !list.manual_sort {
+        if !self.list.manual_sort {
             self.order[opaque..].sort_by_key(key);
         }
     }
@@ -302,26 +370,26 @@ fn bands(scale: usize, count: usize) -> Vec<Band> {
             };
             Band {
                 owned,
-                buffers: Buffers::new(area),
+                buffers: Some(Buffers::new(area)),
             }
         })
         .collect()
 }
 
-/// Draws `frame` into `buffers`, then marks edges, adds fog and smooths
+/// Draws `scene` into `buffers`, then marks edges, adds fog and smooths
 /// edges as the registers ask.
-fn draw_frame(buffers: &mut Buffers, frame: &Frame<'_>) {
-    clear(buffers, frame);
+fn draw_frame(buffers: &mut Buffers, scene: &Scene) {
+    clear(buffers, scene);
     let mut shadow_drawn = false;
-    for &index in frame.order {
+    for &index in &scene.order {
         draw(
             buffers,
-            &frame.list.polygons[index],
-            frame,
+            &scene.list.polygons[index],
+            scene,
             &mut shadow_drawn,
         );
     }
-    let config = frame.config;
+    let config = &scene.config;
     if config.edge_marking {
         post::mark_edges(buffers, config);
     }
@@ -335,8 +403,8 @@ fn draw_frame(buffers: &mut Buffers, frame: &Frame<'_>) {
 
 /// Fills the top layer of `buffers` with the rear plane. The layer beneath
 /// is only read under anti-aliased edges, which fill it.
-fn clear(buffers: &mut Buffers, frame: &Frame<'_>) {
-    let config = frame.config;
+fn clear(buffers: &mut Buffers, scene: &Scene) {
+    let config = &scene.config;
     let clear_id = ((config.clear_color >> 24) & 0x3F) as u8;
     let area = buffers.area;
     let layer = buffers.layer;
@@ -366,8 +434,8 @@ fn clear(buffers: &mut Buffers, frame: &Frame<'_>) {
         let x = ((index % width / area.scale) as u32 + offset_x) & 0xFF;
         let y = (((area.top + index / width) / area.scale) as u32 + offset_y) & 0xFF;
         let offset = (y * 256 + x) * 2;
-        let rear_color = frame.memory.texture_16(REAR_COLOR + offset);
-        let rear_depth = frame.memory.texture_16(REAR_DEPTH + offset);
+        let rear_color = scene.memory.texture_16(REAR_COLOR + offset);
+        let rear_depth = scene.memory.texture_16(REAR_DEPTH + offset);
         let alpha = if rear_color & 0x8000 != 0 { 31 } else { 0 };
         *pixel = color::pack(color::rgb6(u32::from(rear_color)), alpha);
         *depth = expand_depth(u32::from(rear_depth));
@@ -377,10 +445,10 @@ fn clear(buffers: &mut Buffers, frame: &Frame<'_>) {
 
 /// Draws one polygon into `buffers`. `shadow_drawn` tracks whether a
 /// shadow polygon has drawn since the last shadow mask.
-fn draw(buffers: &mut Buffers, polygon: &Polygon, frame: &Frame<'_>, shadow_drawn: &mut bool) {
-    let (list, config) = (frame.list, frame.config);
+fn draw(buffers: &mut Buffers, polygon: &Polygon, scene: &Scene, shadow_drawn: &mut bool) {
+    let (list, config) = (&scene.list, &scene.config);
     let attr = polygon.attr;
-    let shader = Shader::new(polygon, config, &frame.toon);
+    let shader = Shader::new(polygon, config, &scene.toon);
     let kind = match (attr.mode(), attr.id()) {
         (Mode::Shadow, 0) => {
             // A new shadow volume starts with a clean stencil.
@@ -398,7 +466,7 @@ fn draw(buffers: &mut Buffers, polygon: &Polygon, frame: &Frame<'_>, shadow_draw
     let area = buffers.area;
     let mut target = PolygonTarget {
         buffers,
-        memory: frame.memory,
+        memory: &scene.memory,
         shader: &shader,
         kind,
         id: attr.id(),
@@ -435,7 +503,7 @@ mod tests {
             for band in &bands {
                 assert_eq!(band.owned.start, next);
                 next = band.owned.end;
-                let area = band.buffers.area;
+                let area = band.buffers.as_ref().expect("not drawing").area;
                 // Edge marking reaches `scale` rows: one to the neighbour,
                 // then up to `scale - 1` back over the polygon.
                 assert!(area.top + scale <= band.owned.start || area.top == 0);
@@ -443,5 +511,35 @@ mod tests {
             }
             assert_eq!(next, HEIGHT * scale);
         }
+    }
+
+    #[test]
+    fn a_panic_while_drawing_reaches_the_reader() {
+        let mut renderer = Renderer {
+            native: bands(1, 1),
+            ..Renderer::default()
+        };
+        // A drawing order naming a polygon the list does not have.
+        let broken = Scene {
+            order: vec![7],
+            ..Scene::default()
+        };
+        let buffers = renderer.native[0].buffers.take().expect("not drawing");
+        renderer.drawing = 1;
+        let job = draw_job(
+            Arc::new(broken),
+            buffers,
+            (Resolution::Native, 0),
+            renderer.sender.clone(),
+        );
+        renderer.workers.run(vec![job]);
+        let reading = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            renderer.line(0);
+        }));
+        assert!(reading.is_err(), "the panic carries on");
+        // The band is back, so the next frame draws.
+        let config = RenderRegisters::default().config();
+        renderer.render(&PolygonList::default(), &config, &Vram::default());
+        assert_eq!(renderer.line(0)[0], 0);
     }
 }

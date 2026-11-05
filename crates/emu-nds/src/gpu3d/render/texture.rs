@@ -202,7 +202,9 @@ impl Sampler {
         memory.load_palette(vram, self.palette, colors * 2);
     }
 
-    /// The texel at `s`, `t` (in texels, before wrapping).
+    /// The texel at `s`, `t` (in texels, before wrapping). Inlined into
+    /// the rasterizer's loop, where it is most of the work per pixel.
+    #[inline(always)]
     pub(crate) fn sample(&self, memory: &TextureMemory, s: i32, t: i32) -> Texel {
         let param = self.param;
         let width_shift = param.width_shift();
@@ -243,6 +245,7 @@ impl Sampler {
         memory.palette_16(self.palette + u32::from(index) * 2)
     }
 
+    #[inline]
     fn indexed(&self, memory: &TextureMemory, index: u8) -> Texel {
         if index == 0 && self.param.color0_transparent() {
             TRANSPARENT
