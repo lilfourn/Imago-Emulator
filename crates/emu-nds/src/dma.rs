@@ -215,8 +215,8 @@ impl Dma {
         }
     }
 
-    /// Whether any enabled channel waits for `timing`.
-    #[cfg(test)]
+    /// Whether any enabled channel waits for `timing`: whether
+    /// [`Dma::trigger`] would start one.
     pub(crate) fn waiting_for(&self, timing: Timing) -> bool {
         (0..4).any(|index| self.channels[index].enabled() && self.timing(index) == timing)
     }

@@ -156,7 +156,7 @@ impl Linked {
             for index in 0..2 {
                 let machine = &mut self.players[index].machine;
                 while !done[index] && machine.now() < target {
-                    let progress = machine.run_slice_with(&mut steppers[index], |_, _| {});
+                    let progress = machine.run_slice_with(&mut steppers[index], target);
                     if progress.stopped {
                         self.resume = Some(Resume {
                             target,
@@ -245,8 +245,7 @@ impl Core for Linked {
 
     fn save_state(&self, out: &mut Vec<u8>) {
         let machines = (&self.players[0].machine, &self.players[1].machine);
-        let bytes = postcard::to_stdvec(&machines).expect("machine state always serializes");
-        out.extend_from_slice(&bytes);
+        crate::bytes::append(&machines, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {

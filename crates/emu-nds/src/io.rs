@@ -13,6 +13,24 @@ use crate::ipc::Side;
 /// Registers that live in the ARM9's or ARM7's 0x04000000 page.
 const IO_PAGE: u32 = 0x1FFF;
 
+/// `word` with the halfword that a 16-bit access at `offset` covers (the
+/// low one if bit 1 is clear, else the high one) replaced by `half`.
+fn with_half(word: u32, offset: u32, half: u16) -> u32 {
+    let shift = (offset & 2) * 8;
+    (word & !(0xFFFF << shift)) | u32::from(half) << shift
+}
+
+/// The VRAM bank (A-I as 0-8) whose VRAMCNT byte is at `offset`:
+/// 0x240-0x246, then 0x248-0x249 past WRAMCNT.
+fn vram_bank(offset: u32) -> usize {
+    let bank = if offset < 0x247 {
+        offset - 0x240
+    } else {
+        offset - 0x241
+    };
+    bank as usize
+}
+
 impl Hardware {
     fn raw(&self, side: Side) -> &[u8] {
         match side {
@@ -119,8 +137,7 @@ impl Hardware {
             0x0B0..=0x0DF => {
                 let register = (offset - 0xB0) & !3;
                 let current = self.cpu(side).dma.read(register);
-                let shift = (offset & 2) * 8;
-                let merged = (current & !(0xFFFF << shift)) | u32::from(value) << shift;
+                let merged = with_half(current, offset, value);
                 self.cpu_mut(side).dma.write(register, merged);
             }
             0x100..=0x10F => {
@@ -168,9 +185,7 @@ impl Hardware {
                 }
             }
             0x1A4 | 0x1A6 => {
-                let shift = (offset & 2) * 8;
-                let current = self.cart.rom_control();
-                let merged = (current & !(0xFFFF << shift)) | u32::from(value) << shift;
+                let merged = with_half(self.cart.rom_control(), offset, value);
                 let event = self.cart.write_rom_control(merged);
                 self.rom_event(event);
             }
@@ -317,14 +332,7 @@ impl Hardware {
     fn io9_page_8(&self, address: u32) -> u8 {
         let offset = address & IO_PAGE;
         match offset {
-            0x240..=0x246 | 0x248 | 0x249 => {
-                let bank = if offset < 0x247 {
-                    offset - 0x240
-                } else {
-                    offset - 0x241
-                };
-                self.vram.control(bank as usize)
-            }
+            0x240..=0x246 | 0x248 | 0x249 => self.vram.control(vram_bank(offset)),
             0x247 => self.wramcnt,
             _ => (self.io9_page_16(address & !1) >> ((address & 1) * 8)) as u8,
         }
@@ -358,9 +366,7 @@ impl Hardware {
             }
             0x280..=0x2BF => {
                 let register = (offset - 0x280) & !3;
-                let shift = (offset & 2) * 8;
-                let current = self.math.read(register);
-                let merged = (current & !(0xFFFF << shift)) | u32::from(value) << shift;
+                let merged = with_half(self.math.read(register), offset, value);
                 self.math.write(register, merged);
             }
             0x300 => self.arm9.postflg = (value & 3) as u8,
@@ -377,14 +383,7 @@ impl Hardware {
         }
         let offset = address & IO_PAGE;
         match offset {
-            0x240..=0x246 | 0x248 | 0x249 => {
-                let bank = if offset < 0x247 {
-                    offset - 0x240
-                } else {
-                    offset - 0x241
-                };
-                self.vram.set_control(bank as usize, value);
-            }
+            0x240..=0x246 | 0x248 | 0x249 => self.vram.set_control(vram_bank(offset), value),
             0x247 => self.wramcnt = value & 3,
             // IF: only this byte's ones clear flags.
             0x214..=0x217 => self

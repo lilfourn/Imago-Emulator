@@ -325,7 +325,7 @@ impl Nds {
         // A frame ends at VBlank, or after a frame's time if that never
         // comes.
         while self.machine.now() - start < FRAME_CYCLES {
-            let progress = self.machine.run_slice_with(stepper, |_, _| {});
+            let progress = self.machine.run_slice_with(stepper, start + FRAME_CYCLES);
             if progress.stopped {
                 return false;
             }
@@ -386,8 +386,7 @@ impl Core for Nds {
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
-        let bytes = postcard::to_stdvec(&self.machine).expect("machine state always serializes");
-        out.extend_from_slice(&bytes);
+        bytes::append(&self.machine, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
