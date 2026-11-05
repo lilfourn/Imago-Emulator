@@ -247,3 +247,55 @@ Two things were fixed:
    `3DS/helper.lock` for as long as it runs and waits up to 5 s for the
    last to let go, so two cores never write the same emulated NAND and SD
    card.
+
+## Update, 2026-11-05: white Pokémon
+
+In Pokémon Omega Ruby, Magikarp drew white, all but its outline and the
+inside of its mouth, in the Pokédex and on its summary. Grovyle, Treecko
+and Ralts drew right. It wasn't the save state the game was resumed from:
+a copy of the player's in-game save, started cold and played to Magikarp's
+summary with no state loaded, drew it white too. Azahar's issue #1445
+reports the same in Pokémon X and Alpha Sapphire, mostly on Android.
+
+Started from the same point with one option changed at a time:
+
+| How vertices were shaded | Magikarp | Summary screen, unpaced | Slateport, unpaced |
+|---|---|---|---|
+| CPU, the shader JIT (since the 2026-11-04 update) | white | 246–250 fps | 816–946 fps |
+| CPU, the interpreter (`citra_use_shader_jit` off) | right | 107–109 fps | 544–580 fps |
+| GPU (`citra_use_hw_shader` on) | right | 464–643 fps | 841–1,075 fps |
+| CPU, the JIT, on the software renderer | white | | |
+
+So it was the shader JIT for arm64. Its `LG2` splits the exponent off its
+input and converts it to a float with `UCVTF`, as unsigned, so the
+exponent of any input below 1 comes out as about 4.29 billion. Shaders
+raise numbers below 1 to a power as `EX2(n * LG2(x))`, which then
+overflows. The x86-64 JIT converts it as signed (`cvtsi2ss`). The arm64
+JIT has had this since it was written for Citra in 2023 (#7002), and
+Azahar's master still has it.
+
+Shading on the GPU brings back the first-time freezes, and the
+interpreter can't keep up with 3× fast forward on a screen with a Pokémon
+on it. So the installer fixes the core instead (`emu_3ds::jit_fix`, from
+`install::ensure`, which also fixes a core installed before). The JIT
+builds each instruction it emits in a register, so the fix changes the
+`MOVK` that makes `UCVTF S4, S4` (`0x7E21D884`) into one that makes
+`SCVTF S4, S4` (`0x5E21D884`), at both places the JIT adds it to the
+code. It then rehashes the one 4 KiB page they sit in, in the core's ad
+hoc, linker-made code signature, which macOS checks pages against as it
+maps them. The core's SHA-256 is checked before and after, so only the
+pinned core changes, and only into the pinned result. The fixed core
+replaces the original by a rename, so a helper still running the
+original keeps it. The x86-64 core needs no fix.
+
+Checked: Magikarp drew right from the same cold start on the fixed core,
+which macOS loaded and `codesign --verify` passed. Slateport and
+Grovyle's summary drew the same on both cores. The fixed core changes one
+bit of one instruction, so it runs as fast as the original. Run for real,
+the installer's ignored test downloads both parts, fixes the core and
+verifies its signature.
+
+Azahar's contributing rules turn away issues and pull requests written by
+AI, so the fix isn't reported upstream yet. A draft for a person to check
+and file is in the 3DS research kit. Once Azahar ships the fix, the next
+pinned core needs no `jit_fix`.

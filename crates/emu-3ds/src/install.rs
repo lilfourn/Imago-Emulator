@@ -14,6 +14,10 @@
 //! together or the app and the headless runner, from racing: the second
 //! waits for the first and then finds its parts.
 //!
+//! A part may come with a fix for a bug in it, which [`ensure`] applies to
+//! the installed library, one already installed too: the core for Apple
+//! silicon gets one for its shader JIT (`jit_fix`).
+//!
 //! Everything here blocks.
 
 use std::fs::{self, File};
@@ -23,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use sha2::{Digest, Sha256};
+
+use crate::jit_fix::{self, Fix};
 
 /// The installed files the helper loads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,12 +100,15 @@ const CORE_ARM64: Download<'static> = Download {
     archive: Archive::Zip,
     library: "azahar_libretro.dylib",
     license: None,
+    fix: Some(jit_fix::LOG2),
 };
 
-/// The same core for Intel Macs (8.28 MB).
+/// The same core for Intel Macs (8.28 MB), whose shader JIT has no such
+/// bug.
 const CORE_X86_64: Download<'static> = Download {
     url: "https://github.com/azahar-emu/azahar/releases/download/2126.2/azahar-libretro-macos-x86_64-2126.2.zip",
     sha256: "d65abafb775c964f9064a8319099b2346cd8983d4e58c079f899f6fb5d00aaae",
+    fix: None,
     ..CORE_ARM64
 };
 
@@ -113,6 +122,7 @@ const MOLTENVK: Download<'static> = Download {
     archive: Archive::Tar,
     library: "MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib",
     license: Some("MoltenVK/LICENSE"),
+    fix: None,
 };
 
 /// The pinned parts for this Mac.
@@ -149,16 +159,18 @@ pub fn install(data: &Path) -> Result<Parts, InstallError> {
 }
 
 /// The installed parts in `data`, installing them first if they are not
-/// there.
+/// there, with their fixes applied.
 ///
 /// # Errors
 ///
-/// As [`install`].
+/// As [`install`], or if a fixed library cannot be written.
 pub fn ensure(data: &Path) -> Result<Parts, InstallError> {
-    match installed(data) {
-        Some(parts) => Ok(parts),
-        None => install(data),
-    }
+    let parts = match installed(data) {
+        Some(parts) => parts,
+        None => install(data)?,
+    };
+    PINS.core.fix(data)?;
+    Ok(parts)
 }
 
 /// Fetches the file at a URL into a path, or says why it could not.
@@ -226,6 +238,8 @@ struct Download<'a> {
     /// The license's path in the archive, if it holds one, kept as
     /// `LICENSE` beside the library.
     license: Option<&'a str>,
+    /// A fix for a bug in the library, applied once it is installed.
+    fix: Option<Fix<'a>>,
 }
 
 /// How a download is packed.
@@ -258,6 +272,22 @@ impl Download<'_> {
         let prepared = temp.join(self.folder);
         self.prepare(&unpacked, &prepared)?;
         place(&prepared, &data.join(self.folder))?;
+        Ok(())
+    }
+
+    /// Applies this part's fix to its library in `data`, if it has one the
+    /// library still wants, once no install is under way.
+    fn fix(&self, data: &Path) -> Result<(), InstallError> {
+        let Some(fix) = self.fix else {
+            return Ok(());
+        };
+        let library = self.library_path(data);
+        if fix.wanted(&library)? {
+            let _lock = lock(data)?;
+            // Another process may have fixed it while this one waited,
+            // and then it is no longer the library the fix is for.
+            fix.apply(&library)?;
+        }
         Ok(())
     }
 
@@ -772,8 +802,16 @@ mod tests {
             assert_eq!(mode(library), 0o755);
         }
         assert!(data.join("moltenvk-1.4.2/LICENSE").is_file());
-        assert_eq!(installed(&data), Some(parts));
+        assert_eq!(installed(&data), Some(parts.clone()));
         assert_eq!(leftovers(&data), Vec::<String>::new());
+
+        // The core gets its fix, signed so that macOS still loads it.
+        assert_eq!(ensure(&data).expect("ensure"), parts);
+        if let Some(fix) = PINS.core.fix {
+            assert!(!fix.wanted(&parts.core).expect("wanted"), "fixed");
+            run("/usr/bin/codesign", &[Path::new("--verify"), &parts.core]);
+        }
+        assert_eq!(mode(&parts.core), 0o755);
         fs::remove_dir_all(&data).ok();
     }
 }

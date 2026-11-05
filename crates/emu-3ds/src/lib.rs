@@ -23,6 +23,7 @@ pub mod install;
 
 #[allow(unsafe_code)]
 mod host;
+mod jit_fix;
 #[allow(unsafe_code)]
 mod libretro;
 mod link;
