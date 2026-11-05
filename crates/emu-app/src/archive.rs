@@ -331,7 +331,7 @@ fn listed_size(archive: &Path) -> u64 {
 
 /// The size of the files under `folder`, without following links. What
 /// cannot be read counts for nothing.
-fn folder_size(folder: &Path) -> u64 {
+pub fn folder_size(folder: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(folder) else {
         return 0;
     };

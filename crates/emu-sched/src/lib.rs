@@ -105,6 +105,13 @@ impl<E> Scheduler<E> {
         self.next_time().map(|time| time.saturating_sub(self.now))
     }
 
+    /// Whether an event is due at or before now: whether
+    /// [`Scheduler::pop_due`] would return one.
+    #[must_use]
+    pub fn has_due(&self) -> bool {
+        self.next_time().is_some_and(|time| time <= self.now)
+    }
+
     /// Removes and returns the earliest event due at or before now.
     pub fn pop_due(&mut self) -> Option<Due<E>> {
         if self.next_time()? > self.now {
@@ -220,9 +227,11 @@ mod tests {
         let mut sched = Scheduler::new();
         sched.schedule_in(100, 'a');
         sched.advance(99);
+        assert!(!sched.has_due());
         assert_eq!(sched.pop_due(), None);
         assert_eq!(sched.cycles_until_next(), Some(1));
         sched.advance(1);
+        assert!(sched.has_due());
         assert_eq!(
             sched.pop_due(),
             Some(Due {

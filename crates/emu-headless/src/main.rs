@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! emu-headless [--system gb|gba|nds|3ds] [--frames N] [--start-time SECS] [--dump DIR]
-//!              [--wav FILE] [--script FILE.lua] [--work-dir DIR] ROM
+//!              [--wav FILE] [--script FILE.lua] [--work-dir DIR] [--state FILE]
+//!              [--scale N] [--time] [--digest] ROM
 //! ```
 //!
 //! An RPG Maker game's folder plays in place of a ROM, in a hidden player
@@ -32,11 +33,24 @@
 //! run after that frame, and `frames=` then says how many ran. Save-state
 //! slots live in memory for the run. Drawing is ignored. A script error
 //! ends the run with exit status 1.
+//!
+//! For benchmarks and before-and-after checks of a change that should
+//! change nothing:
+//!
+//! - `--state FILE` starts from a save state, such as a game's `.ss0`
+//!   checkpoint, after checking it is for this system and ROM;
+//! - `--scale N` draws the DS's 3D at N times its resolution;
+//! - `--time` adds a line with how long the frames took to run:
+//!   `elapsed_ms=… ms_per_frame=… fps=…`;
+//! - `--digest` adds a line with the CRC-32s of every sound sample made
+//!   and of the save state after the last frame: `audio_crc32=…
+//!   state_crc32=…`. Same ROM, state and frames, same line.
 
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, bail};
 use emu_core::debug::Stops;
@@ -45,7 +59,7 @@ use emu_script::{Output, Script, StateRequest};
 
 const USAGE: &str = "usage: emu-headless [--system gb|gba|nds|3ds] [--frames N] \
                      [--start-time SECS] [--dump DIR] [--wav FILE] [--script FILE.lua] \
-                     [--work-dir DIR] ROM";
+                     [--work-dir DIR] [--state FILE] [--scale N] [--time] [--digest] ROM";
 
 struct Args {
     rom: PathBuf,
@@ -56,6 +70,10 @@ struct Args {
     wav: Option<PathBuf>,
     script: Option<PathBuf>,
     work_dir: Option<PathBuf>,
+    state: Option<PathBuf>,
+    scale: Option<u32>,
+    time: bool,
+    digest: bool,
 }
 
 fn main() -> ExitCode {
@@ -88,6 +106,10 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     let mut wav = None;
     let mut script = None;
     let mut work_dir = None;
+    let mut state = None;
+    let mut scale = None;
+    let mut time = false;
+    let mut digest = false;
     while let Some(arg) = argv.next() {
         let mut value = |name: &str| argv.next().with_context(|| format!("{name} needs a value"));
         match arg.as_str() {
@@ -100,6 +122,10 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
             "--wav" => wav = Some(PathBuf::from(value("--wav")?)),
             "--script" => script = Some(PathBuf::from(value("--script")?)),
             "--work-dir" => work_dir = Some(PathBuf::from(value("--work-dir")?)),
+            "--state" => state = Some(PathBuf::from(value("--state")?)),
+            "--scale" => scale = Some(value("--scale")?.parse().context("--scale")?),
+            "--time" => time = true,
+            "--digest" => digest = true,
             "-h" | "--help" => bail!("help requested"),
             flag if flag.starts_with('-') => bail!("unknown option {flag}"),
             path if rom.is_none() => rom = Some(PathBuf::from(path)),
@@ -115,29 +141,44 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
         wav,
         script,
         work_dir,
+        state,
+        scale,
+        time,
+        digest,
     })
 }
 
 fn run(args: &Args) -> anyhow::Result<()> {
     let (system, mut core) = open(args)?;
+    if let Some(scale) = args.scale {
+        core.set_render_scale(scale);
+    }
+    if let Some(path) = &args.state {
+        load_state_file(path, system, &args.rom, &mut *core)
+            .with_context(|| format!("loading {}", path.display()))?;
+    }
 
     let mut out = BufWriter::new(io::stdout().lock());
     let mut audio = Vec::new();
+    let mut audio_crc = crc32fast::Hasher::new();
+    // Sound is kept only for a WAV file; otherwise each frame's is hashed
+    // for the digest and dropped.
+    let keep_audio = args.wav.is_some();
+    let started = Instant::now();
     let frames = match &args.script {
-        Some(path) => run_script(path, &mut *core, args, &mut audio, &mut out)?,
+        Some(path) => run_script(path, &mut *core, args, &mut audio, &mut audio_crc, &mut out)?,
         None => {
             let inputs = vec![Input::default(); core.info().players.max(1)];
             for frame in 1..=args.frames {
                 let keep = audio.len();
                 core.run_frame(&inputs, &mut audio);
-                if args.wav.is_none() {
-                    audio.truncate(keep);
-                }
+                take_audio(&mut audio, keep, keep_audio, args.digest, &mut audio_crc);
                 still_running(&*core, frame)?;
             }
             args.frames
         }
     };
+    let elapsed = started.elapsed();
     if let Some(path) = &args.wav {
         write_wav(path, core.info().audio_sample_rate, &audio)
             .with_context(|| format!("writing {}", path.display()))?;
@@ -156,7 +197,75 @@ fn run(args: &Args) -> anyhow::Result<()> {
             write_ppm(&path, screen).with_context(|| format!("writing {}", path.display()))?;
         }
     }
+    if args.digest {
+        let mut state = Vec::new();
+        core.save_state(&mut state);
+        writeln!(
+            out,
+            "audio_crc32={:08x} state_crc32={:08x}",
+            audio_crc.finalize(),
+            crc32fast::hash(&state),
+        )?;
+    }
+    if args.time {
+        let ms = elapsed.as_secs_f64() * 1000.0;
+        // Counted as u32 so the division is exact for any run that fits in
+        // a day; longer runs only lose precision in the average.
+        let per_frame = ms / f64::from(u32::try_from(frames.max(1)).unwrap_or(u32::MAX));
+        writeln!(
+            out,
+            "elapsed_ms={ms:.1} ms_per_frame={per_frame:.3} fps={:.1}",
+            1000.0 / per_frame,
+        )?;
+    }
     out.flush()?;
+    Ok(())
+}
+
+/// Hashes the sound one frame made, `audio[keep..]`, for the digest, and
+/// drops it unless it is kept for a WAV file.
+fn take_audio(
+    audio: &mut Vec<StereoSample>,
+    keep: usize,
+    keep_audio: bool,
+    digest: bool,
+    crc: &mut crc32fast::Hasher,
+) {
+    if digest {
+        for [left, right] in &audio[keep..] {
+            crc.update(&left.to_le_bytes());
+            crc.update(&right.to_le_bytes());
+        }
+    }
+    if !keep_audio {
+        audio.truncate(keep);
+    }
+}
+
+/// Loads the save-state container at `path` into `core`, refusing one made
+/// by another system or for another ROM.
+fn load_state_file(
+    path: &Path,
+    system: System,
+    rom: &Path,
+    core: &mut dyn Core,
+) -> anyhow::Result<()> {
+    let bytes = fs::read(path)?;
+    let decoded = emu_state::decode(&bytes)?;
+    if decoded.header.system != system {
+        bail!(
+            "it is a {} state, not a {system} one",
+            decoded.header.system
+        );
+    }
+    let rom_crc32 = crc32fast::hash(&fs::read(rom)?);
+    if decoded.header.rom_crc32 != rom_crc32 {
+        bail!(
+            "it was saved with another ROM (CRC-32 {:08x}, not {rom_crc32:08x})",
+            decoded.header.rom_crc32
+        );
+    }
+    core.load_state(decoded.payload)?;
     Ok(())
 }
 
@@ -237,6 +346,7 @@ fn run_script(
     core: &mut dyn Core,
     args: &Args,
     audio: &mut Vec<StereoSample>,
+    audio_crc: &mut crc32fast::Hasher,
     out: &mut impl Write,
 ) -> anyhow::Result<u64> {
     let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -260,9 +370,7 @@ fn run_script(
         let keep = audio.len();
         // No stops of our own, so the frame always finishes.
         let (_, called) = script.run_frame(core, &inputs, audio, &Stops::default());
-        if args.wav.is_none() {
-            audio.truncate(keep);
-        }
+        take_audio(audio, keep, args.wav.is_some(), args.digest, audio_crc);
         frames += 1;
         let result = called.and_then(|()| script.after_frame(core, &inputs));
         output = script.take_output();

@@ -36,10 +36,13 @@ fn test_roms() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-roms")
 }
 
+/// Where the report `name` goes: `target/` beside the workspace's
+/// sources, made if a checkout that builds elsewhere (CARGO_TARGET_DIR)
+/// has none yet.
 fn target(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target")
-        .join(name)
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    fs::create_dir_all(&dir).expect("making target/");
+    dir.join(name)
 }
 
 fn power_on(path: &Path) -> Result<Nds, String> {

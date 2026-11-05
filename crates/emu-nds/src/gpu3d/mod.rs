@@ -9,8 +9,8 @@
 //! the result for engine A's BG0: per pixel, 6-bit red, green and blue in
 //! bits 0–17 and a 5-bit alpha in bits 18–22 (0 where there is no 3D
 //! pixel). With [`Gpu3d::set_render_scale`], it also draws each frame
-//! larger for the screen ([`Gpu3d::scaled_row`]); the game only ever sees
-//! the native frame.
+//! larger for the screen ([`Gpu3d::scaled_frame`]); the game only ever
+//! sees the native frame.
 //!
 //! Commands execute instantly, so the FIFO only fills while a swap waits
 //! for VBlank, and the test and matrix busy flags never read as busy.
@@ -22,7 +22,7 @@ mod polygon;
 mod registers;
 mod render;
 
-pub(crate) use self::render::MAX_SCALE;
+pub(crate) use self::render::{MAX_SCALE, ScaledFrame};
 
 use serde::{Deserialize, Serialize};
 
@@ -210,8 +210,8 @@ impl Gpu3d {
     /// Draws the current polygon list with the rendering registers as they
     /// are now. Call once per frame, when the hardware starts rendering
     /// (line 214), and before reading [`Self::line`]. VRAM is read now; the
-    /// drawing may finish on a worker thread, which [`Self::line`] waits
-    /// for.
+    /// drawing finishes on worker threads, which [`Self::line`] and
+    /// [`Self::scaled_frame`] wait for.
     pub(crate) fn render_frame(&mut self, vram: &Vram) {
         let config = self.registers.config();
         self.renderer.render(&self.rendering, &config, vram);
@@ -237,11 +237,11 @@ impl Gpu3d {
         self.renderer = std::mem::take(&mut other.renderer);
     }
 
-    /// Row `row` (0 to `192 * scale - 1`) of the last larger frame drawn:
-    /// `256 * scale` pixels, as [`Gpu3d::line`]'s. `None` at the native
-    /// scale.
-    pub(crate) fn scaled_row(&self, row: usize) -> Option<&[u32]> {
-        self.renderer.scaled_row(row)
+    /// The last larger frame drawn, waiting for it if it is still drawing:
+    /// rows 0 to `192 * scale - 1` of `256 * scale` pixels, as
+    /// [`Gpu3d::line`]'s. Its rows are `None` at the native scale.
+    pub(crate) fn scaled_frame(&mut self) -> ScaledFrame<'_> {
+        self.renderer.scaled_frame()
     }
 }
 
@@ -543,9 +543,10 @@ mod tests {
     }
 
     /// Every row of `gpu`'s larger frame.
-    fn scaled_frame(gpu: &Gpu3d, scale: usize) -> Vec<u32> {
+    fn scaled_frame(gpu: &mut Gpu3d, scale: usize) -> Vec<u32> {
+        let frame = gpu.scaled_frame();
         (0..192 * scale)
-            .flat_map(|row| gpu.scaled_row(row).expect("drawn larger").to_vec())
+            .flat_map(|row| frame.row(row).expect("drawn larger").to_vec())
             .collect()
     }
 
@@ -556,7 +557,7 @@ mod tests {
         let mut native = Gpu3d::new();
         busy_scene(&mut native, everything);
         finish(&mut native, &vram);
-        assert!(native.scaled_row(0).is_none());
+        assert!(native.scaled_frame().row(0).is_none());
         for scale in [2, 3] {
             let mut gpu = Gpu3d::new();
             gpu.set_render_scale(scale);
@@ -579,7 +580,7 @@ mod tests {
         gpu.set_render_scale(2);
         busy_scene(&mut gpu, 1 << 7 | 1 << 3);
         finish(&mut gpu, &vram);
-        let larger = scaled_frame(&gpu, 2);
+        let larger = scaled_frame(&mut gpu, 2);
         let mut compared = 0;
         for y in 1..191 {
             for x in 1..255 {
@@ -613,7 +614,7 @@ mod tests {
             busy_scene(&mut banded, everything);
             finish(&mut banded, &vram);
             assert!(
-                scaled_frame(&whole, scale) == scaled_frame(&banded, scale),
+                scaled_frame(&mut whole, scale) == scaled_frame(&mut banded, scale),
                 "at {scale}x"
             );
         }
@@ -647,7 +648,8 @@ mod tests {
         quad(&mut gpu, [-ONE / 2, -ONE / 2, ONE / 2, ONE / 2], 0);
         finish(&mut gpu, &Vram::default());
         // The quad spans x 128..384, y 96..288: edges two cells thick.
-        let cell = |x: usize, y: usize| gpu.scaled_row(y).expect("drawn larger")[x];
+        let frame = gpu.scaled_frame();
+        let cell = |x: usize, y: usize| frame.row(y).expect("drawn larger")[x];
         let white = opaque([63, 63, 63]);
         let red = opaque([63, 0, 0]);
         assert_eq!(

@@ -1759,6 +1759,7 @@ dependencies = [
  "emu-core",
  "emu-cores",
  "emu-script",
+ "emu-state",
 ]
 
 [[package]]

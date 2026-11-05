@@ -59,7 +59,9 @@ impl<'a> Shader<'a> {
     }
 
     /// Colour and alpha for the interpolated vertex colour and 12.4
-    /// texture coordinates.
+    /// texture coordinates. Inlined into the rasterizer's loop, as
+    /// [`Sampler::sample`] is.
+    #[inline(always)]
     pub(crate) fn shade(
         &self,
         memory: &TextureMemory,

@@ -24,7 +24,33 @@ const OVERFLOW_LIMIT: usize = 0x1_0000;
 pub(crate) const SWAP_BUFFERS: u8 = 0x50;
 
 /// How many parameters `command` takes, or `None` if it is not a command.
+/// Every FIFO entry asks twice, so this reads [`PARAM_COUNTS`].
 pub(crate) fn param_count(command: u8) -> Option<usize> {
+    match PARAM_COUNTS[usize::from(command)] {
+        NOT_A_COMMAND => None,
+        count => Some(usize::from(count)),
+    }
+}
+
+/// [`PARAM_COUNTS`] for a byte that is not a command.
+const NOT_A_COMMAND: u8 = u8::MAX;
+
+/// [`params_of`] for every command byte.
+const PARAM_COUNTS: [u8; 256] = {
+    let mut table = [NOT_A_COMMAND; 256];
+    let mut command = 0;
+    while command < 256 {
+        if let Some(count) = params_of(command as u8) {
+            table[command] = count;
+        }
+        command += 1;
+    }
+    table
+};
+
+/// How many parameters `command` takes, or `None` if it is not a command
+/// (GBATEK's command list).
+const fn params_of(command: u8) -> Option<u8> {
     Some(match command {
         0x11 | 0x15 | 0x41 => 0,
         0x10
@@ -124,8 +150,8 @@ impl Fifo {
             .min(FIFO_CAPACITY)
     }
 
-    #[cfg(test)]
     /// Whether a write now would stall the CPU (or DMA).
+    #[cfg(test)]
     pub(crate) fn is_full(&self) -> bool {
         self.entries.len() >= FIFO_CAPACITY + PIPE_CAPACITY
     }
@@ -215,6 +241,19 @@ mod tests {
         }
         assert_eq!(fifo.len(), 256);
         assert!(fifo.is_full());
+    }
+
+    #[test]
+    fn the_table_matches_the_command_list() {
+        for command in 0..=u8::MAX {
+            assert_eq!(
+                param_count(command),
+                params_of(command).map(usize::from),
+                "{command:#04x}"
+            );
+        }
+        assert_eq!(param_count(0x34), Some(32));
+        assert_eq!(param_count(0x00), None);
     }
 
     #[test]

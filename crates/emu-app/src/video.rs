@@ -27,16 +27,41 @@ pub fn prescale_factor(source_width: u16, drawn_width: f32, scale_factor: f32) -
     (device_per_source.floor() as usize).clamp(1, MAX_FACTOR)
 }
 
+/// Pixels along each side of the squares [`turn`] works in.
+const TURN_TILE: u16 = 32;
+
 /// `frame` turned by `rotation`, for screens drawn on their side.
+///
+/// Turned a quarter, a row is a column of the frame, which in a large frame
+/// reads one pixel from each of hundreds of rows far apart in memory.
+/// Working a square at a time keeps the rows it reads and writes in the
+/// cache: a DS screen drawn with 3D at 4× turns twice as fast or more.
 pub fn turn(frame: &Frame, rotation: Rotation) -> Frame {
     let size = frame.size();
     let width = usize::from(size.width);
     let source = frame.pixels();
     let mut turned = Frame::new(rotation.turn_size(size));
-    for (row, line) in (0u16..).zip(turned.rows_mut()) {
-        for (column, pixel) in (0u16..).zip(line) {
-            let (x, y) = rotation.source_pixel(size, column, row);
-            *pixel = source[usize::from(y) * width + usize::from(x)];
+    let turned_size = turned.size();
+    let turned_width = usize::from(turned_size.width);
+    let pixels = turned.pixels_mut();
+    // Upside down, a row is a row of the frame backwards: one tile will do.
+    let tile = if rotation.swaps_axes() {
+        TURN_TILE
+    } else {
+        u16::MAX
+    };
+    for top in (0..turned_size.height).step_by(usize::from(tile)) {
+        let rows = top..turned_size.height.min(top.saturating_add(tile));
+        for left in (0..turned_size.width).step_by(usize::from(tile)) {
+            let columns = left..turned_size.width.min(left.saturating_add(tile));
+            for row in rows.clone() {
+                let start = usize::from(row) * turned_width;
+                let line = &mut pixels[start..][usize::from(left)..usize::from(columns.end)];
+                for (pixel, column) in line.iter_mut().zip(left..) {
+                    let (x, y) = rotation.source_pixel(size, column, row);
+                    *pixel = source[usize::from(y) * width + usize::from(x)];
+                }
+            }
         }
     }
     turned
@@ -159,6 +184,82 @@ mod tests {
             pixels(Rotation::Anticlockwise),
             ((2, 3), vec![c, f, b, e, a, d])
         );
+    }
+
+    /// [`turn`] as first written, a row of the turned frame at a time:
+    /// the oracle for the tiled one.
+    fn turn_row_by_row(frame: &Frame, rotation: Rotation) -> Frame {
+        let size = frame.size();
+        let width = usize::from(size.width);
+        let source = frame.pixels();
+        let mut turned = Frame::new(rotation.turn_size(size));
+        for (row, line) in (0u16..).zip(turned.rows_mut()) {
+            for (column, pixel) in (0u16..).zip(line) {
+                let (x, y) = rotation.source_pixel(size, column, row);
+                *pixel = source[usize::from(y) * width + usize::from(x)];
+            }
+        }
+        turned
+    }
+
+    /// A frame of `size` whose every pixel differs.
+    fn numbered(size: ScreenSize) -> Frame {
+        let mut frame = Frame::new(size);
+        for (index, pixel) in (0u32..).zip(frame.pixels_mut()) {
+            *pixel = index;
+        }
+        frame
+    }
+
+    const ROTATIONS: [Rotation; 4] = [
+        Rotation::Upright,
+        Rotation::Clockwise,
+        Rotation::UpsideDown,
+        Rotation::Anticlockwise,
+    ];
+
+    #[test]
+    fn turning_in_tiles_matches_turning_row_by_row() {
+        // Whole tiles, part tiles, frames smaller than a tile, and lines.
+        let sizes = [
+            (256, 192),
+            (1024, 768),
+            (240, 160),
+            (160, 144),
+            (33, 65),
+            (7, 3),
+            (1, 40),
+            (40, 1),
+        ];
+        for (width, height) in sizes {
+            let frame = numbered(ScreenSize::new(width, height));
+            for rotation in ROTATIONS {
+                assert!(
+                    turn(&frame, rotation) == turn_row_by_row(&frame, rotation),
+                    "{width}x{height} {rotation:?}"
+                );
+            }
+        }
+    }
+
+    /// Times [`turn`] against [`turn_row_by_row`]: `cargo test --release
+    /// -p emu-app -- --ignored --nocapture turn_timing`.
+    #[test]
+    #[ignore = "a timing, not a test"]
+    fn turn_timing() {
+        use crate::bench::best_of;
+
+        for (name, size) in [
+            ("DS", ScreenSize::new(256, 192)),
+            ("DS, 3D at 4x", ScreenSize::new(1024, 768)),
+        ] {
+            let frame = numbered(size);
+            for rotation in [Rotation::Clockwise, Rotation::UpsideDown] {
+                let old = best_of(100, || turn_row_by_row(&frame, rotation));
+                let new = best_of(100, || turn(&frame, rotation));
+                println!("turn {name} {rotation:?}: {old:?} -> {new:?}");
+            }
+        }
     }
 
     #[test]

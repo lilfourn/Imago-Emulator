@@ -147,25 +147,35 @@ impl Engine2d {
         let y = (line - line % mosaic_y + u32::from(self.registers.vofs[index])) & (height - 1);
         let scroll_x = u32::from(self.registers.hofs[index]);
         // Maps wider or taller than 256 pixels are 2 KiB blocks of 32x32
-        // tiles.
+        // tiles: the map row's entries are 64 bytes in each block across.
         let row_base = screen_base + (y / 256) * (width / 256) * 0x800 + (y % 256 / 8) * 64;
+        let mut entries = [0; 64];
+        for (block, entries) in (0..width / 256).zip(entries.chunks_exact_mut(32)) {
+            let bytes: [u8; 64] = memory.bg_bytes(row_base + block * 0x800);
+            for (entry, pair) in entries.iter_mut().zip(bytes.chunks_exact(2)) {
+                *entry = u16::from_le_bytes([pair[0], pair[1]]);
+            }
+        }
         // The row of the tile covering map column `x`.
-        let tile_row_at = |x: u32| {
-            let entry = memory.bg(row_base + (x / 256) * 0x800 + (x % 256 / 8) * 2);
-            self.text_tile_row(memory, &tiles, entry, y % 8)
-        };
+        let tile_row_at =
+            |x: u32| self.text_tile_row(memory, &tiles, entries[(x / 8) as usize], y % 8);
 
         if mosaic_x == 1 {
-            // Whole tile rows at a time; the fine scroll cuts the first.
-            let mut screen_x = 0;
-            let mut x = scroll_x & (width - 1);
-            while screen_x < WIDTH {
-                let fine = (x % 8) as usize;
-                let count = (8 - fine).min(WIDTH - screen_x);
-                out[screen_x..screen_x + count]
-                    .copy_from_slice(&tile_row_at(x)[fine..fine + count]);
-                screen_x += count;
-                x = (x + count as u32) & (width - 1);
+            // Whole tile rows at a time: the fine scroll cuts the first
+            // tile's start and the last one's end.
+            let first = scroll_x & (width - 1);
+            let fine = (first % 8) as usize;
+            let (head, rest) = out.split_at_mut(8 - fine);
+            head.copy_from_slice(&tile_row_at(first)[fine..]);
+            let mut x = first - fine as u32 + 8;
+            let mut tiles = rest.chunks_exact_mut(8);
+            for tile in &mut tiles {
+                tile.copy_from_slice(&tile_row_at(x & (width - 1)));
+                x += 8;
+            }
+            let tail = tiles.into_remainder();
+            if !tail.is_empty() {
+                tail.copy_from_slice(&tile_row_at(x & (width - 1))[..tail.len()]);
             }
             return;
         }
@@ -205,22 +215,19 @@ impl Engine2d {
         };
         let mut row = [0; 8];
         if tiles.eight_bit {
-            let address = tiles.char_base + tile * 64 + fine_y * 8;
-            for (pair, pixels) in (0u32..).zip(row.chunks_exact_mut(2)) {
-                let indices = memory.bg(address + pair * 2);
-                for (pixel, index) in pixels.iter_mut().zip([indices & 0xFF, indices >> 8]) {
-                    *pixel = match tiles.ext_slot {
-                        _ if index == 0 => 0,
-                        Some(slot) => layer_color(
-                            memory.bg_ext_palette(slot, palette * 256 + u32::from(index)),
-                        ),
-                        None => self.bg_color(u32::from(index)),
-                    };
-                }
+            let indices: [u8; 8] = memory.bg_bytes(tiles.char_base + tile * 64 + fine_y * 8);
+            for (pixel, index) in row.iter_mut().zip(indices) {
+                *pixel = match tiles.ext_slot {
+                    _ if index == 0 => 0,
+                    Some(slot) => {
+                        layer_color(memory.bg_ext_palette(slot, palette * 256 + u32::from(index)))
+                    }
+                    None => self.bg_color(u32::from(index)),
+                };
             }
         } else {
             let address = tiles.char_base + tile * 32 + fine_y * 4;
-            let nibbles = u32::from(memory.bg(address)) | u32::from(memory.bg(address + 2)) << 16;
+            let nibbles = u32::from_le_bytes(memory.bg_bytes(address));
             for (shift, pixel) in (0..32).step_by(4).zip(row.iter_mut()) {
                 let index = (nibbles >> shift) & 0xF;
                 if index != 0 {
@@ -416,16 +423,152 @@ impl Engine2d {
     /// span: the 256 rendered pixels, then 256 transparent ones. Alpha 0
     /// is transparent; mosaic does not apply.
     fn layer_3d(&self, pixels: &[u32; WIDTH], out: &mut [u32; WIDTH]) {
+        // The screen pixels that show the rendered ones, and those pixels:
+        // the line's end, or after the transparent half, its start.
         let scroll = usize::from(self.registers.hofs[0]);
-        for (screen_x, pixel) in out.iter_mut().enumerate() {
-            *pixel = pixels
-                .get((screen_x + scroll) & 0x1FF)
-                .map_or(0, |&value| layer_3d_pixel(value));
+        let (shown, rendered) = if scroll < WIDTH {
+            (0..WIDTH - scroll, scroll..WIDTH)
+        } else {
+            (2 * WIDTH - scroll..WIDTH, 0..scroll - WIDTH)
+        };
+        out.fill(0);
+        for (pixel, &value) in out[shown].iter_mut().zip(&pixels[rendered]) {
+            *pixel = layer_3d_pixel(value);
         }
     }
 
     /// Whether BG0 is the 3D layer, when it is enabled.
     pub(super) fn shows_3d_as_bg0(&self) -> bool {
         self.bg_kind(0) == BgKind::ThreeD
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu2d::tests::Random;
+    use crate::vram::{Region, Vram};
+
+    /// The pixel a text background shows at (`screen_x`, `line`), worked
+    /// out alone from GBATEK's description, a halfword read at a time.
+    fn text_pixel(
+        engine: &Engine2d,
+        memory: &impl EngineMemory,
+        index: usize,
+        line: u32,
+        screen_x: u32,
+    ) -> u32 {
+        let registers = &engine.registers;
+        let control = registers.bgcnt[index];
+        let (char_base, screen_base) = engine.tile_bases(control);
+        let (width, height) =
+            [(256, 256), (512, 256), (256, 512), (512, 512)][usize::from(control >> 14)];
+        let x = (screen_x + u32::from(registers.hofs[index])) & (width - 1);
+        let y = (line + u32::from(registers.vofs[index])) & (height - 1);
+        let block = (y / 256) * (width / 256) + x / 256;
+        let entry = memory.bg(screen_base + block * 0x800 + (y % 256 / 8) * 64 + (x % 256 / 8) * 2);
+        let tile = u32::from(entry & 0x3FF);
+        let column = if entry & (1 << 10) != 0 {
+            7 - x % 8
+        } else {
+            x % 8
+        };
+        let row = if entry & (1 << 11) != 0 {
+            7 - y % 8
+        } else {
+            y % 8
+        };
+        let byte = |address: u32| (memory.bg(address) >> ((address & 1) * 8)) as u8;
+        let palette = u32::from(entry >> 12);
+        if control & (1 << 7) == 0 {
+            let pair = byte(char_base + tile * 32 + row * 4 + column / 2);
+            let color = u32::from(pair >> ((column & 1) * 4)) & 0xF;
+            return if color == 0 {
+                0
+            } else {
+                engine.bg_color(palette * 16 + color)
+            };
+        }
+        let color = u32::from(byte(char_base + tile * 64 + row * 8 + column));
+        let slot = if index < 2 && control & (1 << 13) != 0 {
+            index + 2
+        } else {
+            index
+        };
+        match color {
+            0 => 0,
+            _ if registers.dispcnt & (1 << 30) != 0 => {
+                layer_color(memory.bg_ext_palette(slot as u32, palette * 256 + color))
+            }
+            _ => engine.bg_color(color),
+        }
+    }
+
+    #[test]
+    fn the_3d_layer_scrolls_within_a_512_pixel_span_at_every_bg0hofs() {
+        let mut random = Random(0x3D);
+        let pixels = [0; WIDTH].map(|_| random.next() & 0x7F_FFFF);
+        let mut engine = Engine2d::new(Engine::A);
+        for scroll in 0..0x200 {
+            engine.write_register(0x10, scroll);
+            let mut out = [0; WIDTH];
+            engine.layer_3d(&pixels, &mut out);
+            for (screen_x, &pixel) in out.iter().enumerate() {
+                let x = (screen_x + usize::from(scroll)) % 512;
+                let expected = pixels.get(x).map_or(0, |&value| layer_3d_pixel(value));
+                assert_eq!(pixel, expected, "BG0HOFS {scroll} x {screen_x}");
+            }
+        }
+    }
+
+    #[test]
+    fn text_lines_drawn_a_tile_at_a_time_match_each_pixel_alone() {
+        let mut random = Random(0x7E47);
+        let mut vram = Vram::default();
+        // Engine A: banks A and B as BG VRAM, E as extended palettes;
+        // engine B: bank C, and H as its extended palettes. The rest of
+        // engine A's 512 KiB is unmapped and reads 0.
+        for (bank, control) in [(0, 0x81), (1, 0x89), (2, 0x84), (4, 0x84), (7, 0x82)] {
+            vram.set_control(bank, control);
+        }
+        for (region, size) in [
+            (Region::BgA, 0x4_0000),
+            (Region::BgB, 0x2_0000),
+            (Region::BgExtPaletteA, 0x8000),
+            (Region::BgExtPaletteB, 0x8000),
+        ] {
+            for offset in (0..size).step_by(2) {
+                vram.write_16(region, offset, random.next() as u16);
+            }
+        }
+        for _ in 0..300 {
+            let which = if random.next() & 1 == 0 {
+                Engine::A
+            } else {
+                Engine::B
+            };
+            let mut engine = Engine2d::new(which);
+            for color in 0..0x100 {
+                engine.write_palette(color * 2, random.next() as u16);
+            }
+            let index = (random.next() & 3) as usize;
+            // Display mode 1, with random extended palettes and base offsets.
+            let dispcnt = 1 << 16 | random.next() & (1 << 30 | 0x3F << 24);
+            engine.write_register(0x00, dispcnt as u16);
+            engine.write_register(0x02, (dispcnt >> 16) as u16);
+            // Any BGxCNT but mosaic.
+            let control = random.next() as u16 & !(1 << 6);
+            engine.write_register(0x08 + 2 * index as u32, control);
+            engine.write_register(0x10 + 4 * index as u32, random.next() as u16);
+            engine.write_register(0x12 + 4 * index as u32, random.next() as u16);
+            let line = random.next() % 192;
+            let memory = vram.engine(which);
+            let mut out = [0; WIDTH];
+            engine.text_line(index, line, &memory, &mut out);
+            for (screen_x, &pixel) in (0..).zip(&out) {
+                let expected = text_pixel(&engine, &memory, index, line, screen_x);
+                assert_eq!(pixel, expected, "BG{index}CNT {control:04X} x {screen_x}");
+            }
+        }
     }
 }

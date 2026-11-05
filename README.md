@@ -108,6 +108,19 @@ cargo run -p emu-headless -- --frames 600 --script scripts/lua/input-macro.lua g
 cargo run -p emu-headless -- --frames 600 ~/Games/My\ Fan\ Game   # an RPG Maker game's folder
 ```
 
+Measure a core's speed, and check that a change to it changes nothing the
+game can see: `--state` starts from a save state such as a game's `.ss0`
+checkpoint, `--scale` draws DS 3D larger, `--time` says how long the frames
+took and `--digest` hashes the sound and the save state at the end.
+
+```sh
+cargo run --release -p emu-headless -- --frames 600 --state game.ss0 --time --digest game.nds
+# system=nds frames=600 screen=0 width=256 height=192 crc32=…
+# system=nds frames=600 screen=1 width=256 height=192 crc32=…
+# audio_crc32=… state_crc32=…
+# elapsed_ms=2236.9 ms_per_frame=3.728 fps=268.2
+```
+
 Measure how a game plays in the release app: how long a key takes to reach
 the window, how evenly frames reach the display, and the CPU it costs. It
 plays behind the frontmost app, with copies of your settings and the
@@ -722,6 +735,7 @@ commit's build.
 | `emu-cheats` | Cheat list parsing and application |
 | `emu-patch` | ROM-hack patches: IPS, UPS, BPS and xdelta |
 | `emu-script` | Lua scripts, sandboxed, run between frames |
+| `emu-guide` | Guide's OpenRouter connection: sign-in, the key, the API |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-headless` | Windowless runner for test ROMs |
 | `emu-app` | The GPUI app (`ds-emulator` binary) |

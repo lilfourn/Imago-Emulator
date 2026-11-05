@@ -65,6 +65,13 @@ pub(crate) struct CpuIo {
     pub(crate) keycnt: u16,
     /// POSTFLG.
     pub(crate) postflg: u8,
+    /// Whether what the machine checked before this CPU's last checked
+    /// instruction (no DMA to run, not halted, the IRQ line) still holds,
+    /// so it can skip those checks. The bus's RAM fast paths leave it set;
+    /// every other access clears it, as does the start of a slice. Not
+    /// machine state.
+    #[serde(skip)]
+    pub(crate) checked: bool,
 }
 
 impl CpuIo {
@@ -78,6 +85,7 @@ impl CpuIo {
             cycles: 0,
             keycnt: 0,
             postflg: 0,
+            checked: false,
         }
     }
 }

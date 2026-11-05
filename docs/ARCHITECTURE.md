@@ -62,6 +62,7 @@ pub trait Core: Send {
     fn run_frame(&mut self, inputs: &[Input], audio: &mut Vec<StereoSample>); // one per player
     fn screens(&self) -> &[Frame];                     // DS: [top, bottom]
     fn set_render_scale(&mut self, scale: u32);        // DS: 3D at N× resolution, display only
+    fn set_texture_upscaling(&mut self, upscaling: TextureUpscaling); // 3DS: textures, display only
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
@@ -76,6 +77,7 @@ pub trait Core: Send {
     fn debugger(&mut self) -> Option<&mut dyn Debugger>; // see "Debugging" below
     fn try_save_state(&self, out: &mut Vec<u8>) -> Result<(), String>; // save_state, or why not
     fn saves_every_frame(&self) -> bool;               // false: no rewind, states only when asked
+    fn checkpoints_while_playing(&self) -> bool;       // checkpoint every minute, not just on leaving
     fn ended(&self) -> Option<String>;                 // why a game in another process stopped
 }
 ```
@@ -189,7 +191,7 @@ pub trait Debugger {
                                             apply cheats (Core::peek/poke)
                                             run the Lua script, if any
                                             record frame and sound ───────► JPEG, QuickTime
- render(): copy latest frames ◄── Mutex ─── publish screens                 (bounded queue)
+ render(): swap in latest frames ◄─ Mutex ─ publish screens                 (bounded queue)
            correct, turn, then upscale       │
            on the GPU or filter and          │
            pre-scale to BGRA                 │
@@ -380,13 +382,18 @@ back up until the speed asked for or the screens change. In Pokémon
 Platinum's overworld the core took 3.75 ms a frame with 3D at 1×, 5.2 ms
 at 2× and 7.35 ms at 4× (headless), against 5.6 ms a frame at 3×
 fast-forward; with the check, 3× fast-forward ran at 172 frames a second
-instead of about 110, while normal speed keeps 4×. The view sends the
+instead of about 110, while normal speed keeps 4×. Since the speed-ups of
+November 2026 it takes about 2.5, 3.4 and 4.2–4.6 ms, so 3× fast-forward
+can keep 4× and the check steps down less often. The view sends the
 core a new render scale only when the scale changes.
 
 DS 3D upscaling is the core's job, as that decision planned. At a render
 scale above 1, the DS draws each 3D frame twice: at the native
 resolution, which display capture can put in VRAM for the game, and
-larger, in 16 horizontal bands on scoped threads. Engine A copies each
+larger, in 16 horizontal bands. Both draw on worker threads the
+renderer keeps (`gpu3d/render/workers.rs`) while the machine runs on: a
+native band is waited for when its first line is needed, the larger
+frame at the next VBlank. Engine A copies each
 line that shows 3D, with the registers that composed it, and at VBlank
 composes those lines again around the larger 3D frame, a few lines to a
 thread; everything else is enlarged. The app draws the larger frames like
@@ -440,16 +447,25 @@ once they are an hour old. See `emu-app/src/leftovers.rs`.
 
 ## Save-state container
 
+Version 2, all integers little-endian (`emu-state` also reads version 1,
+which has no thumbnail fields: a 24-byte header, the payload, the
+checksum):
+
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 8 | magic `EMUSTATE` |
-| 8 | 2 | container version (1) |
-| 10 | 1 | system tag (1 GB, 2 GBA, 3 DS, 4 RPG Maker) |
+| 8 | 2 | container version (2) |
+| 10 | 1 | system tag (1 GB, 2 GBA, 3 DS, 4 RPG Maker, 5 3DS) |
+| 11 | 1 | reserved, 0 |
 | 12 | 2 | core state version |
+| 14 | 2 | reserved, 0 |
 | 16 | 4 | ROM CRC-32 (an RPG Maker game: of its folder's path) |
 | 20 | 4 | payload length *n* |
-| 24 | *n* | core payload |
-| 24 + *n* | 4 | CRC-32 of everything before it |
+| 24 | 2 | thumbnail width *w*, 0 for none |
+| 26 | 2 | thumbnail height *h* |
+| 28 | *n* | core payload |
+| 28 + *n* | 3*wh* | thumbnail, RGB, row-major |
+| end − 4 | 4 | CRC-32 of everything before it |
 
 The app refuses a state from another system, another ROM, or another core
 state version, and says which.
@@ -472,7 +488,8 @@ order). A core's main loop:
 | Layer | Where | Run |
 |---|---|---|
 | Unit tests | `#[cfg(test)]` in each module | `cargo test --workspace` |
-| Determinism | headless runner, run twice and diff | M1 test-ROM script |
+| Determinism | headless runner, run twice and diff; `--digest` adds the sound's and the final save state's CRC-32s, and `emu-headless/tests/bench.rs` checks a run from a state matches one from power-on | M1 test-ROM script |
+| Core speed | `emu-headless --time`, from a game's checkpoint with `--state`; before and after a change, with `--digest` to show it changed nothing | by hand |
 | ROM-hack patches | `emu-patch/tests/formats.rs` applies patches made by Floating IPS and xdelta3 from made-up ROMs; `scripts/make-patch-fixtures.sh` makes them again | `cargo test` |
 | Scripts | `emu-script` unit tests against a test core; `emu-headless/tests/script.rs` runs a script twice on a ROM it builds and diffs the output | `cargo test` |
 | Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |

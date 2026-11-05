@@ -77,16 +77,18 @@ pub(crate) fn mark_edges(buffers: &mut Buffers, config: &RenderConfig) {
 pub(crate) fn fog_density(depth: u32, config: &RenderConfig) -> u32 {
     let table = |n: usize| u32::from(config.fog_table[n]);
     let offset = config.fog_offset << 9;
-    // FOG_STEP (0x400 >> FOG_SHIFT) in 24-bit depth. For shifts of 11 and
-    // up, GBATEK expects a step of 0, so only the first and last entries;
-    // melonDS measured this formula, which comes to nearly the same.
-    let step = 0x8_0000 >> config.fog_shift;
+    // FOG_STEP (0x400 >> FOG_SHIFT) in 24-bit depth, 0x8_0000 >> FOG_SHIFT,
+    // which is 2 to the power `step_bits`. For shifts of 11 and up, GBATEK
+    // expects a step of 0, so only the first and last entries; melonDS
+    // measured this formula, which comes to nearly the same.
+    let step_bits = 19 - config.fog_shift;
+    let step = 1 << step_bits;
     let relative = depth.saturating_sub(offset);
-    let density = match (relative / step) as usize {
+    let density = match (relative >> step_bits) as usize {
         0 => table(0),
         n @ 1..=31 => {
-            let fraction = relative % step;
-            (table(n - 1) * (step - fraction) + table(n) * fraction) / step
+            let fraction = relative & (step - 1);
+            (table(n - 1) * (step - fraction) + table(n) * fraction) >> step_bits
         }
         _ => table(31),
     };
@@ -182,6 +184,39 @@ mod tests {
         assert_eq!(fog_density(0x1180 << 9, &config), 32, "halfway to entry 1");
         assert_eq!(fog_density(0x1200 << 9, &config), 64, "at entry 1");
         assert_eq!(fog_density(0x7FFF << 9, &config), 128, "127 counts as 128");
+    }
+
+    /// The density as first written, dividing by the step.
+    fn density_by_division(depth: u32, config: &RenderConfig) -> u32 {
+        let table = |n: usize| u32::from(config.fog_table[n]);
+        let step = 0x8_0000 >> config.fog_shift;
+        let relative = depth.saturating_sub(config.fog_offset << 9);
+        let density = match (relative / step) as usize {
+            0 => table(0),
+            n @ 1..=31 => {
+                let fraction = relative % step;
+                (table(n - 1) * (step - fraction) + table(n) * fraction) / step
+            }
+            _ => table(31),
+        };
+        if density >= 127 { 128 } else { density }
+    }
+
+    #[test]
+    fn fog_density_shifts_as_it_divided() {
+        let entries: Vec<(u32, u8)> = (0..32).map(|n| (n, (n * 37 % 128) as u8)).collect();
+        for shift in 0..16 {
+            for offset in [0, 0x1234, 0x7FFF] {
+                let config = config(offset, shift, &entries);
+                for depth in (0..=0xFF_FFFF).step_by(0x3F1).chain([0xFF_FFFF]) {
+                    assert_eq!(
+                        fog_density(depth, &config),
+                        density_by_division(depth, &config),
+                        "depth {depth:#x}, shift {shift}, offset {offset:#x}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

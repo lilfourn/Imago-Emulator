@@ -265,7 +265,19 @@ fn vram_display_line(line: u32, block: u32, lcdc: impl Fn(u32) -> u16) -> [u32; 
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub(super) use crate::vram::tests::Random;
     use crate::vram::{Region, Vram};
+
+    /// A layer pixel: transparent half the time, else a BGR555 or (when
+    /// `three_d`) a 3D pixel with a random alpha.
+    pub(super) fn layer_pixel(random: &mut Random, three_d: bool) -> u32 {
+        let value = random.next();
+        match value & 3 {
+            0 | 1 => 0,
+            2 if three_d => OPAQUE | IS_3D | (value >> 2) & 0x7F_FFFF,
+            _ => OPAQUE | (value >> 2) & 0x7FFF,
+        }
+    }
 
     const RED: u16 = 0x001F;
     const GREEN: u16 = 0x03E0;

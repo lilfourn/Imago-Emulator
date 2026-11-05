@@ -94,7 +94,10 @@ impl Prefetch {
     /// dropped. A unit that stopped because the buffer was full starts
     /// reading again if `enabled`.
     pub(crate) fn take(&mut self, address: u32, enabled: bool) {
-        let taken = (address.wrapping_sub(self.head) / self.width + 1).min(self.count);
+        // Dividing by the width, a power of two, by shifting saves a
+        // division on every prefetched fetch.
+        let passed = address.wrapping_sub(self.head) >> self.width.trailing_zeros();
+        let taken = (passed + 1).min(self.count);
         self.head = address.wrapping_add(self.width);
         self.count -= taken;
         if enabled && !self.fetching && !self.full() {

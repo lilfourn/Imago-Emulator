@@ -4,10 +4,10 @@
 //! decoder and NanoBoyAdvance do, so odd encodings behave as the tests
 //! recorded them. Those 12 bits are looked up in a table built at compile
 //! time ([`decode`]), so running an instruction starts with one lookup
-//! rather than a chain of tests. R15 reads as the instruction's address plus 8 while an
-//! instruction runs; handlers advance it (or reload the pipeline) at the
-//! cycle the hardware does, which is visible to instructions that store
-//! R15 or read it after a register shift.
+//! rather than a chain of tests. R15 reads as the instruction's address
+//! plus 8 while an instruction runs; handlers advance it (or reload the
+//! pipeline) at the cycle the hardware does, which is visible to
+//! instructions that store R15 or read it after a register shift.
 //!
 //! ARMv5TE's additions are in `armv5.rs`; where it changes an ARMv4
 //! instruction (loads into R15, misaligned halfword loads, LDM/STM edge
@@ -107,6 +107,19 @@ const fn decode(key: u32, v5: bool) -> Kind {
         // the ARM9's only one (CP15) takes no CDP, LDC or STC.
         Kind::Undefined
     }
+}
+
+/// The registers a block transfer's `list` names, lowest first: one step
+/// per set bit rather than per register.
+fn listed(list: u32) -> impl Iterator<Item = usize> {
+    let mut remaining = list;
+    std::iter::from_fn(move || {
+        (remaining != 0).then(|| {
+            let register = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            register
+        })
+    })
 }
 
 impl<M: Model> Processor<M> {
@@ -604,17 +617,20 @@ impl<M: Model> Processor<M> {
         // ARMv4 writes the base back after the first access, ARMv5 after
         // the last.
         let early_writeback = writeback && !M::V5TE;
+        // The User bank does not change the mode, so neither do the
+        // accesses' permissions.
+        let user = self.user_permissions();
         let mut address = start;
         let mut first = true;
         let mut refused = false;
-        for register in (0..16).filter(|r| list & (1 << r) != 0) {
+        for register in listed(list) {
             let access = if first {
                 Access::NONSEQUENTIAL
             } else {
                 Access::SEQUENTIAL
             };
             if load {
-                let value = self.read_32(bus, address, access);
+                let value = self.model.read_32(bus, address, access, user);
                 refused = self.model.data_refused();
                 if refused {
                     break;
@@ -624,7 +640,8 @@ impl<M: Model> Processor<M> {
                 }
                 self.r[register] = value;
             } else {
-                self.write_32(bus, address, self.r[register], access);
+                let value = self.r[register];
+                self.model.write_32(bus, address, value, access, user);
                 refused = self.model.data_refused();
                 if refused {
                     break;
@@ -714,6 +731,19 @@ impl<M: Model> Processor<M> {
             i32::from((half >> 8) as u8 as i8) as u32
         } else {
             i32::from(half as i16) as u32
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listed_names_each_register_in_the_list_in_order() {
+        for list in 0..=0xFFFF_u32 {
+            let plain: Vec<usize> = (0..16).filter(|r| list & (1 << r) != 0).collect();
+            assert_eq!(listed(list).collect::<Vec<_>>(), plain, "{list:#06X}");
         }
     }
 }

@@ -91,7 +91,7 @@ impl Rotation {
     }
 
     /// Whether width and height trade places.
-    fn swaps_axes(self) -> bool {
+    pub fn swaps_axes(self) -> bool {
         matches!(self, Self::Clockwise | Self::Anticlockwise)
     }
 

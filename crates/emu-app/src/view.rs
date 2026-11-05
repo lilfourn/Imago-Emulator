@@ -57,7 +57,7 @@ use crate::library::{self, Library};
 use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
-use crate::persist::{self, GameFiles};
+use crate::persist::{self, GameFiles, file_name};
 use crate::picture::{self, Look, Picture, Resolution3d};
 use crate::probe;
 use crate::randomize_window::{self, RandomizeWindow};
@@ -3735,13 +3735,6 @@ fn loading_notice(paths: &[PathBuf], name: &str) -> String {
 /// Whether `system` takes GBA games in a second slot.
 fn has_gba_slot(system: System) -> bool {
     emu_cores::second_slot(system) == Some(System::Gba)
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
 }
 
 /// Where the screens go with Guide `open`: the window as it is, with the

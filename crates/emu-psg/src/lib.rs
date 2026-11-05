@@ -191,10 +191,12 @@ impl Pulse {
         (2048 - u32::from(self.frequency)) * 4
     }
 
-    fn tick(&mut self, cycles: u32) {
+    /// Returns whether the duty step moved.
+    fn tick(&mut self, cycles: u32) -> bool {
         let period = self.period();
         let steps = run_timer(&mut self.timer, period, cycles);
         self.duty_step = ((u32::from(self.duty_step) + steps) % 8) as u8;
+        steps > 0
     }
 
     fn output(&self) -> u8 {
@@ -272,11 +274,11 @@ impl Wave {
     }
 
     /// Plays from `bank` (0 or 1), through both banks in turn if
-    /// `two_banks` (GBA only).
-    fn tick(&mut self, cycles: u32, wave_ram: &[u8], bank: usize, two_banks: bool) {
+    /// `two_banks` (GBA only). Returns whether a sample was read.
+    fn tick(&mut self, cycles: u32, wave_ram: &[u8], bank: usize, two_banks: bool) -> bool {
         self.just_read = false;
         if !self.enabled {
-            return;
+            return false;
         }
         let period = self.period();
         let samples = if two_banks { 64 } else { 32 };
@@ -293,6 +295,7 @@ impl Wave {
         // A countdown reloaded and not yet run down means the last read was
         // in the very last cycle.
         self.just_read = reads > 0 && self.timer == period;
+        reads > 0
     }
 
     /// Whether the channel reads wave RAM in the next 2 MHz sound cycle.
@@ -356,19 +359,22 @@ impl Noise {
         NOISE_DIVISORS[usize::from(self.divisor_code)] << self.shift
     }
 
-    fn tick(&mut self, cycles: u32) {
+    /// Returns whether the shift register moved.
+    fn tick(&mut self, cycles: u32) -> bool {
         // Shifts of 14 and 15 stop the clock entirely.
         if self.shift >= 14 {
-            return;
+            return false;
         }
         let period = self.period();
-        for _ in 0..run_timer(&mut self.timer, period, cycles) {
+        let shifts = run_timer(&mut self.timer, period, cycles);
+        for _ in 0..shifts {
             let feedback = (self.lfsr ^ (self.lfsr >> 1)) & 1;
             self.lfsr = (self.lfsr >> 1) | feedback << 14;
             if self.narrow {
                 self.lfsr = (self.lfsr & !0x40) | feedback << 6;
             }
         }
+        shifts > 0
     }
 
     fn output(&self) -> u8 {
@@ -462,16 +468,69 @@ impl Psg {
         ]
     }
 
-    /// Advances `cycles` cycles of the 4.19 MHz sound clock.
-    pub fn tick(&mut self, cycles: u32) {
-        if self.powered {
-            self.pulse1.tick(cycles);
-            self.pulse2.tick(cycles);
-            let bank = self.wave_bank_played();
-            let two_banks = self.variant == Variant::Agb && self.registers[0x0A] & 0x20 != 0;
-            self.wave.tick(cycles, &self.wave_ram, bank, two_banks);
-            self.noise.tick(cycles);
+    /// The four outputs mixed for each side, left then right: the sum of
+    /// the channels NR51 sends to that side, times its NR50 volume plus 1.
+    #[must_use]
+    pub fn mixed(&self) -> [i32; 2] {
+        let channels = self.outputs();
+        let panning = self.panning();
+        let volume = self.master_volume();
+        let side = |shift: u8, master: u8| -> i32 {
+            let sum: i32 = channels
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| panning & (1 << (index + usize::from(shift))) != 0)
+                .map(|(_, value)| *value)
+                .sum();
+            sum * (i32::from(master & 7) + 1)
+        };
+        [side(4, volume >> 4), side(0, volume)]
+    }
+
+    /// Advances `cycles` cycles of the 4.19 MHz sound clock. Returns
+    /// whether [`Psg::outputs`] may have changed: whether a channel's
+    /// timer ran out and moved it on to its next step, sample or noise
+    /// bit.
+    pub fn tick(&mut self, cycles: u32) -> bool {
+        if !self.powered {
+            return false;
         }
+        if self.quiet_for(cycles) {
+            // What running each channel does when no timer runs out; the
+            // Game Boy ticks every M-cycle, and most are like this.
+            self.pulse1.timer -= cycles;
+            self.pulse2.timer -= cycles;
+            self.wave.just_read = false;
+            if self.wave.enabled {
+                self.wave.timer -= cycles;
+            }
+            if self.noise.shift < 14 {
+                self.noise.timer -= cycles;
+            }
+            return false;
+        }
+        self.tick_channels(cycles)
+    }
+
+    /// Whether `cycles` can pass without any running channel's timer
+    /// running out.
+    fn quiet_for(&self, cycles: u32) -> bool {
+        cycles < self.pulse1.timer
+            && cycles < self.pulse2.timer
+            && (!self.wave.enabled || cycles < self.wave.timer)
+            && (self.noise.shift >= 14 || cycles < self.noise.timer)
+    }
+
+    /// [`Psg::tick`] for each channel in turn.
+    fn tick_channels(&mut self, cycles: u32) -> bool {
+        let bank = self.wave_bank_played();
+        let two_banks = self.variant == Variant::Agb && self.registers[0x0A] & 0x20 != 0;
+        // Every channel runs, whatever the others did.
+        let pulse1 = self.pulse1.tick(cycles);
+        let pulse2 = self.pulse2.tick(cycles);
+        let wave = self.wave.tick(cycles, &self.wave_ram, bank, two_banks);
+        let noise = self.noise.tick(cycles);
+        pulse1 | pulse2 | wave | noise
     }
 
     /// The wave RAM bank channel 3 plays (always 0 on the Game Boy).
@@ -805,6 +864,39 @@ mod tests {
         // and 7. The CPU sees the byte being played, not the one it asked
         // for: byte 0 (sample 1), then byte 1 (samples 2 and 3).
         assert_eq!(reads, [0xFF, 0xFF, 0x00, 0xFF, 0x11, 0xFF, 0x11, 0xFF]);
+    }
+
+    #[test]
+    fn ticks_that_end_no_timer_match_running_each_channel() {
+        let mut seed = 99_u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as u8
+        };
+        for variant in [Variant::Dmg, Variant::Cgb, Variant::Agb] {
+            let mut psg = Psg::new(variant);
+            for index in 0..16 {
+                psg.write_wave(index, next());
+            }
+            for step in 0..20_000 {
+                // Now and then a random register write: triggers, new
+                // frequencies, noise shifts that stop its clock.
+                if step % 50 == 0 {
+                    let register = 0x10 + next() % 0x16;
+                    psg.write(register, next());
+                }
+                let cycles = [2, 4, 128][usize::from(next() % 3)];
+                let mut each = psg.clone();
+                let changed = psg.tick(cycles);
+                let each_changed = each.tick_channels(cycles);
+                assert_eq!(changed, each_changed, "{variant:?} step {step}");
+                assert_eq!(
+                    format!("{psg:?}"),
+                    format!("{each:?}"),
+                    "{variant:?} step {step}"
+                );
+            }
+        }
     }
 
     #[test]

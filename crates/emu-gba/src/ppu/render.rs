@@ -20,6 +20,15 @@ struct ObjPixel {
     semi_transparent: bool,
 }
 
+/// Where a text background's map and tiles are, and their format.
+struct TextMap {
+    screen_base: usize,
+    char_base: usize,
+    eight_bit: bool,
+    /// The map's width in pixels: 256 or 512.
+    width: usize,
+}
+
 /// Layer numbers in blend-target bit order.
 const OBJ: usize = 4;
 const BACKDROP: usize = 5;
@@ -85,51 +94,61 @@ impl Ppu {
         let mosaic = control & (1 << 6) != 0;
         let line = if mosaic { line - line % mosaic_y } else { line };
         let y = (line + scroll_y) % height;
+        let map = TextMap {
+            screen_base,
+            char_base,
+            eight_bit,
+            width,
+        };
 
-        let mut layer = [None; WIDTH];
-        for (screen_x, pixel) in layer.iter_mut().enumerate() {
-            let sample_x = if mosaic {
-                screen_x - screen_x % mosaic_x
-            } else {
-                screen_x
-            };
-            let x = (sample_x + scroll_x) % width;
-            // Maps wider or taller than 256 are made of 32x32-tile blocks.
-            let block = x / 256 + (y / 256) * (width / 256);
-            let entry_offset =
-                screen_base + block * 0x800 + ((y % 256) / 8) * 64 + ((x % 256) / 8) * 2;
-            let entry = self.vram_16(entry_offset);
-            let tile = usize::from(entry & 0x3FF);
-            let column = if entry & (1 << 10) != 0 {
-                7 - x % 8
-            } else {
-                x % 8
-            };
-            let row = if entry & (1 << 11) != 0 {
-                7 - y % 8
-            } else {
-                y % 8
-            };
-            let color_index = if eight_bit {
-                self.bg_vram_byte(char_base + tile * 64 + row * 8 + column)
-            } else {
-                let byte = self.bg_vram_byte(char_base + tile * 32 + row * 4 + column / 2);
-                let nibble = if column % 2 == 0 {
-                    byte & 0xF
-                } else {
-                    byte >> 4
-                };
-                if nibble == 0 {
-                    0
-                } else {
-                    (entry >> 12) as u8 * 16 + nibble
-                }
-            };
-            if color_index != 0 {
-                *pixel = Some(self.palette_16(usize::from(color_index) * 2));
-            }
+        // Whole tile rows, from the one under the left edge: a tile more
+        // than the screen, starting `skip` pixels left of it.
+        let skip = scroll_x % 8;
+        let rows: [[Option<u16>; 8]; WIDTH / 8 + 1] = std::array::from_fn(|tile| {
+            // The width is a power of two.
+            let x = (scroll_x - skip + tile * 8) & (width - 1);
+            self.text_tile_row(&map, x / 8, y)
+        });
+        let mut layer: Layer = rows.as_flattened()[skip..skip + WIDTH]
+            .try_into()
+            .expect("a tile's width more than the screen");
+        if mosaic {
+            apply_mosaic(&mut layer, mosaic_x);
         }
         layer
+    }
+
+    /// The colours of the eight pixels of line `y` (in map pixels) of the
+    /// tile in map column `column`, left to right after flipping, `None`
+    /// where transparent.
+    fn text_tile_row(&self, map: &TextMap, column: usize, y: usize) -> [Option<u16>; 8] {
+        let x = column * 8;
+        // Maps wider or taller than 256 are made of 32x32-tile blocks.
+        let block = x / 256 + (y / 256) * (map.width / 256);
+        let entry_offset =
+            map.screen_base + block * 0x800 + ((y % 256) / 8) * 64 + ((x % 256) / 8) * 2;
+        let entry = self.vram_16(entry_offset);
+        let tile = usize::from(entry & 0x3FF);
+        let row = if entry & (1 << 11) != 0 {
+            7 - y % 8
+        } else {
+            y % 8
+        };
+        // Colour numbers, left to right as stored.
+        let mut indices: [u8; 8] = if map.eight_bit {
+            self.bg_tile_bytes(map.char_base + tile * 64 + row * 8)
+        } else {
+            let bytes: [u8; 4] = self.bg_tile_bytes(map.char_base + tile * 32 + row * 4);
+            let palette = (entry >> 12) as u8 * 16;
+            std::array::from_fn(|pixel| {
+                let nibble = (bytes[pixel / 2] >> (pixel % 2 * 4)) & 0xF;
+                if nibble == 0 { 0 } else { palette + nibble }
+            })
+        };
+        if entry & (1 << 10) != 0 {
+            indices.reverse();
+        }
+        indices.map(|index| (index != 0).then(|| self.palette_16(usize::from(index) * 2)))
     }
 
     /// Affine background (modes 1–2) or bitmap (modes 3–5) for BG2/BG3,
@@ -159,13 +178,8 @@ impl Ppu {
                 self.affine_tile_pixel(control, tx, ty)
             };
         }
-        // Mosaic copies from the left, which needs the pixels already drawn.
         if mosaic {
-            for screen_x in 0..WIDTH {
-                if screen_x % mosaic_x != 0 {
-                    layer[screen_x] = layer[screen_x - screen_x % mosaic_x];
-                }
-            }
+            apply_mosaic(&mut layer, mosaic_x);
         }
         layer
     }
@@ -374,37 +388,45 @@ impl Ppu {
     // ----- Composition -------------------------------------------------
 
     /// Which layers (bits 0–4) and whether effects (bit 5) are enabled at
-    /// pixel `x` of `line`, by the window covering it.
-    fn window_mask(&self, dispcnt: u16, line: usize, x: usize, object_window: bool) -> u8 {
+    /// each pixel of `line`, by the window covering it.
+    fn window_masks(
+        &self,
+        dispcnt: u16,
+        line: usize,
+        object_window: &[bool; WIDTH],
+    ) -> [u8; WIDTH] {
         if dispcnt & 0xE000 == 0 {
-            return 0x3F;
+            return [0x3F; WIDTH];
         }
-        let inside = |h: usize, v: usize| {
-            let (horizontal, vertical) = (self.reg(h), self.reg(v));
-            let span = |value: u16, position: usize, limit: usize| {
-                let (start, end) = (
-                    usize::from(value >> 8),
-                    usize::from(value & 0xFF).min(limit),
-                );
-                if start <= end {
-                    (start..end).contains(&position)
-                } else {
-                    position >= start || position < end
-                }
-            };
-            span(horizontal, x, WIDTH) && span(vertical, line, HEIGHT)
+        let span = |value: u16, position: usize, limit: usize| {
+            let (start, end) = (
+                usize::from(value >> 8),
+                usize::from(value & 0xFF).min(limit),
+            );
+            if start <= end {
+                (start..end).contains(&position)
+            } else {
+                position >= start || position < end
+            }
         };
+        // Whether window `n` is on and covers this line.
+        let on_line =
+            |n: usize| dispcnt & (1 << (13 + n)) != 0 && span(self.reg(0x44 + n * 2), line, HEIGHT);
+        let (window0, window1) = (on_line(0), on_line(1));
+        let (horizontal0, horizontal1) = (self.reg(0x40), self.reg(0x42));
         let winin = self.reg(0x48);
         let winout = self.reg(0x4A);
-        if dispcnt & (1 << 13) != 0 && inside(0x40, 0x44) {
-            (winin & 0x3F) as u8
-        } else if dispcnt & (1 << 14) != 0 && inside(0x42, 0x46) {
-            ((winin >> 8) & 0x3F) as u8
-        } else if dispcnt & (1 << 15) != 0 && object_window {
-            ((winout >> 8) & 0x3F) as u8
-        } else {
-            (winout & 0x3F) as u8
-        }
+        std::array::from_fn(|x| {
+            if window0 && span(horizontal0, x, WIDTH) {
+                (winin & 0x3F) as u8
+            } else if window1 && span(horizontal1, x, WIDTH) {
+                ((winin >> 8) & 0x3F) as u8
+            } else if dispcnt & (1 << 15) != 0 && object_window[x] {
+                ((winout >> 8) & 0x3F) as u8
+            } else {
+                (winout & 0x3F) as u8
+            }
+        })
     }
 
     fn compose(
@@ -423,9 +445,10 @@ impl Ppu {
         let evb = u32::from((bldalpha >> 8) & 0x1F).min(16);
         let evy = u32::from(self.reg(0x54) & 0x1F).min(16);
         let priorities: [u16; 4] = std::array::from_fn(|bg| self.reg(0x08 + bg * 2) & 3);
+        let masks = self.window_masks(dispcnt, line, object_window);
 
         for x in 0..WIDTH {
-            let mask = self.window_mask(dispcnt, line, x, object_window[x]);
+            let mask = masks[x];
             // Keep the two visible layers with the lowest sort key: priority
             // first, then objects before backgrounds, then background number.
             let mut first = (u16::MAX, BACKDROP, backdrop);
@@ -487,6 +510,16 @@ impl Ppu {
         }
     }
 
+    /// [`Ppu::bg_vram_byte`] for the `N` bytes from `offset`, a row of a
+    /// tile: aligned to `N`, so all of them or none are in object VRAM.
+    fn bg_tile_bytes<const N: usize>(&self, offset: usize) -> [u8; N] {
+        if offset < 0x1_0000 {
+            std::array::from_fn(|index| self.vram[offset + index])
+        } else {
+            [0; N]
+        }
+    }
+
     fn vram_16(&self, offset: usize) -> u16 {
         u16::from_le_bytes([self.vram_byte(offset), self.vram_byte(offset + 1)])
     }
@@ -497,6 +530,15 @@ impl Ppu {
 
     fn oam_16(&self, offset: usize) -> u16 {
         u16::from_le_bytes([self.oam[offset], self.oam[offset + 1]])
+    }
+}
+
+/// Horizontal mosaic: each block of `size` pixels repeats its leftmost.
+fn apply_mosaic(layer: &mut Layer, size: usize) {
+    for screen_x in 0..WIDTH {
+        if screen_x % size != 0 {
+            layer[screen_x] = layer[screen_x - screen_x % size];
+        }
     }
 }
 
@@ -554,6 +596,138 @@ mod tests {
         let mut row = [0; WIDTH];
         ppu.draw_line(line, &mut row);
         row
+    }
+
+    /// A pseudo-random number generator, for filling memory.
+    fn next(seed: &mut u32) -> u32 {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *seed >> 8
+    }
+
+    /// Text background `index`'s pixel at `screen_x` of `line`, looked up
+    /// on its own: what [`Ppu::text_layer`] does a tile row at a time.
+    fn text_pixel(ppu: &Ppu, index: usize, line: usize, screen_x: usize) -> Option<u16> {
+        let control = ppu.reg(0x08 + index * 2);
+        let scroll_x = usize::from(ppu.reg(0x10 + index * 4) & 0x1FF);
+        let scroll_y = usize::from(ppu.reg(0x12 + index * 4) & 0x1FF);
+        let char_base = usize::from((control >> 2) & 3) * 0x4000;
+        let screen_base = usize::from((control >> 8) & 0x1F) * 0x800;
+        let (width, height) =
+            [(256, 256), (512, 256), (256, 512), (512, 512)][usize::from(control >> 14)];
+        let (mosaic_x, mosaic_y, ..) = ppu.mosaic();
+        let mosaic = control & (1 << 6) != 0;
+        let line = if mosaic { line - line % mosaic_y } else { line };
+        let sample_x = if mosaic {
+            screen_x - screen_x % mosaic_x
+        } else {
+            screen_x
+        };
+        let (x, y) = ((sample_x + scroll_x) % width, (line + scroll_y) % height);
+        let block = x / 256 + (y / 256) * (width / 256);
+        let entry =
+            ppu.vram_16(screen_base + block * 0x800 + ((y % 256) / 8) * 64 + ((x % 256) / 8) * 2);
+        let tile = usize::from(entry & 0x3FF);
+        let column = if entry & (1 << 10) != 0 {
+            7 - x % 8
+        } else {
+            x % 8
+        };
+        let row = if entry & (1 << 11) != 0 {
+            7 - y % 8
+        } else {
+            y % 8
+        };
+        let color_index = if control & (1 << 7) != 0 {
+            ppu.bg_vram_byte(char_base + tile * 64 + row * 8 + column)
+        } else {
+            let byte = ppu.bg_vram_byte(char_base + tile * 32 + row * 4 + column / 2);
+            let nibble = if column % 2 == 0 {
+                byte & 0xF
+            } else {
+                byte >> 4
+            };
+            if nibble == 0 {
+                0
+            } else {
+                (entry >> 12) as u8 * 16 + nibble
+            }
+        };
+        (color_index != 0).then(|| ppu.palette_16(usize::from(color_index) * 2))
+    }
+
+    #[test]
+    fn text_layers_by_tile_rows_match_them_pixel_by_pixel() {
+        let mut ppu = Ppu::new();
+        let mut seed = 1;
+        for offset in (0..0x1_8000).step_by(2) {
+            ppu.write_vram(offset, next(&mut seed) as u16);
+        }
+        for offset in (0..0x400).step_by(2) {
+            ppu.write_palette(offset, next(&mut seed) as u16);
+        }
+        for _ in 0..200 {
+            // Any size, tile base, map base, colour depth and mosaic.
+            ppu.write_register(0x08, next(&mut seed) as u16);
+            ppu.write_register(0x10, next(&mut seed) as u16);
+            ppu.write_register(0x12, next(&mut seed) as u16);
+            ppu.write_register(0x4C, next(&mut seed) as u16);
+            for line in 0..HEIGHT {
+                let layer = ppu.text_layer(0, line);
+                for (x, pixel) in layer.iter().enumerate() {
+                    assert_eq!(*pixel, text_pixel(&ppu, 0, line, x), "line {line}, x {x}");
+                }
+            }
+        }
+    }
+
+    /// The window mask at pixel `x` of `line`, worked out on its own: what
+    /// [`Ppu::window_masks`] does for a whole line.
+    fn window_mask(ppu: &Ppu, dispcnt: u16, line: usize, x: usize, object_window: bool) -> u8 {
+        if dispcnt & 0xE000 == 0 {
+            return 0x3F;
+        }
+        let span = |value: u16, position: usize, limit: usize| {
+            let (start, end) = (
+                usize::from(value >> 8),
+                usize::from(value & 0xFF).min(limit),
+            );
+            if start <= end {
+                (start..end).contains(&position)
+            } else {
+                position >= start || position < end
+            }
+        };
+        let inside =
+            |h: usize, v: usize| span(ppu.reg(h), x, WIDTH) && span(ppu.reg(v), line, HEIGHT);
+        let (winin, winout) = (ppu.reg(0x48), ppu.reg(0x4A));
+        if dispcnt & (1 << 13) != 0 && inside(0x40, 0x44) {
+            (winin & 0x3F) as u8
+        } else if dispcnt & (1 << 14) != 0 && inside(0x42, 0x46) {
+            ((winin >> 8) & 0x3F) as u8
+        } else if dispcnt & (1 << 15) != 0 && object_window {
+            ((winout >> 8) & 0x3F) as u8
+        } else {
+            (winout & 0x3F) as u8
+        }
+    }
+
+    #[test]
+    fn window_masks_for_a_line_match_them_pixel_by_pixel() {
+        let mut ppu = Ppu::new();
+        let mut seed = 7;
+        for _ in 0..500 {
+            for offset in [0x40, 0x42, 0x44, 0x46, 0x48, 0x4A] {
+                ppu.write_register(offset, next(&mut seed) as u16);
+            }
+            let dispcnt = next(&mut seed) as u16 & 0xE000;
+            let object_window: [bool; WIDTH] = std::array::from_fn(|_| next(&mut seed) & 1 != 0);
+            for line in 0..HEIGHT {
+                let masks = ppu.window_masks(dispcnt, line, &object_window);
+                for (x, mask) in masks.iter().enumerate() {
+                    assert_eq!(*mask, window_mask(&ppu, dispcnt, line, x, object_window[x]));
+                }
+            }
+        }
     }
 
     #[test]

@@ -78,10 +78,11 @@ impl ScaledScreens {
             let mut out = vec![0; native.len() * scale * scale].into_boxed_slice();
             let line_size = WIDTH * scale * scale;
             for (line, out) in native
-                .chunks_exact(WIDTH)
+                .as_chunks()
+                .0
+                .iter()
                 .zip(out.chunks_exact_mut(line_size))
             {
-                let line = line.try_into().expect("chunks are a line long");
                 gpu2d::enlarge_line(line, scale, out);
             }
             out
@@ -139,8 +140,7 @@ impl Hardware {
     /// Both 2D engines draw `line` into their screens; a running capture
     /// takes engine A's line.
     pub(crate) fn draw_line(&mut self, line: u16) {
-        let start = usize::from(line) * WIDTH;
-        let mut a = [0; WIDTH];
+        let index = usize::from(line);
         let vram = &self.vram;
         // POWCNT1 bit 2 powers the 3D rendering engine.
         let three_d = (self.powcnt1 & (1 << 2) != 0).then(|| self.gpu3d.line(line));
@@ -149,29 +149,32 @@ impl Hardware {
             &vram.engine(Engine::A),
             |offset| vram.read_16(Region::Lcdc, offset),
             three_d,
-            &mut a,
+            &mut self.screen_a.as_chunks_mut().0[index],
         );
-        self.screen_a[start..start + WIDTH].copy_from_slice(&a);
         if self.capturing {
             self.capture(line);
         }
-        let mut b = [0; WIDTH];
-        self.engine_b
-            .render_line(line, &self.vram.engine(Engine::B), |_| 0, None, &mut b);
-        self.screen_b[start..start + WIDTH].copy_from_slice(&b);
+        self.engine_b.render_line(
+            line,
+            &self.vram.engine(Engine::B),
+            |_| 0,
+            None,
+            &mut self.screen_b.as_chunks_mut().0[index],
+        );
         if self.scaled.scale > 1 {
-            self.draw_scaled_line(line, &a, &b);
+            self.draw_scaled_line(index);
         }
     }
 
-    /// Takes `line` for the [`ScaledScreens`], given the line as engines A
-    /// and B drew it: B's enlarged now, A's copied to draw at VBlank.
-    fn draw_scaled_line(&mut self, line: u16, a: &[u32; WIDTH], b: &[u32; WIDTH]) {
+    /// Takes line `line` for the [`ScaledScreens`], as engines A and B
+    /// just drew it: B's enlarged now, A's copied to draw at VBlank.
+    fn draw_scaled_line(&mut self, line: usize) {
         let scaled = &mut self.scaled;
-        let line = usize::from(line);
         let size = WIDTH * scaled.scale * scaled.scale;
+        let b = &self.screen_b.as_chunks().0[line];
         gpu2d::enlarge_line(b, scaled.scale, &mut scaled.b[line * size..][..size]);
-        self.engine_a.copy_line(a, &mut scaled.lines[line]);
+        self.engine_a
+            .copy_line(&self.screen_a.as_chunks().0[line], &mut scaled.lines[line]);
         scaled.fresh[line] = true;
     }
 
@@ -181,7 +184,7 @@ impl Hardware {
         let scaled = &mut self.scaled;
         let scale = scaled.scale;
         let size = WIDTH * scale * scale;
-        let gpu3d = &self.gpu3d;
+        let three_d = self.gpu3d.scaled_frame();
         let lines = scaled.lines.chunks(SCALED_LINES_PER_THREAD);
         let fresh = scaled.fresh.chunks(SCALED_LINES_PER_THREAD);
         let screen = scaled.a.chunks_mut(SCALED_LINES_PER_THREAD * size);
@@ -195,7 +198,7 @@ impl Hardware {
                         (first..).zip(lines.iter().zip(screen.chunks_mut(size)))
                     {
                         if fresh[line - first] {
-                            copy.draw(scale, |row| gpu3d.scaled_row(line * scale + row), out);
+                            copy.draw(scale, |row| three_d.row(line * scale + row), out);
                         }
                     }
                 });

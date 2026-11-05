@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::archive;
+use crate::persist::file_name;
 
 /// The patches the app makes games from, by extension.
 const PATCHES: [&str; 5] = ["ips", "ups", "bps", "xdelta", "vcdiff"];
@@ -156,13 +157,6 @@ fn stem(patch: &Path) -> String {
         stem.as_os_str()
     };
     stem.to_string_lossy().into_owned()
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
 }
 
 #[cfg(test)]

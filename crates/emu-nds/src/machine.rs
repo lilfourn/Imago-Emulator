@@ -4,7 +4,9 @@
 //! and never more than [`SLICE_CYCLES`] bus cycles. In each slice the ARM9
 //! runs until its clock reaches the slice's end, then the ARM7 does, then
 //! the events due by then fire. A CPU therefore sees the other's writes at
-//! most a slice late, which the games' IPC handshakes tolerate.
+//! most a slice late, which the games' IPC handshakes tolerate. While both
+//! CPUs wait for an interrupt, one slice runs to the next event: the short
+//! ones would do nothing different.
 
 use emu_arm::{Bus, Cpu, Mode, Model, Processor, Registers, cp15, psr};
 use serde::{Deserialize, Serialize};
@@ -15,12 +17,19 @@ use crate::bus::{Arm7Bus, Arm9Bus, Arm9TcmBus, CpuBus};
 use crate::cart::Cart;
 use crate::display::Moment;
 use crate::dma::Timing;
-use crate::hardware::{Event, Hardware};
+use crate::hardware::{CpuIo, Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
 
 /// The longest slice, in bus cycles.
 const SLICE_CYCLES: u64 = 64;
+
+/// Where the ARM9's BIOS starts, with the addresses its emulated system
+/// calls trap at.
+const ARM9_BIOS: u32 = 0xFFFF_0000;
+
+/// Where the ARM7's BIOS, with its trap addresses, ends.
+const ARM7_BIOS_END: u32 = 0x4000;
 
 /// The ARM9's processor, an ARM946E-S.
 pub(crate) type Arm9 = emu_arm::Arm9;
@@ -157,21 +166,23 @@ impl Machine {
 
     /// Runs one slice, each instruction by `stepper` ([`Plain`] to just
     /// run them), which can stop it part-way; the next call then finishes
-    /// the same slice. Returns what the events in it did.
-    pub(crate) fn run_slice_with<S: Stepper>(
-        &mut self,
-        stepper: &mut S,
-        mut on_moment: impl FnMut(&mut Hardware, Moment),
-    ) -> Progress {
+    /// the same slice. The caller stops calling once the clock reaches
+    /// `limit` (see [`Machine::slice_end`]). Returns what the events in it
+    /// did.
+    pub(crate) fn run_slice_with<S: Stepper>(&mut self, stepper: &mut S, limit: u64) -> Progress {
         let now = self.hw.scheduler.now();
-        let target = self.slice_target.take().unwrap_or_else(|| {
-            let next = self.hw.scheduler.next_time().unwrap_or(u64::MAX);
-            next.clamp(now + 1, now + SLICE_CYCLES)
-        });
+        let target = self
+            .slice_target
+            .take()
+            .unwrap_or_else(|| self.slice_end(now, limit));
         let stopped = Progress {
             frame_done: false,
             stopped: true,
         };
+        // The other CPU and the events may have changed what each CPU's
+        // first instruction of the slice must check.
+        self.hw.arm9.checked = false;
+        self.hw.arm7.checked = false;
         while self.hw.arm9.cycles < target * 2 {
             let ran = self.step_arm9(target * 2, stepper);
             if stepper.stop(Side::Arm9, ran, self.arm9.next_instruction()) {
@@ -199,14 +210,12 @@ impl Machine {
         while let Some(due) = self.hw.scheduler.pop_due() {
             match due.event {
                 Event::HBlank => {
-                    let moment = self.hw.hblank(due.time);
-                    on_moment(&mut self.hw, moment);
+                    self.hw.hblank(due.time);
                 }
                 Event::LineStart => {
                     let moment = self.hw.line_start(due.time);
                     progress.frame_done |=
                         moment == Moment::LineStart(crate::display::VISIBLE_LINES);
-                    on_moment(&mut self.hw, moment);
                 }
                 Event::TimerOverflow(side, index) => {
                     self.timer_overflow(side, usize::from(index), due.time)
@@ -228,6 +237,41 @@ impl Machine {
         progress
     }
 
+    /// Where a fresh slice from `now` ends: at the next event, but at most
+    /// [`SLICE_CYCLES`] on.
+    ///
+    /// While both CPUs are halted and nothing can wake them before the
+    /// next event, the slices up to it would all just let the time pass,
+    /// so one slice runs there at once. It still ends where a run of full
+    /// slices would first reach `limit`, where the caller stops.
+    fn slice_end(&self, now: u64, limit: u64) -> u64 {
+        let next = self.hw.scheduler.next_time().unwrap_or(u64::MAX);
+        if next <= now + SLICE_CYCLES || !self.idle() {
+            return next.clamp(now + 1, now + SLICE_CYCLES);
+        }
+        let slices = limit.saturating_sub(now).div_ceil(SLICE_CYCLES).max(1);
+        next.min(now.saturating_add(slices.saturating_mul(SLICE_CYCLES)))
+    }
+
+    /// Whether a slice would only let time pass: both CPUs are halted with
+    /// no interrupt to wake them and no DMA to run, and the geometry FIFO
+    /// checks that end every slice would not change that.
+    fn idle(&self) -> bool {
+        let Hardware {
+            arm9, arm7, gpu3d, ..
+        } = &self.hw;
+        let quiet = |cpu: &CpuIo| !cpu.interrupts.pending() && cpu.dma.next_pending().is_none();
+        let fifo_wakes =
+            || gpu3d.irq_requested() && arm9.interrupts.enable & irq::GEOMETRY_FIFO != 0;
+        let fifo_dma = || gpu3d.fifo_wants_dma() && arm9.dma.waiting_for(Timing::GeometryFifo);
+        (arm9.halted || self.arm9.halted())
+            && arm7.halted
+            && quiet(arm9)
+            && quiet(arm7)
+            && !fifo_wakes()
+            && !fifo_dma()
+    }
+
     fn timer_overflow(&mut self, side: Side, index: usize, time: u64) {
         let timers = &mut self.hw.cpu_mut(side).timers;
         let overflowed = timers.overflow(index, time);
@@ -241,6 +285,16 @@ impl Machine {
     /// whether it was an instruction or a BIOS call.
     fn step_arm9<S: Stepper>(&mut self, target: u64, stepper: &mut S) -> bool {
         let hw = &mut self.hw;
+        // While `checked` holds, the checks below would find what they did
+        // before the last instruction: no DMA to run and the same IRQ line.
+        // CP15 can halt the CPU without touching the bus, so that is
+        // checked here, and the BIOS area, where the emulated calls trap,
+        // gets every check.
+        if hw.arm9.checked && !self.arm9.halted() && self.arm9.reg(15) < ARM9_BIOS {
+            stepper.arm9(&mut self.arm9, &mut Arm9Bus(hw));
+            return true;
+        }
+        hw.arm9.checked = false;
         if hw.run_dma(Side::Arm9) {
             return false;
         }
@@ -311,6 +365,7 @@ impl Machine {
             return true;
         }
         self.arm9.set_irq_line(hw.arm9.interrupts.line());
+        hw.arm9.checked = true;
         stepper.arm9(&mut self.arm9, &mut Arm9Bus(hw));
         true
     }
@@ -320,6 +375,12 @@ impl Machine {
     /// whether it was an instruction or a BIOS call.
     fn step_arm7<S: Stepper>(&mut self, target: u64, stepper: &mut S) -> bool {
         let hw = &mut self.hw;
+        // As on the ARM9.
+        if hw.arm7.checked && self.arm7.reg(15) >= ARM7_BIOS_END {
+            stepper.arm7(&mut self.arm7, &mut Arm7Bus(hw));
+            return true;
+        }
+        hw.arm7.checked = false;
         if hw.run_dma(Side::Arm7) {
             return false;
         }
@@ -365,6 +426,7 @@ impl Machine {
             return true;
         }
         self.arm7.set_irq_line(hw.arm7.interrupts.line());
+        hw.arm7.checked = true;
         stepper.arm7(&mut self.arm7, &mut Arm7Bus(hw));
         true
     }
@@ -581,10 +643,11 @@ fn soft_reset<M: Model, B: Bus>(
 
 #[cfg(test)]
 mod tests {
-    use emu_core::{Core, Media};
+    use emu_core::{Button, Core, Input, Media, StereoSample};
 
     use super::*;
     use crate::Nds;
+    use crate::display::FRAME_CYCLES;
 
     /// Where the ARM9 program loads and starts.
     const ARM9_BASE: u32 = 0x0200_4000;
@@ -658,7 +721,7 @@ mod tests {
             if !nds.machine.suspended[0].is_empty() {
                 break;
             }
-            nds.machine.run_slice_with(&mut Plain, |_, _| {});
+            nds.machine.run_slice_with(&mut Plain, u64::MAX);
         }
         assert!(!nds.machine.suspended[0].is_empty(), "stopped mid-call");
         let mut state = Vec::new();
@@ -707,8 +770,10 @@ mod tests {
         assert_eq!(arm9.cp15().control(), bios::ARM9_RESET_CONTROL);
     }
 
-    #[test]
-    fn vblank_intr_wait_returns_once_per_frame() {
+    /// An ARM9 program that waits for VBlank with VBlankIntrWait in a
+    /// loop, counting frames in R5, with an IRQ handler that acknowledges
+    /// the IRQ and sets the BIOS flag at the top of DTCM, as libnds's does.
+    fn vblank_wait_program() -> Vec<u32> {
         let mut program = vec![0; 0x4C];
         program[..17].copy_from_slice(&[
             0xEE19_3F11, // MRC P15, 0, R3, C9, C1, 0  (DTCM region)
@@ -729,8 +794,6 @@ mod tests {
             0xE285_5001, // ADD R5, R5, #1
             0xEAFF_FFFC, // B loop
         ]);
-        // The handler acknowledges the IRQ and sets the BIOS flag at the
-        // top of DTCM, as libnds's does.
         program[0x40..0x4C].copy_from_slice(&[
             0xE3A0_0301, // MOV R0, #0x04000000
             0xE280_0C02, // ADD R0, R0, #0x200
@@ -745,11 +808,277 @@ mod tests {
             0xE502_3008, // STR R3, [R2, #-8]
             0xE12F_FF1E, // BX LR
         ]);
-        let mut nds = Nds::new(&Media::new(&rom(&program))).expect("valid header");
+        program
+    }
+
+    #[test]
+    fn vblank_intr_wait_returns_once_per_frame() {
+        let mut nds = Nds::new(&Media::new(&rom(&vblank_wait_program()))).expect("valid header");
         for _ in 0..10 {
             nds.run_frame(&[], &mut Vec::new());
         }
         let frames_waited = nds.machine.arm9.reg(5);
         assert!((9..=10).contains(&frames_waited), "{frames_waited}");
+    }
+
+    /// A cartridge whose CPUs take turns, each halted with IME off until
+    /// it is woken. At VBlank the ARM9 wakes from CP15's wait for
+    /// interrupt, counts a while, lets the VBlank IRQ in by turning IME on
+    /// for a moment, and wakes the ARM7 with an IPCSYNC IRQ. The ARM7,
+    /// halted through HALTCNT in its own WRAM, wakes for that and for its
+    /// timer 1, counts a little and wakes the ARM9. Each CPU adds its timer 0 count at every waking to
+    /// R8, and the IRQ handler adds the ARM9's to the word at 0x02000000,
+    /// so those show when everything happened.
+    fn ping_pong_rom() -> Vec<u8> {
+        let mut arm9 = vec![0; 0x4B];
+        arm9[..38].copy_from_slice(&[
+            0xEE19_3F11, // MRC P15, 0, R3, C9, C1, 0  (DTCM region)
+            0xE1A0_3623, // MOV R3, R3, LSR #12
+            0xE1A0_3603, // MOV R3, R3, LSL #12
+            0xE283_3901, // ADD R3, R3, #0x4000
+            0xE3A0_4402, // MOV R4, #0x02000000
+            0xE284_4C41, // ADD R4, R4, #0x4100
+            0xE503_4004, // STR R4, [R3, #-4]  (the IRQ handler)
+            0xE3A0_0301, // MOV R0, #0x04000000
+            0xE280_2C02, // ADD R2, R0, #0x200
+            0xE3A0_1801, // MOV R1, #0x10000
+            0xE381_1001, // ORR R1, R1, #1
+            0xE582_1010, // STR R1, [R2, #0x10]  (IE: IPCSYNC and VBlank)
+            0xE3A0_1008, // MOV R1, #8
+            0xE1C0_10B4, // STRH R1, [R0, #4]  (DISPSTAT: VBlank IRQ)
+            0xE280_3E18, // ADD R3, R0, #0x180
+            0xE3A0_1901, // MOV R1, #0x4000
+            0xE1C3_10B0, // STRH R1, [R3]  (IPCSYNC: IRQ from the ARM7)
+            0xE280_5C01, // ADD R5, R0, #0x100
+            0xE3A0_1080, // MOV R1, #0x80
+            0xE1C5_10B2, // STRH R1, [R5, #2]  (TM0CNT_H: start)
+            0xEE07_0F90, // loop: MCR P15, 0, R0, C7, C0, 4  (wait for IRQ)
+            0xE1D5_40B0, // LDRH R4, [R5]  (TM0CNT_L)
+            0xE088_8004, // ADD R8, R8, R4
+            0xE592_6014, // LDR R6, [R2, #0x14]  (IF)
+            0xE316_0801, // TST R6, #0x10000
+            0x13A0_1801, // MOVNE R1, #0x10000
+            0x1582_1014, // STRNE R1, [R2, #0x14]  (the ARM7's: acknowledge)
+            0x1AFF_FFF7, // BNE loop
+            0xE3A0_7040, // MOV R7, #0x40
+            0xE257_7001, // count: SUBS R7, R7, #1
+            0x1AFF_FFFD, // BNE count
+            0xE3A0_1001, // MOV R1, #1
+            0xE582_1008, // STR R1, [R2, #8]  (IME on: VBlank's IRQ comes)
+            0xE3A0_1000, // MOV R1, #0
+            0xE582_1008, // STR R1, [R2, #8]  (IME off)
+            0xE3A0_1A06, // MOV R1, #0x6000
+            0xE1C3_10B0, // STRH R1, [R3]  (IPCSYNC: IRQ to the ARM7)
+            0xEAFF_FFED, // B loop
+        ]);
+        arm9[0x40..].copy_from_slice(&[
+            0xE3A0_0301, // MOV R0, #0x04000000
+            0xE280_1C01, // ADD R1, R0, #0x100
+            0xE1D1_10B0, // LDRH R1, [R1]  (TM0CNT_L)
+            0xE3A0_2402, // MOV R2, #0x02000000
+            0xE592_3000, // LDR R3, [R2]
+            0xE083_3001, // ADD R3, R3, R1
+            0xE582_3000, // STR R3, [R2]
+            0xE280_0C02, // ADD R0, R0, #0x200
+            0xE3A0_1001, // MOV R1, #1
+            0xE580_1014, // STR R1, [R0, #0x14]  (IF: acknowledge VBlank)
+            0xE12F_FF1E, // BX LR
+        ]);
+        let arm7 = [
+            0xE3A0_0301, // MOV R0, #0x04000000
+            0xE280_2C02, // ADD R2, R0, #0x200
+            0xE3A0_1801, // MOV R1, #0x10000
+            0xE381_1010, // ORR R1, R1, #0x10
+            0xE582_1010, // STR R1, [R2, #0x10]  (IE: IPCSYNC and timer 1)
+            0xE280_3E18, // ADD R3, R0, #0x180
+            0xE3A0_1901, // MOV R1, #0x4000
+            0xE1C3_10B0, // STRH R1, [R3]  (IPCSYNC: IRQ from the ARM9)
+            0xE280_5C01, // ADD R5, R0, #0x100
+            0xE3A0_1080, // MOV R1, #0x80
+            0xE1C5_10B2, // STRH R1, [R5, #2]  (TM0CNT_H: start)
+            0xE3A0_1CF0, // MOV R1, #0xF000
+            0xE381_18C0, // ORR R1, R1, #0xC00000
+            0xE585_1004, // STR R1, [R5, #4]  (timer 1: every 4096, IRQ)
+            0xE3A0_1080, // loop: MOV R1, #0x80
+            0xE5C0_1301, // STRB R1, [R0, #0x301]  (HALTCNT: halt)
+            0xE1D5_40B0, // LDRH R4, [R5]  (TM0CNT_L)
+            0xE088_8004, // ADD R8, R8, R4
+            0xE592_6014, // LDR R6, [R2, #0x14]  (IF)
+            0xE582_6014, // STR R6, [R2, #0x14]  (acknowledge)
+            0xE3A0_7020, // MOV R7, #0x20
+            0xE257_7001, // count: SUBS R7, R7, #1
+            0x1AFF_FFFD, // BNE count
+            0xE3A0_1A06, // MOV R1, #0x6000
+            0xE1C3_10B0, // STRH R1, [R3]  (IPCSYNC: IRQ to the ARM9)
+            0xEAFF_FFF3, // B loop
+        ];
+        let mut rom = rom(&arm9);
+        rom.resize(0x400 + arm7.len() * 4, 0);
+        let mut put = |offset: usize, value: u32| {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put(0x34, 0x0380_0000);
+        put(0x38, 0x0380_0000);
+        put(0x3C, arm7.len() as u32 * 4);
+        for (index, word) in arm7.into_iter().enumerate() {
+            put(0x400 + index * 4, word);
+        }
+        rom
+    }
+
+    /// Stops after every step, so each instruction runs in a fresh call of
+    /// [`Machine::run_slice_with`], which checks everything before it.
+    struct CheckEverything;
+
+    impl Stepper for CheckEverything {
+        fn arm9(&mut self, cpu: &mut Arm9, bus: &mut Arm9Bus<'_>) {
+            cpu.step(bus);
+        }
+
+        fn arm7(&mut self, cpu: &mut Cpu, bus: &mut Arm7Bus<'_>) {
+            cpu.step(bus);
+        }
+
+        fn stop(&mut self, _: Side, _: bool, _: u32) -> bool {
+            true
+        }
+    }
+
+    /// Runs a frame as [`Core::run_frame`] does, but the plain way: every
+    /// instruction gets every check, and no slice is longer than
+    /// [`SLICE_CYCLES`], idle or not.
+    fn run_frame_plainly(nds: &mut Nds, input: Input, audio: &mut Vec<StereoSample>) {
+        nds.set_input(&input);
+        let start = nds.machine.now();
+        while nds.machine.now() - start < FRAME_CYCLES {
+            // A limit just ahead keeps idle slices short too.
+            let limit = nds.machine.now() + 1;
+            if nds
+                .machine
+                .run_slice_with(&mut CheckEverything, limit)
+                .frame_done
+            {
+                break;
+            }
+        }
+        nds.machine.hw.wifi.take_transmissions();
+        nds.machine.hw.sound.drain_samples(audio);
+        nds.present();
+    }
+
+    /// Runs `rom` for `frames` frames with `input`, both as games run and
+    /// [`run_frame_plainly`], and checks that the screens, the sound and
+    /// (every 10 frames) the save states match.
+    fn assert_runs_as_plainly(rom: &[u8], frames: usize, input: impl Fn(usize) -> Input) {
+        let mut fast = Nds::new(&Media::new(rom)).expect("valid header");
+        let mut plain = Nds::new(&Media::new(rom)).expect("valid header");
+        for frame in 0..frames {
+            let (mut fast_audio, mut plain_audio) = (Vec::new(), Vec::new());
+            fast.run_frame(&[input(frame)], &mut fast_audio);
+            run_frame_plainly(&mut plain, input(frame), &mut plain_audio);
+            assert!(fast.screens() == plain.screens(), "frame {frame}: screens");
+            assert!(fast_audio == plain_audio, "frame {frame}: sound");
+            if frame % 10 == 9 {
+                let (mut fast_state, mut plain_state) = (Vec::new(), Vec::new());
+                fast.save_state(&mut fast_state);
+                plain.save_state(&mut plain_state);
+                assert!(fast_state == plain_state, "frame {frame}: state");
+            }
+        }
+    }
+
+    #[test]
+    fn idle_slices_run_to_the_next_event() {
+        let mut nds = Nds::new(&Media::new(&ping_pong_rom())).expect("valid header");
+        for _ in 0..3 {
+            nds.run_frame(&[], &mut Vec::new());
+        }
+        assert_ne!(word(&nds, 0x0200_0000), 0, "the ARM9 took VBlank's IRQ");
+        assert_ne!(nds.machine.arm7.reg(8), 0, "the ARM9 woke the ARM7");
+        assert!(nds.machine.arm9.reg(8) > 0x1_0000, "and the ARM7 the ARM9");
+        let mut longest = 0;
+        loop {
+            let before = nds.machine.now();
+            let progress = nds.machine.run_slice_with(&mut Plain, u64::MAX);
+            longest = longest.max(nds.machine.now() - before);
+            if progress.frame_done {
+                break;
+            }
+        }
+        assert!(longest > SLICE_CYCLES, "{longest}");
+    }
+
+    #[test]
+    fn a_slice_is_idle_only_with_nothing_to_wake_or_run() {
+        let rom = rom(&[0xEAFF_FFFE]);
+        let idle_after = |change: &dyn Fn(&mut Hardware)| {
+            let mut nds = Nds::new(&Media::new(&rom)).expect("valid header");
+            nds.machine.hw.arm9.halted = true;
+            nds.machine.hw.arm7.halted = true;
+            change(&mut nds.machine.hw);
+            nds.machine.idle()
+        };
+        assert!(idle_after(&|_| {}));
+        assert!(!idle_after(&|hw| hw.arm9.halted = false));
+        assert!(!idle_after(&|hw| hw.arm7.halted = false));
+        // An interrupt to wake a CPU, whatever IME says.
+        assert!(!idle_after(&|hw| {
+            hw.arm9.interrupts.enable = irq::VBLANK;
+            hw.arm9.interrupts.request(irq::VBLANK);
+        }));
+        assert!(idle_after(&|hw| hw.arm7.interrupts.request(irq::VBLANK)));
+        // A DMA channel to run.
+        assert!(!idle_after(&|hw| hw.arm7_write_32(0x0400_00B8, 0x8000_0001)));
+        // The geometry FIFO, empty, would raise an enabled interrupt or
+        // start its DMA at the end of the slice.
+        let fifo_irq = |hw: &mut Hardware| hw.arm9_write_32(0x0400_0600, 2 << 30);
+        assert!(idle_after(&fifo_irq));
+        assert!(!idle_after(&|hw| {
+            fifo_irq(hw);
+            hw.arm9.interrupts.enable = irq::GEOMETRY_FIFO;
+        }));
+        assert!(!idle_after(&|hw| hw.arm9_write_32(0x0400_00B8, 0xB800_0001)));
+    }
+
+    #[test]
+    fn halted_cpus_and_skipped_checks_change_nothing() {
+        assert_runs_as_plainly(&ping_pong_rom(), 30, |_| Input::default());
+        // The emulated BIOS's VBlankIntrWait, with the ARM7 busy.
+        assert_runs_as_plainly(&rom(&vblank_wait_program()), 30, |_| Input::default());
+    }
+
+    /// rockwrestler (if fetched) opening its IPC menu and running its
+    /// IPCFIFO IRQ test, where both CPUs exchange words and interrupts.
+    #[test]
+    fn rockwrestler_runs_as_plainly() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-roms/rockwrestler/rockwrestler.nds"
+        );
+        let Ok(rom) = std::fs::read(path) else {
+            eprintln!("skipping: run scripts/fetch-test-roms.sh to download rockwrestler");
+            return;
+        };
+        let presses = [
+            Button::Down,
+            Button::Down,
+            Button::A,
+            Button::Down,
+            Button::Down,
+            Button::A,
+        ];
+        // 60 frames to start, then each press held for 10 frames and
+        // released for 10.
+        let input = |frame: usize| {
+            let step = frame.saturating_sub(60);
+            match presses.get(step / 20) {
+                Some(&button) if frame >= 60 && step % 20 < 10 => Input {
+                    buttons: [button].into_iter().collect(),
+                    ..Input::default()
+                },
+                _ => Input::default(),
+            }
+        };
+        assert_runs_as_plainly(&rom, 300, input);
     }
 }

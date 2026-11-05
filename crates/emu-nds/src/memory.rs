@@ -155,20 +155,29 @@ impl Hardware {
         match address >> 24 {
             0x00 if address < 0x4000 => Place::Arm7Bios(address as usize),
             0x02 => Place::MainRam(address as usize & 0x3F_FFFF),
-            0x03 if address < 0x0380_0000 => match self.wramcnt & 3 {
-                // With no shared WRAM, the ARM7's own WRAM shows here too.
-                0 => Place::Arm7Wram(address as usize & 0xFFFF),
-                1 => Place::SharedWram(address as usize & 0x3FFF),
-                2 => Place::SharedWram(0x4000 + (address as usize & 0x3FFF)),
-                _ => Place::SharedWram(address as usize & 0x7FFF),
-            },
-            0x03 => Place::Arm7Wram(address as usize & 0xFFFF),
+            0x03 => self.arm7_wram_place(address),
             0x04 if (0x0480_0000..0x0481_0000).contains(&address) => Place::Wifi,
             0x04 => Place::Io,
             0x06 => Place::Vram(Region::Arm7, address & 0x3_FFFF),
             0x08 | 0x09 => self.gba_slot_place(Side::Arm7, Place::GbaRom),
             0x0A => self.gba_slot_place(Side::Arm7, Place::GbaRam),
             _ => Place::Open,
+        }
+    }
+
+    /// Where the ARM7 sees `address` in 0x03000000-0x03FFFFFF: shared WRAM
+    /// as WRAMCNT gives it below 0x03800000, its own WRAM above.
+    #[inline]
+    fn arm7_wram_place(&self, address: u32) -> Place {
+        if address >= 0x0380_0000 {
+            return Place::Arm7Wram(address as usize & 0xFFFF);
+        }
+        match self.wramcnt & 3 {
+            // With no shared WRAM, the ARM7's own WRAM shows here too.
+            0 => Place::Arm7Wram(address as usize & 0xFFFF),
+            1 => Place::SharedWram(address as usize & 0x3FFF),
+            2 => Place::SharedWram(0x4000 + (address as usize & 0x3FFF)),
+            _ => Place::SharedWram(address as usize & 0x7FFF),
         }
     }
 
@@ -533,16 +542,20 @@ impl Hardware {
         }
     }
 
-    /// The ARM7's working RAM, shared or its own, if that is where `place`
-    /// is, and the index there, after charging the access's cycle as
-    /// [`Hardware::arm7_wait`] does; `None` for every other place. The
-    /// ARM7's code and stacks live there, so its bus tries it before the
-    /// rest of the memory map.
+    /// The ARM7's working RAM, shared or its own, if that is where
+    /// `address` is, and the index there, after charging the access's
+    /// cycle as [`Hardware::arm7_wait`] does; `None` for every other
+    /// address. The ARM7's code and stacks live there, so its bus tries it
+    /// before the rest of the memory map.
     #[inline]
-    pub(crate) fn arm7_wram_hit(&mut self, place: Place) -> Option<(&mut [u8], usize)> {
-        let (memory, index) = match place {
+    pub(crate) fn arm7_wram_hit(&mut self, address: u32) -> Option<(&mut [u8], usize)> {
+        if address >> 24 != 0x03 {
+            return None;
+        }
+        let (memory, index) = match self.arm7_wram_place(address) {
             Place::SharedWram(index) => (&mut self.shared_wram, index),
             Place::Arm7Wram(index) => (&mut self.arm7_wram, index),
+            // Not a place `arm7_wram_place` gives.
             _ => return None,
         };
         self.arm7.cycles += ARM7_WRAM;

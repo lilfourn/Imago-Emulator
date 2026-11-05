@@ -453,9 +453,11 @@ struct Session {
     /// The Vulkan device, when the GPU draws. Dropped only as the process
     /// ends, after the core.
     gpu: Option<Box<Gpu>>,
-    /// Reused for each frame: the picture, then the link's payload.
+    /// Reused for each frame: the picture, then the link's payload: the
+    /// screens' pixels and the sound's bytes.
     picture: Picture,
     frame: Vec<u8>,
+    sound: Vec<u8>,
     /// Why this game cannot have save states, if it cannot.
     no_states: Option<&'static str>,
 }
@@ -525,6 +527,7 @@ impl Session {
             gpu: None,
             picture: Picture::default(),
             frame: Vec::new(),
+            sound: Vec::new(),
             no_states: (renderer == Renderer::Vulkan && !has_title_id(game))
                 .then_some(NO_HOMEBREW_STATES),
         };
@@ -590,14 +593,17 @@ impl Session {
         let audio = std::mem::take(&mut shared().audio);
         let (top, bottom) = split(&self.picture, &mut self.frame);
         let samples = audio.len() / 2;
-        let sound: Vec<u8> = audio
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect();
+        self.sound.clear();
+        self.sound
+            .extend(audio.iter().flat_map(|sample| sample.to_le_bytes()));
         let result = link::write_message(
             out,
             link::FRAME,
-            &[&link::frame_head(top, bottom, samples), &self.frame, &sound],
+            &[
+                &link::frame_head(top, bottom, samples),
+                &self.frame,
+                &self.sound,
+            ],
         );
         // Hand the buffer back for the next frame's sound.
         let mut shared = shared();

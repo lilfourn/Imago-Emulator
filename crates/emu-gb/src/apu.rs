@@ -26,6 +26,10 @@ pub(crate) struct Apu {
     sample_clock: u32,
     /// High-pass filter capacitor charge, per side.
     capacitor: (f32, f32),
+    /// The mixed output of the channels as they are, until one changes.
+    /// Worked out again after loading a state.
+    #[serde(skip)]
+    mixed: Option<[i32; 2]>,
     /// Samples produced but not yet collected. Not machine state.
     #[serde(skip)]
     samples: Vec<StereoSample>,
@@ -68,6 +72,7 @@ impl Apu {
             accumulated_cycles: 0,
             sample_clock: 0,
             capacitor: (0.0, 0.0),
+            mixed: None,
             samples: Vec::new(),
         }
     }
@@ -82,35 +87,38 @@ impl Apu {
     /// clocks it at 512 Hz fell.
     pub(crate) fn tick(&mut self, cycles: u8, frame_sequencer: bool) {
         if frame_sequencer {
-            self.psg.clock_frame_sequencer();
+            self.clock_frame_sequencer();
         }
         let cycles = u32::from(cycles);
-        self.psg.tick(cycles);
+        if self.psg.tick(cycles) {
+            self.mixed = None;
+        }
         self.mix(cycles);
     }
 
     /// One frame-sequencer step, for a DIV write that makes its bit fall.
     pub(crate) fn clock_frame_sequencer(&mut self) {
         self.psg.clock_frame_sequencer();
+        self.mixed = None;
+    }
+
+    /// The channels' output after NR51 panning and NR50 volume, left and
+    /// right; silence with the sound circuit off.
+    fn mix_channels(&self) -> [i32; 2] {
+        if self.psg.powered() {
+            self.psg.mixed()
+        } else {
+            [0, 0]
+        }
     }
 
     fn mix(&mut self, cycles: u32) {
-        let channels = self.psg.outputs();
-        let panning = self.psg.panning();
-        let volume = self.psg.master_volume();
-        let side = |shift: u8, master: u8| -> i32 {
-            let sum: i32 = channels
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| panning & (1 << (index + usize::from(shift))) != 0)
-                .map(|(_, value)| *value)
-                .sum();
-            sum * (i32::from(master & 7) + 1)
+        let [left, right] = match self.mixed {
+            Some(mixed) => mixed,
+            None => *self.mixed.insert(self.mix_channels()),
         };
-        if self.psg.powered() {
-            self.accumulated.0 += side(4, volume >> 4);
-            self.accumulated.1 += side(0, volume);
-        }
+        self.accumulated.0 += left;
+        self.accumulated.1 += right;
         self.accumulated_cycles += 1;
 
         self.sample_clock += cycles * SAMPLE_RATE;
@@ -144,6 +152,7 @@ impl Apu {
     }
 
     pub(crate) fn write(&mut self, address: u16, value: u8) {
+        self.mixed = None;
         if (0xFF30..=0xFF3F).contains(&address) {
             self.psg.write_wave((address - 0xFF30) as u8, value);
         } else {
@@ -198,6 +207,35 @@ mod tests {
             .unwrap_or(0);
         assert!(peak > 5_000, "peak {peak}");
         assert_eq!(apu.read(0xFF26) & 0x01, 0x01);
+    }
+
+    #[test]
+    fn the_kept_mix_sounds_like_mixing_every_cycle() {
+        let mut kept = Apu::after_boot(Model::Cgb);
+        let mut fresh = kept.clone();
+        let mut seed = 5_u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as u8
+        };
+        for step in 0..400_000 {
+            // Now and then a random sound register or wave RAM write.
+            if step % 97 == 0 {
+                let address = 0xFF10 + u16::from(next() % 0x30);
+                let value = next();
+                kept.write(address, value);
+                fresh.write(address, value);
+            }
+            let frame_sequencer = step % 2048 == 0;
+            kept.tick(4, frame_sequencer);
+            fresh.mixed = None;
+            fresh.tick(4, frame_sequencer);
+        }
+        let (mut kept_samples, mut fresh_samples) = (Vec::new(), Vec::new());
+        kept.drain_samples(&mut kept_samples);
+        fresh.drain_samples(&mut fresh_samples);
+        assert!(kept_samples.iter().any(|&sample| sample != [0, 0]));
+        assert_eq!(kept_samples, fresh_samples);
     }
 
     #[test]

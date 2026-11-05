@@ -221,6 +221,15 @@ impl PolygonList {
         &self.vertices[first..first + usize::from(polygon.len)]
     }
 
+    /// Makes this list a copy of `other`, reusing its allocations.
+    pub(crate) fn copy_from(&mut self, other: &Self) {
+        self.polygons.clone_from(&other.polygons);
+        self.vertices.clone_from(&other.vertices);
+        self.vertex_ram = other.vertex_ram;
+        self.manual_sort = other.manual_sort;
+        self.w_buffer = other.w_buffer;
+    }
+
     /// Empties the list for a new frame with SWAP_BUFFERS parameter
     /// `params`, keeping the allocations.
     pub(crate) fn restart(&mut self, params: u32) {

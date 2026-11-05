@@ -11,6 +11,36 @@ use std::fmt;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Serializes `value` onto the end of `out`, laid out as postcard lays it
+/// out. It goes straight into the caller's buffer: the app's rewind
+/// snapshot reuses one each frame that already has room, where postcard's
+/// own buffer would grow several times over, a whole state each frame, and
+/// then be copied.
+pub(crate) fn append<T: Serialize + ?Sized>(value: &T, out: &mut Vec<u8>) {
+    postcard::serialize_with_flavor(value, Append(out)).expect("machine state always serializes");
+}
+
+/// A postcard output that appends to a `Vec` it borrows.
+struct Append<'a>(&'a mut Vec<u8>);
+
+impl postcard::ser_flavors::Flavor for Append<'_> {
+    type Output = ();
+
+    fn try_push(&mut self, data: u8) -> postcard::Result<()> {
+        self.0.push(data);
+        Ok(())
+    }
+
+    fn try_extend(&mut self, data: &[u8]) -> postcard::Result<()> {
+        self.0.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn finalize(self) -> postcard::Result<()> {
+        Ok(())
+    }
+}
+
 /// Writes `bytes` as one byte string.
 pub(crate) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_bytes(bytes)
@@ -159,5 +189,19 @@ mod tests {
         assert_eq!(plain_bytes, string_bytes);
         let read: Strings = postcard::from_bytes(&plain_bytes).expect("deserializes");
         assert_eq!(read, strings);
+    }
+
+    #[test]
+    fn appending_writes_what_postcard_writes_after_what_was_there() {
+        let strings = Strings {
+            boxed: vec![1, 2, 3].into_boxed_slice(),
+            vec: vec![4; 300],
+            banks: [vec![5].into_boxed_slice(), Vec::new().into_boxed_slice()],
+        };
+        let mut out = vec![0xAA, 0xBB];
+        super::append(&strings, &mut out);
+        let own = postcard::to_stdvec(&strings).expect("serializes");
+        assert_eq!(out[..2], [0xAA, 0xBB]);
+        assert_eq!(out[2..], own[..]);
     }
 }

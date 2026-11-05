@@ -642,8 +642,10 @@ impl<M: Model> Processor<M> {
     }
 
     /// Whether condition `condition` (0–15) passes with the current flags.
+    /// Most instructions run always, and those need not wait for the
+    /// previous instruction's flags.
     fn condition_passed(&self, condition: u32) -> bool {
-        CONDITIONS[condition as usize] >> (self.cpsr >> 28) & 1 != 0
+        condition == 0xE || CONDITIONS[condition as usize] >> (self.cpsr >> 28) & 1 != 0
     }
 
     /// Saves R8–R14 of `mode` from the live registers into its banks.

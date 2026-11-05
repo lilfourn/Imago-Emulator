@@ -58,7 +58,7 @@ use crate::audio::AudioSink;
 use crate::capture;
 use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
-use crate::persist::{self, GameFiles};
+use crate::persist::{self, GameFiles, file_name};
 use crate::qos;
 use crate::recorder::Recorder;
 use crate::refresh::Lock;
@@ -430,13 +430,6 @@ fn minutes_and_seconds(duration: Duration) -> String {
     }
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// A request from the UI to the emulation thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -574,6 +567,8 @@ impl emu_cheats::Memory for PlayerMemory<'_> {
 /// The most recent frame, shared between the threads.
 #[derive(Default)]
 struct Latest {
+    /// The newest frame's sequence number and screens. Once the window has
+    /// taken them, the screens are its old ones, until the next frame.
     frames: Mutex<(u64, Vec<Frame>)>,
     /// What the script drew after that frame, to show over the screens.
     overlay: Mutex<Arc<[Draw]>>,
@@ -637,6 +632,7 @@ impl Emulator {
             recorded_at: None,
             events,
             latest: Arc::clone(&latest),
+            unpublished: Vec::new(),
             audio,
             sound_on,
         };
@@ -667,20 +663,22 @@ impl Emulator {
         }
     }
 
-    /// Copies the latest frame into `frames` if it is newer than `seen`,
-    /// returning its sequence number.
+    /// Takes the latest frames into `frames` if they are newer than `seen`,
+    /// returning their sequence number. The buffers `frames` held go back
+    /// to the emulation thread to copy later frames into, so frames must
+    /// be taken by one caller, the one that knows which it has seen.
     pub fn take_latest(&self, seen: u64, frames: &mut Vec<Frame>) -> Option<u64> {
         self.latest.unseen.store(false, Ordering::Release);
-        let latest = self
+        let mut latest = self
             .latest
             .frames
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (sequence, latest_frames) = &*latest;
+        let (sequence, latest_frames) = &mut *latest;
         if *sequence == seen {
             return None;
         }
-        frames.clone_from(latest_frames);
+        std::mem::swap(frames, latest_frames);
         *self
             .latest
             .taken
@@ -767,6 +765,9 @@ struct Runner {
     writer: SaveWriter,
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
+    /// The next frame's screens, copied out of the core before they are
+    /// swapped into `latest`, into buffers swapped out of it before.
+    unpublished: Vec<Frame>,
     /// Where each frame's sound goes, unless the core's sound plays as it
     /// comes (see [`Loaded::live_sound`]).
     audio: Option<AudioSink>,
@@ -804,6 +805,22 @@ fn generations(core: &dyn Core, cartridges: usize) -> Vec<Option<u64>> {
     (0..cartridges)
         .map(|cartridge| Some(core.backup_generation(cartridge).unwrap_or(0)))
         .collect()
+}
+
+/// Copies `screens` into `frames`, into the buffers already there where
+/// the sizes match: cloning a frame allocates afresh, and a DS screen
+/// drawn with 3D at 4× is 3 MB.
+fn copy_screens(frames: &mut Vec<Frame>, screens: &[Frame]) {
+    frames.truncate(screens.len());
+    for (frame, screen) in frames.iter_mut().zip(screens) {
+        if frame.size() == screen.size() {
+            frame.pixels_mut().copy_from_slice(screen.pixels());
+        } else {
+            frame.clone_from(screen);
+        }
+    }
+    let copied = frames.len();
+    frames.extend_from_slice(&screens[copied..]);
 }
 
 /// What a panic on the emulation thread said.
@@ -1447,6 +1464,9 @@ impl Runner {
     }
 
     fn publish(&mut self) {
+        // Copied before the lock is taken and swapped in under it, so the
+        // window never waits for a copy, nor this thread for the window.
+        copy_screens(&mut self.unpublished, self.loaded.core.screens());
         {
             let mut latest = self
                 .latest
@@ -1456,12 +1476,7 @@ impl Runner {
             let (sequence, frames) = &mut *latest;
             *sequence += 1;
             self.lock.published(*sequence, Instant::now());
-            let screens = self.loaded.core.screens();
-            if frames.len() == screens.len() {
-                frames.clone_from_slice(screens);
-            } else {
-                *frames = screens.to_vec();
-            }
+            std::mem::swap(frames, &mut self.unpublished);
         }
         *self
             .latest
@@ -1875,10 +1890,100 @@ mod tests {
         (Emulator::start(loaded, events, None), receiver)
     }
 
+    /// The count in the latest frame, read where it is published, as no
+    /// window takes frames in these tests.
     fn latest_count(emulator: &Emulator) -> u32 {
+        let latest = emulator.latest.frames.lock().expect("not poisoned");
+        latest.1[0].pixels()[0]
+    }
+
+    #[test]
+    fn taken_frames_are_the_latest_and_their_buffers_come_back() {
+        let (emulator, _events) = start(PathBuf::from("/nonexistent/taken.gb"));
         let mut frames = Vec::new();
-        emulator.take_latest(u64::MAX, &mut frames);
-        frames[0].pixels()[0]
+        let (mut seen, mut count) = (0, 0);
+        // Taken as a window does, while the frames run.
+        for _ in 0..20 {
+            let sequence = loop {
+                if let Some(sequence) = emulator.take_latest(seen, &mut frames) {
+                    break sequence;
+                }
+                thread::sleep(Duration::from_millis(1));
+            };
+            assert!(sequence > seen);
+            assert!(frames[0].pixels()[0] > count, "a newer frame");
+            (seen, count) = (sequence, frames[0].pixels()[0]);
+        }
+        emulator.send(Command::TogglePause);
+        thread::sleep(Duration::from_millis(20));
+        let seen = emulator.take_latest(seen, &mut frames).unwrap_or(seen);
+        let paused = frames[0].pixels()[0];
+        assert_eq!(emulator.take_latest(seen, &mut frames), None);
+        assert_eq!(frames[0].pixels()[0], paused, "kept while none is newer");
+    }
+
+    #[test]
+    fn copied_screens_match_whatever_the_buffers_held() {
+        let filled = |width, height, value| {
+            let mut frame = Frame::new(ScreenSize::new(width, height));
+            frame.pixels_mut().fill(value);
+            frame
+        };
+        let shapes: [&[(u16, u16)]; 5] = [
+            &[],
+            &[(4, 3)],
+            &[(4, 3), (4, 3)],
+            &[(8, 6), (4, 3)],
+            &[(4, 3), (4, 3), (2, 2)],
+        ];
+        for (from, screens_shape) in (0..).zip(shapes) {
+            for frames_shape in shapes {
+                let screens: Vec<Frame> = screens_shape
+                    .iter()
+                    .map(|&(width, height)| filled(width, height, from))
+                    .collect();
+                let mut frames: Vec<Frame> = frames_shape
+                    .iter()
+                    .map(|&(width, height)| filled(width, height, 99))
+                    .collect();
+                copy_screens(&mut frames, &screens);
+                assert_eq!(frames, screens, "{frames_shape:?} -> {screens_shape:?}");
+            }
+        }
+    }
+
+    /// Times handing a frame's screens from the core to the window, as
+    /// it was (copied into the shared frames under their lock, then
+    /// copied again out of them) against now (copied once, then swapped):
+    /// `cargo test --release -p emu-app -- --ignored --nocapture
+    /// frame_hand_off_timing`.
+    #[test]
+    #[ignore = "a timing, not a test"]
+    fn frame_hand_off_timing() {
+        use crate::bench::best_of;
+
+        for (name, size) in [
+            ("DS", ScreenSize::new(256, 192)),
+            ("DS, 3D at 4x", ScreenSize::new(1024, 768)),
+        ] {
+            let mut screens = vec![Frame::new(size), Frame::new(size)];
+            for (index, pixel) in (0u32..).zip(screens[0].pixels_mut()) {
+                *pixel = index;
+            }
+            let (mut shared, mut window) = (screens.clone(), screens.clone());
+            let old_publish = best_of(200, || shared.clone_from_slice(&screens));
+            let old_take = best_of(200, || window.clone_from(&shared));
+            let mut unpublished = screens.clone();
+            let new_publish = best_of(200, || {
+                copy_screens(&mut unpublished, &screens);
+                std::mem::swap(&mut shared, &mut unpublished);
+            });
+            let new_take = best_of(200, || std::mem::swap(&mut window, &mut shared));
+            println!(
+                "{name}: emulation thread {old_publish:?} -> {new_publish:?}, \
+                 window {old_take:?} -> {new_take:?}"
+            );
+        }
     }
 
     /// Every frame's inputs, one per player, as a core saw them.

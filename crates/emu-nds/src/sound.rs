@@ -12,9 +12,10 @@
 //! the right mixer (or channel 2), at the rate of channel 1's or 3's timer.
 //! Those channels are meant to play the recording back, for effects such as
 //! reverb, so SOUNDCNT can send them straight to the speakers. Compared with
-//! hardware, a capture records the mix of the output sample it falls in (the real mixer runs at about 1 MHz), its timer counts from its
-//! own start rather than sharing channel 1's or 3's count, and it writes
-//! memory at once rather than through a 16-byte FIFO.
+//! hardware, a capture records the mix of the output sample it falls in
+//! (the real mixer runs at about 1 MHz), its timer counts from its own
+//! start rather than sharing channel 1's or 3's count, and it writes memory
+//! at once rather than through a 16-byte FIFO.
 
 use emu_core::StereoSample;
 use serde::{Deserialize, Serialize};
@@ -100,7 +101,8 @@ impl Channel {
         self.lfsr = 0x7FFF;
     }
 
-    /// Timer ticks per sample. Capture shares channel 1's and 3's.
+    /// Timer ticks per sample. Captures 0 and 1 run at channel 1's and
+    /// 3's.
     fn period(&self) -> u32 {
         0x1_0000 - u32::from(self.timer)
     }
