@@ -508,7 +508,9 @@ library, or open an archive holding one. The first time, the app
 downloads Azahar's core (GPL-3.0) and MoltenVK (Apache-2.0), about 67 MB,
 checks them against the digests it pins, and keeps them in
 `~/Library/Application Support/ds-emulator/3DS`; neither ships with the
-app. The game runs in a helper process, the app's own executable, and
+app. On Apple silicon it then fixes a bug in the core's shader JIT that
+drew some Pokémon white, Omega Ruby's Magikarp among them (decision
+0011). The game runs in a helper process, the app's own executable, and
 draws on the GPU through Vulkan on Metal, at the internal resolution View >
 3D Resolution sets.
 
