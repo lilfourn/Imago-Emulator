@@ -329,7 +329,7 @@ impl<M: Model> Processor<M> {
             list |= if load { 1 << 15 } else { 1 << 14 };
         }
         if load {
-            self.thumb_transfer(bus, 13, list, true, true);
+            self.thumb_transfer(bus, 13, list, true);
         } else {
             self.thumb_store_descending(bus, list);
         }
@@ -339,22 +339,15 @@ impl<M: Model> Processor<M> {
     fn thumb_load_store_multiple<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let rb = Self::low(op, 8);
         let load = op & (1 << 11) != 0;
-        self.thumb_transfer(bus, rb, op & 0xFF, load, true);
+        self.thumb_transfer(bus, rb, op & 0xFF, load);
     }
 
-    /// An ascending block transfer from `rb` with writeback, like
-    /// LDMIA/STMIA. An empty list transfers R15 and moves the base by 0x40.
-    fn thumb_transfer<B: Bus>(
-        &mut self,
-        bus: &mut B,
-        rb: usize,
-        list: u32,
-        load: bool,
-        writeback: bool,
-    ) {
+    /// An ascending block transfer from `rb` with writeback, like LDMIA and
+    /// STMIA (and POP). [`Processor::transfer_multiple`] has the edge cases.
+    fn thumb_transfer<B: Bus>(&mut self, bus: &mut B, rb: usize, list: u32, load: bool) {
         // POP {PC} stays in Thumb on ARMv4T; on ARMv5 bit 0 of the loaded
         // value picks the state, as for LDM.
-        self.transfer_multiple(bus, rb, list, false, true, false, writeback, load);
+        self.transfer_multiple(bus, rb, list, false, true, false, true, load);
     }
 
     /// PUSH: a descending store, lowest register at the lowest address.

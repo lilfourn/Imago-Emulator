@@ -25,6 +25,7 @@ impl Shift {
 /// Shifts by an immediate amount (0–31), with the encodings where 0 means
 /// something else: LSR #0 and ASR #0 shift by 32, ROR #0 is RRX. Returns the
 /// result and the shifter carry-out.
+#[inline]
 pub(crate) fn shift_immediate(shift: Shift, value: u32, amount: u32, carry: bool) -> (u32, bool) {
     match (shift, amount) {
         (Shift::Lsl, 0) => (value, carry),
@@ -37,6 +38,7 @@ pub(crate) fn shift_immediate(shift: Shift, value: u32, amount: u32, carry: bool
 /// Shifts by an amount from a register (its bottom byte, 0–255). An amount
 /// of 0 leaves value and carry alone; amounts of 32 or more follow the
 /// architecture's rules for each shift.
+#[inline]
 pub(crate) fn shift_register(shift: Shift, value: u32, amount: u32, carry: bool) -> (u32, bool) {
     if amount == 0 {
         return (value, carry);
