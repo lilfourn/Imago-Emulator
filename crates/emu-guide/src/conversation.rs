@@ -55,8 +55,6 @@ pub struct Answer {
     pub model: Option<String>,
     /// How it ended.
     pub ending: Ending,
-    /// The player's rating: good or bad.
-    pub rating: Option<bool>,
 }
 
 impl Answer {

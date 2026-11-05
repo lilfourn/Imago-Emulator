@@ -508,10 +508,11 @@ if part("controls") != nil, let sheet = part("sheet") {
     }
 }
 
-// 10. Notices and readouts: their words sit evenly inside their plates,
-//     the same distance in from the window's sides, on one line. Under the
-//     game menu, the sheet covers the readouts.
-for name in ["notice", "speed", "rec"] {
+// 10. Notices and the recording mark: their words sit evenly inside their
+//     plates. The speed readout, plain words without a plate, starts where
+//     the notices do and sits below them. Under the game menu, the sheet
+//     covers the readout.
+for name in ["notice", "rec"] {
     guard let box = part(name), part("sheet") == nil || name == "notice", let glyphs = ink(in: box) else { continue }
     let letter = firstGlyph(in: box) ?? glyphs
     centered("\(name)", box, CGRect(x: glyphs.minX, y: letter.minY, width: glyphs.width, height: letter.height),
@@ -519,8 +520,8 @@ for name in ["notice", "speed", "rec"] {
 }
 
 if let notice = part("notice"), let speed = part("speed"), part("sheet") == nil {
-    even("notice and speed readout are as far from their sides", notice.minX, win.width - speed.maxX, ("notice", "readout"))
-    even("notice and speed readout share a foot", notice.maxY, speed.maxY, ("notice", "readout"))
+    even("notice and speed readout start on one line", notice.minX, speed.minX, ("notice", "readout"))
+    check(notice.maxY <= speed.minY + tight, "notice sits above the speed readout", "\(f(notice.maxY - speed.minY))pt over it")
 }
 
 // 11. A game's menu: inside the window, as far off its foot as its sides;
