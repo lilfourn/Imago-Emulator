@@ -27,6 +27,8 @@ pub struct HeldState {
     pub touch: bool,
     /// Blow into the microphone.
     pub blow: bool,
+    /// Tilt the 3DS's circle pad gently.
+    pub gentle: bool,
 }
 
 /// Held inputs by source.
@@ -100,6 +102,7 @@ impl Controls {
                 Held::Rewind => state.rewind = true,
                 Held::Touch => state.touch = true,
                 Held::Blow => state.blow = true,
+                Held::TiltGently => state.gentle = true,
             }
         }
         state.pace = if fast_forward {
@@ -172,6 +175,18 @@ mod tests {
         assert!(controls.state().blow);
         controls.release_all();
         assert!(!controls.state().blow);
+    }
+
+    #[test]
+    fn tilting_gently_is_held_with_the_directions() {
+        let mut controls = Controls::default();
+        controls.set("key:shift".to_owned(), Some(Held::TiltGently), true);
+        controls.set("key:a".to_owned(), Some(Held::Button(Button::Left)), true);
+        let state = controls.state();
+        assert!(state.gentle && state.buttons.contains(Button::Left));
+        controls.set("key:shift".to_owned(), None, false);
+        let state = controls.state();
+        assert!(!state.gentle && state.buttons.contains(Button::Left));
     }
 
     #[test]

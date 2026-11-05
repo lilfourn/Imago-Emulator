@@ -96,6 +96,10 @@ const MOUSE: &str = "mouse:left";
 /// GPUI name.
 const KEY: &str = "key:";
 
+/// Shift's name in the bindings: held on its own, it comes only as a
+/// change of modifiers.
+const SHIFT: &str = "shift";
+
 /// The root view of the main window.
 pub struct EmulatorView {
     focus: FocusHandle,
@@ -1139,6 +1143,7 @@ impl EmulatorView {
                 } else {
                     self.heard
                 },
+                gentle: self.sent.gentle,
             },
         });
     }
@@ -1195,9 +1200,11 @@ impl EmulatorView {
         if state.buttons != self.sent.buttons
             || touch != self.sent_touch
             || state.blow != self.sent.blow
+            || state.gentle != self.sent.gentle
         {
             self.sent.buttons = state.buttons;
             self.sent.blow = state.blow;
+            self.sent.gentle = state.gentle;
             self.sent_touch = touch;
             self.send_input();
         }
@@ -1373,15 +1380,22 @@ impl EmulatorView {
         }
     }
 
-    /// Lets go of every key held for the game when ⌘ goes down: macOS
-    /// sends no key-up for a key let go of while ⌘ is down, which would
-    /// leave it held. A key still down counts again once pressed again.
+    /// Holds or lets go of whatever Shift is bound to, as it comes only as
+    /// a change of modifiers, never as a key; Shift is the game's while it
+    /// plays, as a key would be. Lets go of every key held for the game
+    /// when ⌘ goes down: macOS sends no key-up for a key let go of while
+    /// ⌘ is down, which would leave it held. A key still down counts again
+    /// once pressed again.
     fn modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let shift = event.modifiers.shift && self.key_route(window, cx) == Route::Game;
+        let action = shift.then(|| self.bindings.key_action(SHIFT)).flatten();
+        self.controls.set(format!("{KEY}{SHIFT}"), action, shift);
+        self.sync_held();
         if !event.modifiers.platform {
             return;
         }
