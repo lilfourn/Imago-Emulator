@@ -169,7 +169,8 @@ impl Script {
     ) -> Result<(), ScriptError> {
         let callbacks = self.lua_error(api::state_mut(&self.lua).map(|mut state| {
             state.frame += 1;
-            state.inputs = inputs.to_vec();
+            state.inputs.clear();
+            state.inputs.extend_from_slice(inputs);
             state.on_frame.clone()
         }))?;
         self.enter(core, |lua, main| {

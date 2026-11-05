@@ -735,6 +735,7 @@ commit's build.
 | `emu-cheats` | Cheat list parsing and application |
 | `emu-patch` | ROM-hack patches: IPS, UPS, BPS and xdelta |
 | `emu-script` | Lua scripts, sandboxed, run between frames |
+| `emu-guide` | Guide's OpenRouter connection: sign-in, the key, the API |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-headless` | Windowless runner for test ROMs |
 | `emu-app` | The GPUI app (`ds-emulator` binary) |

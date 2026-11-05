@@ -95,6 +95,12 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.emu-3ds]
 opt-level = 2
+[profile.dev.package.emu-mkxp]
+opt-level = 2
+[profile.dev.package.emu-cores]
+opt-level = 2
+[profile.dev.package.emu-headless]
+opt-level = 2
 
 [profile.release]
 lto = "thin"
