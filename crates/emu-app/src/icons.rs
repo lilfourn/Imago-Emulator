@@ -41,8 +41,32 @@ pub const SHUFFLE: &str = "icons/shuffle.svg";
 pub const STORE: &str = "icons/shop.svg";
 /// A bin: taking a game out of the library.
 pub const TRASH: &str = "icons/trash-bin-minimalistic.svg";
+/// A chevron pointing right: something that opens.
+pub const CHEVRON_RIGHT: &str = "icons/alt-arrow-right.svg";
+/// A chevron pointing down: something open.
+pub const CHEVRON_DOWN: &str = "icons/alt-arrow-down.svg";
+/// An arrow up: sending a question.
+pub const ARROW_UP: &str = "icons/arrow-up.svg";
+/// An arrow down: back to the newest.
+pub const ARROW_DOWN: &str = "icons/arrow-down.svg";
+/// A camera: a screenshot of the game.
+pub const CAMERA: &str = "icons/camera.svg";
+/// Two sheets: copying.
+pub const COPY: &str = "icons/copy.svg";
+/// A thumb up: a good answer.
+pub const LIKE: &str = "icons/like.svg";
+/// A thumb down: a bad answer.
+pub const DISLIKE: &str = "icons/dislike.svg";
+/// A pen on a square: a new chat.
+pub const NEW_CHAT: &str = "icons/pen-new-square.svg";
+/// A clock going back: earlier chats.
+pub const HISTORY: &str = "icons/history.svg";
+/// A page of text: a page read.
+pub const PAGE: &str = "icons/document-text.svg";
+/// A picture with a plus: adding a picture from a file.
+pub const ADD_PICTURE: &str = "icons/gallery-add.svg";
 
-const FILES: [(&str, &[u8]); 16] = [
+const FILES: [(&str, &[u8]); 28] = [
     (ADD, include_bytes!("../../../assets/icons/add.svg")),
     (
         BACK,
@@ -79,6 +103,39 @@ const FILES: [(&str, &[u8]); 16] = [
     (
         TRASH,
         include_bytes!("../../../assets/icons/trash-bin-minimalistic.svg"),
+    ),
+    (
+        CHEVRON_RIGHT,
+        include_bytes!("../../../assets/icons/alt-arrow-right.svg"),
+    ),
+    (
+        CHEVRON_DOWN,
+        include_bytes!("../../../assets/icons/alt-arrow-down.svg"),
+    ),
+    (
+        ARROW_UP,
+        include_bytes!("../../../assets/icons/arrow-up.svg"),
+    ),
+    (
+        ARROW_DOWN,
+        include_bytes!("../../../assets/icons/arrow-down.svg"),
+    ),
+    (CAMERA, include_bytes!("../../../assets/icons/camera.svg")),
+    (COPY, include_bytes!("../../../assets/icons/copy.svg")),
+    (LIKE, include_bytes!("../../../assets/icons/like.svg")),
+    (DISLIKE, include_bytes!("../../../assets/icons/dislike.svg")),
+    (
+        NEW_CHAT,
+        include_bytes!("../../../assets/icons/pen-new-square.svg"),
+    ),
+    (HISTORY, include_bytes!("../../../assets/icons/history.svg")),
+    (
+        PAGE,
+        include_bytes!("../../../assets/icons/document-text.svg"),
+    ),
+    (
+        ADD_PICTURE,
+        include_bytes!("../../../assets/icons/gallery-add.svg"),
     ),
 ];
 

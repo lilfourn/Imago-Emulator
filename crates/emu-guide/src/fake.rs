@@ -90,3 +90,37 @@ fn read(stream: &mut TcpStream) -> Option<Request> {
         }
     }
 }
+
+/// Serves on a loopback port as [`openrouter`] does, but answers with a
+/// stream: the status `reply` gives, then each of its pieces in turn,
+/// `pause` apart, as server-sent events arrive, and then closes.
+pub fn stream(reply: fn(&Request) -> (u16, Vec<String>), pause: std::time::Duration) -> Endpoints {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let Some(request) = read(&mut stream) else {
+                continue;
+            };
+            let (status, pieces) = reply(&request);
+            thread::spawn(move || {
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: text/event-stream\r\n\
+                     connection: close\r\n\r\n"
+                );
+                if stream.write_all(head.as_bytes()).is_err() {
+                    return;
+                }
+                for piece in pieces {
+                    if stream.write_all(piece.as_bytes()).is_err() {
+                        return;
+                    }
+                    stream.flush().ok();
+                    thread::sleep(pause);
+                }
+            });
+        }
+    });
+    Endpoints::at(format!("http://127.0.0.1:{port}"))
+}

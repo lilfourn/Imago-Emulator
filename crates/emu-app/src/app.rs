@@ -81,6 +81,8 @@ actions!(
         Resolution3d6x,
         Resolution3d8x,
         ToggleMicrophone,
+        ToggleGuide,
+        ScreenshotForGuide,
         CloseWindow,
         Minimize,
         Zoom,
@@ -173,6 +175,9 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                 KeyBinding::new("cmd-s", SaveState, None),
                 KeyBinding::new("cmd-l", LoadState, None),
                 KeyBinding::new("cmd-shift-s", SaveScreenshot, None),
+                // Guide, the chat beside the screens, and a screenshot for it.
+                KeyBinding::new("cmd-j", ToggleGuide, None),
+                KeyBinding::new("cmd-alt-s", ScreenshotForGuide, None),
                 KeyBinding::new("cmd-shift-r", ToggleRecording, None),
                 KeyBinding::new("cmd-shift-l", RunScript, None),
                 KeyBinding::new("cmd-alt-l", StopScript, None),
@@ -199,6 +204,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                 KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
+            cx.bind_keys(crate::guide::composer::bindings());
             cx.set_menus(menus(MenuChecks::default()));
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
@@ -359,6 +365,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                 MenuItem::action("Randomize Pokémon Game…", Randomize),
                 MenuItem::separator(),
                 MenuItem::action("Save Screenshot", SaveScreenshot),
+                MenuItem::action("Screenshot for Guide", ScreenshotForGuide),
                 MenuItem::action("Start / Stop Recording", ToggleRecording),
                 MenuItem::separator(),
                 MenuItem::action("Edit Cheats…", EditCheats),
@@ -437,6 +444,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                     ],
                 }),
                 MenuItem::separator(),
+                MenuItem::action("Guide", ToggleGuide),
                 MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
                 MenuItem::action("Debugger", ShowDebugger),
             ],

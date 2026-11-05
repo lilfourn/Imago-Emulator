@@ -1,0 +1,503 @@
+# Guide's source map: the sites players trust for each series, in order of
+# trust. Chosen and checked in docs/research/game-chat.md §5; re-checked by
+# hand with scripts/guide/check-sources.sh.
+#
+# - A game gets its series' sources, then the fallback ones, with no domain
+#   twice and at most twelve in all (the fallback is trimmed first). A fan
+#   game gets the fan-game sources before its series'.
+# - A series matches when one of its `titles` appears, as whole words, in
+#   the game's No-Intro name or its library title. Case, accents,
+#   punctuation and the words "the" and "version" are ignored, so "Legend of
+#   Zelda, The - The Minish Cap" and "The Legend of Zelda: The Minish Cap"
+#   both match "Zelda". The first matching series wins, so specific series
+#   come before general ones.
+# - `reach` says how a site can be read: "fetch" (pages open), "search"
+#   (behind a bot check: only through web search), "mediawiki" (its API is
+#   at `api`), or "api" (a JSON API at `api`).
+# - `domain` is what web search may use: a host, a host with a path, or a
+#   wildcard such as "*.fandom.com". A site has one name everywhere in the
+#   map, which is the text its citations carry.
+# - `games` gives where a site's page for a game starts. A game's name must
+#   begin with one of the `names` (the same words are ignored); the longest
+#   match wins. Every Serebii path here answered 200 on 2026-11-04.
+#
+# Left out to keep the domain list short: The Cutting Room Floor, TASVideos,
+# Speedrun.com, HowLongToBeat and GameHacking.org (research §5.2).
+
+# Fan games, and ROM hacks of the series in `hacks_of`. A fan game gets these
+# first; an unlisted copy of a series in `hacks_of` gets them after its
+# series' own.
+[fan_games]
+hacks_of = ["pokemon"]
+
+[[fan_games.sources]]
+name = "Fandom"
+domain = "*.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "the game's own wiki, such as Infinite Fusion's or Reborn's"
+
+[[fan_games.sources]]
+name = "Miraheze"
+domain = "*.miraheze.org"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "the game's own wiki when it left Fandom, such as Unbound's or Infinity's"
+
+[[fan_games.sources]]
+name = "Eevee Expo"
+domain = "eeveeexpo.com"
+reach = "fetch"
+good_for = "Pokémon Essentials games' pages and their makers' threads"
+
+[[fan_games.sources]]
+name = "Relic Castle"
+domain = "reliccastle.com"
+reach = "fetch"
+good_for = "older Essentials games' pages"
+
+[[fan_games.sources]]
+name = "PokéCommunity"
+domain = "pokecommunity.com"
+reach = "search"
+good_for = "ROM hack and fan game threads: makers' docs, FAQs, changelogs"
+
+[[fan_games.sources]]
+name = "romhack.ing"
+domain = "romhack.ing"
+reach = "fetch"
+good_for = "hack pages and readmes"
+
+# Every game, after its series.
+[fallback]
+
+[[fallback.sources]]
+name = "StrategyWiki"
+domain = "strategywiki.org"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "walkthroughs for most games"
+
+[[fallback.sources]]
+name = "GameFAQs"
+domain = "gamefaqs.gamespot.com"
+reach = "search"
+good_for = "text guides and FAQs for nearly every game"
+
+[[fallback.sources]]
+name = "IGN"
+domain = "ign.com/wikis"
+reach = "fetch"
+good_for = "guides for popular games"
+
+[[fallback.sources]]
+name = "Fandom"
+domain = "*.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "the game's own wiki when it has no independent one"
+
+# Pokémon --------------------------------------------------------------------
+
+[[series]]
+id = "pokemon-mystery-dungeon"
+titles = ["Pokemon Mystery Dungeon", "Pokemon Super Mystery Dungeon", "Pokemon Fushigi no Dungeon"]
+
+[[series.sources]]
+name = "Mystery Dungeon Wiki"
+domain = "mysterydungeonwiki.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "dungeons, recruitment, items, moves and missions"
+
+[[series.sources]]
+name = "Bulbapedia"
+domain = "bulbapedia.bulbagarden.net"
+reach = "search"
+good_for = "dungeon lists, walkthroughs and mechanics"
+
+[[series.sources]]
+name = "Serebii"
+domain = "serebii.net"
+reach = "fetch"
+good_for = "each game's dungeons, recruitment and items"
+games = [
+  { names = ["Pokemon Mystery Dungeon Explorers of Time", "Pokemon Mystery Dungeon Explorers of Darkness"], start = "/dungeon2/" },
+  { names = ["Pokemon Mystery Dungeon Explorers of Sky"], start = "/dungeonsky/" },
+  { names = ["Pokemon Super Mystery Dungeon"], start = "/supermysterydungeon/" },
+]
+
+[[series]]
+id = "pokemon"
+titles = ["Pokemon", "Pocket Monsters"]
+
+[[series.sources]]
+name = "Bulbapedia"
+domain = "bulbapedia.bulbagarden.net"
+reach = "search"
+good_for = "everything: locations, mechanics, version differences, and walkthroughs on its Appendix pages"
+
+[[series.sources]]
+name = "Serebii"
+domain = "serebii.net"
+reach = "fetch"
+good_for = "this version's Pokédex and locations, items, trainers, events"
+games = [
+  { names = ["Pokemon Red", "Pokemon Blue", "Pokemon Green", "Pocket Monsters Aka", "Pocket Monsters Midori", "Pocket Monsters Ao"], start = "/rb/" },
+  { names = ["Pokemon Yellow", "Pocket Monsters Pikachu"], start = "/yellow/" },
+  { names = ["Pokemon Gold", "Pokemon Silver", "Pocket Monsters Kin", "Pocket Monsters Gin"], start = "/gs/" },
+  { names = ["Pokemon Crystal", "Pocket Monsters Crystal"], start = "/crystal/" },
+  { names = ["Pokemon Ruby", "Pokemon Sapphire", "Pocket Monsters Ruby", "Pocket Monsters Sapphire"], start = "/rubysapphire/" },
+  { names = ["Pokemon Emerald", "Pocket Monsters Emerald"], start = "/emerald/" },
+  { names = ["Pokemon FireRed", "Pokemon LeafGreen", "Pokemon Fire Red", "Pokemon Leaf Green", "Pocket Monsters FireRed", "Pocket Monsters LeafGreen"], start = "/fireredleafgreen/" },
+  { names = ["Pokemon Diamond", "Pokemon Pearl", "Pocket Monsters Diamond", "Pocket Monsters Pearl"], start = "/diamondpearl/" },
+  { names = ["Pokemon Platinum", "Pocket Monsters Platinum"], start = "/platinum/" },
+  { names = ["Pokemon HeartGold", "Pokemon SoulSilver", "Pokemon Heart Gold", "Pokemon Soul Silver", "Pocket Monsters HeartGold", "Pocket Monsters SoulSilver"], start = "/heartgoldsoulsilver/" },
+  { names = ["Pokemon Black", "Pokemon White", "Pocket Monsters Black", "Pocket Monsters White"], start = "/blackwhite/" },
+  { names = ["Pokemon Black 2", "Pokemon White 2", "Pocket Monsters Black 2", "Pocket Monsters White 2"], start = "/black2white2/" },
+  { names = ["Pokemon X", "Pokemon Y", "Pocket Monsters X", "Pocket Monsters Y"], start = "/xy/" },
+  { names = ["Pokemon Omega Ruby", "Pokemon Alpha Sapphire", "Pocket Monsters Omega Ruby", "Pocket Monsters Alpha Sapphire"], start = "/omegarubyalphasapphire/" },
+  { names = ["Pokemon Sun", "Pokemon Moon", "Pocket Monsters Sun", "Pocket Monsters Moon"], start = "/sunmoon/" },
+  { names = ["Pokemon Ultra Sun", "Pokemon Ultra Moon", "Pocket Monsters Ultra Sun", "Pocket Monsters Ultra Moon"], start = "/ultrasunultramoon/" },
+  { names = ["Pokemon Ranger"], start = "/ranger/" },
+  { names = ["Pokemon Ranger Shadows of Almia"], start = "/ranger2/" },
+  { names = ["Pokemon Ranger Guardian Signs"], start = "/ranger3/" },
+  { names = ["Pokemon Conquest"], start = "/conquest/" },
+]
+
+[[series.sources]]
+name = "PokémonDB"
+domain = "pokemondb.net"
+reach = "fetch"
+good_for = "Pokédex, moves, and where each Pokémon is found per game"
+
+[[series.sources]]
+name = "PokeAPI"
+domain = "pokeapi.co"
+reach = "api"
+api = "https://pokeapi.co/api/v2/"
+good_for = "encounters by version, moves and evolutions"
+
+[[series.sources]]
+name = "Smogon"
+domain = "smogon.com/dex"
+reach = "fetch"
+good_for = "competitive movesets by generation"
+
+# Nintendo series -------------------------------------------------------------
+
+[[series]]
+id = "mario"
+titles = ["Mario", "Luigi", "Luigis", "Wario", "WarioWare", "Yoshi", "Yoshis", "Donkey Kong", "Diddy Kong", "Captain Toad"]
+
+[[series.sources]]
+name = "Super Mario Wiki"
+domain = "mariowiki.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "levels, items, enemies, bosses and secrets in Mario, Wario, Yoshi and Donkey Kong games"
+
+[[series]]
+id = "zelda"
+titles = ["Zelda"]
+
+[[series.sources]]
+name = "Zelda Wiki"
+domain = "zeldawiki.wiki"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "items, dungeons, characters, Heart Pieces and side quests"
+
+[[series.sources]]
+name = "Zelda Dungeon"
+domain = "zeldadungeon.net"
+reach = "search"
+good_for = "walkthroughs and collectible guides"
+
+[[series]]
+id = "kirby"
+titles = ["Kirby"]
+
+[[series.sources]]
+name = "WiKirby"
+domain = "wikirby.com"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "levels, Copy Abilities, bosses and collectibles"
+
+[[series]]
+id = "metroid"
+titles = ["Metroid"]
+
+[[series.sources]]
+name = "Metroid Wiki"
+domain = "metroidwiki.org"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "areas, upgrades and their locations, bosses"
+
+[[series.sources]]
+name = "Wikitroid"
+domain = "metroid.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "a second Metroid wiki: items, areas, enemies"
+
+[[series]]
+id = "fire-emblem"
+titles = ["Fire Emblem"]
+
+[[series.sources]]
+name = "Fire Emblem Wiki"
+domain = "fireemblemwiki.org"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "chapters, characters and how to recruit them, classes, supports"
+
+[[series.sources]]
+name = "Serenes Forest"
+domain = "serenesforest.net"
+reach = "fetch"
+good_for = "growth rates, base stats, class and weapon data, chapter maps"
+
+[[series]]
+id = "golden-sun"
+titles = ["Golden Sun", "Ougon no Taiyou"]
+
+[[series.sources]]
+name = "Golden Sun Universe"
+domain = "goldensunwiki.net"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "Djinn locations, Psynergy, classes, puzzles"
+
+[[series]]
+id = "advance-wars"
+titles = ["Advance Wars", "Game Boy Wars", "Famicom Wars"]
+
+[[series.sources]]
+name = "Wars Wiki"
+domain = "warswiki.org"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "COs, units, campaign missions"
+
+[[series.sources]]
+name = "Wars World News"
+domain = "warsworldnews.com"
+reach = "fetch"
+good_for = "campaign guides and maps"
+
+[[series]]
+id = "animal-crossing"
+titles = ["Animal Crossing", "Doubutsu no Mori", "Animal Forest"]
+
+[[series.sources]]
+name = "Nookipedia"
+domain = "nookipedia.com"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "villagers, fish and bugs by month and hour, items, events"
+
+[[series]]
+id = "earthbound"
+titles = ["EarthBound", "Mother 1 2", "Mother 3"]
+
+[[series.sources]]
+name = "WikiBound"
+domain = "wikibound.info"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "enemies, items, PSI, walkthroughs"
+
+[[series.sources]]
+name = "Starmen.net"
+domain = "starmen.net"
+reach = "search"
+good_for = "walkthroughs and FAQs"
+
+[[series]]
+id = "pikmin"
+titles = ["Pikmin"]
+
+[[series.sources]]
+name = "Pikipedia"
+domain = "pikminwiki.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "treasures, areas and enemies"
+
+[[series]]
+id = "rhythm-heaven"
+titles = ["Rhythm Heaven", "Rhythm Tengoku", "Rhythm Paradise", "Rhythm World"]
+
+[[series.sources]]
+name = "Rhythm Heaven Wiki"
+domain = "rhwiki.net"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "each rhythm game's cues, medals and unlocks"
+
+[[series]]
+id = "smash-bros"
+titles = ["Super Smash Bros", "Dairantou Smash Brothers"]
+
+[[series.sources]]
+name = "SmashWiki"
+domain = "ssbwiki.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "fighters, moves, stages, unlockables"
+
+[[series]]
+id = "layton"
+titles = ["Layton"]
+
+[[series.sources]]
+name = "Layton Wiki"
+domain = "layton.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "every puzzle with its hints and solution, Hint Coins, story"
+
+[[series]]
+id = "ace-attorney"
+titles = ["Ace Attorney", "Phoenix Wright", "Apollo Justice", "Miles Edgeworth", "Gyakuten Saiban"]
+
+[[series.sources]]
+name = "Ace Attorney Wiki"
+domain = "aceattorney.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "cases, evidence, characters, and how each trial goes"
+
+# Other series ----------------------------------------------------------------
+
+[[series]]
+id = "final-fantasy"
+titles = ["Final Fantasy", "Chocobo"]
+
+[[series.sources]]
+name = "Final Fantasy Wiki"
+domain = "finalfantasy.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "jobs, abilities, bestiaries, items, walkthroughs"
+
+[[series]]
+id = "dragon-quest"
+titles = ["Dragon Quest", "Dragon Warrior", "Torneko"]
+
+[[series.sources]]
+name = "Dragon Quest Wiki"
+domain = "dragon-quest.org"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "monsters, spells, items, vocations, walkthroughs"
+
+[[series]]
+id = "kingdom-hearts"
+titles = ["Kingdom Hearts"]
+
+[[series.sources]]
+name = "Kingdom Hearts Wiki"
+domain = "khwiki.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "worlds, bosses, abilities, items"
+
+[[series]]
+id = "castlevania"
+titles = ["Castlevania", "Akumajou Dracula", "Akumajo Dracula"]
+
+[[series.sources]]
+name = "Castlevania Wiki"
+domain = "castlevania.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "enemies, souls and drops, items, maps"
+
+[[series]]
+id = "mega-man"
+titles = ["Mega Man", "MegaMan", "Rockman", "Rock Man"]
+
+[[series.sources]]
+name = "Mega Man Knowledge Base"
+domain = "megaman.fandom.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "bosses and weaknesses, chips, items, upgrades, including Battle Network, Zero, ZX and Star Force"
+
+[[series]]
+id = "sonic"
+titles = ["Sonic"]
+
+[[series.sources]]
+name = "Sonic Retro"
+domain = "info.sonicretro.org"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "zones, items, secrets, version differences"
+
+[[series]]
+id = "harvest-moon"
+titles = ["Harvest Moon", "Story of Seasons", "Bokujou Monogatari", "Rune Factory"]
+
+[[series.sources]]
+name = "FoGu"
+domain = "fogu.com"
+reach = "fetch"
+good_for = "guides: crops, gifts, marriage, festivals and calendars"
+
+[[series]]
+id = "chrono-trigger"
+titles = ["Chrono Trigger"]
+
+[[series.sources]]
+name = "Chrono Wiki"
+domain = "chronowiki.org"
+reach = "mediawiki"
+api = "/w/api.php"
+good_for = "techs, items, side quests, endings"
+
+[[series]]
+id = "yu-gi-oh"
+titles = ["Yu-Gi-Oh", "Yugioh"]
+
+[[series.sources]]
+name = "Yugipedia"
+domain = "yugipedia.com"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "cards, and each game's opponents, decks and unlocks"
+
+[[series]]
+id = "digimon"
+titles = ["Digimon"]
+
+[[series.sources]]
+name = "Wikimon"
+domain = "wikimon.net"
+reach = "mediawiki"
+api = "/api.php"
+good_for = "Digimon, digivolution lines, each game's details"
+
+[[series]]
+id = "megami-tensei"
+titles = ["Megami Tensei", "Devil Survivor", "Persona Q", "Soul Hackers", "Devil Summoner"]
+
+[[series.sources]]
+name = "Megami Tensei Wiki"
+domain = "megatenwiki.com"
+reach = "search"
+good_for = "demons, fusions, skills, bosses"
+
+[[series]]
+id = "twewy"
+titles = ["The World Ends with You", "Subarashiki Kono Sekai"]
+
+[[series.sources]]
+name = "TWEWY Wiki"
+domain = "twewy.wiki"
+reach = "search"
+good_for = "pins, Noise, each day's goals, Secret Reports"

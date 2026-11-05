@@ -11,6 +11,7 @@
 //! ([`OpenRouter`]): its buttons sit in a track as the choices do, with a
 //! line under them saying how the connection stands.
 
+use emu_guide::chat::Effort;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ScrollHandle,
     SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
@@ -267,6 +268,24 @@ fn rows(settings: &Settings) -> Vec<Row> {
             |settings, shown| settings.window_controls = shown,
         )
         .under("Window"),
+        Row::new(
+            "Thinking",
+            vec![
+                ("Off".into(), Effort::None),
+                ("Low".into(), Effort::Low),
+                ("Medium".into(), Effort::Medium),
+                ("High".into(), Effort::High),
+            ],
+            settings.guide_thinking,
+            |settings, effort| settings.guide_thinking = effort,
+        )
+        .under("Guide"),
+        Row::new(
+            "Look Things Up",
+            vec![("On".into(), true), ("Off".into(), false)],
+            settings.guide_lookups,
+            |settings, on| settings.guide_lookups = on,
+        ),
     ]
 }
 
@@ -480,7 +499,6 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap_2()
-            .child(section("Guide", name_width))
             .child(control)
             .child(
                 div().pl(px(name_width + NAME_GAP)).child(

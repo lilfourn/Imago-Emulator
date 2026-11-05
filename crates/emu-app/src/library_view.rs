@@ -546,6 +546,15 @@ impl LibraryView {
         games.map(|game| (game.crc32, game.path.clone())).collect()
     }
 
+    /// The library's record of the game at `path`, if it has it.
+    pub fn game_of(&self, path: &Path) -> Option<library::Game> {
+        self.library
+            .games
+            .iter()
+            .find(|game| game.path == path)
+            .cloned()
+    }
+
     /// The title the library shows for the game at `path`, if it has it.
     pub fn title_of(&self, path: &Path) -> Option<String> {
         let game = self.library.games.iter().find(|game| game.path == path)?;

@@ -13,8 +13,8 @@ use gpui::{
     Animation, AnimationExt, App, BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths,
     FocusHandle, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, RenderImage, SharedString,
-    Subscription, Task, Window, WindowBounds, WindowHandle, div, img, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb, rgba,
+    StyleRefinement, Subscription, Task, Window, WindowBounds, WindowHandle, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
 };
 
 use crate::ambient::{self, Backdrop};
@@ -33,6 +33,7 @@ use crate::app::{
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
 };
+use crate::app::{ScreenshotForGuide, ToggleGuide};
 use crate::archive;
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Held, Shortcut};
@@ -48,6 +49,7 @@ use crate::filter::Filter;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
 use crate::gpu_upscale::{Gpu, GpuDevice, GpuError, Method, Request};
+use crate::guide::{self, GuideEvent, GuideGame, GuidePanel};
 use crate::key_guide;
 use crate::key_routes::{KeyRoutes, Route};
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
@@ -71,6 +73,9 @@ use crate::video;
 use crate::window_chrome;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
+
+/// How long the pill that opens Guide stays once the pointer rests.
+const GUIDE_PILL_REST: Duration = Duration::from_secs(2);
 
 /// How often the speed readout measures.
 const READOUT_INTERVAL: Duration = Duration::from_millis(500);
@@ -194,6 +199,19 @@ pub struct EmulatorView {
     /// Images no longer shown, to remove from GPUI's atlas on next render.
     stale_images: Vec<Arc<RenderImage>>,
     slot_preview_task: Option<Task<()>>,
+    /// Guide, the chat about the game, in the margin beside the screens.
+    guide: Entity<GuidePanel>,
+    /// Whether Guide's panel shows.
+    guide_open: bool,
+    /// While the panel is closed: when the pointer last moved in the
+    /// empty margin, which shows the pill that opens it.
+    guide_pill: Option<Instant>,
+    /// Hides the pill once the pointer has rested.
+    guide_pill_hide: Option<Task<()>>,
+    /// How hard Guide's model thinks, from the settings.
+    guide_thinking: emu_guide::chat::Effort,
+    /// Whether Guide looks answers up, from the settings.
+    guide_lookups: bool,
     _gamepad: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -422,13 +440,25 @@ impl EmulatorView {
         // A library that cannot be read is left alone, not overwritten.
         let library_path = library_path.filter(|_| library_error.is_none());
         let library = cx.new(|cx| LibraryView::new(games, library_path, cx));
+        let guide = cx.new(|cx| GuidePanel::new(window, cx));
+        let composer_focus = guide.read(cx).composer_focus(cx);
         let subscriptions = vec![
+            cx.subscribe_in(&guide, window, Self::guide_event),
+            // The composer taking the caret lets go of every game key held,
+            // as losing focus does: a held W stops walking.
+            cx.on_focus_in(&composer_focus, window, |this, _, cx| {
+                this.release_all();
+                cx.notify();
+            }),
             cx.subscribe_in(&library, window, Self::library_event),
             // Over a game, the library's games being added show in the
             // corner (see `adding_card`), drawn anew as the library is, even
             // while the game is paused.
             cx.observe(&library, |this, _, cx| {
                 if this.session.is_some() {
+                    // The library may have just read the game Guide is about.
+                    let game = this.guide_game(cx);
+                    this.guide.update(cx, |guide, cx| guide.set_game(game, cx));
                     cx.notify();
                 }
             }),
@@ -544,6 +574,12 @@ impl EmulatorView {
             slot_image: None,
             stale_images: Vec::new(),
             slot_preview_task: None,
+            guide,
+            guide_open: false,
+            guide_pill: None,
+            guide_pill_hide: None,
+            guide_thinking: Settings::default().guide_thinking,
+            guide_lookups: Settings::default().guide_lookups,
             _gamepad: gamepad_task,
             _subscriptions: subscriptions,
         };
@@ -566,6 +602,8 @@ impl EmulatorView {
                 view.color_correction = settings.color_correction;
                 view.state_slot = settings.state_slot;
                 view.window_place = settings.window_place;
+                view.guide_thinking = settings.guide_thinking;
+                view.guide_lookups = settings.guide_lookups;
                 if settings.fast_forward_on {
                     view.controls.toggle_fast_forward();
                 }
@@ -592,6 +630,7 @@ impl EmulatorView {
                 view.startup_notice = Some(warning);
             }
         }
+        view.tell_guide_settings(cx);
         view.refresh_menus(cx);
         if view.show_fps {
             view.start_readout(cx);
@@ -802,6 +841,8 @@ impl EmulatorView {
         let bindings = self.reload_bindings();
         self.sync_held();
         self.sessions += 1;
+        let game = self.guide_game(cx);
+        self.guide.update(cx, |guide, cx| guide.set_game(game, cx));
         if info.players > 1 {
             // Linked consoles sit side by side; a DS's own two screens
             // keep the chosen layout.
@@ -971,6 +1012,10 @@ impl EmulatorView {
         self.linked_side_by_side = false;
         self.menu = None;
         self.record_play_time(cx);
+        if self.guide.read(cx).composer_focused(window, cx) {
+            window.focus(&self.focus);
+        }
+        self.guide.update(cx, |guide, cx| guide.set_game(None, cx));
         let mut session = self.session.take()?;
         let images = session.images.drain(..).flatten();
         let ambient = session.ambient.take().map(|glow| glow.image);
@@ -1225,18 +1270,20 @@ impl EmulatorView {
     }
 
     /// Where keys go now.
-    fn key_route(&self) -> Route {
+    fn key_route(&self, window: &Window, cx: &App) -> Route {
         if self.session.is_none() {
             Route::Library
         } else if self.menu.is_some() {
             Route::Menu
+        } else if self.guide_open && self.guide.read(cx).composer_focused(window, cx) {
+            Route::Guide
         } else {
             Route::Game
         }
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let route = self.key_route();
+        let route = self.key_route(window, cx);
         let key = event.keystroke.key.as_str();
         // A key held down repeats. GPUI passes on the repeats of keys that
         // type nothing (the arrows, Escape, Backspace) as fresh presses, so
@@ -1250,7 +1297,15 @@ impl EmulatorView {
             }
         } else if pressed_to != Some(route) {
             // Repeats go only where the press went: Return held to choose
-            // in the menu or the library never reaches what comes after.
+            // in the menu or the library never reaches what comes after,
+            // and W held to walk never types into Guide.
+            if route == Route::Guide {
+                cx.stop_propagation();
+            }
+            return;
+        }
+        // Typing in Guide's composer: the composer's own, never the game's.
+        if route == Route::Guide {
             return;
         }
         let event = KeyDownEvent {
@@ -1522,7 +1577,12 @@ impl EmulatorView {
     /// game moves its selection there and presses it at once, as on a DS;
     /// anywhere else it presses A. The click that brings the window to the
     /// front only does that.
-    fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The panel keeps its own clicks, so this one is outside it: the
+        // keys go back to the game.
+        if self.guide.read(cx).composer_focused(window, cx) {
+            window.focus(&self.focus);
+        }
         if event.first_mouse {
             return;
         }
@@ -1563,7 +1623,8 @@ impl EmulatorView {
     /// Drags the stylus with the mouse while it touches. Past the
     /// touchscreen's edges it stays on the nearest edge, as a stylus slid
     /// off a DS would.
-    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_guide_pill(event, window, cx);
         let Some((index, at)) = self.stylus else {
             return;
         };
@@ -1654,6 +1715,159 @@ impl EmulatorView {
     }
 
     /// Pauses the game and opens the game menu over it.
+    /// What Guide is told about the game the keyboard plays.
+    fn guide_game(&self, cx: &App) -> Option<GuideGame> {
+        let session = self.session.as_ref()?;
+        let player = self
+            .active_player
+            .min(session.player_rom_paths.len().saturating_sub(1));
+        let rom = session.player_rom_paths.get(player)?;
+        let game = self.library.read(cx).game_of(rom);
+        Some(guide_info(rom, session.info.system, game))
+    }
+
+    /// ⌘J: opens Guide with the caret in its composer, or closes it if
+    /// the caret is there already.
+    fn toggle_guide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.show_notice("Open a game, then ask Guide about it (⌘J)", cx);
+            return;
+        }
+        if self.guide_open && self.guide.read(cx).composer_focused(window, cx) {
+            self.close_guide(window, cx);
+        } else {
+            self.open_guide(window, cx);
+        }
+    }
+
+    fn open_guide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        let game = self.guide_game(cx);
+        self.guide.update(cx, |guide, cx| {
+            guide.set_game(game, cx);
+            guide.focus_composer(window, cx);
+        });
+        self.guide_open = true;
+        self.guide_pill = None;
+        self.release_all();
+        cx.notify();
+    }
+
+    fn close_guide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.guide_open = false;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// ⌥⌘S and the Screenshot button: the screens as the console drew
+    /// them, into Guide's composer, whether the panel shows or not.
+    fn screenshot_for_guide(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if session.frames.is_empty() {
+            return;
+        }
+        let players = session.info.players;
+        let before = self.guide.read(cx).shot_count();
+        let count = self
+            .guide
+            .update(cx, |guide, cx| guide.add_shot(&session.frames, players, cx));
+        if count == before {
+            self.show_notice(
+                format!("Guide takes {} screenshots a question", guide::MOST_SHOTS),
+                cx,
+            );
+        } else if !self.guide_open {
+            self.show_notice(format!("Screenshot added to Guide ({count})"), cx);
+        }
+    }
+
+    fn guide_event(
+        &mut self,
+        _: &Entity<GuidePanel>,
+        event: &GuideEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match *event {
+            GuideEvent::Close => self.close_guide(window, cx),
+            GuideEvent::Blur => {
+                window.focus(&self.focus);
+                cx.notify();
+            }
+            GuideEvent::TakeShot => self.screenshot_for_guide(cx),
+            GuideEvent::AskWithShot(question) => {
+                self.screenshot_for_guide(cx);
+                self.guide
+                    .update(cx, |guide, cx| guide.ask_starter(question, window, cx));
+            }
+        }
+    }
+
+    /// Shows the pill that opens Guide while the pointer moves in the
+    /// empty margin beside the screens, and hides it once it rests.
+    fn show_guide_pill(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.guide_open || self.session.is_none() || self.menu.is_some() {
+            return;
+        }
+        let x = f32::from(event.position.x);
+        let right = self
+            .placements
+            .iter()
+            .map(|placement| placement.rect.x + placement.rect.width)
+            .fold(0.0, f32::max);
+        if right <= 0.0 || x < right + INSET {
+            return;
+        }
+        let shown = self.guide_pill.is_some();
+        self.guide_pill = Some(Instant::now());
+        if !shown {
+            cx.notify();
+        }
+        self.guide_pill_hide = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(GUIDE_PILL_REST).await;
+            this.update(cx, |this, cx| {
+                this.guide_pill = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// "Ask about Omega Ruby ⌘J", in the right margin's top corner.
+    fn guide_pill_element(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let title = self
+            .guide
+            .read(cx)
+            .short_title()
+            .or_else(|| self.guide_game(cx).map(|game| game.context.short_title()))?;
+        Some(
+            div()
+                .id("guide-pill")
+                .absolute()
+                .top(px(TOP_BAR + 4.0))
+                .right(px(INSET))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded_full()
+                .bg(rgba(0x0000_00A6))
+                .border_1()
+                .border_color(rgba(0xFFFF_FF1A))
+                .text_size(px(13.0))
+                .text_color(rgb(0x00ED_EDF0))
+                .cursor_pointer()
+                .child(format!("Ask about {title}"))
+                .child(div().text_color(rgb(0x00A1_A1AA)).child("⌘J"))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, window, cx| this.open_guide(window, cx)))
+                .children(probe::part("pill:guide")),
+        )
+    }
+
     fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
@@ -2063,6 +2277,8 @@ impl EmulatorView {
             dmg_colors: self.dmg_colors,
             window_controls: self.window_controls,
             window_place: self.window_place,
+            guide_thinking: self.guide_thinking,
+            guide_lookups: self.guide_lookups,
         }
     }
 
@@ -2111,6 +2327,23 @@ impl EmulatorView {
         if settings.window_controls != self.window_controls {
             self.set_window_controls(settings.window_controls, cx);
         }
+        if (settings.guide_thinking, settings.guide_lookups)
+            != (self.guide_thinking, self.guide_lookups)
+        {
+            self.guide_thinking = settings.guide_thinking;
+            self.guide_lookups = settings.guide_lookups;
+            self.tell_guide_settings(cx);
+            self.save_settings(cx);
+        }
+    }
+
+    /// Hands Guide's settings to its panel.
+    fn tell_guide_settings(&self, cx: &mut App) {
+        let (effort, lookups) = (self.guide_thinking, self.guide_lookups);
+        self.guide.update(cx, |guide, _| {
+            guide.effort = effort;
+            guide.lookups = lookups;
+        });
     }
 
     /// Fills the window around the screens with `backdrop` from now on,
@@ -2837,6 +3070,12 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &SaveScreenshot, _, _| {
                 this.send(Command::SaveScreenshot);
             }))
+            .on_action(cx.listener(|this, _: &ToggleGuide, window, cx| {
+                this.toggle_guide(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScreenshotForGuide, _, cx| {
+                this.screenshot_for_guide(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleRecording, _, _| {
                 this.send(Command::ToggleRecording);
             }))
@@ -2914,11 +3153,22 @@ impl Render for EmulatorView {
         }));
         let shown = self.shown_layout();
         let mut upscaler_failed = None;
+        let mut guide_width = None;
         if let Some(session) = self.session.as_mut() {
             let consoles = consoles(&session.info);
+            // Guide takes the margin beside the screens, or a column the
+            // screens make room for when the margin is too narrow.
+            let (stage, width) = guide_stage(
+                self.guide_open,
+                &shown,
+                session.info.screens,
+                consoles,
+                viewport,
+            );
+            guide_width = width;
             // On whole device pixels, so upscaled screens draw one to one.
             self.placements = shown
-                .place_consoles(session.info.screens, consoles, viewport)
+                .place_consoles(session.info.screens, consoles, stage)
                 .into_iter()
                 .map(|placement| Placement {
                     rect: placement.rect.snapped(scale_factor),
@@ -2987,6 +3237,24 @@ impl Render for EmulatorView {
                     root = root.child(ambient_layer(glow, viewport));
                 }
             }
+            // Guide's colours follow the game's, at most every two seconds.
+            if guide_width.is_some() && self.guide.read(cx).wants_palette(Instant::now()) {
+                let colors = match &session.ambient {
+                    Some(glow) => Some(glow.fade.shown().colors().to_vec()),
+                    None => {
+                        let correction = session
+                            .correction
+                            .as_ref()
+                            .filter(|_| self.color_correction);
+                        ambient::picture(&session.frames, &self.placements, correction)
+                            .map(|picture| picture.colors().to_vec())
+                    }
+                };
+                if let Some(colors) = colors.filter(|colors| !colors.is_empty()) {
+                    self.guide
+                        .update(cx, |guide, cx| guide.see_picture(&colors, cx));
+                }
+            }
             root = root.children(
                 ambient::shadows(&self.placements)
                     .into_iter()
@@ -3024,6 +3292,24 @@ impl Render for EmulatorView {
         if self.window_controls && !fullscreen && self.session.is_some() {
             root = root.child(top_bar_shade());
         }
+        // Guide, drawn as its own cached view: game frames reuse its last
+        // layout and paint, and its streaming redraws only itself.
+        if let Some(width) = guide_width {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(px(width))
+                    .child(
+                        gpui::AnyView::from(self.guide.clone())
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
+            );
+        } else if self.session.is_some() && self.guide_pill.is_some() && self.menu.is_none() {
+            root = root.children(self.guide_pill_element(cx));
+        }
         if self
             .session
             .as_ref()
@@ -3039,7 +3325,7 @@ impl Render for EmulatorView {
             && self.menu.is_none()
             && let Some(readout) = &self.speed_readout
         {
-            root = root.child(speed_readout(readout.clone()));
+            root = root.child(speed_readout(readout.clone(), guide_width.is_some()));
         }
 
         if let Some((menu, _)) = &self.menu {
@@ -3331,11 +3617,16 @@ fn slot_image(width: u16, height: u16, rgb: &[u8]) -> Arc<RenderImage> {
 }
 
 /// The speed readout, small in the window's bottom right corner.
-fn speed_readout(text: SharedString) -> impl IntoElement {
-    overlay_plate(div())
-        .absolute()
-        .bottom(px(INSET))
-        .right(px(INSET))
+fn speed_readout(text: SharedString, guide_open: bool) -> impl IntoElement {
+    let plate = overlay_plate(div()).absolute();
+    // Guide takes the right margin; the readout moves to the left one's
+    // top, clear of the notices at its bottom.
+    let plate = if guide_open {
+        plate.top(px(TOP_BAR + 4.0)).left(px(INSET))
+    } else {
+        plate.bottom(px(INSET)).right(px(INSET))
+    };
+    plate
         .font_family("Menlo")
         .child(text)
         .children(probe::part("speed"))
@@ -3444,4 +3735,171 @@ fn loading_notice(paths: &[PathBuf], name: &str) -> String {
 /// Whether `system` takes GBA games in a second slot.
 fn has_gba_slot(system: System) -> bool {
     emu_cores::second_slot(system) == Some(System::Gba)
+}
+
+/// Where the screens go with Guide `open`: the window as it is, with the
+/// panel in the margin beside them, or less a column for the panel when the
+/// margin is too narrow. Also the panel's width, while it is open.
+fn guide_stage(
+    open: bool,
+    layout: &Layout,
+    screens: &[ScreenSize],
+    consoles: usize,
+    viewport: (f32, f32),
+) -> ((f32, f32), Option<f32>) {
+    if !open {
+        return (viewport, None);
+    }
+    let natural = layout.place_consoles(screens, consoles, viewport);
+    let right = natural
+        .iter()
+        .map(|placement| placement.rect.x + placement.rect.width)
+        .fold(0.0, f32::max);
+    if let Some(width) = guide::width_in(viewport.0 - right, INSET) {
+        return (viewport, Some(width));
+    }
+    let width = guide::COLUMN_WIDTH
+        .min(viewport.0 * 0.6)
+        .max(guide::MIN_WIDTH.min(viewport.0));
+    (((viewport.0 - width).max(1.0), viewport.1), Some(width))
+}
+
+/// What Guide is told about the game at `rom`, for `system`, from the
+/// library's record of it if it has one.
+fn guide_info(rom: &Path, system: System, game: Option<library::Game>) -> GuideGame {
+    use crate::rom_info::Platform as Shelf;
+    use emu_guide::game::{GameContext, Kind, Platform};
+    let stem = rom
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let shelf = game.as_ref().map(|game| game.platform);
+    let platform = match (shelf, system) {
+        (Some(Shelf::Gb), _) => Platform::GameBoy,
+        (Some(Shelf::Gbc), _) => Platform::GameBoyColor,
+        (Some(Shelf::Gba), _) | (None, System::Gba) => Platform::GameBoyAdvance,
+        (Some(Shelf::Nds), _) | (None, System::Nds) => Platform::Ds,
+        (Some(Shelf::N3ds), _) | (None, System::N3ds) => Platform::ThreeDs,
+        (Some(Shelf::RpgMaker), _) | (None, System::RpgMaker) => Platform::RpgMaker,
+        (None, _) => Platform::GameBoy,
+    };
+    let title = game.as_ref().map_or_else(
+        || crate::game_db::display_title(&stem),
+        |game| game.title.clone(),
+    );
+    let release = game.as_ref().and_then(|game| game.name.clone());
+    let kind = if platform == Platform::RpgMaker {
+        Kind::FanGame
+    } else if let Some(at) = stem.find(" (Random ") {
+        Kind::Randomized {
+            base: stem[..at].to_owned(),
+        }
+    } else if release.is_some() {
+        Kind::Retail
+    } else {
+        Kind::Unlisted
+    };
+    GuideGame {
+        // By its system and file, so it is the same from the moment it
+        // starts, before the library has read it.
+        key: format!(
+            "{}-{:08x}",
+            system.name().to_lowercase().replace(' ', "-"),
+            crc32fast::hash(rom.as_os_str().as_encoded_bytes())
+        ),
+        tint: theme_tint(platform),
+        context: GameContext {
+            title,
+            release,
+            platform,
+            serial: game.as_ref().and_then(|game| game.serial.clone()),
+            kind,
+            play_time: game.map(|game| game.play_time),
+        },
+    }
+}
+
+/// A system's colour, as the library's plates use it, for Guide before a
+/// game draws anything.
+fn theme_tint(platform: emu_guide::game::Platform) -> u32 {
+    use crate::rom_info::Platform as Shelf;
+    use emu_guide::game::Platform;
+    let shelf = match platform {
+        Platform::GameBoy => Shelf::Gb,
+        Platform::GameBoyColor => Shelf::Gbc,
+        Platform::GameBoyAdvance => Shelf::Gba,
+        Platform::Ds => Shelf::Nds,
+        Platform::ThreeDs => Shelf::N3ds,
+        Platform::RpgMaker => Shelf::RpgMaker,
+    };
+    crate::theme::tint(shelf).0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use emu_guide::game::{Kind, Platform};
+
+    const DS: [ScreenSize; 2] = [ScreenSize::new(256, 192), ScreenSize::new(256, 192)];
+
+    #[test]
+    fn guide_sits_in_a_wide_margin_and_makes_room_in_a_narrow_one() {
+        let layout = Layout::default();
+        assert_eq!(
+            guide_stage(false, &layout, &DS, 1, (1360.0, 860.0)),
+            ((1360.0, 860.0), None)
+        );
+        // Stacked screens 860 tall are about 573 wide: margins of almost
+        // 400 each, room enough.
+        let (stage, width) = guide_stage(true, &layout, &DS, 1, (1360.0, 860.0));
+        assert_eq!(stage, (1360.0, 860.0));
+        assert!(width.is_some_and(|width| (guide::MIN_WIDTH..=guide::MAX_WIDTH).contains(&width)));
+        // A narrow window: the screens move over for a column.
+        let (stage, width) = guide_stage(true, &layout, &DS, 1, (800.0, 860.0));
+        assert_eq!(width, Some(guide::COLUMN_WIDTH));
+        assert_eq!(stage, (800.0 - guide::COLUMN_WIDTH, 860.0));
+    }
+
+    #[test]
+    fn guide_is_told_what_kind_of_copy_is_played() {
+        let retail = library::Game {
+            path: PathBuf::from("/games/Pokemon - Platinum Version (USA) (Rev 1).nds"),
+            platform: crate::rom_info::Platform::Nds,
+            crc32: 0x69D6_28E8,
+            serial: Some("CPUE".to_owned()),
+            title: "Pokemon: Platinum Version".to_owned(),
+            name: Some("Pokemon - Platinum Version (USA) (Rev 1)".to_owned()),
+            looked_up: true,
+            play_time: Duration::from_secs(60),
+        };
+        let info = guide_info(&retail.path.clone(), System::Nds, Some(retail));
+        assert_eq!(info.context.kind, Kind::Retail);
+        assert_eq!(info.context.platform, Platform::Ds);
+        assert_eq!(info.context.short_title(), "Platinum");
+        let unread = guide_info(
+            Path::new("/games/Pokemon - Platinum Version (USA) (Rev 1).nds"),
+            System::Nds,
+            None,
+        );
+        assert_eq!(info.key, unread.key);
+
+        let random = Path::new("/games/Pokemon Emerald (Random 42).gba");
+        let info = guide_info(random, System::Gba, None);
+        assert_eq!(
+            info.context.kind,
+            Kind::Randomized {
+                base: "Pokemon Emerald".to_owned()
+            }
+        );
+        let hack = guide_info(Path::new("/games/Some Hack.gba"), System::Gba, None);
+        assert_eq!(hack.context.kind, Kind::Unlisted);
+        let fan = guide_info(Path::new("/games/Insurgence"), System::RpgMaker, None);
+        assert_eq!(fan.context.kind, Kind::FanGame);
+        // The same file is the same game, before and after the library
+        // reads it.
+        assert_eq!(
+            guide_info(random, System::Gba, None).key,
+            guide_info(random, System::Gba, None).key
+        );
+    }
 }
