@@ -1,5 +1,5 @@
 //! The keys held down, and where each went when it was pressed: to the
-//! library, the game menu or the game.
+//! library, the game menu, the game or Guide's composer.
 //!
 //! A key held down repeats, and each repeat is a key-down of its own. A
 //! repeat goes only where its press went, so Return held to choose
@@ -24,6 +24,8 @@ pub enum Route {
     Menu,
     /// The game.
     Game,
+    /// Guide's composer, while it has the caret.
+    Guide,
 }
 
 /// The keys held down, by GPUI key name, with where each went when

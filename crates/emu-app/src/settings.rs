@@ -49,6 +49,7 @@
 //! fast-forward ran at 2x by default left `fast_forward` out for no
 //! limit; they now get 2x, and the menu or `"unlimited"` brings it back.
 
+use emu_guide::chat::Effort;
 use std::path::{Path, PathBuf};
 
 use emu_core::DmgColors;
@@ -109,6 +110,10 @@ pub struct Settings {
     pub window_controls: bool,
     /// Where the main window was left, if it has been placed.
     pub window_place: Option<WindowPlace>,
+    /// How hard Guide's model thinks before answering.
+    pub guide_thinking: Effort,
+    /// Whether Guide looks answers up on the game's fan sites.
+    pub guide_lookups: bool,
 }
 
 /// Where the main window was and how large, to open it there again.
@@ -145,6 +150,8 @@ impl Default for Settings {
             dmg_colors: DmgColors::ByTitle,
             window_controls: true,
             window_place: None,
+            guide_thinking: Effort::Low,
+            guide_lookups: true,
         }
     }
 }
@@ -158,6 +165,39 @@ struct SettingsFile {
     game_boy: GameBoySection,
     states: StatesSection,
     window: WindowSection,
+    guide: GuideSection,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct GuideSection {
+    thinking: String,
+    lookups: bool,
+}
+
+impl Default for GuideSection {
+    fn default() -> Self {
+        let settings = Settings::default();
+        Self {
+            thinking: thinking_name(settings.guide_thinking).to_owned(),
+            lookups: settings.guide_lookups,
+        }
+    }
+}
+
+/// The names Guide's Thinking setting has in the file.
+const THINKING: [(Effort, &str); 4] = [
+    (Effort::None, "off"),
+    (Effort::Low, "low"),
+    (Effort::Medium, "medium"),
+    (Effort::High, "high"),
+];
+
+fn thinking_name(effort: Effort) -> &'static str {
+    THINKING
+        .iter()
+        .find(|(known, _)| *known == effort)
+        .map_or("low", |(_, name)| name)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -489,6 +529,11 @@ impl Settings {
         if !(1..=STATE_SLOTS).contains(&state_slot) {
             return Err(SettingsError::UnknownStateSlot(state_slot));
         }
+        let guide_thinking = THINKING
+            .iter()
+            .find(|(_, name)| *name == file.guide.thinking)
+            .map(|(effort, _)| *effort)
+            .ok_or_else(|| SettingsError::UnknownThinking(file.guide.thinking.clone()))?;
         Ok(Self {
             layout: file.layout.to_layout()?,
             speed: file.speed.to_speeds()?,
@@ -503,6 +548,8 @@ impl Settings {
             dmg_colors,
             window_controls: file.window.controls,
             window_place: file.window.place(),
+            guide_thinking,
+            guide_lookups: file.guide.lookups,
         })
     }
 
@@ -519,6 +566,10 @@ impl Settings {
                 slot: self.state_slot,
             },
             window: WindowSection::from(&self),
+            guide: GuideSection {
+                thinking: thinking_name(self.guide_thinking).to_owned(),
+                lookups: self.guide_lookups,
+            },
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
         format!("# Saved by ds-emulator whenever a setting changes.\n\n{body}")
@@ -589,6 +640,9 @@ pub enum SettingsError {
     /// The colours for original Game Boy games are not one of the names.
     #[error("unknown Game Boy colours {0:?} in settings")]
     UnknownDmgColors(String),
+    /// Guide's Thinking is not "off", "low", "medium" or "high".
+    #[error("unknown Guide thinking {0:?} in settings; use off, low, medium or high")]
+    UnknownThinking(String),
     /// The save-state slot is not 1 to [`STATE_SLOTS`].
     #[error("unknown save-state slot {0} in settings; use 1 to {max}", max = STATE_SLOTS)]
     UnknownStateSlot(u8),
@@ -614,6 +668,19 @@ pub enum SettingsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guide_settings_default_to_low_thinking_with_lookups_and_refuse_unknown_words() {
+        let settings = Settings::from_toml("").expect("empty file");
+        assert_eq!(settings.guide_thinking, Effort::Low);
+        assert!(settings.guide_lookups);
+        let off = Settings::from_toml("[guide]\nthinking = \"off\"\n").expect("off");
+        assert_eq!(off.guide_thinking, Effort::None);
+        assert_eq!(
+            Settings::from_toml("[guide]\nthinking = \"lots\"\n"),
+            Err(SettingsError::UnknownThinking("lots".to_owned()))
+        );
+    }
 
     #[test]
     fn layouts_round_trip_through_toml() {
@@ -646,8 +713,13 @@ mod tests {
                 fullscreen: true,
                 display: Some(0x37d8_832a_2d66_02ca_b9f7_8f6a_8a6b_1fd0),
             }),
+            guide_thinking: Effort::High,
+            guide_lookups: false,
         };
         let text = settings.to_toml();
+        assert!(text.contains("[guide]"), "{text}");
+        assert!(text.contains("thinking = \"high\""), "{text}");
+        assert!(text.contains("lookups = false"), "{text}");
         assert!(text.contains("arrangement = \"hybrid\""), "{text}");
         assert!(text.contains("resolution_3d = 4"), "{text}");
         assert!(text.contains("picture = \"scanlines\""), "{text}");
