@@ -159,3 +159,38 @@ pub fn fit(
     let line = wrapper.truncate_line(text.to_owned().into(), px(width), "…", &mut Vec::new());
     line.replace(" …", "…").into()
 }
+
+/// The tile chosen after pressing `key` with `selected` of `count` chosen
+/// in a grid `columns` wide, as the library's and the store's grids move.
+/// Up and down stay put at the top and bottom.
+pub fn moved(selected: usize, count: usize, columns: usize, key: &str) -> usize {
+    let last = count.saturating_sub(1);
+    match key {
+        "left" => selected.saturating_sub(1),
+        "right" => (selected + 1).min(last),
+        "up" => selected.checked_sub(columns).unwrap_or(selected),
+        "down" if selected + columns <= last => selected + columns,
+        _ => selected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arrows_move_through_the_grid() {
+        // Seven tiles, three across:
+        // 0 1 2
+        // 3 4 5
+        // 6
+        assert_eq!(moved(4, 7, 3, "left"), 3);
+        assert_eq!(moved(0, 7, 3, "left"), 0);
+        assert_eq!(moved(6, 7, 3, "right"), 6);
+        assert_eq!(moved(4, 7, 3, "up"), 1);
+        assert_eq!(moved(1, 7, 3, "up"), 1);
+        assert_eq!(moved(3, 7, 3, "down"), 6);
+        assert_eq!(moved(4, 7, 3, "down"), 4);
+        assert_eq!(moved(0, 0, 3, "right"), 0);
+    }
+}

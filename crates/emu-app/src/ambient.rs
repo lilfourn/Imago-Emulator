@@ -267,7 +267,8 @@ fn sample(
         f32::from(size.width) / span.width,
         f32::from(size.height) / span.height,
     );
-    let mut sums = vec![[0.0; 3]; size.pixel_count()];
+    // Whole numbers, so they add up exactly in any order.
+    let mut sums = vec![[0_u32; 3]; size.pixel_count()];
     let mut counts = vec![0_u32; size.pixel_count()];
     for placement in placements {
         let Some(frame) = frames.get(placement.screen) else {
@@ -278,28 +279,65 @@ fn sample(
         // Every pixel, or for a large frame an even grid of them. Only the
         // frame's size decides which, never the window's.
         let stride = (source_width * source_height / MOST_SAMPLES).isqrt().max(1);
-        for y in (stride / 2..source_height).step_by(stride) {
-            for x in (stride / 2..source_width).step_by(stride) {
-                let centre = (x as f32 + 0.5, y as f32 + 0.5);
-                let (left, top) = placement.window_point(source, centre);
-                // `as` saturates, so points a rounding error outside the
-                // span land in its edge pixels.
-                let column = (((left - span.x) * scale.0) as usize).min(width - 1);
-                let row = (((top - span.y) * scale.1) as usize).min(height - 1);
-                let pixel = frame.pixels()[y * source_width + x];
-                let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
-                let index = row * width + column;
-                for (sum, channel) in sums[index].iter_mut().zip(channels(pixel)) {
-                    *sum += channel;
+        let first = stride / 2;
+        // The picture's column and row that frame pixel (x, y) is drawn in.
+        let place = |x: usize, y: usize| {
+            let centre = (x as f32 + 0.5, y as f32 + 0.5);
+            let (left, top) = placement.window_point(source, centre);
+            // `as` saturates, so points a rounding error outside the
+            // span land in its edge pixels.
+            let column = (((left - span.x) * scale.0) as usize).min(width - 1);
+            let row = (((top - span.y) * scale.1) as usize).min(height - 1);
+            (column, row)
+        };
+        // A frame's columns decide the picture's column, or, turned a
+        // quarter, its row, and the frame's rows the other. So a pixel's
+        // index in the picture is one offset for its column plus one for
+        // its row, each worked out once rather than for every pixel.
+        let turned = placement.rotation.swaps_axes();
+        let across: Vec<usize> = (first..source_width)
+            .step_by(stride)
+            .map(|x| match place(x, first) {
+                (_, row) if turned => row * width,
+                (column, _) => column,
+            })
+            .collect();
+        let down: Vec<usize> = (first..source_height)
+            .step_by(stride)
+            .map(|y| match place(first, y) {
+                (column, _) if turned => column,
+                (_, row) => row * width,
+            })
+            .collect();
+        // Samples side by side in a row mostly land in one picture pixel:
+        // each run of them is added up on its own, then added in at once.
+        let runs: Vec<(usize, usize)> = across
+            .chunk_by(|one, next| one == next)
+            .map(|run| (run[0], run.len()))
+            .collect();
+        for (line, offset) in frame.rows().skip(first).step_by(stride).zip(&down) {
+            let mut sampled = line.iter().skip(first).step_by(stride);
+            for &(along, length) in &runs {
+                let mut sum = [0; 3];
+                for &pixel in sampled.by_ref().take(length) {
+                    let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
+                    for (sum, level) in sum.iter_mut().zip(levels(pixel)) {
+                        *sum += level;
+                    }
                 }
-                counts[index] += 1;
+                let index = offset + along;
+                for (total, sum) in sums[index].iter_mut().zip(sum) {
+                    *total += sum;
+                }
+                // A run is at most a row of a frame, a few thousand pixels.
+                counts[index] += length as u32;
             }
         }
     }
     let mut colors = Vec::with_capacity(sums.len());
     for (index, (sum, count)) in sums.into_iter().zip(counts).enumerate() {
         if count > 0 {
-            colors.push(sum.map(|channel| channel / count as f32));
+            colors.push(sum.map(|level| level as f32 / count as f32));
             continue;
         }
         let centre = (
@@ -388,7 +426,12 @@ fn tone(colors: &mut [Color], size: ScreenSize) {
 
 /// `pixel`'s red, green and blue.
 fn channels(pixel: u32) -> Color {
-    [16, 8, 0].map(|shift| ((pixel >> shift) & 0xFF) as f32)
+    levels(pixel).map(|level| level as f32)
+}
+
+/// `pixel`'s red, green and blue, from 0 to 255.
+fn levels(pixel: u32) -> [u32; 3] {
+    [16, 8, 0].map(|shift| (pixel >> shift) & 0xFF)
 }
 
 /// `color`, rounded, as an opaque pixel.
@@ -635,6 +678,190 @@ mod tests {
         let steps = (1..100).map(|step| start + FADE * 20 + LONGEST_STEP * step);
         assert!(steps.map(|now| fade.step(now)).any(|moving| !moving));
         assert_eq!(fade.shown(), &light);
+    }
+
+    /// [`sample`] as it was first written, placing every pixel on its own
+    /// through [`Placement::window_point`]: the oracle for the faster one.
+    fn sample_each_pixel(
+        frames: &[Frame],
+        placements: &[Placement],
+        span: Rect,
+        size: ScreenSize,
+        correction: Option<&Correction>,
+    ) -> Vec<Color> {
+        let (width, height) = (usize::from(size.width), usize::from(size.height));
+        let scale = (
+            f32::from(size.width) / span.width,
+            f32::from(size.height) / span.height,
+        );
+        let mut sums = vec![[0.0; 3]; size.pixel_count()];
+        let mut counts = vec![0_u32; size.pixel_count()];
+        for placement in placements {
+            let Some(frame) = frames.get(placement.screen) else {
+                continue;
+            };
+            let source = frame.size();
+            let (source_width, source_height) =
+                (usize::from(source.width), usize::from(source.height));
+            let stride = (source_width * source_height / MOST_SAMPLES).isqrt().max(1);
+            for y in (stride / 2..source_height).step_by(stride) {
+                for x in (stride / 2..source_width).step_by(stride) {
+                    let centre = (x as f32 + 0.5, y as f32 + 0.5);
+                    let (left, top) = placement.window_point(source, centre);
+                    let column = (((left - span.x) * scale.0) as usize).min(width - 1);
+                    let row = (((top - span.y) * scale.1) as usize).min(height - 1);
+                    let pixel = frame.pixels()[y * source_width + x];
+                    let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
+                    let index = row * width + column;
+                    for (sum, channel) in sums[index].iter_mut().zip(channels(pixel)) {
+                        *sum += channel;
+                    }
+                    counts[index] += 1;
+                }
+            }
+        }
+        let mut colors = Vec::with_capacity(sums.len());
+        for (index, (sum, count)) in sums.into_iter().zip(counts).enumerate() {
+            if count > 0 {
+                colors.push(sum.map(|channel| channel / count as f32));
+                continue;
+            }
+            let centre = (
+                span.x + ((index % width) as f32 + 0.5) / scale.0,
+                span.y + ((index / width) as f32 + 0.5) / scale.1,
+            );
+            let pixel = pixel_near(frames, placements, centre).unwrap_or(0);
+            let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
+            colors.push(channels(pixel));
+        }
+        colors
+    }
+
+    /// A frame of `size` in made-up colours, different for each `seed`,
+    /// with the 15-bit colours GBC and GBA cores draw.
+    fn noise(size: ScreenSize, seed: u32) -> Frame {
+        let mut frame = Frame::new(size);
+        let mut state = seed.wrapping_mul(0x9E37_79B9) | 1;
+        let widen = |level: u32| (level << 3 | level >> 2) as u8;
+        for pixel in frame.pixels_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *pixel = rgb(
+                widen(state & 31),
+                widen(state >> 5 & 31),
+                widen(state >> 10 & 31),
+            );
+        }
+        frame
+    }
+
+    /// `screens` placed one under another at `scale`, `left` and `top`
+    /// from the window's corner, `gap` apart, each turned by `rotation`.
+    fn column_of(
+        screens: &[ScreenSize],
+        rotation: Rotation,
+        (left, top, scale, gap): (f32, f32, f32, f32),
+    ) -> Vec<Placement> {
+        let mut y = top;
+        let mut placements = Vec::new();
+        for (screen, &size) in screens.iter().enumerate() {
+            let turned = rotation.turn_size(size);
+            let (width, height) = (
+                f32::from(turned.width) * scale,
+                f32::from(turned.height) * scale,
+            );
+            placements.push(Placement {
+                rotation,
+                ..placement(screen, left, y, width, height)
+            });
+            y += height + gap;
+        }
+        placements
+    }
+
+    #[test]
+    fn sampling_places_pixels_as_the_window_draws_them() {
+        let systems: [&[ScreenSize]; 6] = [
+            &[DS, DS],
+            &[ScreenSize::new(1024, 768), ScreenSize::new(1024, 768)],
+            &[ScreenSize::new(512, 384), DS],
+            &[ScreenSize::new(240, 160)],
+            &[ScreenSize::new(160, 144)],
+            &[ScreenSize::new(400, 240), ScreenSize::new(320, 240)],
+        ];
+        let rotations = [
+            Rotation::Upright,
+            Rotation::Clockwise,
+            Rotation::UpsideDown,
+            Rotation::Anticlockwise,
+        ];
+        let places = [
+            (0.0, 0.0, 1.0, 0.0),
+            (37.5, 12.25, 1.8229, 0.0),
+            (210.0, 0.0, 2.0833, 90.0),
+            (5.25, 3.5, 3.177, 13.7),
+            (0.0, 0.0, 0.31, 0.0),
+        ];
+        let gbc = Correction::for_system(emu_core::System::Gb);
+        let gba = Correction::for_system(emu_core::System::Gba);
+        let mut seed = 0;
+        for screens in systems {
+            for rotation in rotations {
+                for place in places {
+                    for correction in [None, gbc.as_ref(), gba.as_ref()] {
+                        seed += 1;
+                        let frames: Vec<Frame> = (0..)
+                            .zip(screens)
+                            .map(|(index, &size)| noise(size, seed * 4 + index))
+                            .collect();
+                        let placements = column_of(screens, rotation, place);
+                        let span = span(&placements).expect("screens are placed");
+                        let size = picture_size(span);
+                        assert_eq!(
+                            sample(&frames, &placements, span, size, correction),
+                            sample_each_pixel(&frames, &placements, span, size, correction),
+                            "{screens:?} {rotation:?} at {place:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Times [`sample`] against [`sample_each_pixel`], and the whole
+    /// [`picture`]: `cargo test --release -p emu-app -- --ignored
+    /// --nocapture ambient_timing`.
+    #[test]
+    #[ignore = "a timing, not a test"]
+    fn ambient_timing() {
+        let cases: [(&str, &[ScreenSize], Option<Correction>); 3] = [
+            ("DS", &[DS, DS], None),
+            (
+                "DS, 3D at 4x",
+                &[ScreenSize::new(1024, 768), ScreenSize::new(1024, 768)],
+                None,
+            ),
+            (
+                "GBA, corrected",
+                &[ScreenSize::new(240, 160)],
+                Correction::for_system(emu_core::System::Gba),
+            ),
+        ];
+        for (name, screens, correction) in cases {
+            let frames: Vec<Frame> = (0..).zip(screens).map(|(i, &s)| noise(s, i)).collect();
+            let placements = column_of(screens, Rotation::Upright, (300.0, 0.0, 2.0, 0.0));
+            let span = span(&placements).expect("screens are placed");
+            let size = picture_size(span);
+            let correction = correction.as_ref();
+            let old = crate::bench::best_of(200, || {
+                sample_each_pixel(&frames, &placements, span, size, correction)
+            });
+            let new =
+                crate::bench::best_of(200, || sample(&frames, &placements, span, size, correction));
+            let whole = crate::bench::best_of(200, || picture(&frames, &placements, correction));
+            println!("ambient {name}: sample {old:?} -> {new:?}; whole picture now {whole:?}");
+        }
     }
 
     #[test]

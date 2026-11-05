@@ -538,7 +538,7 @@ impl StoreView {
                 }
             }
             key @ ("left" | "right" | "up" | "down") => {
-                let at = moved(self.position(), self.shown.len(), self.columns, key);
+                let at = ui::moved(self.position(), self.shown.len(), self.columns, key);
                 self.choose(at);
             }
             _ => match &keystroke.key_char {
@@ -1407,19 +1407,6 @@ fn grid(width: f32) -> (usize, f32) {
     (columns, tile.max(MIN_TILE / 2.0))
 }
 
-/// The game chosen after pressing `key` with `selected` of `count` chosen
-/// in a grid `columns` wide. Up and down stay put at the top and bottom.
-fn moved(selected: usize, count: usize, columns: usize, key: &str) -> usize {
-    let last = count.saturating_sub(1);
-    match key {
-        "left" => selected.saturating_sub(1),
-        "right" => (selected + 1).min(last),
-        "up" => selected.checked_sub(columns).unwrap_or(selected),
-        "down" if selected + columns <= last => selected + columns,
-        _ => selected,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1438,16 +1425,6 @@ mod tests {
         assert_eq!(columns, 4);
         assert!((tile - MIN_TILE).abs() < 0.01);
         assert_eq!(grid(100.0).0, 1);
-    }
-
-    #[test]
-    fn arrows_move_through_the_grid() {
-        assert_eq!(moved(4, 7, 3, "left"), 3);
-        assert_eq!(moved(6, 7, 3, "right"), 6);
-        assert_eq!(moved(4, 7, 3, "up"), 1);
-        assert_eq!(moved(1, 7, 3, "up"), 1);
-        assert_eq!(moved(3, 7, 3, "down"), 6);
-        assert_eq!(moved(4, 7, 3, "down"), 4);
     }
 
     #[test]

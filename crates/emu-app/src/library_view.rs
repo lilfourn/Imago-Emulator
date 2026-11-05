@@ -659,7 +659,7 @@ impl LibraryView {
             key @ ("left" | "right" | "up" | "down") => {
                 let shown = self.shown();
                 let at = self.chosen_at(&shown);
-                let at = moved(at, shown.len(), self.columns, key);
+                let at = ui::moved(at, shown.len(), self.columns, key);
                 self.selected = shown.get(at).map(|game| game.path.clone());
                 self.scroll_to_chosen();
             }
@@ -2512,7 +2512,7 @@ fn read_facts(game: &Game) -> Facts {
         return Facts::default();
     };
     let size = if metadata.is_dir() {
-        folder_size(&game.path)
+        archive::folder_size(&game.path)
     } else {
         metadata.len()
     };
@@ -2537,27 +2537,6 @@ fn read_facts(game: &Game) -> Facts {
         states,
         randomizable: randomizer::generation(&game.path).is_some(),
     }
-}
-
-/// How much room the files in `folder` take, not following links.
-fn folder_size(folder: &Path) -> u64 {
-    let mut total = 0;
-    let mut folders = vec![folder.to_owned()];
-    while let Some(folder) = folders.pop() {
-        let Ok(entries) = fs::read_dir(&folder) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => folders.push(entry.path()),
-                Ok(kind) if kind.is_file() => {
-                    total += entry.metadata().map_or(0, |metadata| metadata.len());
-                }
-                _ => {}
-            }
-        }
-    }
-    total
 }
 
 /// `time` played, as the game menu says it.
@@ -2606,19 +2585,6 @@ fn position(shown: &[&Game], selected: Option<&Path>) -> usize {
         .unwrap_or(0)
 }
 
-/// The game chosen after pressing `key` with `selected` of `count` chosen
-/// in a grid `columns` wide. Up and down stay put at the top and bottom.
-fn moved(selected: usize, count: usize, columns: usize, key: &str) -> usize {
-    let last = count.saturating_sub(1);
-    match key {
-        "left" => selected.saturating_sub(1),
-        "right" => (selected + 1).min(last),
-        "up" => selected.checked_sub(columns).unwrap_or(selected),
-        "down" if selected + columns <= last => selected + columns,
-        _ => selected,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2630,22 +2596,6 @@ mod tests {
         assert!((tile * 3.0 + GAP * 2.0 - 450.0).abs() < 0.01);
         assert_eq!(grid(4.0 * MIN_TILE + 3.0 * GAP).0, 4);
         assert_eq!(grid(50.0).0, 1);
-    }
-
-    #[test]
-    fn arrows_move_through_the_grid() {
-        // Seven games, three across:
-        // 0 1 2
-        // 3 4 5
-        // 6
-        assert_eq!(moved(4, 7, 3, "left"), 3);
-        assert_eq!(moved(0, 7, 3, "left"), 0);
-        assert_eq!(moved(6, 7, 3, "right"), 6);
-        assert_eq!(moved(4, 7, 3, "up"), 1);
-        assert_eq!(moved(1, 7, 3, "up"), 1);
-        assert_eq!(moved(3, 7, 3, "down"), 6);
-        assert_eq!(moved(4, 7, 3, "down"), 4);
-        assert_eq!(moved(0, 0, 3, "right"), 0);
     }
 
     #[test]

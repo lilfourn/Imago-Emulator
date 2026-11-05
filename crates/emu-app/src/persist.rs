@@ -247,6 +247,15 @@ pub fn create_capture(rom: &Path, stamp: &str, extension: &str) -> io::Result<(P
     }
 }
 
+/// `path`'s file name, or the whole path if it has none, as notices name
+/// files.
+pub fn file_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Replaces `path` with `bytes` so that a crash or power cut mid-write
 /// never leaves a half-written file: the bytes go to a sibling temporary
 /// file first, reach the disk, and only then is it renamed over `path`.

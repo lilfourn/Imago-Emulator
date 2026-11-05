@@ -14,6 +14,8 @@ mod app;
 mod app_icon;
 mod archive;
 mod audio;
+#[cfg(test)]
+mod bench;
 mod bindings;
 mod boxart;
 mod capture;
