@@ -20,6 +20,10 @@ env:
 jobs:
   check:
     name: macOS
+    # macOS minutes cost GitHub's most, and every change is checked on a
+    # Mac before it is pushed, so pull requests skip this job; pushes to
+    # main and manual runs keep it, with the recorded determinism values.
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
