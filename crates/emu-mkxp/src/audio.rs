@@ -262,7 +262,7 @@ mod windows_pipe {
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{
-        ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE,
+        ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND,
@@ -306,9 +306,11 @@ mod windows_pipe {
         // SAFETY: `pipe` is an open pipe handle, not opened for overlapped
         // I/O, so a null OVERLAPPED waits.
         let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle(), ptr::null_mut()) };
-        // A writer that came first is connected all the same.
+        // A writer that came first is connected all the same, and one that
+        // came and already closed its end leaves what it wrote to be read.
         // SAFETY: reads this thread's last error, nothing else.
-        if connected != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED {
+        let error = unsafe { GetLastError() };
+        if connected != 0 || error == ERROR_PIPE_CONNECTED || error == ERROR_NO_DATA {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
@@ -388,7 +390,7 @@ mod tests {
             .write_all(&[1, 0, 0xFF, 0xFF, 2, 0])
             .expect("samples");
         player.write_all(&[3, 0]).expect("the rest");
-        drop(player);
+        // Open while the sound comes, as a player's pipe is.
         let mut out = Vec::new();
         for _ in 0..200 {
             capture.drain(&mut out);
@@ -397,6 +399,7 @@ mod tests {
             }
             thread::sleep(std::time::Duration::from_millis(5));
         }
+        drop(player);
         assert_eq!(out, [[1, -1], [2, 3]]);
         drop(capture);
         // A Windows pipe goes once the reader lets go of it, in a moment.
