@@ -200,8 +200,9 @@ run() {
     shift
     trace="$out/$name-trace.txt"
     mkdir -p "$out/$name-probe"
+    # VK_LOADER_DEBUG=driver names the Vulkan devices in the log.
     DS_EMULATOR_HOME="$home" DS_EMULATOR_PROBE="$out/$name-probe" \
-        DS_EMULATOR_TRACE="$trace" RUST_BACKTRACE=1 \
+        DS_EMULATOR_TRACE="$trace" RUST_BACKTRACE=1 VK_LOADER_DEBUG=driver \
         "$bin" "$@" >"$out/$name.log" 2>&1 &
     pid=$!
 
@@ -219,7 +220,11 @@ run() {
         wait "$pid" 2>/dev/null || true
         return
     fi
-    check "$name.window" pass "window $window"
+    depth="$(xwininfo -id "$window" 2>/dev/null | awk '/Depth:/ { print $2 }')"
+    if [ "$depth" = 32 ]; then
+        argb=1
+    fi
+    check "$name.window" pass "window $window, $depth-bit"
 
     # Drawn once the window shows more than one colour, and for a game,
     # once it has shown its first 60 frames. GPUI 0.2.2 on X11 sometimes
@@ -230,7 +235,7 @@ run() {
     drawn=""
     remapped=""
     waited=0
-    while [ "$waited" -lt 120 ]; do
+    while [ "$waited" -lt 60 ]; do
         sleep 1
         waited=$((waited + 1))
         kill -0 "$pid" 2>/dev/null || break
@@ -297,12 +302,23 @@ run() {
     fi
 }
 
+# What the app ran on, for the summary.
+system="$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-release 2>/dev/null)"
+system="${system:-$(uname -s)}"
+mesa="$(dpkg-query -W -f '${Version}' mesa-vulkan-drivers 2>/dev/null || true)"
+xserver="$(dpkg-query -W -f '${Version}' xvfb 2>/dev/null || true)"
+argb=""
+
 # The game first, so the library then lists it.
 run game "$work/roms/$(basename "$rom")"
 run library
 
+device="$(grep -h -m 1 -oE '\[0\] [^ ].*' "$out"/game.log "$out"/library.log 2>/dev/null |
+    head -n 1 | sed 's/^\[0\] //; s/ *$//')"
 {
-    echo "## Linux smoke ($(uname -m))"
+    echo "## Linux smoke ($system, $(uname -m))"
+    echo
+    echo "Mesa ${mesa:-unknown}, Xvfb ${xserver:-unknown}, Openbox; first Vulkan device: ${device:-unknown}."
     echo
     echo "| Check | Result | Detail |"
     echo "|---|---|---|"
@@ -310,6 +326,18 @@ run library
     echo
     if grep -q 'cannot find card\|Unknown PCM' "$out"/*.log 2>/dev/null; then
         echo "No sound device here (ALSA found no card); the app ran on without one."
+        echo
+    fi
+    # Mesa's software Vulkan before 24.0.2 sends each frame to an X server
+    # without DRI3, such as Xvfb, as a depth-24 image, which a 32-bit
+    # window refuses; GPUI 0.2.2 always takes a 32-bit visual when there is
+    # one. Hardware drivers present another way.
+    if [ -n "$argb" ] && [ -n "$mesa" ] && grep -q '	fail\|known failure' "$results" &&
+        dpkg --compare-versions "$mesa" lt 24.0.2 2>/dev/null; then
+        echo "Mesa $mesa is older than 24.0.2: its software Vulkan (lavapipe) can't show frames in a"
+        echo "32-bit window on an X server without DRI3, such as Xvfb. It sends depth-24 images, which"
+        echo "the server refuses, so the window stays black while the app draws. GPUI 0.2.2 always takes"
+        echo "a 32-bit visual when the server offers one. Hardware drivers aren't affected."
     fi
 } >"$out/summary.md"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then

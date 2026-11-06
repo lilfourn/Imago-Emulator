@@ -101,20 +101,43 @@ jobs:
       - name: Build the app
         if: ${{ matrix.smoke && !cancelled() }}
         run: cargo build -p emu-app
-      # Gates on every check except those listed: closing the window panics
-      # in GPUI's X11 client, as the app quits from its window-closed
-      # callback (stream 2, app shell).
-      - name: Smoke test
+      # The smoke test that gates runs on Ubuntu 24.04, in the image built
+      # from scripts/linux/Dockerfile, with that release's Mesa; the app
+      # built on the runner runs there as it is. It gates on every check
+      # except those listed: closing the window panics in GPUI's X11
+      # client, as the app quits from its window-closed callback (stream 2,
+      # app shell).
+      - name: Smoke test (Ubuntu 24.04)
         if: ${{ matrix.smoke && !cancelled() }}
+        run: |
+          docker build --load -q -t ds-emulator-linux:24.04 scripts/linux >/dev/null ||
+            docker build -q -t ds-emulator-linux:24.04 scripts/linux >/dev/null
+          status=0
+          docker run --rm --init -v "$PWD:$PWD" -w "$PWD" \
+            -e SMOKE_KNOWN_FAILURES="game.quit library.quit" \
+            ds-emulator-linux:24.04 sh -c \
+            'scripts/linux/smoke.sh target/smoke; status=$?; chown -R "$0" target/smoke; exit $status' \
+            "$(id -u):$(id -g)" || status=$?
+          cat target/smoke/summary.md >>"$GITHUB_STEP_SUMMARY" || true
+          exit "$status"
+      # The runner's own Ubuntu, 22.04 today, report-only: its Mesa (23.2)
+      # can't show software-Vulkan frames in GPUI's 32-bit window under
+      # Xvfb, so the picture stays black there (fixed in Mesa 24.0.2; the
+      # summary explains it). Hardware drivers aren't affected.
+      - name: Smoke test (the runner's Ubuntu, report-only)
+        if: ${{ matrix.smoke && !cancelled() }}
+        continue-on-error: true
         env:
-          SMOKE_KNOWN_FAILURES: game.quit library.quit
-        run: scripts/linux/smoke.sh target/smoke
+          SMOKE_KNOWN_FAILURES: game.quit library.quit game.frame library.drawn
+        run: scripts/linux/smoke.sh target/smoke-runner
       - name: Smoke screenshots
         if: ${{ matrix.smoke && !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: smoke-linux-${{ matrix.arch }}
-          path: target/smoke
+          path: |
+            target/smoke
+            target/smoke-runner
           if-no-files-found: ignore
           retention-days: 14
 
@@ -125,7 +148,9 @@ jobs:
   windows:
     name: Windows x86-64
     runs-on: windows-latest
-    timeout-minutes: 60
+    # Lint and tests take about 55 minutes with nothing cached; the smoke
+    # and determinism steps after them about 10 more.
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
