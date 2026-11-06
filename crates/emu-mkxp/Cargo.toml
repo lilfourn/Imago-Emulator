@@ -9,11 +9,25 @@ publish.workspace = true
 [dependencies]
 crc32fast.workspace = true
 emu-core.workspace = true
+# The TCP link's token and the private X display's cookie.
+getrandom = "0.3"
 # O_NONBLOCK, to open the sound pipe without waiting for its other end.
 libc = "0.2"
 # The game's mkxp.json, read and written again for the hidden player.
 serde_json = "1"
 thiserror.workspace = true
+
+# The named pipe the player's sound comes through on Windows, and the
+# power throttling its process is kept from.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true

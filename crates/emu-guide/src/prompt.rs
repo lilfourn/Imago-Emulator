@@ -30,7 +30,7 @@ pub fn system_prompt(
 ) -> String {
     let mut lines = vec![
         format!(
-            "You are Guide, the in-game helper inside DS Emulator. The player is playing {} on {}.{}",
+            "You are Guide, the in-game helper inside Imago Emulator. The player is playing {} on {}.{}",
             game.title.trim(),
             game.platform.label(),
             copy(game),

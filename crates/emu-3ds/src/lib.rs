@@ -4,9 +4,15 @@
 //! ([`install`]), and runs in a helper process: the app's own executable,
 //! started again with [`HELPER_FLAG`], which calls
 //! [`run_helper_if_asked`] before anything else. The helper loads the
-//! core, gives it a Vulkan device through MoltenVK, and runs one frame
-//! each time [`ThreeDs`] asks, sending back both screens and the frame's
-//! sound over its stdin and stdout.
+//! core, gives it a Vulkan device (through MoltenVK on macOS, the system's
+//! Vulkan loader on Linux and Windows, or the core's software renderer
+//! where there is no Vulkan), and runs one frame each time [`ThreeDs`]
+//! asks, sending back both screens and the frame's sound over its stdin
+//! and stdout.
+//!
+//! Azahar makes its core for macOS, x86-64 Linux and x86-64 Windows. There
+//! is none for Linux on ARM, so 3DS games don't play there
+//! ([`UNSUPPORTED`]).
 //!
 //! Like the RPG Maker core, this one is not deterministic: the game's
 //! clock and the core's threads are its own. States are the whole
@@ -44,16 +50,21 @@ pub use host::run_helper_if_asked;
 /// The argument that starts the app's executable as the helper.
 pub const HELPER_FLAG: &str = "--3ds-helper";
 
-/// Why 3DS games can't play on this system, or `None` where they can. Only
-/// macOS has a pinned Azahar core and a helper that runs it so far.
-pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
+/// Why 3DS games can't play on this system, or `None` where they can: on
+/// macOS, x86-64 Linux and x86-64 Windows, the systems Azahar makes its
+/// core for ([`install`] pins one for each).
+pub const UNSUPPORTED: Option<&str> = if cfg!(any(
+    target_os = "macos",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(windows, target_arch = "x86_64"),
+)) {
     None
 } else if cfg!(target_os = "linux") {
-    Some("3DS games aren't supported on Linux yet")
+    Some("3DS games need an x86-64 PC on Linux: Azahar's 3DS core isn't made for ARM Linux")
 } else if cfg!(windows) {
-    Some("3DS games aren't supported on Windows yet")
+    Some("3DS games need an x86-64 PC on Windows: Azahar's 3DS core isn't made for ARM Windows")
 } else {
-    Some("3DS games aren't supported on this system yet")
+    Some("3DS games aren't supported on this system")
 };
 
 /// The file extensions of 3DS games: cartridge images (`.3ds`, `.cci`),
@@ -75,9 +86,10 @@ pub fn is_game(path: &Path) -> bool {
         })
 }
 
-/// Where the core, MoltenVK and the emulated console's own files (its
-/// NAND, SD card and the games' saves) are kept:
-/// `~/Library/Application Support/ds-emulator/3DS`.
+/// Where the core, MoltenVK on macOS and the emulated console's own files
+/// (its NAND, SD card and the games' saves) are kept: `ds-emulator/3DS` in
+/// the system's data folder, `~/Library/Application Support` on macOS,
+/// `~/.local/share` on Linux and `%LOCALAPPDATA%` on Windows.
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
     Some(emu_os::data_dir()?.join("ds-emulator").join("3DS"))
@@ -217,7 +229,7 @@ pub const INFO: CoreInfo = CoreInfo {
 /// Why a 3DS game could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    /// The core or MoltenVK could not be installed.
+    /// The core, or on macOS MoltenVK, could not be installed.
     #[error(transparent)]
     Install(#[from] install::InstallError),
     /// The helper could not be started or stopped answering.
@@ -261,8 +273,8 @@ impl ThreeDs {
         Self::open_with(game, data, helper, &parts)
     }
 
-    /// Starts `game` as [`ThreeDs::open`] does, on the core and MoltenVK
-    /// in `parts` rather than the installed ones.
+    /// Starts `game` as [`ThreeDs::open`] does, on the core (and on macOS
+    /// MoltenVK) in `parts` rather than the installed ones.
     ///
     /// # Errors
     ///

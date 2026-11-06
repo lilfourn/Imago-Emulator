@@ -68,7 +68,7 @@ const PIN: Download<'static> = if cfg!(target_arch = "x86_64") {
 
 /// Why the randomizer can't run on this system, or `None` where it can:
 /// only FVX's Mac builds are pinned so far.
-const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
+pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
     None
 } else if cfg!(target_os = "linux") {
     Some("The randomizer isn't supported on Linux yet")
@@ -260,7 +260,11 @@ fn curl(url: &str, to: &Path) -> Result<(), String> {
         .args(["--silent", "--show-error", "--location"])
         .args([
             "--user-agent",
-            concat!("ds-emulator/", env!("CARGO_PKG_VERSION")),
+            concat!(
+                "ImagoEmulator/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://imagoemulator.com)"
+            ),
         ])
         .args(["--connect-timeout", "10", "--max-time", DOWNLOAD_SECONDS])
         // Gives up on a download stalled below 1 KB/s for a minute, and

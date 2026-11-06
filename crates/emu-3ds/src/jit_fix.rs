@@ -24,6 +24,11 @@
 //! Only the pinned core is touched, and only into the pinned result: the
 //! digests before and after are both checked. The fixed core replaces the
 //! original by a rename, so a helper still running the original keeps it.
+//!
+//! Only the core for Apple silicon has a fix. The x86-64 cores, for Intel
+//! Macs, Linux and Windows, have a JIT of their own whose `LG2` converts
+//! the exponent as signed (`cvtsi2ss`, in Azahar 2126.2's
+//! `shader_jit_x64_compiler.cpp`), so they need none.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};

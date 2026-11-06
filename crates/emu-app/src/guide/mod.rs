@@ -76,7 +76,7 @@ pub struct GuideGame {
 }
 
 /// What the panel asks of the game view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuideEvent {
     /// Close the panel.
     Close,
@@ -86,6 +86,8 @@ pub enum GuideEvent {
     TakeShot,
     /// Take a screenshot, then ask this starter question.
     AskWithShot(&'static str),
+    /// Say this in the window's notice: why a file dialog didn't open.
+    Notice(String),
 }
 
 /// A screenshot waiting in the composer.
@@ -518,8 +520,16 @@ impl GuidePanel {
             prompt: Some("Add".into()),
         });
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = chosen.await else {
-                return;
+            let paths = match chosen.await {
+                Ok(Ok(Some(paths))) => paths,
+                // On Linux without a desktop portal, say so.
+                Ok(Err(error)) => {
+                    let said = crate::view::dialog_failed(&error);
+                    this.update(cx, |_, cx| cx.emit(GuideEvent::Notice(said)))
+                        .ok();
+                    return;
+                }
+                Ok(Ok(None)) | Err(_) => return,
             };
             let Some(path) = paths.into_iter().next() else {
                 return;

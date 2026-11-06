@@ -42,9 +42,21 @@ pub fn create_if_missing(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Opens `path` in the default text editor.
+/// Opens `path` in the default text editor: TextEdit, or whichever the
+/// user chose, on macOS. Elsewhere it says it can't yet, for the user to
+/// edit the file in their own; opening an editor on Linux and Windows is
+/// the files stream's (see `docs/research/linux-windows.md`).
 pub fn open_in_editor(path: &Path) -> io::Result<()> {
-    Command::new("open").arg("-t").arg(path).spawn().map(drop)
+    if cfg!(target_os = "macos") {
+        return Command::new("open").arg("-t").arg(path).spawn().map(drop);
+    }
+    let system = if cfg!(windows) { "Windows" } else { "Linux" };
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "opening a text editor isn't supported on {system} yet; edit it in yours, then come back"
+        ),
+    ))
 }
 
 /// The text of the cheat file at `path`, or `None` if there is none.

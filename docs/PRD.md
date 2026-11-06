@@ -256,7 +256,7 @@ they are project policy, not legal advice.
 
 | ID | Question | Needed by |
 |---|---|---|
-| Q1 | Which license? GPL-3.0-or-later would allow porting code from melonDS; MPL-2.0 matches mGBA; MIT or Apache-2.0 keeps reuse open. Choose before accepting outside contributions. | Before first public push |
+| Q1 | ~~Which license? GPL-3.0-or-later would allow porting code from melonDS; MPL-2.0 matches mGBA; MIT or Apache-2.0 keeps reuse open. Choose before accepting outside contributions.~~ Decided: closed source for now, the app free under [LICENSE](../LICENSE)'s terms, with the open-source notices in the app ([decision 0016](decisions/0016-public-release.md)). Rule 4 of §9 stands: GPL code is still not copied in. | Before first public push |
 | Q2 | Stay on crates.io GPUI 0.2.2, or pin a newer Zed git revision? | M3 |
 | Q3 | ~~Shader chain and DS upscaling: render through a separate Metal/wgpu layer, or contribute nearest-neighbour sampling and a shader hook upstream to GPUI?~~ Decided: neither for now. Filters are CPU passes, and DS upscaling happens in the core ([decision 0005](decisions/0005-video-filters-on-the-cpu.md)). | M11 |
 | Q4 | ~~Pace emulation from the audio clock or from display vsync?~~ Decided: a frame timer, with dynamic rate control on audio ([decision 0003](decisions/0003-frame-pacing.md)). | M3 |

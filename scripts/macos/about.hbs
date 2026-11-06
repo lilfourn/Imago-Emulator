@@ -1,0 +1,105 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Imago Emulator: acknowledgements</title>
+<style>
+  body { font: 11px -apple-system, sans-serif; }
+  h2 { font-size: 12px; margin: 14px 0 4px; }
+  pre { font: 10px Menlo, monospace; white-space: pre-wrap; }
+  p, li { margin: 2px 0; }
+</style>
+</head>
+<body>
+{{#*inline "mit"}}Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.{{/inline}}
+<p>Imago Emulator is not affiliated with, endorsed by or sponsored by Nintendo.
+Nintendo, Game Boy, Game Boy Color, Game Boy Advance, Nintendo DS and
+Nintendo 3DS are trademarks of Nintendo. <a href="https://imagoemulator.com">imagoemulator.com</a></p>
+
+<p>Imago Emulator is built with the open-source software below. Thank you to
+everyone who made it.</p>
+
+<h2>SameBoy</h2>
+<p>The Game Boy Color's palettes for original Game Boy games come from
+SameBoy's boot ROM, and Rounded Pixels is SameBoy's OmniScale.</p>
+<pre>Copyright (c) 2015-2026 Lior Halphon
+
+{{> mit}}</pre>
+
+<h2>Lua</h2>
+<p>Scripts run on Lua 5.4, built in through the mlua crate.</p>
+<pre>Copyright (C) 1994-2026 Lua.org, PUC-Rio.
+
+{{> mit}}</pre>
+
+<h2>libretro</h2>
+<p>The 3DS helper's libretro definitions follow libretro.h and
+libretro_vulkan.h.</p>
+<pre>Copyright (C) 2010-2024 The RetroArch team
+
+{{> mit}}</pre>
+
+<h2>multiplication-algorithm</h2>
+<p>The ARM multiplier's carry flag is a translation of zaydlang's
+multiplication-algorithm, altered from the original.</p>
+<pre>Copyright (c) 2024 zaydlang
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not
+   be misrepresented as being the original software.
+3. This notice may not be removed or altered from any source
+   distribution.</pre>
+
+<h2>mGBA</h2>
+<p>The cheat decoder's GameShark Advance and Pro Action Replay v3 seed
+tables are copied from mGBA, Copyright (c) 2013-2015 Jeffrey Pfau, under
+the Mozilla Public License 2.0 (text below, with the crates under it). The
+source of the file holding them, seed_tables.rs, is in the app at
+Contents/Resources/Source, and on the disk image.</p>
+
+<h2>Solar Icons</h2>
+<p>Icons: Solar Icons by 480 Design, under
+<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>,
+renamed and resized.</p>
+
+<h2>Rust crates</h2>
+<p>Each license's text is followed by the crates it covers. MPL-2.0 code is
+used unchanged; its source is at the crate's page on crates.io.</p>
+{{#each licenses}}
+<h2>{{name}}</h2>
+<ul>
+{{#each used_by}}
+  <li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

@@ -9,9 +9,11 @@
 //! A 3DS game plays in a helper process: this executable, started again
 //! with `--3ds-helper` (see `emu_3ds::run_helper_if_asked`).
 
+mod about_window;
 mod ambient;
 mod app;
 mod app_icon;
+mod app_menu;
 mod archive;
 mod audio;
 #[cfg(test)]
@@ -21,6 +23,7 @@ mod boxart;
 mod capture;
 mod cheats;
 mod chords;
+mod chrome;
 mod color;
 mod controls;
 mod cursor;
@@ -28,6 +31,7 @@ mod debugger;
 mod debugger_window;
 mod emulator;
 mod filter;
+mod fonts;
 mod game_db;
 mod game_menu;
 mod gamepad;
@@ -37,6 +41,7 @@ mod guide;
 mod icons;
 mod key_guide;
 mod key_routes;
+mod keys;
 mod latch;
 mod layout;
 mod leftovers;
@@ -76,6 +81,7 @@ mod ui;
 mod video;
 mod view;
 mod window_chrome;
+mod x11_redraw;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

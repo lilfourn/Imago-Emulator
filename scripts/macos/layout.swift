@@ -243,6 +243,8 @@ for (name, box) in parts("button:") {
     // nothing.
     if box.maxY > win.height || box.minY < 0 { continue }
     if let grid = part("grid"), box.minY >= grid.minY, !grid.insetBy(dx: -1, dy: -1).contains(box) { continue }
+    // Nor does one under a game's menu.
+    if part("menu")?.intersects(box) ?? false { continue }
     let back = background(box)
     guard let glyphs = ink(in: box.insetBy(dx: 1, dy: 1), on: back) else {
         check(false, "\(name) button shows something"); continue

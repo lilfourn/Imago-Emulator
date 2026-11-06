@@ -1,0 +1,47 @@
+# What emu-headless --digest prints for test ROMs: each screen's CRC-32,
+# then those of all the sound and of the save state after the last frame.
+# Recorded on macOS arm64 with `scripts/determinism/check.sh --record`;
+# every other OS and CPU must print the same (PRD §7), which
+# scripts/determinism/check.sh checks in CI.
+#
+# A case is a line `== FRAMES ROM [SCRIPT]`, the ROM in test-roms/
+# (scripts/fetch-test-roms.sh) and the script beside this file, followed
+# by the lines recorded for it. None of these homebrew ROMs draws in 3D.
+
+== 120 game-boy-test-roms/dmg-acid2/dmg-acid2.gb
+system=gb frames=120 screen=0 width=160 height=144 crc32=c1453957
+audio_crc32=a9792fbc state_crc32=264a8917
+
+== 120 game-boy-test-roms/cgb-acid2/cgb-acid2.gbc
+system=gb frames=120 screen=0 width=160 height=144 crc32=3b13c0e3
+audio_crc32=0bcf3555 state_crc32=90d3f08a
+
+== 2400 game-boy-test-roms/blargg/dmg_sound/dmg_sound.gb
+system=gb frames=2400 screen=0 width=160 height=144 crc32=dc21ea12
+audio_crc32=015d4da9 state_crc32=2ce13584
+
+== 2400 game-boy-test-roms/blargg/cgb_sound/cgb_sound.gb
+system=gb frames=2400 screen=0 width=160 height=144 crc32=8c3781b9
+audio_crc32=19ed44db state_crc32=a6bcd992
+
+== 300 gba-tests/bios/bios.gba
+system=gba frames=300 screen=0 width=240 height=160 crc32=052ed6f4
+audio_crc32=793af041 state_crc32=809236ca
+
+== 300 gba-tests/ppu/stripes.gba
+system=gba frames=300 screen=0 width=240 height=160 crc32=3b64ed87
+audio_crc32=793af041 state_crc32=683f33f4
+
+== 600 armwrestler-gba/armwrestler-gba-fixed.gba buttons.lua
+system=gba frames=600 screen=0 width=240 height=160 crc32=890d83b0
+audio_crc32=638cc92c state_crc32=8fa3b47f
+
+== 600 armwrestler-ds/armwrestler.nds buttons.lua
+system=nds frames=600 screen=0 width=256 height=192 crc32=9570b9d7
+system=nds frames=600 screen=1 width=256 height=192 crc32=523f1d19
+audio_crc32=71095626 state_crc32=b0e9ec92
+
+== 900 rockwrestler/rockwrestler.nds buttons.lua
+system=nds frames=900 screen=0 width=256 height=192 crc32=7127c91e
+system=nds frames=900 screen=1 width=256 height=192 crc32=523f1d19
+audio_crc32=ca2b4da3 state_crc32=61f37d8f

@@ -18,7 +18,7 @@ use crate::icons;
 
 /// Body text: 14.5 on 23.
 pub const BODY: (f32, f32) = (14.5, 23.0);
-/// Code: 12.5 on 18, in Menlo.
+/// Code: 12.5 on 18, in the monospaced face (Menlo on macOS).
 const CODE: (f32, f32) = (12.5, 18.0);
 /// Headings, by level.
 const HEADINGS: [(f32, f32); 3] = [(17.0, 25.0), (15.0, 23.0), (14.5, 23.0)];
@@ -253,7 +253,7 @@ impl GuidePanel {
                     .px(px(12.0))
                     .pb(px(10.0))
                     .pt(px(2.0))
-                    .font_family("Menlo")
+                    .font_family(crate::fonts::MONO)
                     .text_size(px(CODE.0))
                     .line_height(px(CODE.1))
                     .text_color(ink.text)
@@ -351,7 +351,7 @@ pub fn inline(spans: &[Span], ink: &Ink, base: &Font, veil: Option<&Veil>, now: 
             font.style = FontStyle::Italic;
         }
         if span.style.code {
-            font.family = "Menlo".into();
+            font.family = crate::fonts::MONO.into();
         }
         let (color, background) = if chip.is_some() {
             (ink.muted, Some(ink.raised))

@@ -75,7 +75,10 @@ mod tests {
             encode("http://localhost:4321/callback"),
             "http%3A%2F%2Flocalhost%3A4321%2Fcallback"
         );
-        assert_eq!(encode("DS Emulator · Mac"), "DS%20Emulator%20%C2%B7%20Mac");
+        assert_eq!(
+            encode("Imago Emulator · Mac"),
+            "Imago%20Emulator%20%C2%B7%20Mac"
+        );
         assert_eq!(encode("a-b_c.d~e"), "a-b_c.d~e");
     }
 

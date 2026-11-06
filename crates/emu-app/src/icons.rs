@@ -1,7 +1,8 @@
 //! The app's icons: Solar (Linear) by 480 Design, CC BY 4.0, from
-//! `assets/icons`. Each is drawn on a 24-unit grid with 1.5-unit strokes,
-//! so icons of one size share one weight. GPUI loads them through
-//! [`Icons`], the app's asset source.
+//! `assets/icons`, and the window buttons the app draws off macOS, drawn
+//! for it in `assets/icons/window`. Each is drawn on a 24-unit grid with
+//! 1.5-unit strokes, so icons of one size share one weight. GPUI loads
+//! them through [`Icons`], the app's asset source.
 
 use std::borrow::Cow;
 
@@ -61,8 +62,20 @@ pub const HISTORY: &str = "icons/history.svg";
 pub const PAGE: &str = "icons/document-text.svg";
 /// A picture with a plus: adding a picture from a file.
 pub const ADD_PICTURE: &str = "icons/gallery-add.svg";
+/// Three lines: the menu, in the window's top bar where the system draws
+/// no menu bar.
+pub const MENU: &str = "icons/hamburger-menu.svg";
+/// A tick: the choice in force in a menu.
+pub const TICK: &str = "icons/check.svg";
+/// A window's minimise, maximise, restore and close buttons, where the
+/// app draws them (`chrome.rs`): plain shapes drawn for the app, after
+/// the systems' own.
+pub const WINDOW_MINIMIZE: &str = "icons/window/minimize.svg";
+pub const WINDOW_MAXIMIZE: &str = "icons/window/maximize.svg";
+pub const WINDOW_RESTORE: &str = "icons/window/restore.svg";
+pub const WINDOW_CLOSE: &str = "icons/window/close.svg";
 
-const FILES: [(&str, &[u8]); 26] = [
+const FILES: [(&str, &[u8]); 32] = [
     (ADD, include_bytes!("../../../assets/icons/add.svg")),
     (
         BACK,
@@ -130,6 +143,27 @@ const FILES: [(&str, &[u8]); 26] = [
     (
         ADD_PICTURE,
         include_bytes!("../../../assets/icons/gallery-add.svg"),
+    ),
+    (
+        MENU,
+        include_bytes!("../../../assets/icons/hamburger-menu.svg"),
+    ),
+    (TICK, include_bytes!("../../../assets/icons/check.svg")),
+    (
+        WINDOW_MINIMIZE,
+        include_bytes!("../../../assets/icons/window/minimize.svg"),
+    ),
+    (
+        WINDOW_MAXIMIZE,
+        include_bytes!("../../../assets/icons/window/maximize.svg"),
+    ),
+    (
+        WINDOW_RESTORE,
+        include_bytes!("../../../assets/icons/window/restore.svg"),
+    ),
+    (
+        WINDOW_CLOSE,
+        include_bytes!("../../../assets/icons/window/close.svg"),
     ),
 ];
 

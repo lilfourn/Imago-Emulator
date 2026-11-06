@@ -17,6 +17,11 @@
 //! the shaders each translated are saved too, and the next start finds
 //! them all. `DS_EMULATOR_3DS_PIPELINE_CACHE=shared` turns this off, to
 //! compare the two.
+//!
+//! On Linux and Windows the functions called MoltenVK's here are the
+//! system's Vulkan loader's, which pass each call on to the GPU's driver.
+//! The split works the same there; whether those drivers hold a shared
+//! cache's lock across each compile, as MoltenVK does, was not measured.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
