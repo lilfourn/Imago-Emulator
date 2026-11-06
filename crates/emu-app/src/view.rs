@@ -2112,7 +2112,7 @@ impl EmulatorView {
         }
         // The game just left goes first, with where it was left.
         self.library.update(cx, |library, cx| library.refresh(cx));
-        window.set_window_title("ds-emulator");
+        window.set_window_title("Imago Emulator");
         cx.notify();
     }
 

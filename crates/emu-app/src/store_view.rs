@@ -1071,7 +1071,7 @@ impl StoreView {
             ("From", Some(offer.source.name().to_owned())),
             (
                 "Checked",
-                offer.tested.then(|| "Starts in ds-emulator".to_owned()),
+                offer.tested.then(|| "Starts in Imago Emulator".to_owned()),
             ),
         ];
         let facts = facts

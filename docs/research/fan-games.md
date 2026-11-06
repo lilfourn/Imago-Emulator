@@ -133,7 +133,7 @@ string appears only in a comment.
 
 ### 3. Randomize from the app (done)
 
-Done on 2026-11-03: File > Randomize Pokémon Game… runs FVX 1.6.2 with a
+Done on 2026-11-03: File > Randomize Game… runs FVX 1.6.2 with a
 preset or a pasted settings string
 ([decision 0012](../decisions/0012-randomizer.md)). What was found on the
 way:
