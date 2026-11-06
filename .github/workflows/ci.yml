@@ -38,9 +38,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      # The frame, sound and save-state digests every OS must match were
+      # recorded on macOS arm64; this keeps them true here, so a difference
+      # elsewhere is that OS's. Uses the emu-headless the tests built.
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        run: scripts/determinism/check.sh
 
   # Linux on Namespace's runners (the account's default profiles), on both
-  # x86-64 and arm64.
+  # x86-64 and arm64. The x86-64 one also starts the app under Xvfb and
+  # screenshots it (scripts/linux/smoke.sh).
   linux:
     name: Linux ${{ matrix.arch }}
     strategy:
@@ -49,31 +56,72 @@ jobs:
         include:
           - arch: x86-64
             runner: namespace-profile-default
+            smoke: true
           - arch: arm64
             runner: namespace-profile-default-arm64
+            smoke: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Linux packages
-        run: scripts/linux/install-build-deps.sh
+        run: scripts/linux/install-build-deps.sh ${{ matrix.smoke && '--smoke' || '' }}
       - name: No Nintendo files
         run: scripts/check-no-nintendo-files.sh
       - name: Fetch test ROMs
         run: scripts/fetch-test-roms.sh
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      # With Caching turned on in the runner profile, Namespace attaches a
+      # cache volume: the registry and target/ stay on the machine's own
+      # disk, with nothing to download or upload. Without one, GitHub's
+      # cache, also kept when a step fails.
+      - name: Cache volume
+        id: volume
+        run: echo "attached=$([ -n "${NSC_CACHE_PATH:-}" ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+      - name: Cargo cache (Namespace volume)
+        if: steps.volume.outputs.attached == 'true'
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+      - name: Cargo cache (GitHub)
+        if: steps.volume.outputs.attached != 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.arch }}
+          cache-on-failure: true
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         if: success() || failure()
         run: cargo test --workspace --no-fail-fast
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        run: scripts/determinism/check.sh
+      - name: Build the app
+        if: ${{ matrix.smoke && !cancelled() }}
+        run: cargo build -p emu-app
+      # Gates on every check except those listed: closing the window panics
+      # in GPUI's X11 client, as the app quits from its window-closed
+      # callback (stream 2, app shell).
+      - name: Smoke test
+        if: ${{ matrix.smoke && !cancelled() }}
+        env:
+          SMOKE_KNOWN_FAILURES: game.quit library.quit
+        run: scripts/linux/smoke.sh target/smoke
+      - name: Smoke screenshots
+        if: ${{ matrix.smoke && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-linux-${{ matrix.arch }}
+          path: target/smoke
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Windows on GitHub's runners (Namespace's Windows runners need its Team
-  # plan).
+  # plan). After the tests, the same debug build starts the app on the
+  # runner's desktop and screenshots it (scripts/windows/smoke.ps1).
+  # The release build, which needs fxc.exe, is windows-release.yml.
   windows:
     name: Windows x86-64
     runs-on: windows-latest
@@ -88,8 +136,32 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         if: success() || failure()
         run: cargo test --workspace --no-fail-fast
+      # Report-only until a first Windows run shows what passes; then list
+      # what fails in the known-failure variables and make these gate.
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: scripts/determinism/check.sh
+      - name: Build the app
+        if: ${{ !cancelled() }}
+        run: cargo build -p emu-app
+      - name: Smoke test
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: pwsh
+        run: scripts/windows/smoke.ps1 -Out target/smoke
+      - name: Smoke screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-windows-x86-64
+          path: target/smoke
+          if-no-files-found: ignore
+          retention-days: 14
