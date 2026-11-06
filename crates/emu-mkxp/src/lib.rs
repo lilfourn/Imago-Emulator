@@ -59,9 +59,24 @@ pub const INFO: CoreInfo = CoreInfo {
     state_version: 1,
 };
 
+/// Why RPG Maker games can't play on this system, or `None` where they
+/// can. The hidden player is a Mac app, and only macOS has it so far.
+pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
+    None
+} else if cfg!(target_os = "linux") {
+    Some("RPG Maker games aren't supported on Linux yet")
+} else if cfg!(windows) {
+    Some("RPG Maker games aren't supported on Windows yet")
+} else {
+    Some("RPG Maker games aren't supported on this system yet")
+};
+
 /// Why a game could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// RPG Maker games don't play on this system yet ([`UNSUPPORTED`]).
+    #[error("{0}")]
+    Unsupported(&'static str),
     /// The path is not a game folder with a player app.
     #[error("{} is not an RPG Maker game set up for mkxp-z: it needs a Game.ini and a player app", .0.display())]
     NotAGame(PathBuf),
@@ -202,9 +217,13 @@ impl Mkxp {
     ///
     /// # Errors
     ///
-    /// Fails if `path` names no game, the player cannot be made or started,
-    /// or the game does not draw its first frame within a minute.
+    /// Fails if RPG Maker games don't play on this system ([`UNSUPPORTED`]),
+    /// `path` names no game, the player cannot be made or started, or the
+    /// game does not draw its first frame within a minute.
     pub fn open(path: &Path, work_dir: &Path) -> Result<Self, Error> {
+        if let Some(why) = UNSUPPORTED {
+            return Err(Error::Unsupported(why));
+        }
         let game = game_folder(path).ok_or_else(|| Error::NotAGame(path.to_owned()))?;
         let mut player = Player::prepare(&game, work_dir)?;
         let listener =

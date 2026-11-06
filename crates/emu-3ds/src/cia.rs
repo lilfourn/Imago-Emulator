@@ -412,7 +412,6 @@ fn be_u64(bytes: &[u8], at: usize) -> Option<u64> {
 pub(crate) mod tests {
     use super::*;
     use crate::header::tests::{TITLE_ID, ncch, put, smdh, temp_dir};
-    use std::os::unix::fs::MetadataExt as _;
 
     /// The type of a chunk that is not encrypted.
     pub(crate) const PLAIN: u16 = 0;
@@ -571,6 +570,22 @@ pub(crate) mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// What changes when the file at `path` is written again: its inode,
+    /// as extraction renames a new file into place. Windows has no inodes
+    /// in stable std, so there it is the file's modification time.
+    #[cfg(unix)]
+    fn version(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::metadata(path).expect("metadata").ino()
+    }
+
+    #[cfg(not(unix))]
+    fn version(path: &Path) -> std::time::SystemTime {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .expect("metadata")
+    }
+
     #[test]
     fn an_earlier_extraction_is_used_again_and_a_different_one_kept() {
         let dir = temp_dir("cia-again");
@@ -578,13 +593,9 @@ pub(crate) mod tests {
         let (_, image) = plain_title();
         let path = write(&dir, "game.cia", &image);
         let first = extract(&path, &games).expect("extracts");
-        let inode = fs::metadata(&first).expect("written").ino();
+        let written = version(&first);
         assert_eq!(extract(&path, &games).expect("again"), first);
-        assert_eq!(
-            fs::metadata(&first).expect("kept").ino(),
-            inode,
-            "not written again"
-        );
+        assert_eq!(version(&first), written, "not written again");
 
         // Another title of the same name, from another folder.
         let other = ncch(true, &smdh(&[(1, "Another Game")]));
@@ -594,7 +605,7 @@ pub(crate) mod tests {
         let second = extract(&path, &games).expect("extracts");
         assert_eq!(second, games.join("game (2).cxi"));
         assert_eq!(fs::read(&second).expect("written"), other);
-        assert_eq!(fs::metadata(&first).expect("kept").ino(), inode);
+        assert_eq!(version(&first), written);
         fs::remove_dir_all(&dir).ok();
     }
 

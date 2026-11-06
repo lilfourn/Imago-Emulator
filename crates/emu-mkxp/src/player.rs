@@ -351,8 +351,6 @@ mod tests {
     /// A game folder in `dir` whose player app is a stand-in, enough for
     /// [`Player::prepare`] to copy and sign.
     fn fake_game(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let game = dir.join("Game");
         let contents = game.join("Game.app/Contents");
         fs::create_dir_all(contents.join("MacOS")).expect("app");
@@ -365,11 +363,19 @@ mod tests {
         .expect("Info.plist");
         let executable = contents.join("MacOS/game");
         fs::write(&executable, "#!/bin/sh\n").expect("executable");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("mode");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("mode");
+        }
         game
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: the hidden player is a Mac app, changed with plutil and signed with codesign; needs mkxp-z's Linux and Windows players (RPG Maker stream)"
+    )]
     fn a_game_has_one_player_at_a_time() {
         use std::sync::mpsc;
 

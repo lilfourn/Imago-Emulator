@@ -44,6 +44,18 @@ pub use host::run_helper_if_asked;
 /// The argument that starts the app's executable as the helper.
 pub const HELPER_FLAG: &str = "--3ds-helper";
 
+/// Why 3DS games can't play on this system, or `None` where they can. Only
+/// macOS has a pinned Azahar core and a helper that runs it so far.
+pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
+    None
+} else if cfg!(target_os = "linux") {
+    Some("3DS games aren't supported on Linux yet")
+} else if cfg!(windows) {
+    Some("3DS games aren't supported on Windows yet")
+} else {
+    Some("3DS games aren't supported on this system yet")
+};
+
 /// The file extensions of 3DS games: cartridge images (`.3ds`, `.cci`),
 /// executables (`.cxi`), homebrew (`.3dsx`) and Azahar's compressed forms
 /// of each, which the core opens; and installable titles (`.cia`), which
@@ -214,6 +226,9 @@ pub enum OpenError {
     /// The core refused the game, saying why.
     #[error("{0}")]
     Game(String),
+    /// 3DS games don't play on this system yet ([`UNSUPPORTED`]).
+    #[error("{0}")]
+    Unsupported(&'static str),
 }
 
 /// A 3DS game running on Azahar's core in a helper process.
@@ -235,9 +250,13 @@ impl ThreeDs {
     ///
     /// # Errors
     ///
-    /// Fails if the core cannot be installed, the helper cannot start, or
-    /// the core refuses the game, as it does an encrypted one.
+    /// Fails if 3DS games don't play on this system ([`UNSUPPORTED`]), the
+    /// core cannot be installed, the helper cannot start, or the core
+    /// refuses the game, as it does an encrypted one.
     pub fn open(game: &Path, data: &Path, helper: &Path) -> Result<Self, OpenError> {
+        if let Some(why) = UNSUPPORTED {
+            return Err(OpenError::Unsupported(why));
+        }
         let parts = install::ensure(data)?;
         Self::open_with(game, data, helper, &parts)
     }
@@ -247,13 +266,17 @@ impl ThreeDs {
     ///
     /// # Errors
     ///
-    /// Fails if the helper cannot start or the core refuses the game.
+    /// Fails if 3DS games don't play on this system, the helper cannot
+    /// start or the core refuses the game.
     pub fn open_with(
         game: &Path,
         data: &Path,
         helper: &Path,
         parts: &install::Parts,
     ) -> Result<Self, OpenError> {
+        if let Some(why) = UNSUPPORTED {
+            return Err(OpenError::Unsupported(why));
+        }
         let link = link::Client::start(helper, game, data, parts)?;
         Ok(Self {
             link: std::cell::RefCell::new(link),
