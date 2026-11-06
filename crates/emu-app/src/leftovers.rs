@@ -74,7 +74,8 @@ fn let_go(path: &Path) {
 /// lives, and removed with everything in it when dropped.
 pub struct WorkFolder {
     path: PathBuf,
-    _lock: File,
+    /// The lock file in the folder, open while the folder is in use.
+    lock: Option<File>,
 }
 
 impl WorkFolder {
@@ -104,7 +105,10 @@ impl WorkFolder {
             }
         };
         hold(&path);
-        Ok(Self { path, _lock: lock })
+        Ok(Self {
+            path,
+            lock: Some(lock),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -172,6 +176,9 @@ fn stop_working_in(path: &Path) {
 
 impl Drop for WorkFolder {
     fn drop(&mut self) {
+        // Closed first: Windows can't remove a folder while a file in it
+        // is open, and the fields would only close after this.
+        drop(self.lock.take());
         fs::remove_dir_all(&self.path).ok();
         let_go(&self.path);
     }
