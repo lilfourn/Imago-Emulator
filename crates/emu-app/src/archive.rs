@@ -979,6 +979,8 @@ mod tests {
 
     #[test]
     fn unpacks_only_the_games_and_patches() {
+        // Unpacking may make a work folder, which the leftover checks count.
+        let _scratch = scratch_lock();
         let dir = temp_dir("unpack-games");
         let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let zip = zip_file(
@@ -1152,6 +1154,8 @@ mod tests {
 
     #[test]
     fn a_rar_file_is_unpacked_by_a_program_or_says_which_to_install() {
+        // Unpacking may make a work folder, which the leftover checks count.
+        let _scratch = scratch_lock();
         let dir = temp_dir("unpack-rar");
         let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let rar = dir.join("Game.rar");
@@ -1334,6 +1338,8 @@ mod tests {
 
     #[test]
     fn unpacking_again_reuses_the_game_and_keeps_a_different_one() {
+        // Unpacking may make a work folder, which the leftover checks count.
+        let _scratch = scratch_lock();
         let dir = temp_dir("unpack-again");
         let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let first = zip_file(&dir, "a.zip", &[("Game.gba", b"first")]);
@@ -1365,6 +1371,8 @@ mod tests {
     #[test]
     #[ignore = "needs archives, and programs that unpack them"]
     fn unpacks_archives_for_real() {
+        // Unpacking may make a work folder, which the leftover checks count.
+        let _scratch = scratch_lock();
         let archives = std::env::var_os("DS_EMULATOR_ARCHIVES").expect("DS_EMULATOR_ARCHIVES");
         let dir = temp_dir("unpack-real");
         let patches = dir.join("Patches");
@@ -1417,6 +1425,8 @@ mod tests {
 
     #[test]
     fn an_archive_without_a_game_or_not_an_archive_is_refused() {
+        // Unpacking may make a work folder, which the leftover checks count.
+        let _scratch = scratch_lock();
         let dir = temp_dir("unpack-refused");
         let (games, patches) = (dir.join("Games"), dir.join("Patches"));
         let empty = zip_file(&dir, "notes.zip", &[("notes.txt", b"notes")]);
