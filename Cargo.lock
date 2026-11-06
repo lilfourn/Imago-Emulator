@@ -1627,6 +1627,8 @@ dependencies = [
  "libloading",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]

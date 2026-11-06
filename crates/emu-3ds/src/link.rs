@@ -234,6 +234,27 @@ impl Client {
         data: &Path,
         parts: &Parts,
     ) -> Result<Self, OpenError> {
+        let mut command = Command::new(helper);
+        command
+            .arg(HELPER_FLAG)
+            .arg(&parts.core)
+            // Empty without MoltenVK: the helper loads the system's
+            // Vulkan loader.
+            .arg(parts.moltenvk.as_deref().unwrap_or(Path::new("")))
+            .arg(game)
+            .arg(data);
+        if parts.moltenvk.is_some() && std::env::var_os("MVK_CONFIG_LOG_LEVEL").is_none() {
+            // MoltenVK's errors only: its notes on every pipeline would
+            // fill the log.
+            command.env("MVK_CONFIG_LOG_LEVEL", "1");
+        }
+        Self::launch(command, data)
+    }
+
+    /// Starts the helper `command` with its pipes, its stderr in the log
+    /// in `data`, and on Windows no console window, and waits for its
+    /// hello.
+    fn launch(mut command: Command, data: &Path) -> Result<Self, OpenError> {
         let start = |why: io::Error| OpenError::Start(why.to_string());
         std::fs::create_dir_all(data).map_err(start)?;
         let log = data.join("helper.log");
@@ -241,21 +262,10 @@ impl Client {
         // and the player tries again.
         let _ = std::fs::rename(&log, data.join("helper.previous.log"));
         let stderr = File::create(&log).map_err(start)?;
-        let mut command = Command::new(helper);
-        command
-            .arg(HELPER_FLAG)
-            .arg(&parts.core)
-            .arg(&parts.moltenvk)
-            .arg(game)
-            .arg(data)
+        crate::install::without_window(&mut command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr);
-        if std::env::var_os("MVK_CONFIG_LOG_LEVEL").is_none() {
-            // MoltenVK's errors only: its notes on every pipeline would
-            // fill the log.
-            command.env("MVK_CONFIG_LOG_LEVEL", "1");
-        }
         let mut child = command.spawn().map_err(start)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
@@ -457,36 +467,31 @@ mod tests {
     use super::*;
     use emu_core::rgb;
 
-    /// A helper that says hello in this protocol's version, then exits: a
-    /// shell script, so on Unix only.
-    #[cfg(unix)]
-    fn helper_that_dies(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
+    /// A helper that says hello in this protocol's version, then exits:
+    /// the system's own program printing a file holding the hello.
+    fn helper_that_dies(dir: &Path) -> Command {
         let [low, high] = VERSION.to_le_bytes();
-        let script = dir.join("helper.sh");
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\nprintf '\\001\\002\\000\\000\\000\\{low:03o}\\{high:03o}'\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        script
+        let hello = dir.join("hello");
+        std::fs::write(&hello, [HELLO, 2, 0, 0, 0, low, high]).unwrap();
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "type"]);
+            command
+        } else {
+            Command::new("cat")
+        };
+        command.arg(hello);
+        command
     }
 
     #[test]
-    #[cfg(unix)]
     fn once_the_helper_has_gone_every_request_fails_with_why() {
         let dir = std::env::temp_dir().join(format!("emu-3ds-link-gone-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("helper.log"), "the last start").unwrap();
-        let parts = Parts {
-            core: dir.join("core.dylib"),
-            moltenvk: dir.join("moltenvk.dylib"),
-        };
         let mut client =
-            Client::start(&helper_that_dies(&dir), &dir.join("game.3ds"), &dir, &parts)
-                .expect("the helper said hello");
+            Client::launch(helper_that_dies(&dir), &dir).expect("the helper said hello");
         let mut screens = crate::SCREENS.map(Frame::new);
         let why = client
             .run(Pad::default(), &mut screens, &mut Vec::new())

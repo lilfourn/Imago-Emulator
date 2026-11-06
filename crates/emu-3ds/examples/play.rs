@@ -5,8 +5,9 @@
 //! `cargo run --release -p emu-3ds --example play -- GAME FRAMES [OUT_DIR]`
 //!
 //! The core and MoltenVK come from `DS_EMULATOR_3DS_CORE` and
-//! `DS_EMULATOR_3DS_MOLTENVK`, or the installed ones. Every 600th frame is
-//! written to OUT_DIR as two PPM images.
+//! `DS_EMULATOR_3DS_MOLTENVK` (the core alone off macOS, where the system's
+//! Vulkan loader stands in for MoltenVK), or the installed ones. Every
+//! 600th frame is written to OUT_DIR as two PPM images.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -36,13 +37,11 @@ fn play(game: &Path, frames: u64, out: Option<&Path>) -> Result<(), String> {
         PathBuf::from,
     );
     let helper = std::env::current_exe().map_err(|error| error.to_string())?;
-    let parts = match (
-        std::env::var_os("DS_EMULATOR_3DS_CORE"),
-        std::env::var_os("DS_EMULATOR_3DS_MOLTENVK"),
-    ) {
-        (Some(core), Some(moltenvk)) => emu_3ds::install::Parts {
+    let moltenvk = std::env::var_os("DS_EMULATOR_3DS_MOLTENVK");
+    let parts = match std::env::var_os("DS_EMULATOR_3DS_CORE") {
+        Some(core) if moltenvk.is_some() || !cfg!(target_os = "macos") => emu_3ds::install::Parts {
             core: core.into(),
-            moltenvk: moltenvk.into(),
+            moltenvk: moltenvk.map(PathBuf::from),
         },
         _ => {
             let installed = emu_3ds::data_dir().ok_or("no data folder")?;
