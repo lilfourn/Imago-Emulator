@@ -99,7 +99,7 @@ const DOWNLOAD_SECONDS: &str = "1200";
 /// Where the randomizer is kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Randomizer` on macOS.
 pub fn data_dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("ds-emulator").join("Randomizer"))
+    Some(emu_os::data_dir()?.join("ds-emulator").join("Randomizer"))
 }
 
 /// An installed FVX.
@@ -984,6 +984,10 @@ echo "Randomized successfully!"
 "#;
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn a_randomized_game_goes_into_the_hacks_folder_with_its_log() {
         let dir = temp_dir("randomize");
         let randomizer = fake_randomizer(&dir, WRITES_A_GAME);
@@ -1022,6 +1026,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn the_randomizer_is_given_the_game_settings_and_seed() {
         let dir = temp_dir("arguments");
         // Keeps its work folder's files, to read them back.
@@ -1056,6 +1064,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn a_refusal_says_what_the_randomizer_said() {
         let dir = temp_dir("refused");
         // As FVX 1.6.2 says it, on its output, with how to use it after.
@@ -1121,6 +1133,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn a_game_whose_log_cannot_be_kept_is_kept_without_it() {
         let dir = temp_dir("no-log");
         let script = WRITES_A_GAME.replace("printf 'Random Seed: 123456' > \"$out.gbc.log\"\n", "");

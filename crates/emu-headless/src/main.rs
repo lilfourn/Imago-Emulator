@@ -316,12 +316,12 @@ fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
     Ok((system, emu_cores::create(system, &media)?))
 }
 
-/// Where emu-headless keeps what it makes by default:
-/// `~/Library/Caches/emu-headless`.
+/// Where emu-headless keeps what it makes by default: `emu-headless` in
+/// the cache folder, `~/Library/Caches/emu-headless` on macOS.
 fn cache_dir() -> anyhow::Result<PathBuf> {
-    Ok(std::env::home_dir()
+    Ok(emu_os::cache_dir()
         .context("there is no home folder to keep the game's files in; pass --work-dir")?
-        .join("Library/Caches/emu-headless"))
+        .join("emu-headless"))
 }
 
 /// The file the 3DS core opens for the game `args` names: the game

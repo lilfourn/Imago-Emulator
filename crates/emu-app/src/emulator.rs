@@ -314,7 +314,7 @@ pub fn load(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Load
 /// Starts the RPG Maker game in the folder `game` in its hidden player,
 /// which is kept in the app's data folder.
 fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
-    let players = dirs::data_dir()
+    let players = emu_os::data_dir()
         .context("there is no folder to keep the game's player in")?
         .join("ds-emulator")
         .join("RPG Maker");

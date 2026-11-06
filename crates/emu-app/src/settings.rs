@@ -606,7 +606,7 @@ impl Settings {
 /// `~/Library/Application Support/ds-emulator/settings.toml` on macOS.
 pub fn default_path() -> Option<PathBuf> {
     Some(
-        dirs::config_dir()?
+        emu_os::config_dir()?
             .join("ds-emulator")
             .join("settings.toml"),
     )

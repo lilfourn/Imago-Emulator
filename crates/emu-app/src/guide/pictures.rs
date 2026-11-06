@@ -489,7 +489,7 @@ fn decode(bytes: &[u8], page: String) -> Option<Decoded> {
 /// The cache folder pictures are kept in.
 pub(super) fn store() -> PictureStore {
     PictureStore::new(
-        dirs::cache_dir()
+        emu_os::cache_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("ds-emulator")
             .join("Guide pictures"),

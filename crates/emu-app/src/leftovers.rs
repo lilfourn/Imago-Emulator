@@ -389,6 +389,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: a shell script stands in for tar, stopped with pkill (OS services stream)"
+    )]
     fn a_tar_still_unpacking_into_a_folder_left_behind_is_stopped() {
         let temp = temp_dir("tar");
         let left = temp.join(format!("ds-emulator-unpack-{}-99", std::process::id()));

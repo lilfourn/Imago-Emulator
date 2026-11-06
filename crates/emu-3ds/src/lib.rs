@@ -80,7 +80,7 @@ pub fn is_game(path: &Path) -> bool {
 /// `~/Library/Application Support/ds-emulator/3DS`.
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("ds-emulator").join("3DS"))
+    Some(emu_os::data_dir()?.join("ds-emulator").join("3DS"))
 }
 
 /// Where the core keeps one game's own saves on the emulated SD card: the

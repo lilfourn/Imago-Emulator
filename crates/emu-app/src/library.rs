@@ -350,7 +350,11 @@ pub fn checkpoint_path(game: &Game) -> PathBuf {
 /// Where the library file lives, next to the settings, e.g.
 /// `~/Library/Application Support/ds-emulator/library.toml` on macOS.
 pub fn default_path() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("ds-emulator").join("library.toml"))
+    Some(
+        emu_os::config_dir()?
+            .join("ds-emulator")
+            .join("library.toml"),
+    )
 }
 
 /// Why a library file was rejected.

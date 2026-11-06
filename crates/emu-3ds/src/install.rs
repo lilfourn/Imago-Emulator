@@ -668,6 +668,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: MoltenVK's tar unpacks with /usr/bin/tar, and only macOS needs MoltenVK (3DS stream)"
+    )]
     fn a_tar_unpacks_only_the_files_kept() {
         let dir = temp_dir("tar");
         let tar = moltenvk_tar(&dir);

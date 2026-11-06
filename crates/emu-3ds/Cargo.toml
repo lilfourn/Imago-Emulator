@@ -10,8 +10,8 @@ publish.workspace = true
 # Vulkan, for the core's hardware renderer: MoltenVK, loaded at run time.
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 crc32fast.workspace = true
-dirs.workspace = true
 emu-core.workspace = true
+emu-os.workspace = true
 # dup and dup2, to keep the helper's protocol apart from what the core prints.
 libc = "0.2"
 # Opens Azahar's libretro core, downloaded at first use.
