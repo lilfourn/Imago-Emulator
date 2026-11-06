@@ -524,7 +524,7 @@ impl GuidePanel {
                 Ok(Ok(Some(paths))) => paths,
                 // On Linux without a desktop portal, say so.
                 Ok(Err(error)) => {
-                    let said = format!("The file dialog didn't open: {error:#}");
+                    let said = crate::view::dialog_failed(&error);
                     this.update(cx, |_, cx| cx.emit(GuideEvent::Notice(said)))
                         .ok();
                     return;

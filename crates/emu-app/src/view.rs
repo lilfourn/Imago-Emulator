@@ -3691,6 +3691,14 @@ impl Render for EmulatorView {
                 .flex_col()
                 .items_start()
                 .gap(px(6.0));
+            // Off macOS, where a notice may carry a system's error, a long
+            // one wraps short of the right inset and of Guide.
+            let cards = if off_mac {
+                let room = viewport.0 - 2.0 * INSET - guide_width.unwrap_or(0.0);
+                cards.max_w(px(room.max(0.0)))
+            } else {
+                cards
+            };
             // Over the game menu, notices go to the top, clear of it.
             let cards = if self.menu.is_some() {
                 cards.top(px(TOP_BAR + 4.0))
@@ -4090,10 +4098,18 @@ impl Choose {
     }
 }
 
-/// What to say when a file dialog can't open: on Linux, when there is no
-/// desktop portal to show one.
-fn dialog_failed(error: &anyhow::Error) -> String {
-    format!("The file dialog didn't open: {error:#} Drop games on the window instead.")
+/// What to say when a file dialog can't open: on Linux, when no desktop
+/// portal runs to show one (GPUI asks xdg-desktop-portal over D-Bus).
+pub fn dialog_failed(error: &anyhow::Error) -> String {
+    let said = format!("{error:#}");
+    let no_portal = ["xdg-desktop-portal", "ZBus", "org.freedesktop"]
+        .iter()
+        .any(|sign| said.contains(sign));
+    if no_portal {
+        "No file dialog: it needs the desktop portal (xdg-desktop-portal), which isn't running. Drop games on the window instead.".to_owned()
+    } else {
+        format!("The file dialog didn't open: {said}")
+    }
 }
 
 /// Whether `system` takes GBA games in a second slot.
@@ -4222,6 +4238,22 @@ mod tests {
         let (stage, width) = guide_stage(true, &layout, &DS, 1, (800.0, 860.0));
         assert_eq!(width, Some(guide::COLUMN_WIDTH));
         assert_eq!(stage, (800.0 - guide::COLUMN_WIDTH, 860.0));
+    }
+
+    #[test]
+    fn a_file_dialog_without_a_desktop_portal_says_so_plainly() {
+        let missing = anyhow::anyhow!(
+            "Couldn't open file picker due to missing xdg-desktop-portal implementation."
+        );
+        assert!(dialog_failed(&missing).starts_with("No file dialog: it needs the desktop portal"));
+        let no_bus =
+            anyhow::anyhow!("ZBus Error: Failed to connect to address `unix:path=/run/user/0/bus`");
+        assert_eq!(dialog_failed(&no_bus), dialog_failed(&missing));
+        let other = anyhow::anyhow!("the dialog was refused");
+        assert_eq!(
+            dialog_failed(&other),
+            "The file dialog didn't open: the dialog was refused"
+        );
     }
 
     #[test]
