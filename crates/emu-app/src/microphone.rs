@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::Context as _;
+use cpal::ErrorKind;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 /// The open input stream. Dropping it stops listening.
@@ -61,14 +62,15 @@ fn level(samples: &[f32]) -> u8 {
 /// # Errors
 ///
 /// Fails if there is no input device, it cannot record 32-bit float
-/// samples, or the system refuses access to it.
+/// samples, or the system refuses access to it, which on Linux and
+/// Windows says how to allow it.
 pub fn open() -> anyhow::Result<(Microphone, Loudness)> {
     let device = cpal::default_host()
         .default_input_device()
         .context("no microphone")?;
     let supported = device
         .default_input_config()
-        .context("cannot query the microphone")?;
+        .map_err(|error| explain(error, "cannot query the microphone"))?;
     let loudness = Loudness::default();
     let heard = loudness.clone();
     let stream = device
@@ -78,9 +80,46 @@ pub fn open() -> anyhow::Result<(Microphone, Loudness)> {
             |error| eprintln!("ds-emulator: microphone stream error: {error}"),
             None,
         )
-        .context("cannot open the microphone")?;
-    stream.play().context("cannot start the microphone")?;
+        .map_err(|error| explain(error, "cannot open the microphone"))?;
+    stream
+        .play()
+        .map_err(|error| explain(error, "cannot start the microphone"))?;
     Ok((Microphone { _stream: stream }, loudness))
+}
+
+/// What to tell the player of `error`, met while `doing` something: how to
+/// allow the microphone, if the system refused it, or else what went wrong.
+fn explain(error: cpal::Error, doing: &'static str) -> anyhow::Error {
+    match refusal(&error) {
+        Some(how) => anyhow::anyhow!(how),
+        None => anyhow::Error::new(error).context(doing),
+    }
+}
+
+/// How to let the app use the microphone, if `error` says the system
+/// refused it. macOS asks the player itself, and is left as it was.
+fn refusal(error: &cpal::Error) -> Option<&'static str> {
+    let refused = error.kind() == ErrorKind::PermissionDenied
+        // cpal passes WASAPI's E_ACCESSDENIED on as a plain error, whose
+        // message ends with the code (0x80070005) as a signed number.
+        || (cfg!(windows) && error.to_string().contains("os error -2147024891"));
+    if !refused {
+        return None;
+    }
+    if cfg!(windows) {
+        Some(
+            "Windows is keeping the microphone from apps like this one. Turn on \
+             Settings > Privacy & security > Microphone > Let desktop apps access your \
+             microphone, then try again",
+        )
+    } else if cfg!(target_os = "linux") {
+        Some(
+            "Linux won't let ds-emulator open the microphone. Your account needs the sound \
+             devices: sign in to a desktop session, or join the audio group, then try again",
+        )
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +132,31 @@ mod tests {
         assert_eq!(level(&[0.1, -0.5, 0.25]), 128);
         assert_eq!(level(&[2.0]), 255, "clipped");
         assert_eq!(level(&[f32::NAN]), 0);
+    }
+
+    #[test]
+    fn a_refusal_says_how_to_allow_the_microphone() {
+        let denied = cpal::Error::new(ErrorKind::PermissionDenied);
+        let wasapi = cpal::Error::with_message(
+            ErrorKind::BackendError,
+            "Access is denied. (os error -2147024891)",
+        );
+        let busy = cpal::Error::with_message(ErrorKind::DeviceBusy, "in use");
+        if cfg!(windows) {
+            for error in [&denied, &wasapi] {
+                let how = refusal(error).expect("explained");
+                assert!(how.contains("Privacy & security > Microphone"), "{how}");
+            }
+        } else if cfg!(target_os = "linux") {
+            let how = refusal(&denied).expect("explained");
+            assert!(how.contains("audio group"), "{how}");
+            assert_eq!(refusal(&wasapi), None);
+        } else {
+            assert_eq!(refusal(&denied), None, "macOS asks for itself");
+        }
+        assert_eq!(refusal(&busy), None);
+        let other = format!("{:#}", explain(busy, "cannot open the microphone"));
+        assert_eq!(other, "cannot open the microphone: in use");
     }
 
     #[test]

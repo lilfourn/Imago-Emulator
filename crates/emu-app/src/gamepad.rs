@@ -9,6 +9,16 @@
 //! The right stick also works like a mouse: while it is held over, the
 //! thread sends [`PadEvent::Pointer`] motion, faster the further it is
 //! pushed. The view uses it to move the touch cursor.
+//!
+//! gilrs reads controllers through IOKit on macOS, Windows.Gaming.Input on
+//! Windows (which sends events only while one of the app's windows has
+//! the focus), and evdev on Linux. Each names controls the same way and
+//! maps them with the same SDL controller database, built in, and analog
+//! triggers press `LeftTrigger2` and `RightTrigger2` past three quarters
+//! of the way on all three. Linux needs read access to the controller's
+//! `/dev/input/event*` device, which a desktop session gives the user at
+//! the screen; without it the controller isn't seen, and the thread says
+//! so on stderr.
 
 use std::collections::{HashMap, HashSet};
 use std::thread;
@@ -74,6 +84,14 @@ fn run(events: &async_channel::Sender<PadEvent>) {
             return;
         }
     };
+    #[cfg(target_os = "linux")]
+    for pad in unreadable_pads(std::path::Path::new(JOYSTICKS)) {
+        eprintln!(
+            "ds-emulator: cannot read the gamepad at {}: sign in to a desktop session, or join \
+             the input group, to play with it",
+            pad.display()
+        );
+    }
     let mut sticks = Sticks::default();
     let mut held: HashMap<GamepadId, HashSet<String>> = HashMap::new();
     // Each controller's right stick, x right and y up as gilrs reports.
@@ -250,6 +268,42 @@ fn direction_names(axis: Axis) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Where udev links each joystick's device on Linux, by its name.
+#[cfg(target_os = "linux")]
+const JOYSTICKS: &str = "/dev/input/by-id";
+
+/// The joysticks udev lists in `folder` that the app may not read, which
+/// gilrs then passes over without a word.
+#[cfg(target_os = "linux")]
+fn unreadable_pads(folder: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut pads: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_joystick_event)
+        })
+        .filter(|path| {
+            std::fs::File::open(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+        })
+        .collect();
+    pads.sort();
+    pads
+}
+
+/// Whether `name`, in `/dev/input/by-id`, is udev's link to a joystick's
+/// event device, the one gilrs reads, rather than its legacy `js` device
+/// or a keyboard's or mouse's.
+#[cfg(any(target_os = "linux", test))]
+fn is_joystick_event(name: &str) -> bool {
+    name.ends_with("-event-joystick")
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -288,6 +342,31 @@ mod tests {
         let (_, dy) = motion.advance((0.0, 0.0), step).expect("sent on stop");
         assert!((dy - 0.01).abs() < 1e-6);
         assert_eq!(motion.advance((0.0, 0.0), step), None);
+    }
+
+    #[test]
+    fn only_joysticks_event_devices_count() {
+        assert!(is_joystick_event(
+            "usb-Microsoft_Controller_3039-event-joystick"
+        ));
+        assert!(!is_joystick_event("usb-Microsoft_Controller_3039-joystick"));
+        assert!(!is_joystick_event(
+            "usb-Logitech_USB_Receiver-if02-event-mouse"
+        ));
+        assert!(!is_joystick_event("usb-Apple_Keyboard-event-kbd"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_without_joysticks_lists_none() {
+        let missing = std::env::temp_dir().join("ds-emulator-no-such-folder");
+        assert!(unreadable_pads(&missing).is_empty());
+        let empty = std::env::temp_dir().join(format!("ds-emulator-pads-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("temporary folder");
+        // Readable, so gilrs sees it.
+        std::fs::write(empty.join("usb-pad-event-joystick"), b"").expect("file");
+        assert!(unreadable_pads(&empty).is_empty());
+        std::fs::remove_dir_all(&empty).ok();
     }
 
     #[test]

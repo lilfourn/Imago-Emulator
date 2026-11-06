@@ -126,6 +126,13 @@ const CLOSE_ENOUGH: Duration = Duration::from_micros(100);
 /// late: every frame, and the input it reads, would start that much after
 /// its time. Sleeping three quarters of what is left, again and again,
 /// lands on the deadline in two or three wake-ups instead.
+///
+/// Linux wakes a thread within its timer slack, 50 µs, so the same naps
+/// land a few microseconds late. On Windows, Rust sleeps on a
+/// high-resolution waitable timer (from Windows 10's 1803 update on),
+/// which wakes within about half a millisecond, whatever the system timer
+/// ticks at; [`crate::qos::Timers`] makes that tick every millisecond as
+/// well, for older systems and for waits other than sleeps.
 pub fn sleep_until(deadline: Instant) {
     while let Some(nap) = nap(deadline.saturating_duration_since(Instant::now())) {
         thread::sleep(nap);
@@ -248,6 +255,28 @@ mod tests {
         assert!(woke < deadline + Duration::from_millis(50), "woke late");
         // A deadline already past returns at once.
         sleep_until(start);
+    }
+
+    #[test]
+    fn sleeps_wake_well_within_a_millisecond_of_their_deadlines() {
+        // As the emulation thread sleeps: with its timers, a frame's worth
+        // of time at a time. A system timer ticking every 15.6 ms, as
+        // Windows' does by default, would wake most of these 4 to 15 ms
+        // late.
+        let _timers = crate::qos::Timers::fine();
+        let mut late: Vec<_> = (0..40)
+            .map(|_| {
+                let deadline = Instant::now() + Duration::from_micros(4_200);
+                sleep_until(deadline);
+                Instant::now().saturating_duration_since(deadline)
+            })
+            .collect();
+        late.sort();
+        let (median, worst) = (late[late.len() / 2], late[late.len() - 1]);
+        eprintln!("sleep_until woke late by {median:?} (median), {worst:?} (worst)");
+        // Generous, for a busy machine: the median is what a coarse timer
+        // would push past a millisecond.
+        assert!(median < Duration::from_millis(1), "{late:?}");
     }
 
     #[test]

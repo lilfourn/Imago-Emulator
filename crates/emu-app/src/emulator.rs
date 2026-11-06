@@ -641,6 +641,7 @@ impl Emulator {
             .spawn(move || {
                 // Each frame must be ready before the refresh that shows it.
                 qos::interactive();
+                let _timers = qos::Timers::fine();
                 let mut runner = runner;
                 let ran = panic::catch_unwind(AssertUnwindSafe(|| runner.run(&receiver)));
                 if let Err(panic) = ran {
@@ -1056,7 +1057,10 @@ impl Runner {
                 }
             }
             Command::SetSpeed(speed) => self.speed = speed,
-            Command::SetRefresh(refresh) => self.lock.set_refresh(refresh),
+            Command::SetRefresh(refresh) => {
+                trace::event("refresh", &[refresh.map_or(0, trace::micros)]);
+                self.lock.set_refresh(refresh);
+            }
             Command::SetRewind(on) => {
                 let can = self.loaded.core.saves_every_frame();
                 if on && !can {

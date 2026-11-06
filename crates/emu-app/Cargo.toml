@@ -49,6 +49,27 @@ toml.workspace = true
 # compressor the plain `deflate` feature adds.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+# The display's refresh rate on Linux (window_chrome): RandR on X11 and
+# wl_output on Wayland, through connections of the app's own, and GPUI's
+# names for Wayland displays (a v5 UUID). The versions GPUI already uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+uuid = { version = "1", features = ["v5"] }
+wayland-client = "0.31"
+x11rb = { version = "0.13", features = ["randr"] }
+
+# Windows: the display's refresh rate (window_chrome), and the emulation
+# thread's priority, power throttling and timer resolution (qos.rs). The
+# versions GPUI, cpal and gilrs already use.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows ={ version = "0.62", features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_System_Threading",
+] }
+
 # AppKit, for what GPUI leaves out: hiding the window's close, minimise and
 # zoom buttons, the standard About panel, the Dock icon and the display's
 # refresh rate. The versions GPUI already uses.
