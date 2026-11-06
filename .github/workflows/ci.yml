@@ -22,7 +22,7 @@ jobs:
     name: macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: No Nintendo files
         run: scripts/check-no-nintendo-files.sh
       # Bundles pinned to a release or commit: the Game Boy suites, jsmolka,
@@ -31,16 +31,23 @@ jobs:
       # (scripts/fetch-mgba-suite.sh), so its test skips here.
       - name: Fetch test ROMs
         run: scripts/fetch-test-roms.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      # The frame, sound and save-state digests every OS must match were
+      # recorded on macOS arm64; this keeps them true here, so a difference
+      # elsewhere is that OS's. Uses the emu-headless the tests built.
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        run: scripts/determinism/check.sh
 
   # Linux on Namespace's runners (the account's default profiles), on both
-  # x86-64 and arm64.
+  # x86-64 and arm64. The x86-64 one also starts the app under Xvfb and
+  # screenshots it (scripts/linux/smoke.sh).
   linux:
     name: Linux ${{ matrix.arch }}
     strategy:
@@ -49,47 +56,137 @@ jobs:
         include:
           - arch: x86-64
             runner: namespace-profile-default
+            smoke: true
           - arch: arm64
             runner: namespace-profile-default-arm64
+            smoke: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Linux packages
-        run: scripts/linux/install-build-deps.sh
+        run: scripts/linux/install-build-deps.sh ${{ matrix.smoke && '--smoke' || '' }}
       - name: No Nintendo files
         run: scripts/check-no-nintendo-files.sh
       - name: Fetch test ROMs
         run: scripts/fetch-test-roms.sh
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      # With Caching turned on in the runner profile, Namespace attaches a
+      # cache volume: the registry and target/ stay on the machine's own
+      # disk, with nothing to download or upload. Without one, GitHub's
+      # cache, also kept when a step fails.
+      - name: Cache volume
+        id: volume
+        run: echo "attached=$([ -n "${NSC_CACHE_PATH:-}" ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+      - name: Cargo cache (Namespace volume)
+        if: steps.volume.outputs.attached == 'true'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
+        with:
+          cache: rust
+      - name: Cargo cache (GitHub)
+        if: steps.volume.outputs.attached != 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.arch }}
+          cache-on-failure: true
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         if: success() || failure()
         run: cargo test --workspace --no-fail-fast
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        run: scripts/determinism/check.sh
+      - name: Build the app
+        if: ${{ matrix.smoke && !cancelled() }}
+        run: cargo build -p emu-app
+      # The smoke test that gates runs on Ubuntu 24.04, in the image built
+      # from scripts/linux/Dockerfile, with that release's Mesa; the app
+      # built on the runner runs there as it is. It gates on every check
+      # except those listed: closing the window panics in GPUI's X11
+      # client, as the app quits from its window-closed callback (stream 2,
+      # app shell).
+      - name: Smoke test (Ubuntu 24.04)
+        if: ${{ matrix.smoke && !cancelled() }}
+        run: |
+          docker build --load -q -t ds-emulator-linux:24.04 scripts/linux >/dev/null ||
+            docker build -q -t ds-emulator-linux:24.04 scripts/linux >/dev/null
+          status=0
+          docker run --rm --init -v "$PWD:$PWD" -w "$PWD" \
+            -e SMOKE_KNOWN_FAILURES="game.quit library.quit" \
+            ds-emulator-linux:24.04 sh -c \
+            'scripts/linux/smoke.sh target/smoke; status=$?; chown -R "$0" target/smoke; exit $status' \
+            "$(id -u):$(id -g)" || status=$?
+          cat target/smoke/summary.md >>"$GITHUB_STEP_SUMMARY" || true
+          exit "$status"
+      # The runner's own Ubuntu, 22.04 today, report-only: its Mesa (23.2)
+      # can't show software-Vulkan frames in GPUI's 32-bit window under
+      # Xvfb, so the picture stays black there (fixed in Mesa 24.0.2; the
+      # summary explains it). Hardware drivers aren't affected.
+      - name: Smoke test (the runner's Ubuntu, report-only)
+        if: ${{ matrix.smoke && !cancelled() }}
+        continue-on-error: true
+        env:
+          SMOKE_KNOWN_FAILURES: game.quit library.quit game.frame library.drawn
+        run: scripts/linux/smoke.sh target/smoke-runner
+      - name: Smoke screenshots
+        if: ${{ matrix.smoke && !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-linux-${{ matrix.arch }}
+          path: |
+            target/smoke
+            target/smoke-runner
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Windows on GitHub's runners (Namespace's Windows runners need its Team
-  # plan).
+  # plan). After the tests, the same debug build starts the app on the
+  # runner's desktop and screenshots it (scripts/windows/smoke.ps1).
+  # The release build, which needs fxc.exe, is windows-release.yml.
   windows:
     name: Windows x86-64
     runs-on: windows-latest
-    timeout-minutes: 60
+    # Lint and tests take about 55 minutes with nothing cached; the smoke
+    # and determinism steps after them about 10 more.
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Fetch test ROMs
         run: scripts/fetch-test-roms.sh
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         if: success() || failure()
         run: cargo test --workspace --no-fail-fast
+      # Report-only until a first Windows run shows what passes; then list
+      # what fails in the known-failure variables and make these gate.
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: scripts/determinism/check.sh
+      - name: Build the app
+        if: ${{ !cancelled() }}
+        run: cargo build -p emu-app
+      - name: Smoke test
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: pwsh
+        run: scripts/windows/smoke.ps1 -Out target/smoke
+      - name: Smoke screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-windows-x86-64
+          path: target/smoke
+          if-no-files-found: ignore
+          retention-days: 14
