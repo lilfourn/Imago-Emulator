@@ -38,12 +38,12 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Fetch test ROMs
         run: scripts/fetch-test-roms.sh
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release
           cache-on-failure: true
@@ -65,14 +65,14 @@ jobs:
         run: scripts/windows/smoke.ps1 -Exe target/release/ds-emulator.exe -Out target/smoke-release
       - name: Smoke screenshots
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: smoke-windows-x86-64-release
           path: target/smoke-release
           if-no-files-found: ignore
           retention-days: 14
       - name: The app
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ds-emulator-windows-x86-64
           path: target/release/ds-emulator.exe
