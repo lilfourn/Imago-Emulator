@@ -1152,6 +1152,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the test can't set a folder's modified time this way (files stream)"
+    )]
     fn work_folders_left_by_runs_that_never_finished_are_cleared() {
         let temp = temp_dir("stale");
         let old = SystemTime::now() - 2 * STALE_WORK;

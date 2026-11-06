@@ -9,6 +9,9 @@ publish.workspace = true
 [dependencies]
 # The versions emu-app already uses.
 base64 = "0.22"
+# The system's random generator on every OS (PKCE); already in the
+# dependency tree.
+getrandom = { version = "0.3", features = ["std"] }
 # Parses answers' Markdown; pure Rust, no default features (no binary).
 pulldown-cmark = { version = "0.12", default-features = false }
 serde.workspace = true

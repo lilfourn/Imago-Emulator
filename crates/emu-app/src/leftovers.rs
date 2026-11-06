@@ -327,6 +327,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the test can't set a folder's modified time this way (files stream)"
+    )]
     fn what_an_app_that_quit_left_behind_is_removed() {
         let temp = temp_dir("left");
         // A folder whose lock nobody holds, as when the app was killed.

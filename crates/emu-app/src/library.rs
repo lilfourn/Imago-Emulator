@@ -587,6 +587,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the test expects a Unix absolute path (files stream)"
+    )]
     fn relative_paths_become_absolute_from_the_current_folder() {
         let here = std::env::current_dir().expect("a current folder");
         assert_eq!(absolute(Path::new("roms/a.gba")), here.join("roms/a.gba"));
