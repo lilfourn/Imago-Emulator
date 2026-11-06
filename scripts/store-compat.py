@@ -25,6 +25,12 @@ app's install, ~/Library/Application Support/ds-emulator/3DS, or from
 --3ds-core: each run starts a console of its own, never the user's, and
 nothing is downloaded again.
 
+It runs on macOS and Linux. On Linux its folders are the XDG ones, the
+cache in ~/.cache and the app's install in ~/.local/share, `.7z` files
+are read with bsdtar (the libarchive-tools package on Debian and Ubuntu)
+rather than macOS's own tar, and the core is copied with
+`cp --reflink=auto`.
+
 Everything it fetches is kept in ~/Library/Caches/ds-emulator-store-compat:
 the catalogs, each game in a folder of its own, the results of each run
 (results.jsonl), the latest full report (report.json) and a log
@@ -68,9 +74,20 @@ import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
+MACOS = sys.platform == "darwin"
+
+
+def system_folder(macos, variable, default):
+    """A folder of the user's: `macos` in the home folder on macOS, else
+    the XDG `variable`, or `default` in the home folder."""
+    if MACOS:
+        return Path.home() / macos
+    return Path(os.environ.get(variable) or Path.home() / default)
+
+
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "crates/emu-app/src/store_compat.toml"
-CACHE = Path.home() / "Library/Caches/ds-emulator-store-compat"
+CACHE = system_folder("Library/Caches", "XDG_CACHE_HOME", ".cache") / "ds-emulator-store-compat"
 TARGET_DIR = Path("/tmp/store-compat-target")
 
 USER_AGENT = "ds-emulator-store-compat/1 (+https://github.com/lilfourn/ds-emulator)"
@@ -94,7 +111,11 @@ SYSTEMS.update({ext: "3ds" for ext in THREE_DS_EXTENSIONS})
 OTHER_SYSTEMS = {"android", "gamecube", "linux", "mac", "macos", "nds", "pc", "ps3", "psp",
                  "switch", "vita", "wii", "wiiu", "win", "win32", "win64", "windows", "x64", "x86"}
 # Where the app installs the 3DS core, and the folders that hold it there.
-CORE_3DS = Path.home() / "Library/Application Support/ds-emulator/3DS"
+CORE_3DS = (system_folder("Library/Application Support", "XDG_DATA_HOME", ".local/share")
+            / "ds-emulator/3DS")
+# What reads `.7z` files: macOS's own tar is libarchive's bsdtar, which on
+# Linux is a package of its own. GNU tar reads none.
+TAR = "/usr/bin/tar" if MACOS else shutil.which("bsdtar")
 CORE_3DS_PARTS = (("azahar-", "azahar_libretro.dylib"), ("moltenvk-", "libMoltenVK.dylib"))
 
 # Downloads larger than this are refused, and so are files unpacked from
@@ -134,6 +155,10 @@ def main():
                         help="write the note of games that don't run, from the cached results, "
                              f"and exit (default {BACKLOG.relative_to(REPO)})")
     args = parser.parse_args()
+    if os.name == "nt":
+        raise SystemExit("store-compat.py runs on macOS and Linux")
+    if TAR is None:
+        raise SystemExit("store-compat.py needs bsdtar to read .7z files: install libarchive-tools")
     checks = sorted({int(frame) for frame in args.checks.split(",") if frame.strip()})
     if not checks or checks[0] <= 0:
         parser.error("--checks needs positive frame numbers")
@@ -286,7 +311,8 @@ def copy_core_3ds(work):
     cloned into it (copy-on-write, so instant and free), and nothing else,
     so the run starts a console of its own."""
     work.mkdir()
-    subprocess.run(["/bin/cp", "-c", "-R", *map(str, CORE["parts"]), str(work)], check=True,
+    clone = ["/bin/cp", "-c", "-R"] if MACOS else ["cp", "--reflink=auto", "-R"]
+    subprocess.run([*clone, *map(str, CORE["parts"]), str(work)], check=True,
                    capture_output=True)
 
 
@@ -715,9 +741,10 @@ def unpack(archive, platform):
             with zipped.open(info) as source, open(dest, "wb") as file:
                 shutil.copyfileobj(source, file)
     else:
-        # macOS's own tar reads 7z. It refuses names with `..` and absolute
-        # paths, and the file size limit stops one file filling the disk.
-        listing = subprocess.run(["/usr/bin/tar", "-tf", str(archive)], capture_output=True,
+        # bsdtar (macOS's own tar) reads 7z. It refuses names with `..` and
+        # absolute paths, and the file size limit stops one file filling
+        # the disk.
+        listing = subprocess.run([TAR, "-tf", str(archive)], capture_output=True,
                                  text=True, errors="replace", timeout=120)
         if listing.returncode:
             raise NothingToPlay(f"tar cannot read {archive.name}: {listing.stderr.strip()[:200]}")
@@ -730,8 +757,8 @@ def unpack(archive, platform):
         work.mkdir()
         # `ulimit -f` counts 512-byte blocks.
         unpacked = subprocess.run(
-            ["/bin/sh", "-c", 'ulimit -f "$1" && exec /usr/bin/tar -xf "$2" -C "$3"', "sh",
-             str(MAX_BYTES // 512), str(archive), str(work)],
+            ["/bin/sh", "-c", 'ulimit -f "$1" && exec "$4" -xf "$2" -C "$3"', "sh",
+             str(MAX_BYTES // 512), str(archive), str(work), TAR],
             capture_output=True, text=True, errors="replace", timeout=300)
         source = work / member
         if unpacked.returncode or source.is_symlink() or not source.is_file():

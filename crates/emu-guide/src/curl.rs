@@ -1,9 +1,12 @@
-//! Requests through `curl`, which macOS ships, as the app's box art and
-//! store downloads go. Anything secret goes on `curl`'s standard input,
-//! never in its arguments, which any process can read.
+//! Requests through `curl`, which macOS and Windows ship and Linux systems
+//! nearly always have, as the app's box art and store downloads go.
+//! Anything secret goes on `curl`'s standard input, never in its
+//! arguments, which any process can read.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use emu_os::process::why_not_started;
 
 /// What a server answered: its status and body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +31,7 @@ pub fn request(
     url: &str,
     max_seconds: u32,
 ) -> Result<Response, String> {
-    let mut child = Command::new("curl")
+    let mut child = emu_os::process::command("curl")
         .args(["--silent", "--show-error", "--connect-timeout", "10"])
         .args([
             "--user-agent",
@@ -43,7 +46,7 @@ pub fn request(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("curl didn't start: {error}"))?;
+        .map_err(|error| why_not_started("curl", &error))?;
     // Small enough to fit the pipe's buffer, so nothing waits on the
     // other end; dropping the handle closes it.
     if let Some(mut input) = child.stdin.take() {

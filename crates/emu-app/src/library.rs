@@ -587,15 +587,26 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Windows: the test expects a Unix absolute path (files stream)"
-    )]
     fn relative_paths_become_absolute_from_the_current_folder() {
         let here = std::env::current_dir().expect("a current folder");
         assert_eq!(absolute(Path::new("roms/a.gba")), here.join("roms/a.gba"));
         assert_eq!(absolute(Path::new("./a.gba")), here.join("a.gba"));
-        assert_eq!(absolute(Path::new("/roms/a.gba")), Path::new("/roms/a.gba"));
+        // A whole path stays as it is.
+        let whole = if cfg!(windows) {
+            Path::new(r"C:\roms\a.gba")
+        } else {
+            Path::new("/roms/a.gba")
+        };
+        assert_eq!(absolute(whole), whole);
+        // On Windows, one from the root without a drive is on the current
+        // folder's drive.
+        #[cfg(windows)]
+        {
+            let drive = here.components().next().expect("a drive");
+            let mut on_drive = drive.as_os_str().to_owned();
+            on_drive.push(r"\roms\a.gba");
+            assert_eq!(absolute(Path::new("/roms/a.gba")), PathBuf::from(on_drive));
+        }
     }
 
     #[test]

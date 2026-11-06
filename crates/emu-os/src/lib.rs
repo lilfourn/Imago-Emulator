@@ -17,8 +17,12 @@
 //! where the system puts it in a home by default, whatever `XDG_*` says.
 //! Setting `HOME` does that on macOS and Linux, but Windows finds its
 //! folders without it.
+//!
+//! [`process`] runs other programs, such as `curl`, alike on every system.
 
 use std::path::{Path, PathBuf};
+
+pub mod process;
 
 /// The environment variable that stands in for the home folder.
 pub const HOME_VARIABLE: &str = "DS_EMULATOR_HOME";

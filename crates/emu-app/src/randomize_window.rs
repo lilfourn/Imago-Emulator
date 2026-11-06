@@ -12,7 +12,6 @@
 //! the main window says how it went.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -441,11 +440,7 @@ impl RandomizeWindow {
     /// Opens the spoiler log of the game just made in the text editor.
     fn open_log(&self) {
         if let State::Made(Made { log: Some(log), .. }) = &self.state {
-            Command::new("/usr/bin/open")
-                .arg("-t")
-                .arg(log)
-                .spawn()
-                .ok();
+            emu_os::process::open_in_text_editor(log).ok();
         }
     }
 

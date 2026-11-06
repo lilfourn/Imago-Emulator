@@ -5,18 +5,23 @@
 //!
 //! Each is locked while the app works in it. The system lets go of a lock
 //! when its process ends, crashed or killed, so one that no running app
-//! holds is what an app left behind; at launch, those are removed, and
-//! any `tar` still unpacking into one is stopped. On quit, the app removes
-//! its own. Files the app writes for a moment and keeps no lock on, such
-//! as a save's `….tmp`, are removed once they are old.
+//! holds is what an app left behind; at launch, those are removed, and on
+//! macOS any `tar` still unpacking into one is stopped. On quit, the app
+//! removes its own, and stops the programs it started to work in them
+//! (see [`WorkFolder::spawn`]). Files the app writes for a moment and keeps
+//! no lock on, such as a save's `….tmp`, are removed once they are old.
 
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+use std::process::{Child, ChildStderr, Command, ExitStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+use crate::persist;
 
 /// How the names of the work folders start, in the temporary folder:
 /// `ds-emulator-unpack-<pid>-<n>`, `ds-emulator-store-<pid>-<n>`.
@@ -40,9 +45,20 @@ const STALE: Duration = Duration::from_secs(60 * 60);
 /// What this app has under way, to remove on quit.
 static OWN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-fn own() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
-    OWN.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn own() -> MutexGuard<'static, Vec<PathBuf>> {
+    lock(&OWN)
+}
+
+/// The programs this app started to work in its work folders, such as a
+/// `tar` unpacking into one, by folder, to stop on quit.
+static WORKERS: Mutex<Vec<(PathBuf, Arc<Mutex<Child>>)>> = Mutex::new(Vec::new());
+
+fn workers() -> MutexGuard<'static, Vec<(PathBuf, Arc<Mutex<Child>>)>> {
+    lock(&WORKERS)
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Holds `path` as this app's until dropped, to remove on quit.
@@ -94,6 +110,64 @@ impl WorkFolder {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Starts `command`, a program that works in this folder, such as one
+    /// unpacking an archive into it. It is stopped if the app quits while
+    /// it runs ([`remove_own`]), and when the [`Worker`] is dropped.
+    pub fn spawn(&self, command: &mut Command) -> io::Result<Worker> {
+        let child = Arc::new(Mutex::new(command.spawn()?));
+        workers().push((self.path.clone(), Arc::clone(&child)));
+        Ok(Worker { child })
+    }
+}
+
+/// A program working in a [`WorkFolder`], from [`WorkFolder::spawn`]. It is
+/// stopped when dropped, if it is still running.
+pub struct Worker {
+    child: Arc<Mutex<Child>>,
+}
+
+impl Worker {
+    /// Its standard error, if that was piped and is not yet taken.
+    pub fn take_stderr(&self) -> Option<ChildStderr> {
+        lock(&self.child).stderr.take()
+    }
+
+    /// How it ended, once it has.
+    pub fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
+        lock(&self.child).try_wait()
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        stop(&self.child);
+        workers().retain(|(_, child)| !Arc::ptr_eq(child, &self.child));
+    }
+}
+
+/// Stops the program `child`, if it is still running, and waits for it to
+/// end. It is killed outright (on macOS and Linux with SIGKILL): a `tar`
+/// the app starts on macOS ignores being asked to stop (SIGTERM), which it
+/// inherits from the app.
+fn stop(child: &Mutex<Child>) {
+    let mut child = lock(child);
+    if matches!(child.try_wait(), Ok(None)) {
+        child.kill().ok();
+    }
+    child.wait().ok();
+}
+
+/// Stops the programs this app started to work in the folder at `path`.
+fn stop_working_in(path: &Path) {
+    let children: Vec<Arc<Mutex<Child>>> = workers()
+        .iter()
+        .filter(|(folder, _)| folder == path)
+        .map(|(_, child)| Arc::clone(child))
+        .collect();
+    for child in children {
+        stop(&child);
+    }
 }
 
 impl Drop for WorkFolder {
@@ -135,7 +209,7 @@ impl Unfinished {
     pub fn finish(mut self, path: &Path) -> io::Result<()> {
         // Unlocked once closed.
         self.file = None;
-        fs::rename(&self.path, path)?;
+        persist::rename(&self.path, path)?;
         let_go(&self.path);
         self.path = PathBuf::new();
         Ok(())
@@ -152,8 +226,8 @@ impl Drop for Unfinished {
     }
 }
 
-/// Removes what this app has under way, stopping any `tar` unpacking into
-/// it: for quitting, when no drop will run.
+/// Removes what this app has under way, stopping the programs it started
+/// to work in it: for quitting, when no drop will run.
 pub fn remove_own() {
     remove_own_where(|_| true);
 }
@@ -168,7 +242,7 @@ fn remove_own_where(wanted: impl Fn(&Path) -> bool) {
     };
     for path in held {
         if path.is_dir() {
-            stop_unpacking_into(&path);
+            stop_working_in(&path);
             fs::remove_dir_all(&path).ok();
         } else {
             fs::remove_file(&path).ok();
@@ -197,7 +271,8 @@ fn remove_left_behind_in(temp: &Path, folders: &[PathBuf]) -> u64 {
                 && path.is_dir()
                 && !in_use(&path.join(LOCK), &path)
             {
-                stop_unpacking_into(&path);
+                #[cfg(target_os = "macos")]
+                stop_tar_left_unpacking_into(&path);
                 freed += size(&path);
                 fs::remove_dir_all(&path).ok();
             }
@@ -255,10 +330,20 @@ fn changed_lately(path: &Path) -> bool {
         .is_ok_and(|modified| modified.elapsed().map_or(true, |age| age < STALE))
 }
 
-/// Stops any `tar` unpacking into the folder at `path`: one whose command
-/// line names it. It is killed outright, as a `tar` the app started
-/// ignores being asked to stop (SIGTERM), which it inherits from the app.
-fn stop_unpacking_into(path: &Path) {
+/// Stops any `tar` still unpacking into the folder at `path`, left behind
+/// by an app that crashed or was killed: one whose command line names it.
+/// It is killed outright, as a `tar` the app started ignores being asked to
+/// stop (SIGTERM), which it inherits from the app.
+///
+/// macOS only: there the app unpacks `.7z` and `.rar` files with `tar`,
+/// which the system gives to launchd, still running, when the app dies,
+/// and nothing ties its life to the app's. Elsewhere `.7z` files unpack in
+/// the app itself, and only a `.rar` file, or a `.7z` one packed in a way
+/// the app can't unpack, has a program unpack it (see `archive`): a crashed
+/// app's one runs to its end, and what it wrote is removed at a later
+/// launch.
+#[cfg(target_os = "macos")]
+fn stop_tar_left_unpacking_into(path: &Path) {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return;
     };
@@ -273,6 +358,29 @@ fn stop_unpacking_into(path: &Path) {
         .stderr(Stdio::null())
         .status()
         .ok();
+}
+
+/// Sets when the file or folder at `path` last changed, for tests that
+/// make what they leave look old. A folder is opened as macOS and Linux
+/// open one, but Windows opens one only to change its times, and only
+/// with the flag that lets a handle be a folder's.
+#[cfg(test)]
+pub fn set_modified(path: &Path, time: std::time::SystemTime) -> io::Result<()> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        /// `FILE_WRITE_ATTRIBUTES` and `FILE_FLAG_BACKUP_SEMANTICS`, from
+        /// Windows's `winnt.h` and `WinBase.h`.
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?
+    };
+    #[cfg(not(windows))]
+    let file = File::open(path)?;
+    file.set_modified(time)
 }
 
 /// How many bytes the file, or the files in the folder, at `path` take.
@@ -290,6 +398,7 @@ fn size(path: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Stdio;
     use std::time::SystemTime;
 
     use super::*;
@@ -304,10 +413,7 @@ mod tests {
 
     /// Makes what is at `path` look `age` old.
     fn age(path: &Path, age: Duration) {
-        let then = SystemTime::now() - age;
-        File::open(path)
-            .and_then(|file| file.set_modified(then))
-            .expect("aged");
+        set_modified(path, SystemTime::now() - age).expect("aged");
     }
 
     #[test]
@@ -327,10 +433,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Windows: the test can't set a folder's modified time this way (files stream)"
-    )]
     fn what_an_app_that_quit_left_behind_is_removed() {
         let temp = temp_dir("left");
         // A folder whose lock nobody holds, as when the app was killed.
@@ -394,8 +496,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        windows,
-        ignore = "Windows: a shell script stands in for tar, stopped with pkill (OS services stream)"
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: only macOS unpacks .7z files with tar, and stops a crashed app's one at launch"
     )]
     fn a_tar_still_unpacking_into_a_folder_left_behind_is_stopped() {
         let temp = temp_dir("tar");
@@ -424,6 +526,53 @@ mod tests {
         }
         assert!(stopped, "tar is stopped");
         assert!(!left.exists());
+        fs::remove_dir_all(&temp).ok();
+    }
+
+    /// A program that waits for its input to end, as a `tar` unpacking an
+    /// archive it reads from the app would. On macOS and Linux, like one
+    /// the app starts there, it ignores SIGTERM.
+    fn waiting_program() -> Command {
+        if cfg!(windows) {
+            // Reads all its input before it sorts it.
+            emu_os::process::command("sort")
+        } else {
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg("trap '' TERM; exec cat");
+            command
+        }
+    }
+
+    #[test]
+    fn quitting_stops_the_programs_working_in_a_work_folder() {
+        let temp = temp_dir("workers");
+        let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+        let path = folder.path().to_owned();
+        let worker = folder
+            .spawn(waiting_program().stdin(Stdio::piped()))
+            .expect("runs");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(worker.try_wait().expect("waits").is_none(), "it waits");
+        // As if the app quit: the folder is not dropped.
+        std::mem::forget(folder);
+        remove_own_where(|held| held == path);
+        let status = worker.try_wait().expect("waits");
+        assert!(status.is_some_and(|status| !status.success()), "stopped");
+        assert!(!path.exists());
+        drop(worker);
+        assert!(
+            !workers().iter().any(|(folder, _)| folder == &path),
+            "let go"
+        );
+        // A worker dropped while it runs is stopped too.
+        let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+        let worker = folder
+            .spawn(waiting_program().stdin(Stdio::piped()))
+            .expect("runs");
+        let child = Arc::clone(&worker.child);
+        drop(worker);
+        assert!(lock(&child).try_wait().expect("waits").is_some(), "stopped");
+        drop(folder);
         fs::remove_dir_all(&temp).ok();
     }
 

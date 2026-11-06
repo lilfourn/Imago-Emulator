@@ -5,7 +5,6 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::Command;
 
 /// What a new cheat file starts with.
 const TEMPLATE: &str = "\
@@ -44,7 +43,7 @@ pub fn create_if_missing(path: &Path) -> io::Result<()> {
 
 /// Opens `path` in the default text editor.
 pub fn open_in_editor(path: &Path) -> io::Result<()> {
-    Command::new("open").arg("-t").arg(path).spawn().map(drop)
+    emu_os::process::open_in_text_editor(path)
 }
 
 /// The text of the cheat file at `path`, or `None` if there is none.

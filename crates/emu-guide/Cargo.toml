@@ -9,6 +9,9 @@ publish.workspace = true
 [dependencies]
 # The versions emu-app already uses.
 base64 = "0.22"
+# Runs curl alike on every system (no console window on Windows); the
+# app's folders, for the example's key.
+emu-os.workspace = true
 # The system's random generator on every OS (PKCE); already in the
 # dependency tree.
 getrandom = { version = "0.3", features = ["std"] }
@@ -20,10 +23,6 @@ sha2 = "0.10"
 thiserror.workspace = true
 # The source map, sources.toml.
 toml.workspace = true
-
-[dev-dependencies]
-# The app's folders, for the example's key.
-emu-os.workspace = true
 
 [lints]
 workspace = true

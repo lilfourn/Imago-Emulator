@@ -3,11 +3,12 @@
 //! and more shuffled, as a new game in the hacks folder (see `romhack`),
 //! with its spoiler log beside it.
 //!
-//! FVX is GPL-3.0 Java, so it is not built into the app. A pinned release,
-//! which carries its own Java, is downloaded at first use, checked against
-//! its pinned SHA-256 and unpacked into the data folder, as the 3DS core
-//! is (`emu_3ds::install`). Then each game is made by running it as a
-//! separate program, on its command line.
+//! FVX is GPL-3.0 Java, so it is not built into the app. A pinned release
+//! for this system (macOS, Linux or Windows), which carries its own Java,
+//! is downloaded at first use, checked against its pinned SHA-256 and
+//! unpacked into the data folder, as the 3DS core is (`emu_3ds::install`).
+//! Then each game is made by running it as a separate program, on its
+//! command line.
 //!
 //! It randomizes generations 1 to 5: Red, Blue and Yellow; Gold, Silver and
 //! Crystal; Ruby, Sapphire, Emerald, FireRed and LeafGreen; Diamond, Pearl,
@@ -29,6 +30,7 @@ use std::time::{Duration, SystemTime};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256};
+use zip::ZipArchive;
 
 use crate::archive;
 use crate::romhack;
@@ -45,49 +47,89 @@ struct Download<'a> {
     url: &'a str,
     /// Its SHA-256, in lowercase hex.
     sha256: &'a str,
+    /// About how many megabytes it is.
+    megabytes: u32,
 }
 
 /// FVX 1.6.2 for Apple silicon, with Java 25 (41.4 MB).
-const ARM64: Download<'static> = Download {
+const MAC_ARM64: Download<'static> = Download {
     url: "https://github.com/upr-fvx/universal-pokemon-randomizer-fvx/releases/download/vFVX1.6.2/UPR_FVX-v1_6_2-Mac_ARM.zip",
     sha256: "006bd1280ea1b95cfa0c85d909f993bb3a895b99776e03843a9ee297775422ec",
+    megabytes: 41,
 };
 
 /// The same for Intel Macs (43.3 MB).
-const X86_64: Download<'static> = Download {
+const MAC_X86_64: Download<'static> = Download {
     url: "https://github.com/upr-fvx/universal-pokemon-randomizer-fvx/releases/download/vFVX1.6.2/UPR_FVX-v1_6_2-Mac_x86.zip",
     sha256: "66b229d0deddd210916b5776f20f3b293328393c5020c3a60824ac90bfb5e057",
+    megabytes: 43,
 };
 
-/// The download for this Mac.
-const PIN: Download<'static> = if cfg!(target_arch = "x86_64") {
-    X86_64
+/// The same for Linux on x86-64 (51.1 MB), laid out as the Mac's.
+const LINUX_X86_64: Download<'static> = Download {
+    url: "https://github.com/upr-fvx/universal-pokemon-randomizer-fvx/releases/download/vFVX1.6.2/UPR_FVX-v1_6_2-Linux_x86.zip",
+    sha256: "a4a8a87b0fea78ff44ea8b3a1406fe8e503ceab291c482d78001122c5ec5783b",
+    megabytes: 51,
+};
+
+/// The same for Linux on arm64 (49.6 MB).
+const LINUX_ARM64: Download<'static> = Download {
+    url: "https://github.com/upr-fvx/universal-pokemon-randomizer-fvx/releases/download/vFVX1.6.2/UPR_FVX-v1_6_2-Linux_ARM.zip",
+    sha256: "cb91e8dd3cd066bf239b485a6301ec420ae88640a658b1a4c37779b18d94ad66",
+    megabytes: 50,
+};
+
+/// The same for Windows on x86-64 (41.5 MB), its Java's programs `.exe`s.
+const WINDOWS_X86_64: Download<'static> = Download {
+    url: "https://github.com/upr-fvx/universal-pokemon-randomizer-fvx/releases/download/vFVX1.6.2/UPR_FVX-v1_6_2-Windows.zip",
+    sha256: "1cee4080967075e5babcc06e93d7c382ec2f00f05d99e17ce31fc0a99d581acb",
+    megabytes: 41,
+};
+
+/// The download for this system, if FVX has one.
+const PIN: Option<Download<'static>> = if cfg!(target_os = "macos") {
+    if cfg!(target_arch = "x86_64") {
+        Some(MAC_X86_64)
+    } else {
+        Some(MAC_ARM64)
+    }
+} else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    Some(LINUX_X86_64)
+} else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+    Some(LINUX_ARM64)
+} else if cfg!(all(windows, target_arch = "x86_64")) {
+    Some(WINDOWS_X86_64)
 } else {
-    ARM64
+    None
 };
 
 /// Why the randomizer can't run on this system, or `None` where it can:
-/// only FVX's Mac builds are pinned so far.
-const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
-    None
-} else if cfg!(target_os = "linux") {
-    Some("The randomizer isn't supported on Linux yet")
-} else if cfg!(windows) {
-    Some("The randomizer isn't supported on Windows yet")
-} else {
-    Some("The randomizer isn't supported on this system yet")
+/// FVX is pinned for macOS, for Linux on x86-64 and arm64, and for Windows
+/// on x86-64.
+pub const UNSUPPORTED: Option<&str> = match PIN {
+    Some(_) => None,
+    None => Some("The randomizer isn't supported on this system"),
 };
 
 /// About how many megabytes the download is, for the app to say so first.
-pub const DOWNLOAD_MB: u32 = if cfg!(target_arch = "x86_64") { 43 } else { 41 };
+pub const DOWNLOAD_MB: u32 = match PIN {
+    Some(pin) => pin.megabytes,
+    None => 0,
+};
 
 /// The folder in the data folder FVX is kept in, named for its version.
 const FOLDER: &str = "upr-fvx-1.6.2";
-/// The randomizer, and its Java, in that folder.
+/// The randomizer, and its Java, in that folder. On Windows that is
+/// `javaw.exe`, the Java that opens no console window.
 const JAR: &str = "UPR-FVX.jar";
-const JAVA: &str = "java/bin/java";
-/// The other programs in its Java that must be executable: the zip keeps
-/// no permissions.
+const JAVA: &str = if cfg!(windows) {
+    "java/bin/javaw.exe"
+} else {
+    "java/bin/java"
+};
+/// The other programs in its Java that must be executable on macOS and
+/// Linux: the zips keep no permissions. Windows runs programs by their
+/// name.
 const EXECUTABLES: [&str; 3] = ["java/bin/java", "java/bin/keytool", "java/lib/jspawnhelper"];
 /// The file in the data folder an install holds locked.
 const LOCK_FILE: &str = "install.lock";
@@ -135,12 +177,12 @@ pub fn installed(data: &Path) -> Option<Randomizer> {
 /// Says why, if the randomizer can't run on this system, the download
 /// fails or is not the file pinned here, or a file cannot be written.
 pub fn ensure(data: &Path) -> Result<Randomizer, String> {
-    if let Some(why) = UNSUPPORTED {
-        return Err(why.to_owned());
-    }
+    let Some(pin) = PIN else {
+        return Err(UNSUPPORTED.unwrap_or_default().to_owned());
+    };
     match installed(data) {
         Some(randomizer) => Ok(randomizer),
-        None => install(data, PIN, &curl),
+        None => install(data, pin, &curl),
     }
 }
 
@@ -183,16 +225,7 @@ fn unpack_download(temp: &Path, pin: Download<'_>, fetch: Fetch<'_>) -> Result<P
         ));
     }
     let unpacked = temp.join(FOLDER);
-    let output = Command::new("/usr/bin/ditto")
-        .args(["-x", "-k"])
-        .arg(&zip)
-        .arg(&unpacked)
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => return Err(format!("Cannot unpack the randomizer: {}", reason(&output))),
-        Err(error) => return Err(format!("Cannot unpack the randomizer: {error}")),
-    }
+    unzip(&zip, &unpacked).map_err(|why| format!("Cannot unpack the randomizer: {why}"))?;
     for needed in [JAR, JAVA] {
         if !unpacked.join(needed).is_file() {
             return Err(format!("The randomizer's download has no {needed} in it"));
@@ -206,6 +239,31 @@ fn unpack_download(temp: &Path, pin: Download<'_>, fetch: Fetch<'_>) -> Result<P
         }
     }
     Ok(unpacked)
+}
+
+/// Unpacks the zip at `zip` into the new folder `to`: on macOS with its own
+/// `ditto`, as the app always has, and elsewhere in the app.
+fn unzip(zip: &Path, to: &Path) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        let output = Command::new("/usr/bin/ditto")
+            .args(["-x", "-k"])
+            .arg(zip)
+            .arg(to)
+            .output();
+        return match output {
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => Err(reason(&output)),
+            Err(error) => Err(error.to_string()),
+        };
+    }
+    unzip_in_app(zip, to).map_err(|error| error.to_string())
+}
+
+/// Unpacks the zip at `zip` into `to` in the app. Each path is kept inside
+/// `to`, and so is any link.
+fn unzip_in_app(zip: &Path, to: &Path) -> io::Result<()> {
+    let mut archive = ZipArchive::new(File::open(zip)?).map_err(io::Error::other)?;
+    archive.extract(to).map_err(io::Error::other)
 }
 
 /// Lets the file at `path` run. Windows runs programs by their name, and
@@ -251,12 +309,19 @@ fn place(prepared: &Path, target: &Path) -> io::Result<()> {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    fs::rename(prepared, target)
+    // A virus scanner may still have the programs just unpacked open.
+    crate::persist::rename(prepared, target)
 }
 
-/// Downloads `url` into the file `to` with curl.
+/// Downloads `url` into the file `to` with curl: macOS's own, and
+/// elsewhere the one on `PATH`, which Windows 10 and later ship.
 fn curl(url: &str, to: &Path) -> Result<(), String> {
-    let output = Command::new("/usr/bin/curl")
+    let program = if cfg!(target_os = "macos") {
+        "/usr/bin/curl"
+    } else {
+        "curl"
+    };
+    let output = emu_os::process::command(program)
         .args(["--silent", "--show-error", "--location"])
         .args([
             "--user-agent",
@@ -278,7 +343,7 @@ fn curl(url: &str, to: &Path) -> Result<(), String> {
         .args(["--write-out", "%{http_code}"])
         .arg(url)
         .output()
-        .map_err(|error| format!("could not run curl: {error}"))?;
+        .map_err(|error| emu_os::process::why_not_started("curl", &error))?;
     // A transfer cut short can still say 200; only curl's own status tells.
     if !output.status.success() {
         return Err(reason(&output));
@@ -555,7 +620,8 @@ fn randomize_in(
     hacks: &Path,
     work: &Path,
 ) -> Result<Made, String> {
-    let output = Command::new(randomizer.java())
+    // On Windows it opens no console window.
+    let output = emu_os::process::command(randomizer.java())
         // What FVX's own launcher gives it, which the 3DS games need.
         .arg("-Xmx4608M")
         // No Dock icon, nor any window.
@@ -845,27 +911,25 @@ mod tests {
         }
     }
 
-    /// A zip like FVX's: the jar, its data and its Java, none executable.
+    /// A zip like FVX's: the jar, its data and its Java, none executable,
+    /// with this system's name for its Java.
     fn fvx_zip(dir: &Path) -> PathBuf {
-        let source = dir.join("zip-source");
-        write(&source.join(JAR), b"not really a jar");
-        write(&source.join(JAVA), b"#!/bin/sh\n");
-        write(&source.join("java/lib/jspawnhelper"), b"helper");
-        write(&source.join("data/readme.txt"), b"names");
-        #[cfg(unix)]
-        for file in [JAVA, "java/lib/jspawnhelper"] {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(source.join(file), fs::Permissions::from_mode(0o644))
-                .expect("chmod");
+        let files: [(&str, &[u8]); 4] = [
+            (JAR, b"not really a jar"),
+            (JAVA, b"#!/bin/sh\n"),
+            ("java/lib/jspawnhelper", b"helper"),
+            ("data/readme.txt", b"names"),
+        ];
+        let mut writer = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        for (file, bytes) in files {
+            writer.start_file(file, options).expect("start");
+            io::Write::write_all(&mut writer, bytes).expect("write");
         }
         let zip = dir.join("fvx.zip");
-        let status = Command::new("/usr/bin/ditto")
-            .args(["-c", "-k"])
-            .arg(&source)
-            .arg(&zip)
-            .status()
-            .expect("ditto");
-        assert!(status.success());
+        fs::write(&zip, writer.finish().expect("finish").into_inner()).expect("zip written");
         zip
     }
 
@@ -881,10 +945,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "Linux, Windows: FVX's zip unpacks with macOS's ditto; needs FVX's Linux and Windows builds pinned (OS services stream)"
-    )]
     fn installs_from_its_download_with_its_java_executable() {
         let dir = temp_dir("install");
         let zip = fvx_zip(&dir);
@@ -893,6 +953,7 @@ mod tests {
         let pin = Download {
             url: &url,
             sha256: &sha,
+            megabytes: 1,
         };
         let data = dir.join("Randomizer");
         // An install the app quit during left this behind.
@@ -916,19 +977,69 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "Linux, Windows: FVX's zip unpacks with macOS's ditto; needs FVX's Linux and Windows builds pinned (OS services stream)"
-    )]
+    fn the_app_unpacks_a_zip_as_ditto_does() {
+        let dir = temp_dir("unzip");
+        let zip = fvx_zip(&dir);
+        let (in_app, with_unzip) = (dir.join("App"), dir.join("Unzip"));
+        unzip_in_app(&zip, &in_app).expect("unpacked in the app");
+        unzip(&zip, &with_unzip).expect("unpacked");
+        for file in [JAR, JAVA, "java/lib/jspawnhelper", "data/readme.txt"] {
+            assert_eq!(
+                fs::read(in_app.join(file)).expect("in the app"),
+                fs::read(with_unzip.join(file)).expect("unpacked"),
+                "{file}"
+            );
+        }
+        assert!(unzip(&dir.join("missing.zip"), &dir.join("Missing")).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn each_system_has_its_own_download() {
+        let pins = [
+            MAC_ARM64,
+            MAC_X86_64,
+            LINUX_X86_64,
+            LINUX_ARM64,
+            WINDOWS_X86_64,
+        ];
+        for pin in pins {
+            assert!(pin.url.contains("/vFVX1.6.2/"), "{}", pin.url);
+            assert_eq!(pin.sha256.len(), 64);
+            assert!(pin.megabytes > 30);
+        }
+        let urls: std::collections::HashSet<&str> = pins.iter().map(|pin| pin.url).collect();
+        assert_eq!(urls.len(), pins.len(), "one download each");
+        // Every system the app is built for has one.
+        assert!(PIN.is_some());
+        assert_eq!(UNSUPPORTED, None);
+        assert_eq!(Some(DOWNLOAD_MB), PIN.map(|pin| pin.megabytes));
+        let expected = if cfg!(windows) {
+            "java/bin/javaw.exe"
+        } else {
+            "java/bin/java"
+        };
+        assert_eq!(JAVA, expected);
+    }
+
+    #[test]
     fn a_download_that_is_not_the_one_pinned_installs_nothing() {
         let dir = temp_dir("digest");
         let zip = fvx_zip(&dir);
         let url = zip.to_string_lossy();
         let data = dir.join("Randomizer");
-        let error = install(&data, Download { url: &url, ..ARM64 }, &copy).expect_err("digest");
+        let error = install(
+            &data,
+            Download {
+                url: &url,
+                ..MAC_ARM64
+            },
+            &copy,
+        )
+        .expect_err("digest");
         assert!(error.starts_with("The randomizer's download is not the file expected"));
         assert_eq!(installed(&data), None);
-        let error = install(&data, ARM64, &|_, _| {
+        let error = install(&data, MAC_ARM64, &|_, _| {
             Err("Could not resolve host: github.com".to_owned())
         })
         .expect_err("offline");
@@ -950,7 +1061,7 @@ mod tests {
         let data = temp_dir("lock");
         let first = lock(&data).expect("lock");
         thread::scope(|scope| {
-            let second = scope.spawn(|| install(&data, ARM64, &never_fetch));
+            let second = scope.spawn(|| install(&data, MAC_ARM64, &never_fetch));
             thread::sleep(Duration::from_millis(100));
             assert!(!second.is_finished(), "the second install waits");
             write(&data.join(FOLDER).join(JAR), b"jar");
@@ -986,7 +1097,7 @@ echo "Randomized successfully!"
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+        ignore = "Windows: the stand-in for FVX's Java is a shell script; randomizes_for_real runs FVX itself"
     )]
     fn a_randomized_game_goes_into_the_hacks_folder_with_its_log() {
         let dir = temp_dir("randomize");
@@ -1028,7 +1139,7 @@ echo "Randomized successfully!"
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+        ignore = "Windows: the stand-in for FVX's Java is a shell script; randomizes_for_real runs FVX itself"
     )]
     fn the_randomizer_is_given_the_game_settings_and_seed() {
         let dir = temp_dir("arguments");
@@ -1066,7 +1177,7 @@ echo "Randomized successfully!"
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+        ignore = "Windows: the stand-in for FVX's Java is a shell script; randomizes_for_real runs FVX itself"
     )]
     fn a_refusal_says_what_the_randomizer_said() {
         let dir = temp_dir("refused");
@@ -1135,7 +1246,7 @@ echo "Randomized successfully!"
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+        ignore = "Windows: the stand-in for FVX's Java is a shell script; randomizes_for_real runs FVX itself"
     )]
     fn a_game_whose_log_cannot_be_kept_is_kept_without_it() {
         let dir = temp_dir("no-log");
@@ -1152,10 +1263,6 @@ echo "Randomized successfully!"
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Windows: the test can't set a folder's modified time this way (files stream)"
-    )]
     fn work_folders_left_by_runs_that_never_finished_are_cleared() {
         let temp = temp_dir("stale");
         let old = SystemTime::now() - 2 * STALE_WORK;
@@ -1166,9 +1273,7 @@ echo "Randomized successfully!"
             write(&folder.join("randomized.nds"), b"ROM");
         }
         for folder in [&stale, &other] {
-            File::open(folder)
-                .and_then(|folder| folder.set_modified(old))
-                .expect("age the folder");
+            crate::leftovers::set_modified(folder, old).expect("age the folder");
         }
         clear_stale_work(&temp);
         assert!(!stale.exists(), "an hour old: left behind");

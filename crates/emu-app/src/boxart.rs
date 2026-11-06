@@ -1,6 +1,7 @@
 //! Box art for the library: each game's No-Intro name from libretro's game
 //! databases, and its box art from thumbnails.libretro.com, both kept in
-//! the cache folder. Downloads go through `curl`, which macOS has.
+//! the cache folder. Downloads go through `curl`, which macOS and Windows
+//! have, and Linux systems nearly always do.
 //!
 //! A game gets a picture whenever libretro has one: its box art by its
 //! No-Intro name or by its title among the pictures libretro lists, or
@@ -16,13 +17,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, anyhow, bail};
+use emu_os::process::why_not_started;
 
 use crate::app_icon;
 use crate::game_db::{self, GameDb};
@@ -486,7 +487,7 @@ fn download(url: &str) -> anyhow::Result<Option<Vec<u8>>> {
 ///
 /// As [`download`].
 pub fn fetch(url: &str, max_seconds: u32) -> anyhow::Result<Option<Vec<u8>>> {
-    let output = Command::new("curl")
+    let output = emu_os::process::command("curl")
         .args(["--silent", "--show-error", "--location", "--compressed"])
         .args([
             "--user-agent",
@@ -497,7 +498,7 @@ pub fn fetch(url: &str, max_seconds: u32) -> anyhow::Result<Option<Vec<u8>>> {
         .args(["--output", "-", "--write-out", "\n%{http_code}"])
         .arg(url)
         .output()
-        .context("running curl")?;
+        .map_err(|error| anyhow!(why_not_started("curl", &error)))?;
     let mut body = output.stdout;
     let split = body.iter().rposition(|&b| b == b'\n').unwrap_or(0);
     let status = String::from_utf8_lossy(&body[split..]).trim().to_owned();

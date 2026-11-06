@@ -135,7 +135,9 @@ impl KeyStore {
 }
 
 /// Makes `folder` and its parents, the folder itself readable by its owner
-/// alone.
+/// alone. On Windows it sets nothing: the folder is in the user's own
+/// `%LOCALAPPDATA%`, which only they (and administrators) can read, and
+/// what is made inside it inherits that.
 fn private_folder(folder: &Path) -> io::Result<()> {
     fs::create_dir_all(folder)?;
     #[cfg(unix)]
@@ -147,7 +149,9 @@ fn private_folder(folder: &Path) -> io::Result<()> {
 }
 
 /// Writes `bytes` to `path` through a temporary file beside it, created
-/// readable by its owner alone, then renamed over `path`.
+/// readable by its owner alone (on Windows, by the user alone through the
+/// folder's own access list, as [`private_folder`] says), then renamed over
+/// `path`.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
