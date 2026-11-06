@@ -68,7 +68,7 @@ const PIN: Download<'static> = if cfg!(target_arch = "x86_64") {
 
 /// Why the randomizer can't run on this system, or `None` where it can:
 /// only FVX's Mac builds are pinned so far.
-const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
+pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
     None
 } else if cfg!(target_os = "linux") {
     Some("The randomizer isn't supported on Linux yet")
