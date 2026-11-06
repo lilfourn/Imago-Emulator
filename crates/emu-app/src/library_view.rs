@@ -107,8 +107,9 @@ const MENU_BORDER: f32 = 1.0;
 const MENU_PADDING: f32 = 6.0;
 const MENU_RADIUS: f32 = 12.0;
 const ROW_RADIUS: f32 = MENU_RADIUS - MENU_BORDER - MENU_PADDING;
-/// The menu's surface, a step above the panels it floats over.
-const MENU_BACKGROUND: u32 = 0x001E_2024;
+/// The menu's surface: Imago Light's paper, lifted off the tiles it
+/// floats over by its edge and shadow, so the theme's ink reads on it.
+const MENU_BACKGROUND: u32 = TOP;
 /// Height of an action in the menu, whose icon is as far in from the
 /// row's side as from its top and bottom: as far in as everything else in
 /// the menu.
@@ -2597,6 +2598,17 @@ fn position(shown: &[&Game], selected: Option<&Path>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_game_menus_words_read_on_its_surface() {
+        use crate::guide::palette::contrast;
+        let rgb =
+            |colour: u32| [16, 8, 0].map(|shift| f32::from((colour >> shift & 0xFF) as u8) / 255.0);
+        for (name, colour) in [("text", TEXT), ("dimmed", DIM), ("danger", DANGER)] {
+            let ratio = contrast(rgb(colour), rgb(MENU_BACKGROUND));
+            assert!(ratio >= 4.5, "{name} on the menu: {ratio:.2}:1");
+        }
+    }
 
     #[test]
     fn the_grid_fills_the_width_with_whole_tiles() {
