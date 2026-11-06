@@ -23,7 +23,7 @@ const PATCHES: [&str; 5] = ["ips", "ups", "bps", "xdelta", "vcdiff"];
 /// Where games made from patches are kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Hacks` on macOS.
 pub fn hacks_dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("ds-emulator").join("Hacks"))
+    Some(emu_os::data_dir()?.join("ds-emulator").join("Hacks"))
 }
 
 /// Whether `path` is a ROM-hack patch, judged by its extension.

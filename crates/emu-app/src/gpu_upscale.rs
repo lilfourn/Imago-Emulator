@@ -21,6 +21,8 @@ pub use imp::{Gpu, GpuDevice};
 
 /// One screen to upscale: `frame`, with `cell` of its pixels to a console
 /// pixel, enlarged by `method` to `width` × `height`.
+// Only the Metal half reads it all.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     /// The screen as the core drew it, colour corrected and turned.
@@ -50,6 +52,8 @@ pub enum Method {
 }
 
 /// Why the GPU could not upscale.
+// Off macOS there is never a device, so only `NoDevice` is made.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GpuError {
     /// The Mac has no Metal device, or this is not a Mac.

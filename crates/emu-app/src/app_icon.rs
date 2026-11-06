@@ -66,7 +66,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: reads a Mac app's icon with plutil and sips (RPG Maker stream)"
+    )]
     fn the_icon_named_in_info_plist_is_saved_as_a_png() {
         let dir = temp_dir("app-icon");
         let app = dir.join("Game.app");

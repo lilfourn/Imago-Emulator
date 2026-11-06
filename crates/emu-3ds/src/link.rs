@@ -457,7 +457,9 @@ mod tests {
     use super::*;
     use emu_core::rgb;
 
-    /// A helper that says hello in this protocol's version, then exits.
+    /// A helper that says hello in this protocol's version, then exits: a
+    /// shell script, so on Unix only.
+    #[cfg(unix)]
     fn helper_that_dies(dir: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let [low, high] = VERSION.to_le_bytes();
@@ -472,6 +474,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn once_the_helper_has_gone_every_request_fails_with_why() {
         let dir = std::env::temp_dir().join(format!("emu-3ds-link-gone-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

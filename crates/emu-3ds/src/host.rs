@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_uint, c_void};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
+#[cfg(unix)]
 use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
@@ -280,6 +281,7 @@ fn take_console(data: &Path) -> Option<File> {
 /// Takes the protocol's end of stdout, and sends what anything else in the
 /// process prints there (the core, MoltenVK) to stderr, the helper's log,
 /// so it cannot break the link.
+#[cfg(unix)]
 fn take_stdout() -> io::Result<File> {
     // SAFETY: dup and dup2 take plain file descriptors and change no
     // memory; 1 and 2 are open for the life of the process.
@@ -295,13 +297,27 @@ fn take_stdout() -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(link) })
 }
 
+/// Windows has no helper yet ([`crate::UNSUPPORTED`]): keeping the core's
+/// printing off the link there needs its standard handles, not the C
+/// runtime's descriptors.
+#[cfg(not(unix))]
+fn take_stdout() -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        crate::UNSUPPORTED.unwrap_or("the 3DS helper can't run here"),
+    ))
+}
+
 /// Gives the calling thread the user-interactive quality of service, the
 /// class of the app's window and emulation thread. A thread starts at
 /// macOS's default class whatever thread starts it, and waits behind
 /// interactive work, wakes late and may run on the efficiency cores; the
 /// thread running the core and the one reading its frames into the app
-/// are both on the way to every frame shown.
+/// are both on the way to every frame shown. Elsewhere it does nothing:
+/// other systems have no such classes, and their schedulers don't hold a
+/// new thread back.
 pub(crate) fn interactive_thread() {
+    #[cfg(target_os = "macos")]
     // SAFETY: this sets the calling thread's own scheduling class; it
     // touches no memory, and a refusal leaves the thread as it was.
     unsafe {
@@ -335,10 +351,12 @@ fn serve(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> io::Result<(
         &[&link::VERSION.to_le_bytes(), renderer.as_bytes()],
     )?;
     let mut payload = Vec::new();
+    #[cfg(target_os = "macos")]
     let mut role = Role::of_parent();
     while let Some(kind) = link::read_message(&mut requests, &mut payload)? {
         match kind {
             link::RUN => {
+                #[cfg(target_os = "macos")]
                 role.follow();
                 let pad = Pad::decode(&payload).unwrap_or_default();
                 match session.run(pad) {
@@ -397,12 +415,14 @@ fn serve(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> io::Result<(
 /// role, which runs them on efficiency cores with their timers held back,
 /// as it did RPG Maker's hidden player (decision 0008). A process may set
 /// the role of another of its user's, so the helper takes the app's
-/// every few frames.
+/// every few frames. Roles and Game Mode are macOS's alone.
+#[cfg(target_os = "macos")]
 struct Role {
     app: libc::pid_t,
     frames: u32,
 }
 
+#[cfg(target_os = "macos")]
 impl Role {
     /// `PRIO_DARWIN_ROLE`, from `<sys/resource_private.h>`.
     const PRIO_DARWIN_ROLE: libc::c_int = 6;

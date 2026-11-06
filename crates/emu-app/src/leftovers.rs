@@ -327,6 +327,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the test can't set a folder's modified time this way (files stream)"
+    )]
     fn what_an_app_that_quit_left_behind_is_removed() {
         let temp = temp_dir("left");
         // A folder whose lock nobody holds, as when the app was killed.
@@ -389,6 +393,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: a shell script stands in for tar, stopped with pkill (OS services stream)"
+    )]
     fn a_tar_still_unpacking_into_a_folder_left_behind_is_stopped() {
         let temp = temp_dir("tar");
         let left = temp.join(format!("ds-emulator-unpack-{}-99", std::process::id()));

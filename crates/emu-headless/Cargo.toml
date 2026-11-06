@@ -12,6 +12,7 @@ crc32fast.workspace = true
 emu-3ds.workspace = true
 emu-core.workspace = true
 emu-cores.workspace = true
+emu-os.workspace = true
 emu-script.workspace = true
 emu-state.workspace = true
 

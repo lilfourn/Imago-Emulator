@@ -21,7 +21,6 @@
 use std::fs::{self, File};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -67,6 +66,18 @@ const PIN: Download<'static> = if cfg!(target_arch = "x86_64") {
     ARM64
 };
 
+/// Why the randomizer can't run on this system, or `None` where it can:
+/// only FVX's Mac builds are pinned so far.
+const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
+    None
+} else if cfg!(target_os = "linux") {
+    Some("The randomizer isn't supported on Linux yet")
+} else if cfg!(windows) {
+    Some("The randomizer isn't supported on Windows yet")
+} else {
+    Some("The randomizer isn't supported on this system yet")
+};
+
 /// About how many megabytes the download is, for the app to say so first.
 pub const DOWNLOAD_MB: u32 = if cfg!(target_arch = "x86_64") { 43 } else { 41 };
 
@@ -88,7 +99,7 @@ const DOWNLOAD_SECONDS: &str = "1200";
 /// Where the randomizer is kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Randomizer` on macOS.
 pub fn data_dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("ds-emulator").join("Randomizer"))
+    Some(emu_os::data_dir()?.join("ds-emulator").join("Randomizer"))
 }
 
 /// An installed FVX.
@@ -121,9 +132,12 @@ pub fn installed(data: &Path) -> Option<Randomizer> {
 ///
 /// # Errors
 ///
-/// Says why, if the download fails or is not the file pinned here, or a
-/// file cannot be written.
+/// Says why, if the randomizer can't run on this system, the download
+/// fails or is not the file pinned here, or a file cannot be written.
 pub fn ensure(data: &Path) -> Result<Randomizer, String> {
+    if let Some(why) = UNSUPPORTED {
+        return Err(why.to_owned());
+    }
     match installed(data) {
         Some(randomizer) => Ok(randomizer),
         None => install(data, PIN, &curl),
@@ -187,11 +201,26 @@ fn unpack_download(temp: &Path, pin: Download<'_>, fetch: Fetch<'_>) -> Result<P
     for program in EXECUTABLES {
         let path = unpacked.join(program);
         if path.is_file() {
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            make_executable(&path)
                 .map_err(|error| format!("Cannot install the randomizer: {error}"))?;
         }
     }
     Ok(unpacked)
+}
+
+/// Lets the file at `path` run. Windows runs programs by their name, and
+/// has no such bit.
+fn make_executable(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// Takes the lock on installing into `data`, waiting for any other
@@ -679,8 +708,17 @@ mod tests {
         fs::write(path, bytes).expect("write");
     }
 
-    fn mode(path: &Path) -> u32 {
-        fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+    /// Checks the Unix permissions of the file at `path`. Windows files have
+    /// none to check.
+    fn assert_mode(path: &Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let found = fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(found, mode, "{path:?}");
+        }
+        #[cfg(not(unix))]
+        let _ = (path, mode);
     }
 
     /// The first `0x150` bytes of a ROM with `bytes` at `at`.
@@ -818,7 +856,9 @@ mod tests {
         write(&source.join(JAVA), b"#!/bin/sh\n");
         write(&source.join("java/lib/jspawnhelper"), b"helper");
         write(&source.join("data/readme.txt"), b"names");
+        #[cfg(unix)]
         for file in [JAVA, "java/lib/jspawnhelper"] {
+            use std::os::unix::fs::PermissionsExt as _;
             fs::set_permissions(source.join(file), fs::Permissions::from_mode(0o644))
                 .expect("chmod");
         }
@@ -845,6 +885,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: FVX's zip unpacks with macOS's ditto; needs FVX's Linux and Windows builds pinned (OS services stream)"
+    )]
     fn installs_from_its_download_with_its_java_executable() {
         let dir = temp_dir("install");
         let zip = fvx_zip(&dir);
@@ -865,11 +909,8 @@ mod tests {
             fs::read(randomizer.jar()).expect("jar"),
             b"not really a jar"
         );
-        assert_eq!(mode(&randomizer.java()), 0o755);
-        assert_eq!(
-            mode(&data.join(FOLDER).join("java/lib/jspawnhelper")),
-            0o755
-        );
+        assert_mode(&randomizer.java(), 0o755);
+        assert_mode(&data.join(FOLDER).join("java/lib/jspawnhelper"), 0o755);
         assert!(data.join(FOLDER).join("data/readme.txt").is_file());
         assert!(!data.join(".install-1").exists());
         assert_eq!(installed(&data), Some(randomizer.clone()));
@@ -879,6 +920,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: FVX's zip unpacks with macOS's ditto; needs FVX's Linux and Windows builds pinned (OS services stream)"
+    )]
     fn a_download_that_is_not_the_one_pinned_installs_nothing() {
         let dir = temp_dir("digest");
         let zip = fvx_zip(&dir);
@@ -927,7 +972,7 @@ mod tests {
         let folder = dir.join(FOLDER);
         write(&folder.join(JAR), b"jar");
         write(&folder.join(JAVA), script.as_bytes());
-        fs::set_permissions(folder.join(JAVA), fs::Permissions::from_mode(0o755)).expect("chmod");
+        make_executable(&folder.join(JAVA)).expect("chmod");
         Randomizer { folder }
     }
 
@@ -943,6 +988,10 @@ echo "Randomized successfully!"
 "#;
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn a_randomized_game_goes_into_the_hacks_folder_with_its_log() {
         let dir = temp_dir("randomize");
         let randomizer = fake_randomizer(&dir, WRITES_A_GAME);
@@ -981,6 +1030,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn the_randomizer_is_given_the_game_settings_and_seed() {
         let dir = temp_dir("arguments");
         // Keeps its work folder's files, to read them back.
@@ -1015,6 +1068,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn a_refusal_says_what_the_randomizer_said() {
         let dir = temp_dir("refused");
         // As FVX 1.6.2 says it, on its output, with how to use it after.
@@ -1080,6 +1137,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script (OS services stream)"
+    )]
     fn a_game_whose_log_cannot_be_kept_is_kept_without_it() {
         let dir = temp_dir("no-log");
         let script = WRITES_A_GAME.replace("printf 'Random Seed: 123456' > \"$out.gbc.log\"\n", "");
@@ -1095,6 +1156,10 @@ echo "Randomized successfully!"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the test can't set a folder's modified time this way (files stream)"
+    )]
     fn work_folders_left_by_runs_that_never_finished_are_cleared() {
         let temp = temp_dir("stale");
         let old = SystemTime::now() - 2 * STALE_WORK;
@@ -1129,7 +1194,7 @@ echo "Randomized successfully!"
         let data = std::env::var_os("DS_EMULATOR_RANDOMIZER_DATA")
             .map_or_else(|| temp_dir("real"), PathBuf::from);
         let randomizer = ensure(&data).expect("install");
-        assert_eq!(mode(&randomizer.java()), 0o755);
+        assert_mode(&randomizer.java(), 0o755);
         assert!(
             generation(&rom).is_some(),
             "{} is not a game FVX knows",

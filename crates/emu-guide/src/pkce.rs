@@ -3,8 +3,7 @@
 //! the authorization URL. A code the browser brings back is worth a key
 //! only with the verifier, so a code caught on the way is useless.
 
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -14,10 +13,10 @@ use sha2::{Digest, Sha256};
 ///
 /// # Errors
 ///
-/// Fails if `/dev/urandom` cannot be read.
+/// Fails if the system has no random generator to read.
 pub fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
     let mut bytes = [0; N];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::fill(&mut bytes)?;
     Ok(bytes)
 }
 

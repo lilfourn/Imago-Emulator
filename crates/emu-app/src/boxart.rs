@@ -48,7 +48,7 @@ const ICON_SCALE: u32 = 4;
 /// Where downloaded databases, box art and DS icons are kept, e.g.
 /// `~/Library/Caches/ds-emulator` on macOS.
 pub fn cache_dir() -> Option<PathBuf> {
-    Some(dirs::cache_dir()?.join("ds-emulator"))
+    Some(emu_os::cache_dir()?.join("ds-emulator"))
 }
 
 /// Where the box art of the ROM with checksum `crc32` is kept.

@@ -85,7 +85,7 @@ impl OpenRouter {
             return shared.0.clone();
         }
         let store = KeyStore::new(
-            dirs::data_dir()
+            emu_os::data_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("ds-emulator")
                 .join("OpenRouter"),

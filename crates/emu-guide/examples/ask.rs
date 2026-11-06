@@ -73,7 +73,11 @@ fn main() {
         kind,
         play_time: None,
     };
-    let folder = dirs_home().join("Library/Application Support/ds-emulator/OpenRouter");
+    // Where the app keeps it (`emu-app`'s `openrouter`).
+    let folder = emu_os::data_dir()
+        .expect("a home folder")
+        .join("ds-emulator")
+        .join("OpenRouter");
     let key = KeyStore::new(folder)
         .load()
         .expect("connect OpenRouter in the app first");
@@ -154,8 +158,4 @@ fn pictures_in(block: &Block) -> Vec<&emu_guide::markdown::Picture> {
         Block::Quote(blocks) => blocks.iter().flat_map(pictures_in).collect(),
         _ => Vec::new(),
     }
-}
-
-fn dirs_home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").expect("HOME"))
 }

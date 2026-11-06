@@ -23,6 +23,9 @@
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
+#[cfg(not(unix))]
+use std::net::{TcpListener as UnixListener, TcpStream as UnixStream};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -66,6 +69,7 @@ pub struct Hello {
 /// # Errors
 ///
 /// Fails if the socket cannot be made.
+#[cfg(unix)]
 pub fn listen(path: &Path) -> io::Result<UnixListener> {
     match std::fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
@@ -74,6 +78,22 @@ pub fn listen(path: &Path) -> io::Result<UnixListener> {
     let listener = UnixListener::bind(path)?;
     listener.set_nonblocking(true)?;
     Ok(listener)
+}
+
+/// Fails: std has no Unix sockets off Unix, so the link there is still to
+/// come ([`crate::UNSUPPORTED`]). Until it does, a TCP socket's types stand
+/// in for the Unix socket's, so that the rest builds.
+///
+/// # Errors
+///
+/// Always.
+#[cfg(not(unix))]
+pub fn listen(path: &Path) -> io::Result<UnixListener> {
+    let _ = path;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        crate::UNSUPPORTED.unwrap_or("the game's link needs a Unix socket"),
+    ))
 }
 
 /// Waits up to `timeout` for the bridge to connect to `listener`.
@@ -227,7 +247,8 @@ impl Link {
     }
 }
 
-#[cfg(test)]
+// Over Unix sockets, so on Unix only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

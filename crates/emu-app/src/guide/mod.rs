@@ -293,7 +293,7 @@ impl GuidePanel {
             cx.observe(&openrouter, |_, _, cx| cx.notify()),
         ];
         let store = ChatStore::new(
-            dirs::data_dir()
+            emu_os::data_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("ds-emulator")
                 .join("Guide"),

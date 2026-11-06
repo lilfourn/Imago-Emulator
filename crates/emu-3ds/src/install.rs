@@ -22,7 +22,6 @@
 
 use std::fs::{self, File};
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -372,7 +371,22 @@ impl Download<'_> {
             });
         }
         fs::rename(&from, to)?;
-        fs::set_permissions(to, fs::Permissions::from_mode(mode))?;
+        set_mode(to, mode)?;
+        Ok(())
+    }
+}
+
+/// Gives the file at `path` the Unix permissions `mode`. Windows files have
+/// no such bits, and need none to be loaded.
+pub(crate) fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
         Ok(())
     }
 }
@@ -565,8 +579,17 @@ mod tests {
         panic!("fetched {url}");
     }
 
-    fn mode(path: &Path) -> u32 {
-        fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+    /// Checks the Unix permissions of the file at `path`. Windows files have
+    /// none to check.
+    fn assert_mode(path: &Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let found = fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(found, mode, "{path:?}");
+        }
+        #[cfg(not(unix))]
+        let _ = (path, mode);
     }
 
     fn leftovers(data: &Path) -> Vec<String> {
@@ -634,6 +657,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: zips unpack with macOS's ditto; the 3DS stream picks how Azahar's Linux and Windows cores unpack"
+    )]
     fn a_zip_unpacks_whole() {
         let dir = temp_dir("zip");
         let zip = core_zip(&dir);
@@ -645,6 +672,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: MoltenVK's tar unpacks with /usr/bin/tar, and only macOS needs MoltenVK (3DS stream)"
+    )]
     fn a_tar_unpacks_only_the_files_kept() {
         let dir = temp_dir("tar");
         let tar = moltenvk_tar(&dir);
@@ -663,6 +694,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: zips unpack with macOS's ditto; the 3DS stream picks how Azahar's Linux and Windows cores unpack"
+    )]
     fn an_archive_without_the_library_is_refused() {
         let dir = temp_dir("missing");
         let source = dir.join("source");
@@ -698,6 +733,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: zips unpack with macOS's ditto; the 3DS stream picks how Azahar's Linux and Windows cores unpack"
+    )]
     fn installs_from_downloads_and_keeps_only_the_parts() {
         let dir = temp_dir("local");
         let (zip, tar) = (core_zip(&dir), moltenvk_tar(&dir));
@@ -712,8 +751,8 @@ mod tests {
         assert_eq!(parts, PINS.parts(&data));
         assert_eq!(fs::read(&parts.core).expect("core"), CORE_BYTES);
         assert_eq!(fs::read(&parts.moltenvk).expect("MoltenVK"), MOLTENVK_BYTES);
-        assert_eq!(mode(&parts.core), 0o755);
-        assert_eq!(mode(&parts.moltenvk), 0o755);
+        assert_mode(&parts.core, 0o755);
+        assert_mode(&parts.moltenvk, 0o755);
         let license = data.join("moltenvk-1.4.2/LICENSE");
         assert_eq!(fs::read(&license).expect("license"), LICENSE_BYTES);
         let mut kept: Vec<_> = fs::read_dir(data.join("moltenvk-1.4.2"))
@@ -742,6 +781,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: zips unpack with macOS's ditto; the 3DS stream picks how Azahar's Linux and Windows cores unpack"
+    )]
     fn a_failed_install_leaves_nothing_behind() {
         let dir = temp_dir("failed");
         let (zip, tar) = (core_zip(&dir), moltenvk_tar(&dir));
@@ -803,7 +846,7 @@ mod tests {
                 matches!(magic, 0xFEED_FACF | 0xBEBA_FECA),
                 "{library:?}: {magic:#x}"
             );
-            assert_eq!(mode(library), 0o755);
+            assert_mode(library, 0o755);
         }
         assert!(data.join("moltenvk-1.4.2/LICENSE").is_file());
         assert_eq!(installed(&data), Some(parts.clone()));
@@ -815,7 +858,7 @@ mod tests {
             assert!(!fix.wanted(&parts.core).expect("wanted"), "fixed");
             run("/usr/bin/codesign", &[Path::new("--verify"), &parts.core]);
         }
-        assert_eq!(mode(&parts.core), 0o755);
+        assert_mode(&parts.core, 0o755);
         fs::remove_dir_all(&data).ok();
     }
 }

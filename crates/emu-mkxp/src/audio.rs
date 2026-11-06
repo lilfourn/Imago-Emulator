@@ -9,8 +9,9 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -119,8 +120,9 @@ impl Drop for Capture {
     fn drop(&mut self) {
         // A reader still waiting for the player to open the pipe gets in
         // and finds it closed. Opening without waiting fails if no one
-        // reads, when there is nothing to stop.
-        OpenOptions::new()
+        // reads, when there is nothing to stop. Only Unix has such pipes.
+        #[cfg(unix)]
+        fs::OpenOptions::new()
             .write(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(&self.pipe)
@@ -227,6 +229,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
     use std::io::Write;
 
     use super::*;
@@ -263,6 +266,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: no mkfifo; the RPG Maker stream picks how the player's sound comes back"
+    )]
     fn sound_written_to_the_pipe_comes_out_as_samples() {
         let dir = crate::tests::temp_dir("sound");
         let pipe = dir.join("sound.fifo");
@@ -296,6 +303,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: no mkfifo; the RPG Maker stream picks how the player's sound comes back"
+    )]
     fn a_tap_hears_the_sound_as_it_comes_and_the_frames_still_get_it() {
         use std::sync::mpsc;
         use std::time::Duration;
@@ -327,6 +338,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: no mkfifo; the RPG Maker stream picks how the player's sound comes back"
+    )]
     fn stopping_before_the_player_opens_the_pipe_does_not_hang() {
         let dir = crate::tests::temp_dir("no-sound");
         let capture =

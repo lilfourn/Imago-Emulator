@@ -116,7 +116,12 @@ fn roms_with_extension(directory: &str, extension: &str) -> Vec<String> {
                 let relative = path
                     .strip_prefix(bundle_root())
                     .expect("under the bundle root");
-                found.push(relative.to_string_lossy().into_owned());
+                // `/` on every system, as test-roms-passing.txt has them.
+                let parts: Vec<_> = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect();
+                found.push(parts.join("/"));
             }
         }
     }

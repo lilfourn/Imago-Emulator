@@ -35,7 +35,7 @@ const ARCHIVES: [&str; 3] = ["zip", "7z", "rar"];
 /// Where unpacked games are kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Games` on macOS.
 pub fn games_dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("ds-emulator").join("Games"))
+    Some(emu_os::data_dir()?.join("ds-emulator").join("Games"))
 }
 
 /// Where patches unpacked from archives are kept until their games are
@@ -600,6 +600,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: .7z and .rar unpack with macOS's /usr/bin/tar (libarchive), which GNU tar and Windows lack (OS services stream)"
+    )]
     fn unpacks_7_zip_files_with_tar() {
         let _scratch = scratch_lock();
         let dir = temp_dir("unpack-7z");
@@ -643,6 +647,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: .7z and .rar unpack with macOS's /usr/bin/tar (libarchive), which GNU tar and Windows lack (OS services stream)"
+    )]
     fn unpacks_3ds_games_up_to_a_3ds_cartridge_s_size() {
         let _scratch = scratch_lock();
         let dir = temp_dir("unpack-3ds");

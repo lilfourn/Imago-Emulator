@@ -350,7 +350,11 @@ pub fn checkpoint_path(game: &Game) -> PathBuf {
 /// Where the library file lives, next to the settings, e.g.
 /// `~/Library/Application Support/ds-emulator/library.toml` on macOS.
 pub fn default_path() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("ds-emulator").join("library.toml"))
+    Some(
+        emu_os::config_dir()?
+            .join("ds-emulator")
+            .join("library.toml"),
+    )
 }
 
 /// Why a library file was rejected.
@@ -583,6 +587,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the test expects a Unix absolute path (files stream)"
+    )]
     fn relative_paths_become_absolute_from_the_current_folder() {
         let here = std::env::current_dir().expect("a current folder");
         assert_eq!(absolute(Path::new("roms/a.gba")), here.join("roms/a.gba"));

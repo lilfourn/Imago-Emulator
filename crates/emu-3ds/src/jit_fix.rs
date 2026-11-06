@@ -26,8 +26,7 @@
 //! original by a rename, so a helper still running the original keeps it.
 
 use std::fs::{self, File};
-use std::io;
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -73,8 +72,9 @@ impl Fix<'_> {
     /// time a game opens.
     pub(crate) fn wanted(&self, path: &Path) -> io::Result<bool> {
         let mut word = [0; 4];
-        let at = self.words[0] as u64;
-        match File::open(path)?.read_exact_at(&mut word, at) {
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(self.words[0] as u64))?;
+        match file.read_exact(&mut word) {
             Ok(()) => Ok(u32::from_le_bytes(word) == self.from),
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
             Err(error) => Err(error),
@@ -89,7 +89,7 @@ impl Fix<'_> {
         };
         let temp = path.with_extension("fixing");
         fs::write(&temp, fixed)?;
-        fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))?;
+        crate::install::set_mode(&temp, 0o755)?;
         fs::rename(&temp, path)?;
         Ok(true)
     }
@@ -126,7 +126,6 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use std::path::PathBuf;
 
     const FROM: u32 = 0x72AF_C428;
@@ -216,10 +215,12 @@ mod tests {
 
         assert!(fix.apply(&path).expect("apply"));
         assert_eq!(fs::read(&path).expect("read"), fixed_by_hand());
-        assert_eq!(
-            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
-            0o755
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
         let mut kept = Vec::new();
         running.read_to_end(&mut kept).expect("read the original");
         assert_eq!(kept, library());
