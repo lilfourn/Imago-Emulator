@@ -102,5 +102,12 @@ objc2-metal-fx = { version = "0.3", default-features = false, features = [
 ] }
 raw-window-handle = "0.6"
 
+# The Windows exe's icon and version information (build.rs); the version
+# GPUI already uses for its manifest. A build dependency's platform is the
+# machine building, which for this must be Windows, where the resource
+# compiler is.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
 [lints]
 workspace = true

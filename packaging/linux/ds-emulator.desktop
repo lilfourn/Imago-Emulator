@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Imago Emulator
+GenericName=Game Emulator
+Comment=Play Game Boy, Game Boy Advance, Nintendo DS and Nintendo 3DS games and homebrew
+Exec=ds-emulator %F
+Icon=ds-emulator
+Terminal=false
+Categories=Game;Emulator;
+Keywords=Game Boy;Game Boy Color;Game Boy Advance;GBA;Nintendo DS;NDS;3DS;homebrew;emulator;
+MimeType=application/x-gameboy-rom;application/x-gameboy-color-rom;application/x-gba-rom;application/x-nintendo-ds-rom;application/x-nintendo-3ds-rom;application/x-nintendo-3ds-executable;
+StartupWMClass=ds-emulator
+StartupNotify=true
