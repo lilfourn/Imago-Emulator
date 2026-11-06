@@ -1,16 +1,20 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# ds-emulator
+# Imago Emulator
 
-A Game Boy, Game Boy Color, Game Boy Advance and Nintendo DS emulator for
-macOS, written in Rust with a [GPUI](https://gpui.rs) frontend. The goal is to
-play the Pokémon games of generations 1–5 from your own cartridge dumps.
+[Imago Emulator](https://imagoemulator.com) is a Game Boy, Game Boy Color,
+Game Boy Advance and Nintendo DS emulator for Macs with Apple silicon and
+macOS 13 or later, written in Rust with a [GPUI](https://gpui.rs) frontend. It plays games
+from your own cartridge dumps, and free homebrew from its built-in store.
 3DS games play too, on Azahar's core, which the app downloads the first
 time ([below](#3ds-games)).
 
+The app is free; its source is private ([license](#legal)). Imago Emulator
+is not affiliated with, endorsed by or sponsored by Nintendo.
+
 **Status: Phase 4 (Nintendo DS).** The DS core direct-boots retail games
-with an HLE BIOS. Pokémon White plays from power-on through a new game to
-Route 1, and its in-game save survives a restart. It has:
+with an HLE BIOS. A retail game plays from power-on through a new game, and
+its in-game save survives a restart. It has:
 - an ARM946E-S and an ARM7TDMI in lockstep, with IPC;
 - both 2D engines and a software 3D engine with anti-aliasing, which can
   draw at up to 8× its resolution;
@@ -18,8 +22,8 @@ Route 1, and its in-game save survives a restart. It has:
 - the game card with flash saves;
 - the GBA slot, which reads a GBA game and its save for Pal Park;
 - the touchscreen, microphone, firmware and RTC;
-- the Wi-Fi chip, for local wireless between two DSes: two Pokémon Whites
-  trade in the Union Room.
+- the Wi-Fi chip, for local wireless between two DSes: two copies of a game
+  trade over it.
 It passes every test in RockPolish's rockwrestler and every page of
 armwrestler for the DS.
 
@@ -30,7 +34,7 @@ in the colours a Game Boy Color gives them. The Game Boy Advance core has:
 - an ARM7TDMI that passes all 2.25 million SingleStepTests cases;
 - video, sound, DMA, timers and an HLE BIOS;
 - SRAM, Flash and EEPROM saves;
-- the Pokémon real-time clock;
+- the cartridge real-time clock (Seiko S-3511);
 - a link cable.
 It passes every jsmolka test ROM it runs, including the save tests, and
 every page of armwrestler. It passes 6,968 of the mGBA test suite's 6,998
@@ -47,12 +51,12 @@ own dumps. The app has:
   3DS games, demos, music carts and tools, each added to the library in
   one click;
 - ROM hacks, from IPS, UPS, BPS and xdelta patches;
-- randomized Pokémon games, made from your own copies of Red to White 2;
+- a randomizer, which makes new versions of the games it supports from
+  your own copies;
 - cheats;
 - Lua scripts that read and write memory, press buttons and draw over the
   screens;
-- RPG Maker games, such as Pokémon Essentials fan games, played through
-  mkxp-z in the app's window;
+- RPG Maker XP games, played through mkxp-z in the app's window;
 - a debugger: breakpoints and watchpoints on every CPU, disassembly,
   registers, a memory editor, graphics viewers, I/O registers and the
   scheduler's queue.
@@ -67,9 +71,9 @@ See the [roadmap](docs/ROADMAP.md).
 - [Scripting](docs/scripting.md): the Lua functions scripts can call
 - [Design system](docs/design-system.md): the app's layout rules, and the checks that hold it to them
 - [Games we can't run](docs/research/games-we-cant-run.md): store games and homebrew for other systems that the cores can't run yet, with leads
-- [Fan-made Pokémon games](docs/research/fan-games.md): famous ROM hacks, randomizers and PC fan games, what each needs, and the plan to run them all
+- [Fan games](docs/research/fan-games.md): famous ROM hacks, randomizers and PC fan games, what each needs, and the plan to run them all
 - [3DS games](docs/research/3ds.md): what hosting Azahar's core takes, what was measured, and what is left
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store, 3DS games, the randomizer
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store, 3DS games, the randomizer, the public release
 
 ## Build and run
 
@@ -565,7 +569,7 @@ not read ([decision 0009](docs/decisions/0009-rom-hack-patches.md)).
 
 ## Randomizer
 
-File > Randomize Pokémon Game… (⌘⌥R), or Randomize… in a Pokémon game's
+File > Randomize Game… (⌘⌥R), or Randomize… in a Pokémon game's
 menu in the library, makes a randomized copy of the game: the same game with new
 wild Pokémon, trainers, starters and more. It runs the [Universal Pokémon Randomizer
 FVX](https://github.com/upr-fvx/universal-pokemon-randomizer-fvx), the
@@ -746,6 +750,20 @@ commit's build.
 | `emu-app` | The GPUI app (`ds-emulator` binary) |
 
 ## Legal
+
+Imago Emulator is copyright © 2026 Luke Fournier, all rights reserved. Its
+source is private. The app is free to download and use under the terms in
+[LICENSE](LICENSE), which ships in the app and on its disk image. The
+open-source components built into it are listed, with their licenses, in
+its About panel; `scripts/macos/release.sh` writes that list from
+`Cargo.lock` with `cargo-about` (decision
+[0016](docs/decisions/0016-public-release.md)).
+
+Nintendo, Game Boy, Game Boy Color, Game Boy Advance, Nintendo DS and
+Nintendo 3DS are trademarks of Nintendo. Imago Emulator is not affiliated
+with, endorsed by or sponsored by Nintendo. Pages meant for the public (the
+site, store listings, release notes) describe the systems the app plays and
+show homebrew, never a commercial game's name, art or screenshots.
 
 This project contains no Nintendo code, BIOS, firmware or games, and never
 will. Dump your own cartridges and system files from hardware you own. Don't

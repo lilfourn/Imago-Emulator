@@ -1,4 +1,4 @@
-//! The randomize window, from File > Randomize Pokémon Game…: which of the
+//! The randomize window, from File > Randomize Game…: which of the
 //! library's Pokémon games to randomize and how, then a new game made from
 //! it with the Universal Pokémon Randomizer FVX (see `randomizer`), added
 //! to the library beside its spoiler log, ready to play.

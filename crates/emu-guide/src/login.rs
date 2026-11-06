@@ -73,8 +73,8 @@ pub enum LoginError {
 /// list, so keys from different Macs stay apart.
 pub fn label(device: &str) -> String {
     match device.trim() {
-        "" => "DS Emulator".to_owned(),
-        device => format!("DS Emulator \u{b7} {device}"),
+        "" => "Imago Emulator".to_owned(),
+        device => format!("Imago Emulator \u{b7} {device}"),
     }
 }
 
@@ -246,7 +246,7 @@ impl Page {
             Self::Connected => (
                 "OpenRouter connected",
                 "OpenRouter is connected",
-                "DS Emulator can now ask OpenRouter's models about your games. \
+                "Imago Emulator can now ask OpenRouter's models about your games. \
                  You can close this tab."
                     .to_owned(),
             ),
@@ -254,7 +254,7 @@ impl Page {
                 not_connected.0,
                 not_connected.1,
                 "You declined access. To connect later, choose Connect OpenRouter \
-                 in DS Emulator's settings."
+                 in Imago Emulator's settings."
                     .to_owned(),
             ),
             Self::Failed(reason) => {
@@ -262,7 +262,7 @@ impl Page {
                 (
                     not_connected.0,
                     not_connected.1,
-                    format!("{reason}{stop} Try again from DS Emulator's settings."),
+                    format!("{reason}{stop} Try again from Imago Emulator's settings."),
                 )
             }
             Self::NotFound => ("Not found", "Not found", String::new()),
@@ -333,8 +333,8 @@ mod tests {
 
     #[test]
     fn a_key_is_labelled_with_its_mac() {
-        assert_eq!(label(" Luke's Mac \n"), "DS Emulator · Luke's Mac");
-        assert_eq!(label(""), "DS Emulator");
+        assert_eq!(label(" Luke's Mac \n"), "Imago Emulator · Luke's Mac");
+        assert_eq!(label(""), "Imago Emulator");
     }
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
             let outcome = connect(
                 &endpoints,
                 &store,
-                "DS Emulator · Test",
+                "Imago Emulator · Test",
                 timeout,
                 &flag,
                 |p| {
@@ -431,7 +431,7 @@ mod tests {
         });
         let store = store("granted");
         let (url, _, flow) = start(endpoints, store.clone(), TIMEOUT);
-        assert!(url.contains("key_label=DS%20Emulator%20%C2%B7%20Test"));
+        assert!(url.contains("key_label=Imago%20Emulator%20%C2%B7%20Test"));
         let (port, challenge) = port_and_challenge(&url);
 
         assert!(browse(port, "/favicon.ico").starts_with("HTTP/1.1 404"));

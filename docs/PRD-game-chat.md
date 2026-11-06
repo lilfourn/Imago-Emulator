@@ -380,7 +380,7 @@ connects with a button and never pastes a key
 2. Make the PKCE verifier from 32 bytes of `/dev/urandom`, and its S256
    challenge.
 3. Open the authorize URL in the browser:
-   `https://openrouter.ai/auth?callback_url=http://localhost:{port}/callback&code_challenge=…&code_challenge_method=S256&key_label=DS Emulator · {Mac name}`.
+   `https://openrouter.ai/auth?callback_url=http://localhost:{port}/callback&code_challenge=…&code_challenge_method=S256&key_label=Imago Emulator · {Mac name}`.
    - The Mac's name comes from `scutil --get ComputerName`.
    - There is no `state` parameter, as in Imago. A code caught on the
      way is useless without the verifier.
@@ -442,7 +442,7 @@ thread, as recordings and screenshots use their own threads.
 curl -sS --no-buffer --connect-timeout 10 --speed-limit 1 --speed-time 60
      -H 'Content-Type: application/json'
      -H 'HTTP-Referer: https://github.com/lilfourn/ds-emulator'
-     -H 'X-OpenRouter-Title: DS Emulator'
+     -H 'X-OpenRouter-Title: Imago Emulator'
      --write-out '\n%{http_code}\n' --config -
      https://openrouter.ai/api/v1/chat/completions
   stdin, a curl config:  header = "Authorization: Bearer sk-or-…"
@@ -574,7 +574,7 @@ The system prompt is built from that context and the source map. A
 sketch, tuned in phase 0:
 
 ```
-You are Guide, the in-game helper inside DS Emulator. The player is
+You are Guide, the in-game helper inside Imago Emulator. The player is
 playing {title} ({platform}, {region}{, revision}). {kind line}
 They are playing right now; answer quickly and to the point.
 

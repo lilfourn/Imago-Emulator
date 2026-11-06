@@ -241,7 +241,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             let options = WindowOptions {
                 window_bounds: Some(window_bounds),
                 display_id,
-                titlebar: Some(top_bar("ds-emulator")),
+                titlebar: Some(top_bar("Imago Emulator")),
                 window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
                 app_id: Some("ds-emulator".to_owned()),
                 ..WindowOptions::default()
@@ -335,19 +335,19 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
     };
     vec![
         Menu {
-            name: "ds-emulator".into(),
+            name: "Imago Emulator".into(),
             items: vec![
-                MenuItem::action("About ds-emulator", About),
+                MenuItem::action("About Imago Emulator", About),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Hide ds-emulator", HideApp),
+                MenuItem::action("Hide Imago Emulator", HideApp),
                 MenuItem::action("Hide Others", HideOtherApps),
                 MenuItem::action("Show All", ShowAllApps),
                 MenuItem::separator(),
-                MenuItem::action("Quit ds-emulator", Quit),
+                MenuItem::action("Quit Imago Emulator", Quit),
             ],
         },
         Menu {
@@ -362,7 +362,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                 MenuItem::action("Connect Second Console…", ConnectLinkCable),
                 MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),
                 MenuItem::separator(),
-                MenuItem::action("Randomize Pokémon Game…", Randomize),
+                MenuItem::action("Randomize Game…", Randomize),
                 MenuItem::separator(),
                 MenuItem::action("Save Screenshot", SaveScreenshot),
                 MenuItem::action("Screenshot for Guide", ScreenshotForGuide),

@@ -190,12 +190,12 @@ mod tests {
 
     #[test]
     fn the_authorize_url_names_the_loopback_the_challenge_and_the_label() {
-        let url = Endpoints::openrouter().authorize_url(4321, "abc_-", "DS Emulator · Mac");
+        let url = Endpoints::openrouter().authorize_url(4321, "abc_-", "Imago Emulator · Mac");
         assert_eq!(
             url,
             "https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A4321%2Fcallback\
              &code_challenge=abc_-&code_challenge_method=S256\
-             &key_label=DS%20Emulator%20%C2%B7%20Mac"
+             &key_label=Imago%20Emulator%20%C2%B7%20Mac"
         );
     }
 

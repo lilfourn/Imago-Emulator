@@ -1,0 +1,26 @@
+# cargo-about's settings for the app's Acknowledgements (release.sh). Only
+# what the app's binary is built from counts: the targets it ships for, no
+# dev- or build-dependencies, and none of our own crates (publish = false).
+# Where a crate offers a choice of licenses, the first one here that fits
+# is used.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+    "IJG",
+    "MPL-2.0",
+]
+targets = ["aarch64-apple-darwin"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+private = { ignore = true }
