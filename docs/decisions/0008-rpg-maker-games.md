@@ -23,22 +23,25 @@ an SDL window and event loop, as GPUI does.
 
 ## Decision
 
-1. **The game runs in its own player, hidden.** `emu-mkxp` copies the
-   game's player app into `~/Library/Application Support/ds-emulator/RPG
-   Maker/<CRC-32 of the folder's path>/`, marks the copy `LSUIElement`,
-   gives it a bundle ID of its own, signs it ad hoc, and starts it with
-   `open -n -j -g` and `SDL_MAC_BACKGROUND_APP`: no window shows, no Dock
-   icon, no focus taken, and it still draws. Its `mkxp.json` is the
-   game's, with the game folder set and a bridge script first among the
-   preloads. ds-emulator links no mkxp-z code.
+1. **The game runs in its own player, hidden.** On macOS, `emu-mkxp`
+   copies the game's player app into `~/Library/Application
+   Support/ds-emulator/RPG Maker/<CRC-32 of the folder's path>/`, marks the
+   copy `LSUIElement`, gives it a bundle ID of its own, signs it ad hoc,
+   and starts it with `open -n -j -g` and `SDL_MAC_BACKGROUND_APP`: no
+   window shows, no Dock icon, no focus taken, and it still draws. Its
+   `mkxp.json` is the game's, with the game folder set and a bridge script
+   first among the preloads. ds-emulator links no mkxp-z code. Linux and
+   Windows run mkxp-z's own program instead; see the update of 2026-11-06.
 2. **A bridge script paces it.** The bridge replaces `Graphics.update`:
-   each frame it sends the screen over a Unix socket and waits for the
-   next step's buttons, so ds-emulator's pacing, pause and fast-forward
-   are the game's (the bridge lifts mkxp-z's own frame limit). mkxp-z's
-   transitions loop natively, unseen and unpaced, so the bridge fades a
-   frame at a time instead. `link.rs` describes the protocol.
+   each frame it sends the screen over a Unix socket (TCP on Windows) and
+   waits for the next step's buttons, so ds-emulator's pacing, pause and
+   fast-forward are the game's (the bridge lifts mkxp-z's own frame
+   limit). mkxp-z's transitions loop natively, unseen and unpaced, so the
+   bridge fades a frame at a time instead. `link.rs` describes the
+   protocol.
 3. **Sound comes through a FIFO.** OpenAL Soft's WAV writer backend
-   writes the game's 48 kHz mix to a named pipe that a thread reads.
+   writes the game's 48 kHz mix to a named pipe that a thread reads: a
+   FIFO on macOS and Linux, a `\\.\pipe\` pipe on Windows.
 4. **States are the game's saves.** The bridge asks the game's preload
    for a state (`DSEmulator.on_save_state`) and hands one back
    (`on_load_state`), then restarts the game, whose preload loads it in
@@ -204,3 +207,109 @@ a folder of its own: a new game's intro, played to the first map and
 closed mid-message, opened again at the same place and line rather than
 the title; the checkpoint was saved again during a minute's play; and with
 the game's own save changed, it started at the title.
+
+Update, 2026-11-06: Linux and Windows. The game plays the same way, in a
+hidden mkxp-z driven by the same bridge, but the player is mkxp-z's own
+program rather than a Mac app.
+
+**Hiding the player.** Tried in an Ubuntu 24.04 container with mkxp-z's
+own Linux build (CI run 37110075912, `37a04d1`) and a small RPG Maker XP
+game made for the test:
+
+| Way | Result |
+|---|---|
+| `SDL_VIDEODRIVER=offscreen` | Not built in: the builds' SDL 2.28.1 has X11, Wayland, KMSDRM and dummy only |
+| `SDL_VIDEODRIVER=dummy` | No OpenGL, so no window: mkxp-z quits |
+| A private Xvfb | Works. Mesa draws on the CPU; 600 tile `blt`s and 30 `draw_text`s a frame took 29.9 ms on one emulated core, about what the per-call costs measured on the Mac's OpenGL add up to, as each call's fixed cost dominates |
+| The user's X display, the bridge hiding the window | Works; the frames, drawn into framebuffers, still come. The window shows from mkxp-z's start until the bridge runs: 0.3 to 0.7 s |
+| Wayland | The build crashed under a headless Weston before making a window, so it was not tried further |
+
+**Linux.**
+- The player is a program named `mkxp-z…` in the game's folder that is an
+  ELF program for this processor (as `mkxp-z.x86_64` or `mkxp-z.aarch64`,
+  the names its builds have), or else one in the players' folder,
+  `~/.local/share/ds-emulator/RPG Maker/mkxp-z/`, for every game. A game
+  folder is a `Game.ini` with such a program or a `Game.exe`, whose icon
+  the library shows. With neither, the game says where to put mkxp-z.
+- It is started directly, one per game as before (`player.lock`), with
+  its `mkxp.json` in the game's player folder, which mkxp-z reads from
+  `SRCDIR`. The link is a Unix socket and the sound a FIFO, as on macOS.
+- It draws on a private Xvfb when Xvfb is installed: Xvfb picks a free
+  display (`-displayfd`) and takes only clients with the MIT cookie written
+  for it (`-auth`, `XAUTHORITY`), so nothing shows and no other program can
+  watch or type into the game. Otherwise it draws on the user's X display
+  (XWayland on a Wayland desktop) with `SDL_VIDEODRIVER=x11`, and the
+  bridge withdraws the window through Xlib, from the window SDL reports
+  (`SDL_GetWindowWMInfo`). SDL's own `SDL_HideWindow` waits for an
+  `UnmapNotify` that the player's main thread may read first. With neither
+  Xvfb nor an X display, the game says so.
+- It draws with the system's OpenGL (renderer 2), which needs Mesa's
+  `libGL`/`libEGL`, as every desktop has.
+- The builds' Fiddle has its C half but cannot load its Ruby half (`$:`
+  is only the game's folder), so the bridge stands in for the error
+  setters the C half calls.
+- Stopping is `Child::kill` after the grace period; a player that exits
+  before its bridge connects ends the wait at once, with its last error,
+  rather than after a minute.
+
+**Windows** (not turned on: `UNSUPPORTED` still refuses it).
+- The player is `mkxp-z….exe`, or a `Game.exe` that names itself mkxp-z
+  inside, as newer Pokémon Essentials games ship, or else one in
+  `%LOCALAPPDATA%\ds-emulator\RPG Maker\mkxp-z\`. mkxp-z reads
+  `mkxp.json` only from beside its program on Windows, so the program and
+  the DLLs beside it are hard-linked, or copied, into the game's player
+  folder with the settings.
+- Ruby 3.1 has no Unix sockets on Windows, so the link is TCP on
+  127.0.0.1, at a port the system picks. Any program can reach that, so
+  the player gets a token of 128 random bits (`DS_EMULATOR_TOKEN`) that the
+  bridge sends first; a connection that sends anything else is dropped.
+  Both ends turn off Nagle's delay, as each step is four bytes.
+- Sound comes through a named pipe, `\\.\pipe\ds-emulator-<id>-<pid>`,
+  for one writer from this computer. OpenAL Soft opens it as a file and
+  takes it for a pipe.
+- mkxp-z sends Ruby's errors nowhere on Windows unless it opens a console,
+  so the bridge reopens them into the player's error log.
+- `SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN` keeps the keyboard with the app,
+  and the bridge hides the player's windows, those of SDL's class that are
+  its process's, with `ShowWindow`. The window shows until then; starting
+  it hidden takes `STARTUPINFO`, which std's `Command` sets only on
+  nightly.
+- mkxp-z keeps its own renderer, Direct3D 11 through ANGLE. Its OpenGL
+  setting is ANGLE over the driver's OpenGL there, as mkxp-z sets
+  `ANGLE_DEFAULT_PLATFORM` where its own `getenv` does not see it.
+- Tried under Wine (Ubuntu 24.04, x86-64, through Rosetta): the player
+  started from its copy, the link with the token, the sound through the
+  pipe, buttons and save states (by the state's CRC), the error log and
+  the hidden window all worked, with ANGLE's null renderer, which draws
+  nothing. Both of ANGLE's real renderers stopped on Wine's software
+  OpenGL (an ES 3 sample-count assertion). No frame has been drawn on
+  Windows, so it stays off until a run on Windows draws one: then remove
+  Windows from `UNSUPPORTED` and run the test below there.
+
+**Getting mkxp-z.** mkxp-z publishes no releases, only CI artifacts that
+expire after 90 days and need a GitHub login, so the app cannot download
+it from upstream as it does Azahar. Today a game plays when its folder
+has an mkxp-z for the system, or when the player has put one build in
+the players' folder, which the error names. Few fan games ship a Linux
+build. The way to make it one click is to host pinned builds ourselves,
+per system and processor, and download one at first use with its
+SHA-256, as for the 3DS core. The upstream builds are GPL-3.0-or-later,
+not GPL-2.0 (their `LICENSE.txt`: HTTPS through OpenSSL and ANGLE's
+Vulkan backend need version 3), so hosting them means offering the
+complete corresponding source beside them, which upstream's
+`source-with-dependencies` artifact is (277 MB). That is a decision for
+Luke Fournier.
+
+Unchanged everywhere: a game plays only with a preload that reads
+`DSEmulator`'s buttons and makes its states.
+
+Verified with a game of the test's own (`crates/emu-mkxp/tests/mkxp_z.rs`,
+run with `DS_EMULATOR_MKXP_Z` naming a folder holding an mkxp-z build): on
+Linux arm64 and x86-64 (Rosetta) with upstream's builds and Xvfb, the
+square starts at (100, 100), Right for 10 frames puts it at (140, 100),
+a state saved there and loaded after Down for 5 frames puts it back, and
+sound comes. emu-headless with Lua scripts gave the same picture
+(`8c3ef513`) for Right then a state round trip as for Right alone, against
+`0e013883` idle, and wrote the sound to a WAV, both on a private Xvfb and
+on an X display with the window withdrawn.
+

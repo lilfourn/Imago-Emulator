@@ -8,6 +8,9 @@
 # DSEmulator.pressed?, as the game's own compatibility script maps them, and
 # give ds-emulator save states with DSEmulator.on_save_state and
 # on_load_state.
+#
+# The player is mkxp-z on macOS, Linux or Windows: the platform checks below
+# keep each system's parts to it.
 
 require "socket"
 
@@ -23,6 +26,23 @@ module DSEmulator
   RESET = 1
   # The size sent instead of a state's when there is none.
   NO_STATE = 0xFFFF_FFFF
+  MACOS = RUBY_PLATFORM.include?("darwin")
+  WINDOWS = RUBY_PLATFORM.match?(/mingw|mswin/)
+
+  # Fiddle, to call the system's own functions. mkxp-z builds its C half
+  # in, but some builds cannot load its Ruby half, whose setters the C
+  # half calls after each call.
+  def self.fiddle
+    require "fiddle"
+    unless Fiddle.respond_to?(:last_error=)
+      def Fiddle.last_error=(error); end
+    end
+    if WINDOWS && !Fiddle.respond_to?(:win32_last_error=)
+      def Fiddle.win32_last_error=(error); end
+      def Fiddle.win32_last_socket_error=(error); end
+    end
+    Fiddle
+  end
 
   # macOS gives the hidden player a scheduling role of its own, apart from
   # ds-emulator's. While ds-emulator plays full screen, Game Mode makes it
@@ -41,7 +61,7 @@ module DSEmulator
 
     # Follows the role of the process at the other end of `link`.
     def self.follow(link)
-      require "fiddle"
+      DSEmulator.fiddle
       app = link.getsockopt(SOL_LOCAL, LOCAL_PEERPID).int
       int = Fiddle::TYPE_INT
       @get = Fiddle::Function.new(Fiddle::Handle::DEFAULT["getpriority"], [int, int], int)
@@ -68,12 +88,122 @@ module DSEmulator
     end
   end
 
-  @link = UNIXSocket.new(ENV.fetch("DS_EMULATOR_LINK"))
+  # Windows 11 throttles a process with no window in sight, as macOS's Game
+  # Mode did the player. ds-emulator turns that off for the player's
+  # process; what only the player can do is done here, on the thread that
+  # runs the game and draws its frames: it runs above normal priority and
+  # unthrottled, and the player's timers tick every millisecond, so the
+  # sound's writes keep time. As the app does for its own (qos.rs).
+  module Throttling
+    THREAD_PRIORITY_ABOVE_NORMAL = 1
+    # THREAD_INFORMATION_CLASS's ThreadPowerThrottling, and its state:
+    # version 1, control EXECUTION_SPEED, state 0, which turns it off.
+    THREAD_POWER_THROTTLING = 3
+    UNTHROTTLED = [1, 1, 0].pack("L3")
+
+    def self.lift
+      DSEmulator.fiddle
+      pointer = Fiddle::TYPE_VOIDP
+      int = Fiddle::TYPE_INT
+      kernel32 = Fiddle::Handle.new("kernel32")
+      thread = Fiddle::Function.new(kernel32["GetCurrentThread"], [], pointer).call
+      Fiddle::Function.new(kernel32["SetThreadPriority"], [pointer, int], int)
+        .call(thread, THREAD_PRIORITY_ABOVE_NORMAL)
+      Fiddle::Function.new(kernel32["SetThreadInformation"], [pointer, int, pointer, int], int)
+        .call(thread, THREAD_POWER_THROTTLING, UNTHROTTLED, UNTHROTTLED.bytesize)
+      # Held until the player quits, which ends it.
+      winmm = Fiddle::Handle.new("winmm")
+      Fiddle::Function.new(winmm["timeBeginPeriod"], [int], int).call(1)
+    rescue StandardError, ScriptError => error
+      $stderr.puts("[ds-emulator] the player cannot keep from being throttled: #{error.message}")
+    end
+  end
+
+  # Hides the player's window, which on Linux, without a display of its
+  # own, and on Windows shows from its start until now. Its frames are drawn
+  # apart from the window, so they still come.
+  module Window
+    # SDL's SDL_SysWMinfo: where its subsystem is, and X11's.
+    SUBSYSTEM = 4
+    X11 = 2
+    # Windows's SW_HIDE.
+    SW_HIDE = 0
+
+    def self.hide
+      return unless ENV["DS_EMULATOR_HIDE_WINDOW"]
+      DSEmulator.fiddle
+      WINDOWS ? hide_windows : hide_x11
+    rescue StandardError, ScriptError => error
+      $stderr.puts("[ds-emulator] the player's window stays in sight: #{error.message}")
+    end
+
+    # Withdraws the window through Xlib, as SDL's own SDL_HideWindow waits
+    # for an event the player's main thread may take first.
+    def self.hide_x11
+      sdl = Fiddle::Handle::DEFAULT
+      pointer = Fiddle::TYPE_VOIDP
+      int = Fiddle::TYPE_INT
+      window = Fiddle::Function.new(sdl["SDL_GL_GetCurrentWindow"], [], pointer).call
+      info = Fiddle::Pointer.malloc(128, Fiddle::RUBY_FREE)
+      Fiddle::Function.new(sdl["SDL_GetVersion"], [pointer], Fiddle::TYPE_VOID).call(info)
+      got = Fiddle::Function.new(sdl["SDL_GetWindowWMInfo"], [pointer, pointer], int)
+      unless got.call(window, info) == 1 && info[SUBSYSTEM, 4].unpack1("l") == X11
+        raise "it is not an X11 window"
+      end
+      display, id = info[8, 16].unpack("QQ")
+      x11 = Fiddle::Handle.new("libX11.so.6")
+      screen = Fiddle::Function.new(x11["XDefaultScreen"], [pointer], int).call(display)
+      Fiddle::Function.new(x11["XWithdrawWindow"], [pointer, Fiddle::TYPE_LONG, int], int)
+        .call(display, id, screen)
+      Fiddle::Function.new(x11["XFlush"], [pointer], int).call(display)
+    end
+
+    # Hides the windows of SDL's class that are this process's.
+    def self.hide_windows
+      user32 = Fiddle::Handle.new("user32")
+      pointer = Fiddle::TYPE_VOIDP
+      int = Fiddle::TYPE_INT
+      find = Fiddle::Function.new(user32["FindWindowExW"], [pointer] * 4, pointer)
+      owner = Fiddle::Function.new(user32["GetWindowThreadProcessId"], [pointer, pointer], int)
+      show = Fiddle::Function.new(user32["ShowWindow"], [pointer, int], int)
+      name = "SDL_app\0".encode("UTF-16LE")
+      process = Fiddle::Pointer.malloc(4, Fiddle::RUBY_FREE)
+      window = nil
+      loop do
+        window = find.call(nil, window, name, nil)
+        break if window.null?
+        owner.call(window, process)
+        show.call(window, SW_HIDE) if process[0, 4].unpack1("L") == Process.pid
+      end
+    end
+  end
+
+  # mkxp-z sends Ruby's errors nowhere on Windows; ds-emulator reads them
+  # from the player's error log.
+  if WINDOWS && ENV["DS_EMULATOR_ERRORS"]
+    $stderr.reopen(ENV["DS_EMULATOR_ERRORS"], "a")
+    $stderr.sync = true
+  end
+
+  link = ENV.fetch("DS_EMULATOR_LINK")
+  if link.start_with?("tcp:")
+    # Windows: its Ruby has no Unix sockets. The token says this is the
+    # player ds-emulator started.
+    host, port = link.delete_prefix("tcp:").split(":")
+    @link = TCPSocket.new(host, Integer(port))
+    @link.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+    @link.write(ENV.fetch("DS_EMULATOR_TOKEN"))
+  else
+    @link = UNIXSocket.new(link)
+  end
   # Room for a whole frame: the usual 8 KB sent it in a hundred pieces,
   # each waiting for ds-emulator to read the last.
   @link.setsockopt(Socket::SOL_SOCKET, Socket::SO_SNDBUF, 4 << 20)
   @held = 0
-  Role.follow(@link)
+  # Game Mode, and with it the role, is macOS's.
+  Role.follow(@link) if MACOS
+  Throttling.lift if WINDOWS
+  Window.hide
 
   class << self
     # Whether ds-emulator holds `button`, one of BUTTONS, this frame.

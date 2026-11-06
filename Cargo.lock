@@ -1773,9 +1773,11 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "emu-core",
+ "getrandom 0.3.4",
  "libc",
  "serde_json",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
