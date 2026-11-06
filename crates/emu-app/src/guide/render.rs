@@ -76,7 +76,7 @@ impl Render for GuidePanel {
             // Clicks here are the panel's: never the game's A button.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(self.header(&ink, cx))
+            .child(self.header(&ink, crate::chrome::trailing_room(window, true), cx))
             .child(div().flex_1().min_h_0().relative().child(body))
             .when(connected, |panel| {
                 panel.child(self.composer_area(&ink, now, cx))
@@ -107,7 +107,9 @@ impl GuidePanel {
         }
     }
 
-    fn header(&self, ink: &Ink, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The panel's title and buttons, kept `trailing` clear of the right
+    /// side, where the window's own buttons are off macOS.
+    fn header(&self, ink: &Ink, trailing: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self
             .game
             .as_ref()
@@ -119,7 +121,7 @@ impl GuidePanel {
             .items_center()
             .gap(px(4.0))
             .pl(px(12.0))
-            .pr(px(8.0))
+            .pr(px(8.0 + trailing))
             .child(
                 div()
                     .id("guide-title")
@@ -907,9 +909,13 @@ impl GuidePanel {
             .tooltip(move |_, cx| {
                 cx.new(|_| {
                     Tip(if full {
-                        "Four screenshots at most"
+                        "Four screenshots at most".into()
                     } else {
-                        "Screenshot the game  ⌥⌘S"
+                        format!(
+                            "Screenshot the game  {}",
+                            crate::keys::shortcut(crate::app::shortcut::SCREENSHOT_FOR_GUIDE)
+                        )
+                        .into()
                     })
                 })
                 .into()
@@ -1362,7 +1368,7 @@ fn thumbnail(id: impl Into<gpui::ElementId>, ink: &Ink) -> gpui::Stateful<gpui::
 }
 
 /// A tooltip's view.
-struct Tip(&'static str);
+struct Tip(gpui::SharedString);
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -1373,6 +1379,6 @@ impl Render for Tip {
             .bg(hsla([0.12; 3], 1.0))
             .text_size(px(12.0))
             .text_color(hsla([0.93; 3], 1.0))
-            .child(self.0)
+            .child(self.0.clone())
     }
 }

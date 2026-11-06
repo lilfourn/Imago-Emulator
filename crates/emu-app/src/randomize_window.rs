@@ -22,7 +22,8 @@ use gpui::{
     WindowHandle, WindowOptions, div, prelude::*, px, rgb, rgba, size,
 };
 
-use crate::app::{CloseGame, TOP_BAR, top_bar};
+use crate::app::{CloseGame, TOP_BAR, shortcut, top_bar};
+use crate::chrome::{self, Tone};
 use crate::icons;
 use crate::library_view::{LibraryEvent, LibraryView};
 use crate::probe;
@@ -203,6 +204,7 @@ impl RandomizeWindow {
             is_resizable: false,
             is_minimizable: false,
             app_id: Some("ds-emulator".to_owned()),
+            window_decorations: chrome::window_decorations(),
             ..WindowOptions::default()
         };
         let main = main.clone();
@@ -222,6 +224,7 @@ impl RandomizeWindow {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        crate::x11_redraw::ensure_redraws();
         // The window goes when the game's window does.
         cx.observe_release_in(main, window, |_, _, window, _| window.remove_window())
             .detach();
@@ -236,7 +239,9 @@ impl RandomizeWindow {
             chosen,
             changes: Changes::Preset(Preset::Classic),
             pasted: None,
-            state: State::Choosing { problem: None },
+            state: State::Choosing {
+                problem: unsupported(),
+            },
             focus,
             scroll,
         }
@@ -263,7 +268,9 @@ impl RandomizeWindow {
                 this.chosen = index_of(&candidates, wanted.as_ref());
                 this.candidates = candidates;
                 this.scroll.scroll_to_item(this.chosen);
-                this.state = State::Choosing { problem: None };
+                this.state = State::Choosing {
+                    problem: unsupported(),
+                };
                 cx.notify();
             })
             .ok();
@@ -337,6 +344,14 @@ impl RandomizeWindow {
     /// on if the window is closed.
     fn randomize(&mut self, cx: &mut Context<Self>) {
         if self.busy() {
+            return;
+        }
+        // Said at once, not after a moment of "Downloading…".
+        if let Some(why) = randomizer::UNSUPPORTED {
+            self.state = State::Choosing {
+                problem: Some(why.to_owned()),
+            };
+            cx.notify();
             return;
         }
         let Some(game) = self.candidates.get(self.chosen).cloned() else {
@@ -452,7 +467,7 @@ impl RandomizeWindow {
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
-        if modifiers.platform && keystroke.key == "v" {
+        if modifiers.secondary() && keystroke.key == "v" {
             self.paste(cx);
             return;
         }
@@ -709,7 +724,7 @@ impl RandomizeWindow {
 
     /// The foot of the window: the status and the buttons, and the keys
     /// under them, `hint`.
-    fn foot(&self, hint: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    fn foot(&self, hint: String, cx: &mut Context<Self>) -> AnyElement {
         let foot = div()
             .pt_4()
             .border_t_1()
@@ -787,6 +802,28 @@ fn short(settings: &str) -> String {
     format!("{head}…{tail}")
 }
 
+/// Why the randomizer can't run here, said as the window opens rather than
+/// after a moment of downloading; `None` where it can.
+fn unsupported() -> Option<String> {
+    randomizer::UNSUPPORTED.map(str::to_owned)
+}
+
+/// The keys the window takes, once a game is `made` or before: ↩ and ⌘V
+/// on macOS, Enter and Ctrl+V elsewhere.
+fn hint(made: bool) -> String {
+    let enter = if cfg!(target_os = "macos") {
+        "↩".to_owned()
+    } else {
+        crate::keys::key("enter")
+    };
+    if made {
+        format!("{enter} play · choose again to make another")
+    } else {
+        let paste = crate::keys::shortcut(shortcut::PASTE);
+        format!("↑↓ game · ←→ what changes · {paste} paste settings · {enter} randomize")
+    }
+}
+
 /// A heading over a part of the window.
 fn heading(title: &'static str) -> AnyElement {
     div()
@@ -798,7 +835,7 @@ fn heading(title: &'static str) -> AnyElement {
 }
 
 impl gpui::Render for RandomizeWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // With no game to randomize, the window only says so: no status,
         // button or keys.
         let has_games = self.state == State::Reading || !self.candidates.is_empty();
@@ -819,11 +856,17 @@ impl gpui::Render for RandomizeWindow {
         } else {
             self.no_games()
         };
-        let hint = if matches!(self.state, State::Made(_)) {
-            "↩ play · choose again to make another"
-        } else {
-            "↑↓ game · ←→ what changes · ⌘V paste settings · ↩ randomize"
-        };
+        let hint = hint(matches!(self.state, State::Made(_)));
+        let header = div()
+            .h(px(TOP_BAR))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .text_color(rgb(DIM))
+            .child("Randomize")
+            .children(probe::part("header.title"));
+        let header = chrome::header(header, false, window, cx);
         div()
             .track_focus(&self.focus)
             .key_context("Randomize")
@@ -838,19 +881,10 @@ impl gpui::Render for RandomizeWindow {
             // Close Game, ahead of any binding for this window alone.
             .on_action(cx.listener(|_, _: &CloseGame, window, _| window.remove_window()))
             .children(probe::begin())
-            .child(
-                div()
-                    .h(px(TOP_BAR))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .text_color(rgb(DIM))
-                    .child("Randomize")
-                    .children(probe::part("header.title")),
-            )
+            .child(header)
             .child(body)
             .when(has_games, |window| window.child(self.foot(hint, cx)))
+            .children(chrome::window_edges(window, Tone::Paper, false))
             .children(probe::end("randomize"))
     }
 }
@@ -866,6 +900,23 @@ mod tests {
             "321AAgE…OIo="
         );
         assert_eq!(short("428AAAA"), "428AAAA");
+    }
+
+    #[test]
+    fn the_keys_are_named_as_each_system_names_them() {
+        let (enter, paste) = if cfg!(target_os = "macos") {
+            ("↩", "⌘V")
+        } else {
+            ("Enter", "Ctrl+V")
+        };
+        assert_eq!(
+            hint(true),
+            format!("{enter} play · choose again to make another")
+        );
+        assert_eq!(
+            hint(false),
+            format!("↑↓ game · ←→ what changes · {paste} paste settings · {enter} randomize")
+        );
     }
 
     #[test]

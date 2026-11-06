@@ -18,8 +18,11 @@ use gpui::{
     WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
 
-use crate::app::{DebugNextFrame, DebugStep, DebugStepOver, TogglePause};
+use crate::app::{DebugNextFrame, DebugStep, DebugStepOver, TogglePause, shortcut};
+use crate::chrome::{self, Tone};
 use crate::debugger::{self, BYTES_PER_ROW, MEMORY_ROWS, Panel, RunState, Snapshot, View};
+use crate::fonts;
+use crate::keys;
 use crate::memory_viewer::{self, Cursor, Viewer};
 use crate::video;
 use crate::view::EmulatorView;
@@ -110,6 +113,7 @@ impl DebuggerWindow {
             }),
             window_min_size: Some(size(px(900.0), px(560.0))),
             app_id: Some("ds-emulator".to_owned()),
+            window_decorations: chrome::window_decorations(),
             ..WindowOptions::default()
         };
         cx.open_window(options, |window, cx| {
@@ -121,6 +125,7 @@ impl DebuggerWindow {
     pub fn new(main: Entity<EmulatorView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        crate::x11_redraw::ensure_redraws();
         let subscriptions = vec![
             cx.observe(&main, |_, _, cx| cx.notify()),
             // The debugger goes when the game's window does.
@@ -448,23 +453,36 @@ impl gpui::Render for DebuggerWindow {
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
         }
+        // Where the app frames the window on Linux, its own title bar,
+        // reaching out over the window's padding.
+        let title_bar = chrome::title_bar("Debugger", window, cx).map(|bar| {
+            div()
+                .flex_none()
+                .mx(px(-8.0))
+                .mt(px(-8.0))
+                .mb(px(-8.0))
+                .child(bar)
+        });
         let root = div()
             .track_focus(&self.focus)
             .key_context("Debugger")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .gap_2()
             .p_2()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(TEXT))
-            .font_family("Menlo")
+            .font_family(fonts::MONO)
             .text_size(px(11.0))
             .line_height(px(LINE))
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|this, _: &DebugStep, _, cx| this.step(cx)))
             .on_action(cx.listener(|this, _: &DebugStepOver, _, cx| this.step_over(cx)))
-            .on_action(cx.listener(|this, _: &DebugNextFrame, _, cx| this.next_frame(cx)));
+            .on_action(cx.listener(|this, _: &DebugNextFrame, _, cx| this.next_frame(cx)))
+            .children(title_bar)
+            .children(chrome::window_edges(window, Tone::Paper, true));
         let target = self
             .main
             .upgrade()
@@ -530,21 +548,20 @@ impl DebuggerWindow {
             .child(
                 button(
                     "run",
-                    if running {
-                        "Pause ⌘P"
-                    } else {
-                        "Continue ⌘P"
-                    },
+                    labelled(if running { "Pause" } else { "Continue" }, shortcut::PAUSE),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_run(running, cx))),
             )
-            .child(button("step", "Step ⌘⇧I").on_click(cx.listener(|this, _, _, cx| this.step(cx))))
             .child(
-                button("over", "Step over ⌘⇧O")
+                button("step", labelled("Step", shortcut::DEBUG_STEP))
+                    .on_click(cx.listener(|this, _, _, cx| this.step(cx))),
+            )
+            .child(
+                button("over", labelled("Step over", shortcut::DEBUG_STEP_OVER))
                     .on_click(cx.listener(|this, _, _, cx| this.step_over(cx))),
             )
             .child(
-                button("frame", "Next frame ⌘⇧N")
+                button("frame", labelled("Next frame", shortcut::DEBUG_NEXT_FRAME))
                     .on_click(cx.listener(|this, _, _, cx| this.next_frame(cx))),
             )
             .child(
@@ -1091,8 +1108,17 @@ fn panel(title: &'static str) -> gpui::Div {
         .child(div().text_color(rgb(DIM)).child(title))
 }
 
+/// `label` followed by the shortcut `keys`, as this system writes it:
+/// "Step ⌘⇧I" on macOS, "Step Ctrl+Shift+I" elsewhere.
+fn labelled(label: &str, keys: &str) -> gpui::SharedString {
+    format!("{label} {}", keys::shortcut(keys)).into()
+}
+
 /// A clickable label.
-fn button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful<gpui::Div> {
+fn button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .px_2()
@@ -1100,7 +1126,7 @@ fn button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful
         .cursor_pointer()
         .bg(rgb(crate::theme::LINE))
         .hover(|style| style.bg(rgb(0x00D4_D4D8)))
-        .child(label)
+        .child(label.into())
 }
 
 /// A button that shows whether it is the one chosen.

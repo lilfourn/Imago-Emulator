@@ -29,6 +29,7 @@ use gpui::{
 use crate::app::TOP_BAR;
 use crate::archive;
 use crate::boxart;
+use crate::chrome;
 use crate::icons;
 use crate::library::Game;
 use crate::library_view::{HEADER_END, TRAFFIC_LIGHTS, read_game};
@@ -566,22 +567,23 @@ impl StoreView {
             .pl(px(TRAFFIC_LIGHTS))
             // The refresh icon's artwork reaches further out in its box than
             // the library's add icon, which `HEADER_END` is set by.
-            .pr(px(HEADER_END + 1.5))
+            // Clear of the window's buttons, where the app draws them.
+            .pr(px(HEADER_END + 1.5 + chrome::trailing_room(window, true)))
             .gap_1()
             .children(probe::part("header"))
             // A game's page goes back to the grid; the tabs go between the
             // store and the library.
             .when(self.page.is_some(), |bar| {
-                bar.child(
+                bar.child(chrome::over_drag_area(
                     icons::button("back", icons::BACK)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.page = None;
                             cx.notify();
                         }))
                         .children(probe::part("button:back")),
-                )
+                ))
             })
-            .child(ui::tabs([
+            .child(chrome::over_drag_area(ui::tabs([
                 ui::tab(Section::Library, Section::Store, window)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(StoreEvent::Close))),
                 ui::tab(Section::Store, Section::Store, window).on_click(cx.listener(
@@ -590,7 +592,7 @@ impl StoreView {
                         cx.notify();
                     },
                 )),
-            ]))
+            ])))
             .child(div().flex_1().flex().items_center().pl_2().gap_2().when(
                 refreshing && !self.offers.is_empty(),
                 |bar| {
@@ -607,11 +609,11 @@ impl StoreView {
                     )
                 },
             ))
-            .child(
+            .child(chrome::over_drag_area(
                 icons::button("refresh", icons::REFRESH)
                     .on_click(cx.listener(|this, _, _, cx| this.load(true, cx)))
                     .children(probe::part("button:refresh")),
-            )
+            ))
             .into_any_element()
     }
 

@@ -20,6 +20,7 @@ use gpui::{
 
 use crate::ambient::Backdrop;
 use crate::app::{TOP_BAR, top_bar};
+use crate::chrome::{self, Tone};
 use crate::layout::{Arrangement, GAPS, HINGE_GAP, Rotation};
 use crate::openrouter::{self, OpenRouter, Status, Usage};
 use crate::picture::{Picture, RESOLUTIONS_3D};
@@ -299,6 +300,7 @@ impl SettingsWindow {
             is_resizable: false,
             is_minimizable: false,
             app_id: Some("ds-emulator".to_owned()),
+            window_decorations: chrome::window_decorations(),
             ..WindowOptions::default()
         };
         cx.open_window(options, |window, cx| {
@@ -310,6 +312,7 @@ impl SettingsWindow {
     pub fn new(main: Entity<EmulatorView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        crate::x11_redraw::ensure_redraws();
         let openrouter = OpenRouter::global(cx);
         // What the key has spent, freshly, each time settings open.
         openrouter.update(cx, |openrouter, cx| openrouter.check(cx));
@@ -574,6 +577,16 @@ impl gpui::Render for SettingsWindow {
             .map(|(index, row)| self.row(index, row, name_width, cx))
             .collect();
         rows.push(self.account_row(count, name_width, choices_width, cx));
+        let header = div()
+            .h(px(TOP_BAR))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .text_color(rgb(DIM))
+            .child("Settings")
+            .children(probe::part("header.title"));
+        let header = chrome::header(header, false, window, cx);
         div()
             .track_focus(&self.focus)
             .key_context("Settings")
@@ -585,17 +598,7 @@ impl gpui::Render for SettingsWindow {
             .text_size(px(TEXT_SIZE))
             .on_key_down(cx.listener(Self::key_down))
             .children(probe::begin())
-            .child(
-                div()
-                    .h(px(TOP_BAR))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .text_color(rgb(DIM))
-                    .child("Settings")
-                    .children(probe::part("header.title")),
-            )
+            .child(header)
             .child(
                 // Scrolls if the rows are taller than the window.
                 div()
@@ -611,6 +614,7 @@ impl gpui::Render for SettingsWindow {
                     .pb(px(MIN_SIDE))
                     .children(rows),
             )
+            .children(chrome::window_edges(window, Tone::Paper, false))
             .children(probe::end("settings"))
     }
 }

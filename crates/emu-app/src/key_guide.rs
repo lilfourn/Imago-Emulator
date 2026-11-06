@@ -103,8 +103,12 @@ fn preferred(keys: &[String]) -> Option<String> {
         .map(|key| key_name(key))
 }
 
-/// `key`, as GPUI names it, as printed on a Mac keyboard.
+/// `key`, as GPUI names it, as printed on this system's keyboards: a
+/// Mac's glyphs, or the words Linux and Windows keyboards print.
 fn key_name(key: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return crate::keys::key(key);
+    }
     match key {
         "up" => "↑".to_owned(),
         "down" => "↓".to_owned(),
@@ -219,6 +223,18 @@ mod tests {
         (label, keys.to_owned())
     }
 
+    /// Select's and gentle tilting's keys, as each system prints them.
+    const BACKSPACE: &str = if cfg!(target_os = "macos") {
+        "⌫"
+    } else {
+        "Backspace"
+    };
+    const SHIFT: &str = if cfg!(target_os = "macos") {
+        "⇧"
+    } else {
+        "Shift"
+    };
+
     #[test]
     fn the_default_keys_read_as_a_keyboard_prints_them() {
         let ds = columns(System::Nds, &Bindings::default());
@@ -236,7 +252,7 @@ mod tests {
                     row("L", "Q"),
                     row("R", "E"),
                     row("Start", "Space"),
-                    row("Select", "⌫"),
+                    row("Select", BACKSPACE),
                 ],
             ]
         );
@@ -252,7 +268,7 @@ mod tests {
         );
         assert_eq!(
             second,
-            [row("Start", "Space"), row("Select", "⌫")],
+            [row("Start", "Space"), row("Select", BACKSPACE)],
             "no shoulders on a Game Boy"
         );
         let gba = columns(System::Gba, &Bindings::default());
@@ -269,7 +285,7 @@ mod tests {
         let [first, second] = labels(&n3ds);
         assert_eq!(
             first[..2],
-            [row("Move", "W A S D"), row("Tilt gently", "⇧")]
+            [row("Move", "W A S D"), row("Tilt gently", SHIFT)]
         );
         assert_eq!(first.len(), 6);
         assert_eq!(
@@ -280,17 +296,22 @@ mod tests {
                 row("ZL", "Z"),
                 row("ZR", "C"),
                 row("Start", "Space"),
-                row("Select", "⌫"),
+                row("Select", BACKSPACE),
             ]
         );
     }
 
     #[test]
     fn keys_are_named_as_printed() {
-        assert_eq!(key_name("enter"), "⏎");
+        if cfg!(target_os = "macos") {
+            assert_eq!(key_name("enter"), "⏎");
+            assert_eq!(key_name("f1"), "f1");
+        } else {
+            assert_eq!(key_name("enter"), "Enter");
+            assert_eq!(key_name("f1"), "F1");
+        }
         assert_eq!(key_name("up"), "↑");
         assert_eq!(key_name("k"), "K");
-        assert_eq!(key_name("f1"), "f1");
         assert_eq!(
             preferred(&["up".to_owned(), "w".to_owned()]).as_deref(),
             Some("W")
