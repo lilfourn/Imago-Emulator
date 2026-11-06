@@ -113,7 +113,7 @@ jobs:
         run: |
           scripts/linux/install-build-deps.sh
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            dpkg-dev binutils patchelf desktop-file-utils appstream
+            dpkg-dev binutils patchelf desktop-file-utils appstream file
       - name: Rust toolchain
         run: |
           # rustup 1.28.2, by its published SHA-256; the toolchain is

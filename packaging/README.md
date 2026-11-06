@@ -36,7 +36,7 @@ By hand:
   the architecture to package:
   ```sh
   scripts/linux/install-build-deps.sh
-  sudo apt-get install dpkg-dev binutils patchelf desktop-file-utils appstream
+  sudo apt-get install dpkg-dev binutils patchelf desktop-file-utils appstream file
   cargo build --release --locked -p emu-app
   packaging/notices.sh x86_64-unknown-linux-gnu target/notices   # needs cargo-about
   packaging/linux/package.sh --notices target/notices target/release/ds-emulator
