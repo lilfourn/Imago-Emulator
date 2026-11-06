@@ -4,9 +4,22 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Every commit on main keeps its run; a pull request keeps only its latest.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   check:
+    name: macOS
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -25,3 +38,58 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  # Linux on Namespace's runners (the account's default profiles), on both
+  # x86-64 and arm64.
+  linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: namespace-profile-default
+          - arch: arm64
+            runner: namespace-profile-default-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Linux packages
+        run: scripts/linux/install-build-deps.sh
+      - name: No Nintendo files
+        run: scripts/check-no-nintendo-files.sh
+      - name: Fetch test ROMs
+        run: scripts/fetch-test-roms.sh
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        if: success() || failure()
+        run: cargo test --workspace --no-fail-fast
+
+  # Windows on GitHub's runners (Namespace's Windows runners need its Team
+  # plan).
+  windows:
+    name: Windows x86-64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch test ROMs
+        run: scripts/fetch-test-roms.sh
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        if: success() || failure()
+        run: cargo test --workspace --no-fail-fast
