@@ -12,7 +12,8 @@
 //! the library and ⌘Z puts it back. A click chooses a game and a double
 //! click plays it. A right click, or ⌘I, opens the game's menu: how long
 //! it has been played, its saves and size, and Play, Show in Finder and
-//! Remove from Library.
+//! Remove from Library. On Linux and Windows those are Delete, Ctrl+Z and
+//! Ctrl+I, and Show in Files or Show in File Explorer.
 //! The view only shows and edits the library; it asks the main window,
 //! through [`LibraryEvent`], to play a game, add games or open settings.
 
@@ -33,11 +34,13 @@ use gpui::{
     div, img, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba,
 };
 
-use crate::app::TOP_BAR;
+use crate::app::{TOP_BAR, shortcut};
 use crate::app_icon;
 use crate::archive;
 use crate::boxart;
+use crate::chrome;
 use crate::icons;
+use crate::keys;
 use crate::leftovers;
 use crate::library::{self, Game, Library};
 use crate::persist;
@@ -59,8 +62,13 @@ use crate::theme::{
 const FOOT: u32 = 0x00F6_F6F7;
 
 /// Room left of the header for the close, minimise and zoom buttons and
-/// a gap after them.
-pub const TRAFFIC_LIGHTS: f32 = 96.0;
+/// a gap after them; off macOS, for the menu's button there instead
+/// (`chrome::menu_button`).
+pub const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") {
+    96.0
+} else {
+    48.0
+};
 /// Room right of the header's last button, which puts its icon's artwork
 /// as far from the window's right side as the close button is from the
 /// left.
@@ -107,8 +115,9 @@ const MENU_BORDER: f32 = 1.0;
 const MENU_PADDING: f32 = 6.0;
 const MENU_RADIUS: f32 = 12.0;
 const ROW_RADIUS: f32 = MENU_RADIUS - MENU_BORDER - MENU_PADDING;
-/// The menu's surface, a step above the panels it floats over.
-const MENU_BACKGROUND: u32 = 0x001E_2024;
+/// The menu's surface: Imago Light's paper, lifted off the tiles it
+/// floats over by its edge and shadow, so the theme's ink reads on it.
+const MENU_BACKGROUND: u32 = TOP;
 /// Height of an action in the menu, whose icon is as far in from the
 /// row's side as from its top and bottom: as far in as everything else in
 /// the menu.
@@ -641,7 +650,7 @@ impl LibraryView {
             return true;
         }
         match keystroke.key.as_str() {
-            "z" if modifiers.platform && !modifiers.shift && self.removed.is_some() => {
+            "z" if modifiers.secondary() && !modifiers.shift && self.removed.is_some() => {
                 self.restore(cx);
             }
             _ if modifiers.platform || modifiers.control => return false,
@@ -754,8 +763,9 @@ impl LibraryView {
         self.menu = None;
         self.save(cx);
         cx.emit(LibraryEvent::Notice(format!(
-            "Removed {} from the library · ⌘Z puts it back",
-            game.title
+            "Removed {} from the library · {} puts it back",
+            game.title,
+            keys::shortcut(shortcut::PUT_BACK)
         )));
         self.removed = Some((place, game));
         cx.notify();
@@ -1015,25 +1025,26 @@ impl LibraryView {
             .flex()
             .items_center()
             .pl(px(TRAFFIC_LIGHTS))
-            .pr(px(HEADER_END))
+            // Clear of the window's buttons, where the app draws them.
+            .pr(px(HEADER_END + chrome::trailing_room(window, true)))
             .gap_1()
             .children(probe::part("header"))
-            .child(ui::tabs([
+            .child(chrome::over_drag_area(ui::tabs([
                 ui::tab(Section::Library, Section::Library, window),
                 ui::tab(Section::Store, Section::Library, window)
                     .on_click(cx.listener(|this, _, _, cx| this.open_store(cx))),
-            ]))
+            ])))
             .child(div().flex_1())
-            .child(
+            .child(chrome::over_drag_area(
                 icons::button("settings", icons::SETTINGS)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::OpenSettings)))
                     .children(probe::part("button:settings")),
-            )
-            .child(
+            ))
+            .child(chrome::over_drag_area(
                 icons::button("add", icons::ADD)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::AddGames)))
                     .children(probe::part("button:add")),
-            )
+            ))
             .into_any_element()
     }
 
@@ -1816,7 +1827,7 @@ impl LibraryView {
             "menu-play",
             icons::PLAY,
             play_label,
-            Some("↩"),
+            Some(return_key()),
             TEXT,
             !missing,
         )
@@ -1832,7 +1843,7 @@ impl LibraryView {
         let reveal = menu_action(
             "menu-reveal",
             icons::FOLDER,
-            "Show in Finder",
+            SHOW_IN_FILES,
             None,
             TEXT,
             !missing,
@@ -1863,7 +1874,7 @@ impl LibraryView {
             "menu-remove",
             icons::TRASH,
             "Remove from Library",
-            Some("⌘⌫"),
+            Some(keys::shortcut(shortcut::REMOVE_FROM_LIBRARY)),
             DANGER,
             true,
         )
@@ -1908,7 +1919,10 @@ impl LibraryView {
         let (title, hint) = if none {
             (
                 "No games yet".to_owned(),
-                "Get free homebrew games from the store, add your own with + or ⌘⇧A, or drop a .gb, .gbc, .gba, .nds or .3ds file, a .zip, .7z or .rar of one, a ROM-hack patch, or an RPG Maker game's folder, here.".to_owned(),
+                format!(
+                    "Get free homebrew games from the store, add your own with + or {}, or drop a .gb, .gbc, .gba, .nds or .3ds file, a .zip, .7z or .rar of one, a ROM-hack patch, or an RPG Maker game's folder, here.",
+                    keys::shortcut(shortcut::ADD_TO_LIBRARY)
+                ),
             )
         } else {
             (
@@ -2338,8 +2352,9 @@ fn read_games(
         games.push(match romhack::make(&patch, None, &known) {
             Ok(rom) => read_game(&rom, cache),
             Err(MakeError::NoBase(_)) => Err(format!(
-                "To add {}, open it with ⌘O and choose the game it patches",
-                path.file_name().unwrap_or_default().to_string_lossy()
+                "To add {}, open it with {} and choose the game it patches",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                keys::shortcut(shortcut::OPEN_ROM)
             )),
             Err(MakeError::Failed(error)) => Err(error),
         });
@@ -2435,7 +2450,7 @@ fn menu_action(
     id: &'static str,
     icon: &'static str,
     label: &'static str,
-    keys: Option<&'static str>,
+    keys: Option<String>,
     colour: u32,
     enabled: bool,
 ) -> Stateful<gpui::Div> {
@@ -2560,6 +2575,27 @@ fn play_time_text(time: Duration) -> String {
     }
 }
 
+/// The game menu's item that shows a game's file where the system keeps
+/// files: the Finder, File Explorer, or the desktop's file manager on
+/// Linux, which GPUI opens at the game's folder.
+const SHOW_IN_FILES: &str = if cfg!(target_os = "macos") {
+    "Show in Finder"
+} else if cfg!(windows) {
+    "Show in File Explorer"
+} else {
+    "Show in Files"
+};
+
+/// The Return key as the game menu writes it beside Play: `↩` on macOS,
+/// `Enter` elsewhere.
+fn return_key() -> String {
+    if cfg!(target_os = "macos") {
+        "↩".to_owned()
+    } else {
+        keys::key("enter")
+    }
+}
+
 /// `bytes` as Finder says sizes, in thousands.
 fn size_text(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
@@ -2597,6 +2633,17 @@ fn position(shown: &[&Game], selected: Option<&Path>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_game_menus_words_read_on_its_surface() {
+        use crate::guide::palette::contrast;
+        let rgb =
+            |colour: u32| [16, 8, 0].map(|shift| f32::from((colour >> shift & 0xFF) as u8) / 255.0);
+        for (name, colour) in [("text", TEXT), ("dimmed", DIM), ("danger", DANGER)] {
+            let ratio = contrast(rgb(colour), rgb(MENU_BACKGROUND));
+            assert!(ratio >= 4.5, "{name} on the menu: {ratio:.2}:1");
+        }
+    }
 
     #[test]
     fn the_grid_fills_the_width_with_whole_tiles() {

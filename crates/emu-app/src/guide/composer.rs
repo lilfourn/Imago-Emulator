@@ -122,9 +122,15 @@ const NEWLINE_WIDTH: f32 = 0.35;
 /// it has focus, for the app to add with `cx.bind_keys` at launch. Where
 /// one is also an app shortcut (⌘⌫ removes a game from the library), the
 /// field's wins while it has focus, as a deeper context's binding does.
+///
+/// Each system's own text keys: on macOS ⌥ moves by words and ⌘ to the
+/// line's ends, with the Emacs keys a Mac's fields take; on Linux and
+/// Windows Control moves by words and Control-Home and -End to the text's
+/// ends, as their fields do. Copy, cut, paste and select all are
+/// `secondary`, ⌘ on macOS and Control elsewhere.
 pub fn bindings() -> Vec<KeyBinding> {
     let context = Some(KEY_CONTEXT);
-    vec![
+    let mut bindings = vec![
         KeyBinding::new("enter", Submit, context),
         KeyBinding::new("shift-enter", Newline, context),
         KeyBinding::new("alt-enter", Newline, context),
@@ -133,44 +139,63 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("right", MoveRight, context),
         KeyBinding::new("up", MoveUp, context),
         KeyBinding::new("down", MoveDown, context),
-        KeyBinding::new("alt-left", MoveWordLeft, context),
-        KeyBinding::new("alt-right", MoveWordRight, context),
-        KeyBinding::new("cmd-left", MoveToLineStart, context),
-        KeyBinding::new("cmd-right", MoveToLineEnd, context),
         KeyBinding::new("home", MoveToLineStart, context),
         KeyBinding::new("end", MoveToLineEnd, context),
-        KeyBinding::new("ctrl-a", MoveToLineStart, context),
-        KeyBinding::new("ctrl-e", MoveToLineEnd, context),
-        KeyBinding::new("cmd-up", MoveToStart, context),
-        KeyBinding::new("cmd-down", MoveToEnd, context),
         KeyBinding::new("shift-left", SelectLeft, context),
         KeyBinding::new("shift-right", SelectRight, context),
         KeyBinding::new("shift-up", SelectUp, context),
         KeyBinding::new("shift-down", SelectDown, context),
-        KeyBinding::new("alt-shift-left", SelectWordLeft, context),
-        KeyBinding::new("alt-shift-right", SelectWordRight, context),
-        KeyBinding::new("cmd-shift-left", SelectToLineStart, context),
-        KeyBinding::new("cmd-shift-right", SelectToLineEnd, context),
         KeyBinding::new("shift-home", SelectToLineStart, context),
         KeyBinding::new("shift-end", SelectToLineEnd, context),
-        KeyBinding::new("cmd-shift-up", SelectToStart, context),
-        KeyBinding::new("cmd-shift-down", SelectToEnd, context),
-        KeyBinding::new("cmd-a", SelectAll, context),
+        KeyBinding::new("secondary-a", SelectAll, context),
         KeyBinding::new("backspace", Backspace, context),
         KeyBinding::new("shift-backspace", Backspace, context),
-        KeyBinding::new("ctrl-h", Backspace, context),
         KeyBinding::new("delete", Delete, context),
-        KeyBinding::new("ctrl-d", Delete, context),
-        KeyBinding::new("alt-backspace", DeleteWordLeft, context),
-        KeyBinding::new("alt-delete", DeleteWordRight, context),
-        KeyBinding::new("cmd-backspace", DeleteToLineStart, context),
-        KeyBinding::new("cmd-delete", DeleteToLineEnd, context),
-        KeyBinding::new("ctrl-k", DeleteToLineEnd, context),
-        KeyBinding::new("cmd-c", CopySelection, context),
-        KeyBinding::new("cmd-x", CutSelection, context),
-        KeyBinding::new("cmd-v", Paste, context),
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, context),
-    ]
+        KeyBinding::new("secondary-c", CopySelection, context),
+        KeyBinding::new("secondary-x", CutSelection, context),
+        KeyBinding::new("secondary-v", Paste, context),
+    ];
+    if cfg!(target_os = "macos") {
+        // ⌘ is written as itself here: these are macOS's keys alone.
+        bindings.extend([
+            KeyBinding::new("alt-left", MoveWordLeft, context),
+            KeyBinding::new("alt-right", MoveWordRight, context),
+            KeyBinding::new("cmd-left", MoveToLineStart, context),
+            KeyBinding::new("cmd-right", MoveToLineEnd, context),
+            KeyBinding::new("ctrl-a", MoveToLineStart, context),
+            KeyBinding::new("ctrl-e", MoveToLineEnd, context),
+            KeyBinding::new("cmd-up", MoveToStart, context),
+            KeyBinding::new("cmd-down", MoveToEnd, context),
+            KeyBinding::new("alt-shift-left", SelectWordLeft, context),
+            KeyBinding::new("alt-shift-right", SelectWordRight, context),
+            KeyBinding::new("cmd-shift-left", SelectToLineStart, context),
+            KeyBinding::new("cmd-shift-right", SelectToLineEnd, context),
+            KeyBinding::new("cmd-shift-up", SelectToStart, context),
+            KeyBinding::new("cmd-shift-down", SelectToEnd, context),
+            KeyBinding::new("ctrl-h", Backspace, context),
+            KeyBinding::new("ctrl-d", Delete, context),
+            KeyBinding::new("alt-backspace", DeleteWordLeft, context),
+            KeyBinding::new("alt-delete", DeleteWordRight, context),
+            KeyBinding::new("cmd-backspace", DeleteToLineStart, context),
+            KeyBinding::new("cmd-delete", DeleteToLineEnd, context),
+            KeyBinding::new("ctrl-k", DeleteToLineEnd, context),
+            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, context),
+        ]);
+    } else {
+        bindings.extend([
+            KeyBinding::new("ctrl-left", MoveWordLeft, context),
+            KeyBinding::new("ctrl-right", MoveWordRight, context),
+            KeyBinding::new("ctrl-home", MoveToStart, context),
+            KeyBinding::new("ctrl-end", MoveToEnd, context),
+            KeyBinding::new("ctrl-shift-left", SelectWordLeft, context),
+            KeyBinding::new("ctrl-shift-right", SelectWordRight, context),
+            KeyBinding::new("ctrl-shift-home", SelectToStart, context),
+            KeyBinding::new("ctrl-shift-end", SelectToEnd, context),
+            KeyBinding::new("ctrl-backspace", DeleteWordLeft, context),
+            KeyBinding::new("ctrl-delete", DeleteWordRight, context),
+        ]);
+    }
+    bindings
 }
 
 /// How the composer looks: its colours and type, and how tall it grows.
@@ -1635,6 +1660,107 @@ impl Element for Field {
 mod tests {
     use super::*;
     use gpui::font;
+
+    /// Each binding as its keys and action, sorted.
+    fn written(bindings: &[KeyBinding]) -> Vec<String> {
+        let mut written: Vec<String> = bindings
+            .iter()
+            .map(|binding| {
+                let keys: Vec<String> = binding
+                    .keystrokes()
+                    .iter()
+                    .map(|keystroke| keystroke.inner().unparse())
+                    .collect();
+                format!("{} {}", keys.join(" "), binding.action().name())
+            })
+            .collect();
+        written.sort();
+        written
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "checks macOS's own text keys (by design)"
+    )]
+    fn on_macos_the_text_keys_are_what_they_were() {
+        let context = Some(KEY_CONTEXT);
+        let before = [
+            KeyBinding::new("enter", Submit, context),
+            KeyBinding::new("shift-enter", Newline, context),
+            KeyBinding::new("alt-enter", Newline, context),
+            KeyBinding::new("escape", Cancel, context),
+            KeyBinding::new("left", MoveLeft, context),
+            KeyBinding::new("right", MoveRight, context),
+            KeyBinding::new("up", MoveUp, context),
+            KeyBinding::new("down", MoveDown, context),
+            KeyBinding::new("alt-left", MoveWordLeft, context),
+            KeyBinding::new("alt-right", MoveWordRight, context),
+            KeyBinding::new("cmd-left", MoveToLineStart, context),
+            KeyBinding::new("cmd-right", MoveToLineEnd, context),
+            KeyBinding::new("home", MoveToLineStart, context),
+            KeyBinding::new("end", MoveToLineEnd, context),
+            KeyBinding::new("ctrl-a", MoveToLineStart, context),
+            KeyBinding::new("ctrl-e", MoveToLineEnd, context),
+            KeyBinding::new("cmd-up", MoveToStart, context),
+            KeyBinding::new("cmd-down", MoveToEnd, context),
+            KeyBinding::new("shift-left", SelectLeft, context),
+            KeyBinding::new("shift-right", SelectRight, context),
+            KeyBinding::new("shift-up", SelectUp, context),
+            KeyBinding::new("shift-down", SelectDown, context),
+            KeyBinding::new("alt-shift-left", SelectWordLeft, context),
+            KeyBinding::new("alt-shift-right", SelectWordRight, context),
+            KeyBinding::new("cmd-shift-left", SelectToLineStart, context),
+            KeyBinding::new("cmd-shift-right", SelectToLineEnd, context),
+            KeyBinding::new("shift-home", SelectToLineStart, context),
+            KeyBinding::new("shift-end", SelectToLineEnd, context),
+            KeyBinding::new("cmd-shift-up", SelectToStart, context),
+            KeyBinding::new("cmd-shift-down", SelectToEnd, context),
+            KeyBinding::new("cmd-a", SelectAll, context),
+            KeyBinding::new("backspace", Backspace, context),
+            KeyBinding::new("shift-backspace", Backspace, context),
+            KeyBinding::new("ctrl-h", Backspace, context),
+            KeyBinding::new("delete", Delete, context),
+            KeyBinding::new("ctrl-d", Delete, context),
+            KeyBinding::new("alt-backspace", DeleteWordLeft, context),
+            KeyBinding::new("alt-delete", DeleteWordRight, context),
+            KeyBinding::new("cmd-backspace", DeleteToLineStart, context),
+            KeyBinding::new("cmd-delete", DeleteToLineEnd, context),
+            KeyBinding::new("ctrl-k", DeleteToLineEnd, context),
+            KeyBinding::new("cmd-c", CopySelection, context),
+            KeyBinding::new("cmd-x", CutSelection, context),
+            KeyBinding::new("cmd-v", Paste, context),
+            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, context),
+        ];
+        assert_eq!(written(&bindings()), written(&before));
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "checks Linux's and Windows's text keys (by design)"
+    )]
+    fn off_macos_control_edits_text_as_linux_and_windows_fields_do() {
+        let written = written(&bindings());
+        let has = |keys: &str, action: &str| {
+            written
+                .iter()
+                .any(|line| line.starts_with(&format!("{keys} ")) && line.ends_with(action))
+        };
+        assert!(has("ctrl-c", "CopySelection"));
+        assert!(has("ctrl-v", "Paste"));
+        assert!(has("ctrl-a", "SelectAll"));
+        assert!(has("ctrl-left", "MoveWordLeft"));
+        assert!(has("ctrl-shift-right", "SelectWordRight"));
+        assert!(has("ctrl-backspace", "DeleteWordLeft"));
+        assert!(has("ctrl-home", "MoveToStart"));
+        assert!(
+            !written
+                .iter()
+                .any(|line| line.contains("cmd-") || line.contains("super-")),
+            "no binding takes the logo key"
+        );
+    }
 
     /// `text` with the caret at `caret`.
     fn buffer(text: &str, caret: usize) -> Buffer {

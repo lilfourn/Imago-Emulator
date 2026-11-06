@@ -1,4 +1,6 @@
-//! The frontend's side of libretro's Vulkan contract, on MoltenVK.
+//! The frontend's side of libretro's Vulkan contract: on MoltenVK on
+//! macOS, and on the system's Vulkan loader (`libvulkan.so.1`,
+//! `vulkan-1.dll`) and its drivers on Linux and Windows.
 //!
 //! The frontend makes the instance, the core makes its device through its
 //! negotiation interface, and the frontend hands the core
@@ -25,32 +27,68 @@ const COPY_TIMEOUT: Duration = Duration::from_secs(5);
 /// frames, far beyond the tens of microseconds it takes.
 const SUBMIT_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// Loads MoltenVK and finds a GPU, to choose the renderer before the core
+/// Loads Vulkan and finds a GPU, to choose the renderer before the core
 /// loads the game. Returns the GPU's name.
-pub fn probe(moltenvk: &Path) -> Result<String, String> {
-    // SAFETY: `moltenvk` is MoltenVK, checked against its pinned digest
-    // when it was installed; loading it runs no code of the game's.
-    let entry = unsafe { ash::Entry::load_from(moltenvk) }.map_err(|error| error.to_string())?;
+pub fn probe(moltenvk: Option<&Path>) -> Result<String, String> {
+    let entry = load(moltenvk)?;
     let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
     let instance = create_instance(&entry, &app)?;
-    // SAFETY: the instance is alive until destroyed below.
-    let result = unsafe { instance.enumerate_physical_devices() }
-        .map_err(|error| error.to_string())
-        .and_then(|gpus| gpus.first().copied().ok_or_else(|| "no GPU".to_owned()))
-        .map(|gpu| {
-            // SAFETY: `gpu` came from this instance.
-            let properties = unsafe { instance.get_physical_device_properties(gpu) };
-            properties.device_name_as_c_str().map_or_else(
-                |_| "a GPU".to_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            )
-        });
+    let result = pick_gpu(&instance).map(|gpu| {
+        // SAFETY: `gpu` came from this instance.
+        let properties = unsafe { instance.get_physical_device_properties(gpu) };
+        properties.device_name_as_c_str().map_or_else(
+            |_| "a GPU".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+    });
     // SAFETY: nothing made from the instance outlives it.
     unsafe { instance.destroy_instance(None) };
     result
 }
 
-/// Creates an instance with the portability extensions MoltenVK offers.
+/// Loads Vulkan: MoltenVK from `moltenvk`, or with none, the system's
+/// loader, which finds the drivers installed.
+fn load(moltenvk: Option<&Path>) -> Result<ash::Entry, String> {
+    let entry = match moltenvk {
+        // SAFETY: `moltenvk` is MoltenVK, checked against its pinned
+        // digest when it was installed; loading it runs no code of the
+        // game's.
+        Some(path) => unsafe { ash::Entry::load_from(path) },
+        // SAFETY: the system's loader is Vulkan's own, which loads the
+        // drivers installed; it runs no code of the game's.
+        None => unsafe { ash::Entry::load() },
+    };
+    entry.map_err(|error| error.to_string())
+}
+
+/// The GPU to draw on. MoltenVK names the Mac's GPU first, as it always
+/// has. Elsewhere a system may have several, Mesa's software one
+/// (lavapipe) among them, so a GPU of its own comes before an integrated
+/// one, and either before a virtual one or one that is the CPU.
+fn pick_gpu(instance: &ash::Instance) -> Result<vk::PhysicalDevice, String> {
+    // SAFETY: the instance is alive.
+    let gpus =
+        unsafe { instance.enumerate_physical_devices() }.map_err(|error| error.to_string())?;
+    let best = if cfg!(target_os = "macos") {
+        gpus.first().copied()
+    } else {
+        gpus.iter().copied().min_by_key(|&gpu| {
+            // SAFETY: `gpu` came from this instance.
+            let kind = unsafe { instance.get_physical_device_properties(gpu) }.device_type;
+            match kind {
+                vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+                vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+                vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+                vk::PhysicalDeviceType::CPU => 4,
+                _ => 3,
+            }
+        })
+    };
+    best.ok_or_else(|| "no GPU".to_owned())
+}
+
+/// Creates an instance with the portability extensions the loader offers,
+/// which MoltenVK needs; the system's loaders offer them too.
 fn create_instance(
     entry: &ash::Entry,
     app: &vk::ApplicationInfo<'_>,
@@ -265,12 +303,10 @@ impl Gpu {
     ///
     /// `negotiation` is the core's, and the core is loaded.
     pub unsafe fn new(
-        moltenvk: &Path,
+        moltenvk: Option<&Path>,
         negotiation: &VulkanNegotiation,
     ) -> Result<Box<Self>, String> {
-        // SAFETY: as in `probe`.
-        let entry =
-            unsafe { ash::Entry::load_from(moltenvk) }.map_err(|error| error.to_string())?;
+        let entry = load(moltenvk)?;
         let default_app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
         let app = match negotiation.get_application_info {
             // SAFETY: the core's application info lives as long as it.
@@ -278,23 +314,18 @@ impl Gpu {
             None => default_app,
         };
         let instance = create_instance(&entry, &app)?;
-        // SAFETY: the instance is alive.
-        let gpu = unsafe { instance.enumerate_physical_devices() }
-            .map_err(|error| error.to_string())?
-            .first()
-            .copied()
-            .ok_or("no GPU")?;
+        let gpu = pick_gpu(&instance)?;
         let create_device = negotiation
             .create_device
             .ok_or("the core cannot make its own device")?;
         let mut context = lr::VulkanContext::default();
-        let moltenvk = (
+        let vulkan = (
             entry.static_fn().get_instance_proc_addr,
             instance.fp_v1_0().get_device_proc_addr,
         );
         // The core looks Vulkan's functions up through the helper, which
         // stands in for its pipeline caches' (see `pipelines`).
-        let (look_up_instance, look_up_device) = crate::pipelines::lookups(moltenvk);
+        let (look_up_instance, look_up_device) = crate::pipelines::lookups(vulkan);
         // SAFETY: the core makes its device on our instance and GPU, asking
         // through our loader; no extensions, layers or features are
         // required of it.

@@ -7,6 +7,9 @@ use gpui::{
     WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
 };
 
+use crate::about_window;
+use crate::chrome;
+use crate::fonts;
 use crate::icons;
 use crate::layout;
 use crate::settings::{self, Settings, WindowPlace};
@@ -24,7 +27,9 @@ actions!(
         ShowAllApps,
         ToggleWindowControls,
         OpenRom,
+        OpenGameFolder,
         AddToLibrary,
+        AddGameFolders,
         OpenStore,
         GameInfo,
         RemoveFromLibrary,
@@ -87,6 +92,7 @@ actions!(
         Minimize,
         Zoom,
         Quit,
+        ShowAppMenu,
     ]
 );
 
@@ -104,7 +110,7 @@ const SYSTEM_BARS: f32 = 100.0;
 
 /// The app's icon, made from `assets/app-icon.svg` with
 /// `resvg -w 1024 -h 1024 assets/app-icon.svg assets/app-icon.png`.
-const APP_ICON: &[u8] = include_bytes!("../../../assets/app-icon.png");
+pub const APP_ICON: &[u8] = include_bytes!("../../../assets/app-icon.png");
 
 /// The bar across the top of the window that the close, minimise and
 /// zoom buttons sit in, in logical pixels. The window draws under it, so
@@ -126,11 +132,21 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
     Application::new()
         .with_assets(icons::Icons)
         .run(move |cx: &mut App| {
+            fonts::register(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_action(|_: &About, _| window_chrome::show_about_panel());
-            cx.on_action(|_: &HideApp, cx| cx.hide());
-            cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
-            cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
+            // AppKit's About panel on macOS; the app's own window elsewhere.
+            if cfg!(target_os = "macos") {
+                cx.on_action(|_: &About, _| window_chrome::show_about_panel());
+            } else {
+                cx.on_action(|_: &About, cx| about_window::show(cx));
+            }
+            // Only macOS hides apps: elsewhere GPUI logs these, or panics
+            // on Windows, so they are neither bound nor in the menus.
+            if cfg!(target_os = "macos") {
+                cx.on_action(|_: &HideApp, cx| cx.hide());
+                cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
+                cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
+            }
             // Window actions act on whichever window is in front.
             cx.on_action(|_: &CloseWindow, cx| {
                 if let Some(window) = cx.active_window() {
@@ -151,64 +167,12 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                     window.update(cx, |_, window, _| window.zoom_window()).ok();
                 }
             });
-            cx.bind_keys([
-                KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("cmd-h", HideApp, None),
-                KeyBinding::new("cmd-alt-h", HideOtherApps, None),
-                KeyBinding::new("cmd-o", OpenRom, None),
-                KeyBinding::new("cmd-shift-a", AddToLibrary, None),
-                KeyBinding::new("cmd-shift-g", OpenStore, None),
-                KeyBinding::new("cmd-alt-r", Randomize, None),
-                // The chosen game's menu, as Get Info in the Finder, and
-                // taking it out of the library, as Move to Trash there.
-                KeyBinding::new("cmd-i", GameInfo, Some("Emulator")),
-                KeyBinding::new("cmd-backspace", RemoveFromLibrary, Some("Emulator")),
-                KeyBinding::new("cmd-w", CloseGame, None),
-                // In the settings and debugger windows ⌘W closes the window,
-                // as in any Mac app; only the game's own window closes games.
-                KeyBinding::new("cmd-w", CloseWindow, Some("Settings")),
-                KeyBinding::new("cmd-w", CloseWindow, Some("Debugger")),
-                KeyBinding::new("cmd-m", Minimize, None),
-                KeyBinding::new("cmd-t", SwitchPlayer, None),
-                KeyBinding::new("cmd-p", TogglePause, None),
-                KeyBinding::new("cmd-r", Reset, None),
-                KeyBinding::new("cmd-s", SaveState, None),
-                KeyBinding::new("cmd-l", LoadState, None),
-                KeyBinding::new("cmd-shift-s", SaveScreenshot, None),
-                // Guide, the chat beside the screens, and a screenshot for it.
-                KeyBinding::new("cmd-j", ToggleGuide, None),
-                KeyBinding::new("cmd-alt-s", ScreenshotForGuide, None),
-                KeyBinding::new("cmd-shift-r", ToggleRecording, None),
-                KeyBinding::new("cmd-shift-l", RunScript, None),
-                KeyBinding::new("cmd-alt-l", StopScript, None),
-                KeyBinding::new("cmd-]", NextStateSlot, None),
-                KeyBinding::new("cmd-[", PreviousStateSlot, None),
-                KeyBinding::new("cmd-f", ToggleFastForward, None),
-                KeyBinding::new("cmd-shift-f", ToggleSlowMotion, None),
-                KeyBinding::new("cmd-alt-f", ToggleFps, None),
-                KeyBinding::new("cmd-1", LayoutVertical, None),
-                KeyBinding::new("cmd-2", LayoutHorizontal, None),
-                KeyBinding::new("cmd-3", LayoutSingle, None),
-                KeyBinding::new("cmd-4", LayoutHybrid, None),
-                KeyBinding::new("cmd-e", SwapScreens, None),
-                KeyBinding::new("cmd-alt-right", RotateClockwise, None),
-                KeyBinding::new("cmd-alt-left", RotateAnticlockwise, None),
-                KeyBinding::new("cmd-g", NextScreenGap, None),
-                KeyBinding::new("cmd-shift-c", ToggleColorCorrection, None),
-                KeyBinding::new("cmd-shift-d", ShowDebugger, None),
-                KeyBinding::new("cmd-shift-i", DebugStep, None),
-                KeyBinding::new("cmd-shift-o", DebugStepOver, None),
-                KeyBinding::new("cmd-shift-n", DebugNextFrame, None),
-                // AppKit puts View > Enter Full Screen in the menu itself, on
-                // Globe-F; this adds the classic shortcut.
-                KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
-                KeyBinding::new("cmd-q", Quit, None),
-            ]);
+            cx.bind_keys(bindings());
             cx.bind_keys(crate::guide::composer::bindings());
             cx.set_menus(menus(MenuChecks::default()));
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
-                    cx.quit();
+                    quit_after_close(cx);
                 }
             })
             .detach();
@@ -241,9 +205,10 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             let options = WindowOptions {
                 window_bounds: Some(window_bounds),
                 display_id,
-                titlebar: Some(top_bar("ds-emulator")),
+                titlebar: Some(top_bar("Imago Emulator")),
                 window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
                 app_id: Some("ds-emulator".to_owned()),
+                window_decorations: chrome::window_decorations(),
                 ..WindowOptions::default()
             };
             cx.open_window(options, |window, cx| {
@@ -253,6 +218,154 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             window_chrome::set_dock_icon(APP_ICON);
             cx.activate(true);
         });
+}
+
+/// Quits once the last window has closed. On macOS at once. Elsewhere the
+/// window closes from inside the system's event handling, which in GPUI
+/// 0.2.2 still holds its X11 client's state (`client.rs`, `ClientMessage`),
+/// so quitting there panics ("RefCell already borrowed"); and deferring
+/// within the update would still run inside it. So off macOS the quit
+/// waits for the event loop's next turn.
+fn quit_after_close(cx: &mut App) {
+    if cfg!(target_os = "macos") {
+        cx.quit();
+    } else {
+        cx.spawn(async |cx| cx.update(|cx| cx.quit()).ok()).detach();
+    }
+}
+
+/// The shortcuts the app's words name, in GPUI's syntax (see
+/// [`crate::keys::shortcut`]): one binding for every system where it can
+/// be, `secondary` being ⌘ on macOS and Control elsewhere. Where a
+/// Control chord is the system's own off macOS, the app takes another.
+pub mod shortcut {
+    /// Opens a game.
+    pub const OPEN_ROM: &str = "secondary-o";
+    /// Adds games to the library.
+    pub const ADD_TO_LIBRARY: &str = "secondary-shift-a";
+    /// Takes the chosen game out of the library: ⌘⌫ as Move to Trash in
+    /// the Finder, Delete as in File Explorer and Linux's file managers.
+    pub const REMOVE_FROM_LIBRARY: &str = if cfg!(target_os = "macos") {
+        "secondary-backspace"
+    } else {
+        "delete"
+    };
+    /// Puts back the game last taken out of the library.
+    pub const PUT_BACK: &str = "secondary-z";
+    /// Closes the game.
+    pub const CLOSE_GAME: &str = "secondary-w";
+    /// Pauses or resumes.
+    pub const PAUSE: &str = "secondary-p";
+    /// Fast-forward and slow motion, on or off.
+    pub const FAST_FORWARD: &str = "secondary-f";
+    pub const SLOW_MOTION: &str = "secondary-shift-f";
+    /// Opens or closes Guide, and screenshots the game for it.
+    pub const GUIDE: &str = "secondary-j";
+    pub const SCREENSHOT_FOR_GUIDE: &str = "secondary-alt-s";
+    /// Stops a running script: ⌥⌘L on macOS. Control-Alt-L locks the
+    /// screen on KDE, Xfce and Cinnamon.
+    pub const STOP_SCRIPT: &str = if cfg!(target_os = "macos") {
+        "secondary-alt-l"
+    } else {
+        "secondary-shift-k"
+    };
+    /// Turns the screens: ⌥⌘→ and ⌥⌘← on macOS. Control-Alt-arrows
+    /// switch workspaces on GNOME, Xfce and Cinnamon, and turn the display
+    /// with some Intel drivers on Windows.
+    pub const ROTATE_CLOCKWISE: &str = if cfg!(target_os = "macos") {
+        "secondary-alt-right"
+    } else {
+        "secondary-shift-right"
+    };
+    pub const ROTATE_ANTICLOCKWISE: &str = if cfg!(target_os = "macos") {
+        "secondary-alt-left"
+    } else {
+        "secondary-shift-left"
+    };
+    /// The debugger's steps.
+    pub const DEBUG_STEP: &str = "secondary-shift-i";
+    pub const DEBUG_STEP_OVER: &str = "secondary-shift-o";
+    pub const DEBUG_NEXT_FRAME: &str = "secondary-shift-n";
+    /// Pastes a randomizer's settings.
+    pub const PASTE: &str = "secondary-v";
+    /// Full screen: ⌃⌘F on macOS, F11 elsewhere.
+    pub const FULL_SCREEN: &str = if cfg!(target_os = "macos") {
+        "ctrl-cmd-f"
+    } else {
+        "f11"
+    };
+    /// Opens the menu in the window, where the system draws no menu bar.
+    pub const APP_MENU: &str = "f10";
+}
+
+/// Every shortcut of the app's, as the menus show them. Game keys never
+/// take a Control or ⌘ chord, so these never reach the game.
+pub fn bindings() -> Vec<KeyBinding> {
+    let mut bindings = vec![
+        KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new(shortcut::OPEN_ROM, OpenRom, None),
+        KeyBinding::new(shortcut::ADD_TO_LIBRARY, AddToLibrary, None),
+        KeyBinding::new("secondary-shift-g", OpenStore, None),
+        KeyBinding::new("secondary-alt-r", Randomize, None),
+        // The chosen game's menu, as Get Info in the Finder, and
+        // taking it out of the library, as Move to Trash there.
+        KeyBinding::new("secondary-i", GameInfo, Some("Emulator")),
+        KeyBinding::new(
+            shortcut::REMOVE_FROM_LIBRARY,
+            RemoveFromLibrary,
+            Some("Emulator"),
+        ),
+        KeyBinding::new(shortcut::CLOSE_GAME, CloseGame, None),
+        // In the settings and debugger windows ⌘W closes the window,
+        // as in any Mac app; only the game's own window closes games.
+        KeyBinding::new("secondary-w", CloseWindow, Some("Settings")),
+        KeyBinding::new("secondary-w", CloseWindow, Some("Debugger")),
+        KeyBinding::new("secondary-m", Minimize, None),
+        KeyBinding::new("secondary-t", SwitchPlayer, None),
+        KeyBinding::new(shortcut::PAUSE, TogglePause, None),
+        KeyBinding::new("secondary-r", Reset, None),
+        KeyBinding::new("secondary-s", SaveState, None),
+        KeyBinding::new("secondary-l", LoadState, None),
+        KeyBinding::new("secondary-shift-s", SaveScreenshot, None),
+        // Guide, the chat beside the screens, and a screenshot for it.
+        KeyBinding::new(shortcut::GUIDE, ToggleGuide, None),
+        KeyBinding::new(shortcut::SCREENSHOT_FOR_GUIDE, ScreenshotForGuide, None),
+        KeyBinding::new("secondary-shift-r", ToggleRecording, None),
+        KeyBinding::new("secondary-shift-l", RunScript, None),
+        KeyBinding::new(shortcut::STOP_SCRIPT, StopScript, None),
+        KeyBinding::new("secondary-]", NextStateSlot, None),
+        KeyBinding::new("secondary-[", PreviousStateSlot, None),
+        KeyBinding::new(shortcut::FAST_FORWARD, ToggleFastForward, None),
+        KeyBinding::new(shortcut::SLOW_MOTION, ToggleSlowMotion, None),
+        KeyBinding::new("secondary-alt-f", ToggleFps, None),
+        KeyBinding::new("secondary-1", LayoutVertical, None),
+        KeyBinding::new("secondary-2", LayoutHorizontal, None),
+        KeyBinding::new("secondary-3", LayoutSingle, None),
+        KeyBinding::new("secondary-4", LayoutHybrid, None),
+        KeyBinding::new("secondary-e", SwapScreens, None),
+        KeyBinding::new(shortcut::ROTATE_CLOCKWISE, RotateClockwise, None),
+        KeyBinding::new(shortcut::ROTATE_ANTICLOCKWISE, RotateAnticlockwise, None),
+        KeyBinding::new("secondary-g", NextScreenGap, None),
+        KeyBinding::new("secondary-shift-c", ToggleColorCorrection, None),
+        KeyBinding::new("secondary-shift-d", ShowDebugger, None),
+        KeyBinding::new(shortcut::DEBUG_STEP, DebugStep, None),
+        KeyBinding::new(shortcut::DEBUG_STEP_OVER, DebugStepOver, None),
+        KeyBinding::new(shortcut::DEBUG_NEXT_FRAME, DebugNextFrame, None),
+        // On macOS AppKit puts View > Enter Full Screen in the menu
+        // itself, on Globe-F; this adds the classic shortcut. Elsewhere
+        // F11, as in every Linux and Windows app.
+        KeyBinding::new(shortcut::FULL_SCREEN, ToggleFullScreen, None),
+        KeyBinding::new("secondary-q", Quit, None),
+    ];
+    if cfg!(target_os = "macos") {
+        bindings.extend([
+            KeyBinding::new("cmd-h", HideApp, None),
+            KeyBinding::new("cmd-alt-h", HideOtherApps, None),
+        ]);
+    } else {
+        bindings.push(KeyBinding::new(shortcut::APP_MENU, ShowAppMenu, None));
+    }
+    bindings
 }
 
 /// A title bar drawn by the window itself as its [`TOP_BAR`], with the
@@ -326,137 +439,174 @@ impl Default for MenuChecks {
     }
 }
 
-/// The menu bar, with `checks` checked.
+/// The menu bar, with `checks` checked: macOS's, and off macOS the menu
+/// the window draws (`app_menu.rs`) from the same list, laid out as Linux
+/// and Windows apps lay theirs out.
 pub fn menus(checks: MenuChecks) -> Vec<Menu> {
     let fps = if checks.show_fps {
         "Hide FPS"
     } else {
         "Show FPS"
     };
-    vec![
-        Menu {
-            name: "ds-emulator".into(),
+    let mac = cfg!(target_os = "macos");
+    let mut menus = Vec::new();
+    if mac {
+        menus.push(Menu {
+            name: "Imago Emulator".into(),
             items: vec![
-                MenuItem::action("About ds-emulator", About),
+                MenuItem::action("About Imago Emulator", About),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Hide ds-emulator", HideApp),
+                MenuItem::action("Hide Imago Emulator", HideApp),
                 MenuItem::action("Hide Others", HideOtherApps),
                 MenuItem::action("Show All", ShowAllApps),
                 MenuItem::separator(),
-                MenuItem::action("Quit ds-emulator", Quit),
+                MenuItem::action("Quit Imago Emulator", Quit),
             ],
-        },
-        Menu {
-            name: "File".into(),
+        });
+    }
+    // An RPG Maker game is a folder, and no file dialog off macOS takes
+    // files and folders at once, so folders get their own items there.
+    let mut file = vec![MenuItem::action("Open ROM…", OpenRom)];
+    if !mac {
+        file.push(MenuItem::action("Open Game Folder…", OpenGameFolder));
+    }
+    file.push(MenuItem::action("Add Games to Library…", AddToLibrary));
+    if !mac {
+        file.push(MenuItem::action(
+            "Add Game Folders to Library…",
+            AddGameFolders,
+        ));
+    }
+    file.extend([
+        MenuItem::action("Game Store", OpenStore),
+        MenuItem::action("Game Info", GameInfo),
+        MenuItem::action("Remove from Library", RemoveFromLibrary),
+        MenuItem::action("Close Game", CloseGame),
+        MenuItem::action("Connect Second Console…", ConnectLinkCable),
+        MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),
+        MenuItem::separator(),
+        MenuItem::action("Randomize Game…", Randomize),
+        MenuItem::separator(),
+        MenuItem::action("Save Screenshot", SaveScreenshot),
+        MenuItem::action("Screenshot for Guide", ScreenshotForGuide),
+        MenuItem::action("Start / Stop Recording", ToggleRecording),
+        MenuItem::separator(),
+        MenuItem::action("Edit Cheats…", EditCheats),
+        MenuItem::separator(),
+        MenuItem::action("Run Script…", RunScript),
+        MenuItem::action("Stop Script", StopScript),
+    ]);
+    if !mac {
+        // Windows names it Exit, as its apps do.
+        let quit = if cfg!(windows) { "Exit" } else { "Quit" };
+        file.extend([
+            MenuItem::separator(),
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action(quit, Quit),
+        ]);
+    }
+    menus.push(Menu {
+        name: "File".into(),
+        items: file,
+    });
+    menus.push(Menu {
+        name: "Emulation".into(),
+        items: vec![
+            MenuItem::action("Pause / Resume", TogglePause),
+            MenuItem::action("Reset", Reset),
+            MenuItem::action("Fast-Forward", ToggleFastForward),
+            MenuItem::action("Slow Motion", ToggleSlowMotion),
+            MenuItem::submenu(fast_forward_menu(checks.fast_forward)),
+            MenuItem::action("Switch Player", SwitchPlayer),
+            MenuItem::action("Use Microphone", ToggleMicrophone),
+            MenuItem::separator(),
+            MenuItem::action("Step Instruction", DebugStep),
+            MenuItem::action("Step Over", DebugStepOver),
+            MenuItem::action("Next Frame", DebugNextFrame),
+            MenuItem::separator(),
+            MenuItem::action("Save State", SaveState),
+            MenuItem::action("Load State", LoadState),
+            MenuItem::action("Next State Slot", NextStateSlot),
+            MenuItem::action("Previous State Slot", PreviousStateSlot),
+        ],
+    });
+    let mut view = vec![
+        MenuItem::action("Screens Stacked", LayoutVertical),
+        MenuItem::action("Screens Side by Side", LayoutHorizontal),
+        MenuItem::action("One Screen", LayoutSingle),
+        MenuItem::action("One Large, Both Small", LayoutHybrid),
+        MenuItem::separator(),
+        MenuItem::action("Swap Screens", SwapScreens),
+        MenuItem::action("Rotate Clockwise", RotateClockwise),
+        MenuItem::action("Rotate Anticlockwise", RotateAnticlockwise),
+        MenuItem::action("Change Screen Gap", NextScreenGap),
+        MenuItem::separator(),
+        MenuItem::submenu(Menu {
+            name: "3D Resolution".into(),
             items: vec![
-                MenuItem::action("Open ROM…", OpenRom),
-                MenuItem::action("Add Games to Library…", AddToLibrary),
-                MenuItem::action("Game Store", OpenStore),
-                MenuItem::action("Game Info", GameInfo),
-                MenuItem::action("Remove from Library", RemoveFromLibrary),
-                MenuItem::action("Close Game", CloseGame),
-                MenuItem::action("Connect Second Console…", ConnectLinkCable),
-                MenuItem::action("Insert GBA Cartridge…", InsertGbaCartridge),
-                MenuItem::separator(),
-                MenuItem::action("Randomize Pokémon Game…", Randomize),
-                MenuItem::separator(),
-                MenuItem::action("Save Screenshot", SaveScreenshot),
-                MenuItem::action("Screenshot for Guide", ScreenshotForGuide),
-                MenuItem::action("Start / Stop Recording", ToggleRecording),
-                MenuItem::separator(),
-                MenuItem::action("Edit Cheats…", EditCheats),
-                MenuItem::separator(),
-                MenuItem::action("Run Script…", RunScript),
-                MenuItem::action("Stop Script", StopScript),
+                MenuItem::action("Match Display", Resolution3dMatchDisplay),
+                MenuItem::action("Native (1×)", Resolution3d1x),
+                MenuItem::action("2×", Resolution3d2x),
+                MenuItem::action("3×", Resolution3d3x),
+                MenuItem::action("4×", Resolution3d4x),
+                MenuItem::action("6×", Resolution3d6x),
+                MenuItem::action("8×", Resolution3d8x),
             ],
-        },
-        Menu {
-            name: "Emulation".into(),
+        }),
+        MenuItem::submenu(Menu {
+            name: "Picture".into(),
             items: vec![
-                MenuItem::action("Pause / Resume", TogglePause),
-                MenuItem::action("Reset", Reset),
-                MenuItem::action("Fast-Forward", ToggleFastForward),
-                MenuItem::action("Slow Motion", ToggleSlowMotion),
-                MenuItem::submenu(fast_forward_menu(checks.fast_forward)),
-                MenuItem::action("Switch Player", SwitchPlayer),
-                MenuItem::action("Use Microphone", ToggleMicrophone),
-                MenuItem::separator(),
-                MenuItem::action("Step Instruction", DebugStep),
-                MenuItem::action("Step Over", DebugStepOver),
-                MenuItem::action("Next Frame", DebugNextFrame),
-                MenuItem::separator(),
-                MenuItem::action("Save State", SaveState),
-                MenuItem::action("Load State", LoadState),
-                MenuItem::action("Next State Slot", NextStateSlot),
-                MenuItem::action("Previous State Slot", PreviousStateSlot),
+                MenuItem::action("Auto", PictureAuto),
+                MenuItem::action("Sharp Pixels", PictureSharpPixels),
+                MenuItem::action("Smooth", PictureSmooth),
+                MenuItem::action("Rounded Pixels", PictureRoundedPixels),
+                MenuItem::action("LCD Grid", PictureLcdGrid),
+                MenuItem::action("Scanlines", PictureScanlines),
             ],
-        },
-        Menu {
-            name: "View".into(),
+        }),
+        MenuItem::action("Colour Correction", ToggleColorCorrection),
+        MenuItem::action(fps, ToggleFps),
+        MenuItem::submenu(Menu {
+            name: "Original Game Boy Games".into(),
             items: vec![
-                MenuItem::action("Screens Stacked", LayoutVertical),
-                MenuItem::action("Screens Side by Side", LayoutHorizontal),
-                MenuItem::action("One Screen", LayoutSingle),
-                MenuItem::action("One Large, Both Small", LayoutHybrid),
-                MenuItem::separator(),
-                MenuItem::action("Swap Screens", SwapScreens),
-                MenuItem::action("Rotate Clockwise", RotateClockwise),
-                MenuItem::action("Rotate Anticlockwise", RotateAnticlockwise),
-                MenuItem::action("Change Screen Gap", NextScreenGap),
-                MenuItem::separator(),
-                MenuItem::submenu(Menu {
-                    name: "3D Resolution".into(),
-                    items: vec![
-                        MenuItem::action("Match Display", Resolution3dMatchDisplay),
-                        MenuItem::action("Native (1×)", Resolution3d1x),
-                        MenuItem::action("2×", Resolution3d2x),
-                        MenuItem::action("3×", Resolution3d3x),
-                        MenuItem::action("4×", Resolution3d4x),
-                        MenuItem::action("6×", Resolution3d6x),
-                        MenuItem::action("8×", Resolution3d8x),
-                    ],
-                }),
-                MenuItem::submenu(Menu {
-                    name: "Picture".into(),
-                    items: vec![
-                        MenuItem::action("Auto", PictureAuto),
-                        MenuItem::action("Sharp Pixels", PictureSharpPixels),
-                        MenuItem::action("Smooth", PictureSmooth),
-                        MenuItem::action("Rounded Pixels", PictureRoundedPixels),
-                        MenuItem::action("LCD Grid", PictureLcdGrid),
-                        MenuItem::action("Scanlines", PictureScanlines),
-                    ],
-                }),
-                MenuItem::action("Colour Correction", ToggleColorCorrection),
-                MenuItem::action(fps, ToggleFps),
-                MenuItem::submenu(Menu {
-                    name: "Original Game Boy Games".into(),
-                    items: vec![
-                        MenuItem::action("In Grey, as on a Game Boy", DmgColorsGrey),
-                        MenuItem::action(
-                            "In Colour, as on a Game Boy Color",
-                            DmgColorsGameBoyColor,
-                        ),
-                    ],
-                }),
-                MenuItem::separator(),
-                MenuItem::action("Guide", ToggleGuide),
-                MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
-                MenuItem::action("Debugger", ShowDebugger),
+                MenuItem::action("In Grey, as on a Game Boy", DmgColorsGrey),
+                MenuItem::action("In Colour, as on a Game Boy Color", DmgColorsGameBoyColor),
             ],
-        },
-        Menu {
-            name: "Window".into(),
-            items: vec![
-                MenuItem::action("Minimize", Minimize),
-                MenuItem::action("Zoom", Zoom),
-            ],
-        },
-    ]
+        }),
+        MenuItem::separator(),
+        MenuItem::action("Guide", ToggleGuide),
+        MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
+        MenuItem::action("Debugger", ShowDebugger),
+    ];
+    if !mac {
+        // AppKit adds Enter Full Screen to macOS's View menu itself.
+        view.push(MenuItem::separator());
+        view.push(MenuItem::action("Full Screen", ToggleFullScreen));
+    }
+    menus.push(Menu {
+        name: "View".into(),
+        items: view,
+    });
+    menus.push(Menu {
+        name: "Window".into(),
+        items: vec![
+            MenuItem::action("Minimize", Minimize),
+            // Maximise elsewhere, which zooming is.
+            MenuItem::action(if mac { "Zoom" } else { "Maximize" }, Zoom),
+        ],
+    });
+    if !mac {
+        menus.push(Menu {
+            name: "Help".into(),
+            items: vec![MenuItem::action("About Imago Emulator", About)],
+        });
+    }
+    menus
 }
 
 /// Emulation > Fast-Forward Speed, with `current` checked.
@@ -486,6 +636,8 @@ fn checked(label: &str, on: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gpui::Action as _;
+
     use super::*;
 
     fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
@@ -573,5 +725,303 @@ mod tests {
     #[test]
     fn window_opens_at_2x_without_a_display() {
         assert_eq!(initial_size(None), (512.0, 768.0));
+    }
+
+    /// Each binding as its keys, its action and its context, sorted.
+    fn written(bindings: &[KeyBinding]) -> Vec<String> {
+        let mut written: Vec<String> = bindings
+            .iter()
+            .map(|binding| {
+                let keys: Vec<String> = binding
+                    .keystrokes()
+                    .iter()
+                    .map(|keystroke| keystroke.inner().unparse())
+                    .collect();
+                let context = binding
+                    .predicate()
+                    .map(|predicate| predicate.to_string())
+                    .unwrap_or_default();
+                format!("{} {} {context}", keys.join(" "), binding.action().name())
+            })
+            .collect();
+        written.sort();
+        written
+    }
+
+    /// The bindings as they were before Linux and Windows, written with
+    /// `cmd`.
+    fn bindings_before() -> Vec<KeyBinding> {
+        vec![
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-h", HideApp, None),
+            KeyBinding::new("cmd-alt-h", HideOtherApps, None),
+            KeyBinding::new("cmd-o", OpenRom, None),
+            KeyBinding::new("cmd-shift-a", AddToLibrary, None),
+            KeyBinding::new("cmd-shift-g", OpenStore, None),
+            KeyBinding::new("cmd-alt-r", Randomize, None),
+            KeyBinding::new("cmd-i", GameInfo, Some("Emulator")),
+            KeyBinding::new("cmd-backspace", RemoveFromLibrary, Some("Emulator")),
+            KeyBinding::new("cmd-w", CloseGame, None),
+            KeyBinding::new("cmd-w", CloseWindow, Some("Settings")),
+            KeyBinding::new("cmd-w", CloseWindow, Some("Debugger")),
+            KeyBinding::new("cmd-m", Minimize, None),
+            KeyBinding::new("cmd-t", SwitchPlayer, None),
+            KeyBinding::new("cmd-p", TogglePause, None),
+            KeyBinding::new("cmd-r", Reset, None),
+            KeyBinding::new("cmd-s", SaveState, None),
+            KeyBinding::new("cmd-l", LoadState, None),
+            KeyBinding::new("cmd-shift-s", SaveScreenshot, None),
+            KeyBinding::new("cmd-j", ToggleGuide, None),
+            KeyBinding::new("cmd-alt-s", ScreenshotForGuide, None),
+            KeyBinding::new("cmd-shift-r", ToggleRecording, None),
+            KeyBinding::new("cmd-shift-l", RunScript, None),
+            KeyBinding::new("cmd-alt-l", StopScript, None),
+            KeyBinding::new("cmd-]", NextStateSlot, None),
+            KeyBinding::new("cmd-[", PreviousStateSlot, None),
+            KeyBinding::new("cmd-f", ToggleFastForward, None),
+            KeyBinding::new("cmd-shift-f", ToggleSlowMotion, None),
+            KeyBinding::new("cmd-alt-f", ToggleFps, None),
+            KeyBinding::new("cmd-1", LayoutVertical, None),
+            KeyBinding::new("cmd-2", LayoutHorizontal, None),
+            KeyBinding::new("cmd-3", LayoutSingle, None),
+            KeyBinding::new("cmd-4", LayoutHybrid, None),
+            KeyBinding::new("cmd-e", SwapScreens, None),
+            KeyBinding::new("cmd-alt-right", RotateClockwise, None),
+            KeyBinding::new("cmd-alt-left", RotateAnticlockwise, None),
+            KeyBinding::new("cmd-g", NextScreenGap, None),
+            KeyBinding::new("cmd-shift-c", ToggleColorCorrection, None),
+            KeyBinding::new("cmd-shift-d", ShowDebugger, None),
+            KeyBinding::new("cmd-shift-i", DebugStep, None),
+            KeyBinding::new("cmd-shift-o", DebugStepOver, None),
+            KeyBinding::new("cmd-shift-n", DebugNextFrame, None),
+            KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "checks macOS's own shortcuts (by design)"
+    )]
+    fn on_macos_every_shortcut_is_what_it_was() {
+        assert_eq!(written(&bindings()), written(&bindings_before()));
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "checks Linux's and Windows's shortcuts (by design)"
+    )]
+    fn off_macos_no_shortcut_takes_the_logo_key_or_a_chord_the_system_keeps() {
+        let bindings = bindings();
+        let names: Vec<&str> = bindings.iter().map(|b| b.action().name()).collect();
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("Hide") || name.contains("ShowAll")),
+            "only macOS hides apps; Windows panics on Hide Others"
+        );
+        for binding in &bindings {
+            for keystroke in binding.keystrokes() {
+                let keystroke = keystroke.inner();
+                let modifiers = keystroke.modifiers;
+                assert!(!modifiers.platform, "{keystroke}: the Windows or Super key");
+                let arrow = matches!(keystroke.key.as_str(), "left" | "right" | "up" | "down");
+                assert!(
+                    !(modifiers.control && modifiers.alt && (arrow || keystroke.key == "l")),
+                    "{keystroke}: switches workspaces, turns the display or locks the screen"
+                );
+            }
+        }
+        assert!(names.contains(&ShowAppMenu.name()), "F10 opens the menu");
+    }
+
+    #[test]
+    fn every_shortcut_the_app_names_is_bound() {
+        let bound = bindings();
+        for shortcut in [
+            shortcut::OPEN_ROM,
+            shortcut::ADD_TO_LIBRARY,
+            shortcut::REMOVE_FROM_LIBRARY,
+            shortcut::CLOSE_GAME,
+            shortcut::PAUSE,
+            shortcut::FAST_FORWARD,
+            shortcut::SLOW_MOTION,
+            shortcut::GUIDE,
+            shortcut::SCREENSHOT_FOR_GUIDE,
+            shortcut::STOP_SCRIPT,
+            shortcut::ROTATE_CLOCKWISE,
+            shortcut::ROTATE_ANTICLOCKWISE,
+            shortcut::DEBUG_STEP,
+            shortcut::DEBUG_STEP_OVER,
+            shortcut::DEBUG_NEXT_FRAME,
+            shortcut::FULL_SCREEN,
+        ] {
+            let written = gpui::Keystroke::parse(shortcut)
+                .expect("a keystroke")
+                .unparse();
+            let found = bound.iter().any(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .any(|keys| keys.inner().unparse() == written)
+            });
+            assert!(found, "{shortcut} is bound");
+        }
+    }
+
+    /// Each menu as its name and its items' names, `-` for a separator.
+    fn outline(menus: &[Menu]) -> Vec<(String, Vec<String>)> {
+        fn items(items: &[MenuItem]) -> Vec<String> {
+            items
+                .iter()
+                .map(|item| match item {
+                    MenuItem::Separator => "-".to_owned(),
+                    MenuItem::Submenu(menu) => format!("{} >", menu.name),
+                    MenuItem::SystemMenu(menu) => format!("{} (system)", menu.name),
+                    MenuItem::Action { name, .. } => name.to_string(),
+                })
+                .collect()
+        }
+        menus
+            .iter()
+            .map(|menu| (menu.name.to_string(), items(&menu.items)))
+            .collect()
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "checks macOS's own menu bar (by design)"
+    )]
+    fn on_macos_the_menu_bar_is_what_it_was() {
+        let outline = outline(&menus(MenuChecks::default()));
+        let names: Vec<&str> = outline.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Imago Emulator", "File", "Emulation", "View", "Window"]
+        );
+        assert_eq!(
+            outline[0].1,
+            [
+                "About Imago Emulator",
+                "-",
+                "Settings…",
+                "-",
+                "Services (system)",
+                "-",
+                "Hide Imago Emulator",
+                "Hide Others",
+                "Show All",
+                "-",
+                "Quit Imago Emulator",
+            ]
+        );
+        assert_eq!(
+            outline[1].1,
+            [
+                "Open ROM…",
+                "Add Games to Library…",
+                "Game Store",
+                "Game Info",
+                "Remove from Library",
+                "Close Game",
+                "Connect Second Console…",
+                "Insert GBA Cartridge…",
+                "-",
+                "Randomize Game…",
+                "-",
+                "Save Screenshot",
+                "Screenshot for Guide",
+                "Start / Stop Recording",
+                "-",
+                "Edit Cheats…",
+                "-",
+                "Run Script…",
+                "Stop Script",
+            ]
+        );
+        assert_eq!(
+            outline[2].1,
+            [
+                "Pause / Resume",
+                "Reset",
+                "Fast-Forward",
+                "Slow Motion",
+                "Fast-Forward Speed >",
+                "Switch Player",
+                "Use Microphone",
+                "-",
+                "Step Instruction",
+                "Step Over",
+                "Next Frame",
+                "-",
+                "Save State",
+                "Load State",
+                "Next State Slot",
+                "Previous State Slot",
+            ]
+        );
+        assert_eq!(
+            outline[3].1,
+            [
+                "Screens Stacked",
+                "Screens Side by Side",
+                "One Screen",
+                "One Large, Both Small",
+                "-",
+                "Swap Screens",
+                "Rotate Clockwise",
+                "Rotate Anticlockwise",
+                "Change Screen Gap",
+                "-",
+                "3D Resolution >",
+                "Picture >",
+                "Colour Correction",
+                "Show FPS",
+                "Original Game Boy Games >",
+                "-",
+                "Guide",
+                "Show / Hide Window Controls",
+                "Debugger",
+            ]
+        );
+        assert_eq!(outline[4].1, ["Minimize", "Zoom"]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "checks Linux's and Windows's menu (by design)"
+    )]
+    fn off_macos_the_menu_has_folders_full_screen_and_about_but_no_hiding() {
+        let outline = outline(&menus(MenuChecks::default()));
+        let names: Vec<&str> = outline.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["File", "Emulation", "View", "Window", "Help"]);
+        let every: Vec<&String> = outline.iter().flat_map(|(_, items)| items).collect();
+        for missing in [
+            "Hide Imago Emulator",
+            "Hide Others",
+            "Show All",
+            "Services (system)",
+        ] {
+            assert!(!every.iter().any(|item| *item == missing), "{missing}");
+        }
+        let file = &outline[0].1;
+        assert_eq!(
+            file[..4],
+            [
+                "Open ROM…",
+                "Open Game Folder…",
+                "Add Games to Library…",
+                "Add Game Folders to Library…"
+            ]
+        );
+        let quit = if cfg!(windows) { "Exit" } else { "Quit" };
+        assert_eq!(file[file.len() - 3..], ["Settings…", "-", quit]);
+        assert_eq!(outline[2].1.last().map(String::as_str), Some("Full Screen"));
+        assert_eq!(outline[3].1, ["Minimize", "Maximize"]);
+        assert_eq!(outline[4].1, ["About Imago Emulator"]);
     }
 }

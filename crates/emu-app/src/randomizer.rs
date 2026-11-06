@@ -325,7 +325,11 @@ fn curl(url: &str, to: &Path) -> Result<(), String> {
         .args(["--silent", "--show-error", "--location"])
         .args([
             "--user-agent",
-            concat!("ds-emulator/", env!("CARGO_PKG_VERSION")),
+            concat!(
+                "ImagoEmulator/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://imagoemulator.com)"
+            ),
         ])
         .args(["--connect-timeout", "10", "--max-time", DOWNLOAD_SECONDS])
         // Gives up on a download stalled below 1 KB/s for a minute, and

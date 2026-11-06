@@ -20,6 +20,9 @@ use gpui::{
 
 use crate::ambient::{self, Backdrop};
 use crate::app::{
+    AddGameFolders, OpenGameFolder, ScreenshotForGuide, ShowAppMenu, ToggleGuide, shortcut,
+};
+use crate::app::{
     AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
     EditCheats, GameInfo, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
     LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore,
@@ -34,12 +37,13 @@ use crate::app::{
 use crate::app::{
     FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
 };
-use crate::app::{ScreenshotForGuide, ToggleGuide};
+use crate::app_menu::{AppMenu, AppMenuEvent};
 use crate::archive;
 use crate::audio::{self, AudioOutput};
 use crate::bindings::{self, Bindings, Held, Shortcut};
 use crate::cheats;
 use crate::chords::{Chords, Effect};
+use crate::chrome::{self, Tone};
 use crate::color::Correction;
 use crate::controls::{Controls, HeldState};
 use crate::cursor::{self, Cursor};
@@ -47,12 +51,14 @@ use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
 use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Loaded};
 use crate::filter::Filter;
+use crate::fonts;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
 use crate::gpu_upscale::{Gpu, GpuDevice, GpuError, Method, Request};
 use crate::guide::{self, GuideEvent, GuideGame, GuidePanel};
 use crate::key_guide;
 use crate::key_routes::{KeyRoutes, Route};
+use crate::keys;
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::library::{self, Library};
 use crate::library_view::{LibraryEvent, LibraryView};
@@ -176,6 +182,12 @@ pub struct EmulatorView {
     library: Entity<LibraryView>,
     /// The game menu, while it is open over the paused game.
     menu: Option<(Entity<GameMenu>, Subscription)>,
+    /// Off macOS, the menu the window draws for the menu bar there is
+    /// none of, while it is open, and what had the keyboard before it.
+    app_menu: Option<(Entity<AppMenu>, Subscription, Option<FocusHandle>)>,
+    /// Whether the pointer is in the top bar, which shows the menu's
+    /// button off macOS while the window's buttons are hidden.
+    title_hovered: bool,
     /// Games started so far, which numbers each for the debugger.
     sessions: u64,
     session: Option<Session>,
@@ -441,6 +453,7 @@ impl EmulatorView {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        crate::x11_redraw::ensure_redraws();
 
         let loaded_bindings = bindings::default_path().map(|path| Bindings::load(&path));
         let settings_path = settings::default_path();
@@ -568,6 +581,8 @@ impl EmulatorView {
             opening_randomizer: false,
             library,
             menu: None,
+            app_menu: None,
+            title_hovered: false,
             sessions: 0,
             session: None,
             startup_script: script,
@@ -666,6 +681,13 @@ impl EmulatorView {
             .any(|path| archive::is_archive(path) || romhack::is_patch(path))
         {
             self.prepare_and_open(paths, window, cx);
+            return;
+        }
+        // Where 3DS games can't play yet, say so at once: not after a
+        // moment of "Downloading the 3DS core…", nor once the running game
+        // has stopped for it.
+        if let Some(why) = refused(&paths) {
+            self.show_notice(why, cx);
             return;
         }
         // A game opened from the command line is the same game, in the
@@ -871,9 +893,15 @@ impl EmulatorView {
         let running = format!("Running {name}");
         // Left on last time, so worth saying.
         let pace = if self.controls.fast_forward_latched() {
-            Some("fast-forward on (⌘F)".to_owned())
+            Some(format!(
+                "fast-forward on ({})",
+                keys::shortcut(shortcut::FAST_FORWARD)
+            ))
         } else if self.controls.slow_motion_latched() {
-            Some("slow motion on (⌘⇧F)".to_owned())
+            Some(format!(
+                "slow motion on ({})",
+                keys::shortcut(shortcut::SLOW_MOTION)
+            ))
         } else {
             None
         };
@@ -1256,6 +1284,21 @@ impl EmulatorView {
         Some((screen, *info.screens.get(screen)?))
     }
 
+    /// Whether a touchscreen is drawn up into the top bar, where a press
+    /// must touch it rather than drag the window.
+    fn touchscreen_in_top_bar(&self) -> bool {
+        let Some(info) = self.session.as_ref().map(|session| &session.info) else {
+            return false;
+        };
+        let Some(touch) = info.touch_screen else {
+            return false;
+        };
+        let per_console = (info.screens.len() / consoles(info)).max(1);
+        self.placements
+            .iter()
+            .any(|placement| placement.screen % per_console == touch && placement.rect.y < TOP_BAR)
+    }
+
     /// Lets go of everything held, at once: for when keys and buttons stop
     /// reaching the game while they may still be down, as when the window
     /// loses focus or the game menu opens. A key still down counts again
@@ -1291,7 +1334,7 @@ impl EmulatorView {
     fn key_route(&self, window: &Window, cx: &App) -> Route {
         if self.session.is_none() {
             Route::Library
-        } else if self.menu.is_some() {
+        } else if self.menu.is_some() || self.app_menu.is_some() {
             Route::Menu
         } else if self.guide_open && self.guide.read(cx).composer_focused(window, cx) {
             Route::Guide
@@ -1681,7 +1724,8 @@ impl EmulatorView {
         self.sync_held();
     }
 
-    /// Asks for a file, then calls `then` with it.
+    /// Asks for a game, then calls `then` with it: a file, or on macOS a
+    /// file or a folder, as an RPG Maker game is.
     fn prompt_for_file(
         &mut self,
         prompt: &'static str,
@@ -1689,22 +1733,34 @@ impl EmulatorView {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
     ) {
-        // Folders too: an RPG Maker game is one.
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: false,
-            prompt: Some(prompt.into()),
-        });
+        self.prompt_for(Choose::Games, prompt, window, cx, then);
+    }
+
+    /// Asks for `choose`, then calls `then` with the first chosen. Says
+    /// why if the dialog can't open, as on Linux without a desktop portal.
+    fn prompt_for(
+        &mut self,
+        choose: Choose,
+        prompt: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let paths = cx.prompt_for_paths(choose.options(false, prompt));
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
+            let Ok(chosen) = paths.await else {
                 return;
             };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            this.update_in(cx, |this, window, cx| then(this, path, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| match chosen {
+                Ok(Some(paths)) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        then(this, path, window, cx);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => this.show_notice(dialog_failed(&error), cx),
+            })
+            .ok();
         })
         .detach();
     }
@@ -1712,7 +1768,8 @@ impl EmulatorView {
     /// Shows the store in the library's place, unless a game is running.
     fn open_store(&mut self, cx: &mut Context<Self>) {
         if self.session.is_some() {
-            self.show_notice("Close the game with ⌘W to open the store", cx);
+            let close = keys::shortcut(shortcut::CLOSE_GAME);
+            self.show_notice(format!("Close the game with {close} to open the store"), cx);
             return;
         }
         self.library
@@ -1721,20 +1778,29 @@ impl EmulatorView {
 
     /// Asks for games, then adds them to the library without playing them.
     fn add_to_library(&mut self, _: &AddToLibrary, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: true,
-            prompt: Some("Add".into()),
-        });
+        self.add_chosen(Choose::Games, window, cx);
+    }
+
+    /// Asks for `choose`, any number, then adds them to the library.
+    fn add_chosen(&mut self, choose: Choose, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(choose.options(true, "Add"));
         let library = self.library.clone();
-        cx.spawn_in(window, async move |_, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(chosen) = paths.await else {
                 return;
             };
-            library
-                .update(cx, |library, cx| library.add_chosen(paths, cx))
-                .ok();
+            match chosen {
+                Ok(Some(paths)) => {
+                    library
+                        .update(cx, |library, cx| library.add_chosen(paths, cx))
+                        .ok();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    this.update(cx, |this, cx| this.show_notice(dialog_failed(&error), cx))
+                        .ok();
+                }
+            }
         })
         .detach();
     }
@@ -1755,7 +1821,11 @@ impl EmulatorView {
     /// the caret is there already.
     fn toggle_guide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.session.is_none() {
-            self.show_notice("Open a game, then ask Guide about it (⌘J)", cx);
+            let guide = keys::shortcut(shortcut::GUIDE);
+            self.show_notice(
+                format!("Open a game, then ask Guide about it ({guide})"),
+                cx,
+            );
             return;
         }
         if self.guide_open && self.guide.read(cx).composer_focused(window, cx) {
@@ -1816,14 +1886,15 @@ impl EmulatorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match *event {
+        match event {
             GuideEvent::Close => self.close_guide(window, cx),
             GuideEvent::Blur => {
                 window.focus(&self.focus);
                 cx.notify();
             }
             GuideEvent::TakeShot => self.screenshot_for_guide(cx),
-            GuideEvent::AskWithShot(question) => {
+            GuideEvent::Notice(text) => self.show_notice(text.clone(), cx),
+            &GuideEvent::AskWithShot(question) => {
                 self.screenshot_for_guide(cx);
                 self.guide
                     .update(cx, |guide, cx| guide.ask_starter(question, window, cx));
@@ -1883,7 +1954,8 @@ impl EmulatorView {
         // Lit by state, not a hover style: text takes its colour when laid
         // out, before a hover style applies.
         let lit = self.guide_pill_hovered;
-        Some(
+        // Off macOS it stands in the bar that drags the window.
+        let pill = chrome::over_drag_area(
             div()
                 .id("guide-pill")
                 .flex()
@@ -1901,7 +1973,7 @@ impl EmulatorView {
                 .child(
                     div()
                         .text_color(quiet(if lit { 0x8C } else { 0x59 }))
-                        .child("⌘J"),
+                        .child(keys::shortcut(shortcut::GUIDE)),
                 )
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     this.guide_pill_hovered = *hovered;
@@ -1912,13 +1984,13 @@ impl EmulatorView {
                 }))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, window, cx| this.open_guide(window, cx)))
-                .children(probe::part("pill:guide"))
-                .with_animation(
-                    "guide-pill-in",
-                    Animation::new(Duration::from_millis(160)),
-                    |pill, delta| pill.opacity(delta),
-                ),
-        )
+                .children(probe::part("pill:guide")),
+        );
+        Some(pill.with_animation(
+            "guide-pill-in",
+            Animation::new(Duration::from_millis(160)),
+            |pill, delta| pill.opacity(delta),
+        ))
     }
 
     fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2112,7 +2184,7 @@ impl EmulatorView {
         }
         // The game just left goes first, with where it was left.
         self.library.update(cx, |library, cx| library.refresh(cx));
-        window.set_window_title("ds-emulator");
+        window.set_window_title("Imago Emulator");
         cx.notify();
     }
 
@@ -2136,6 +2208,89 @@ impl EmulatorView {
         self.prompt_for_file("Open", window, cx, |this, path, window, cx| {
             this.open(vec![path], window, cx);
         });
+    }
+
+    /// Off macOS, where Open ROM… takes only files: opens an RPG Maker
+    /// game from its folder.
+    fn open_game_folder(
+        &mut self,
+        _: &OpenGameFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_for(
+            Choose::Folders,
+            "Open",
+            window,
+            cx,
+            |this, path, window, cx| {
+                this.open(vec![path], window, cx);
+            },
+        );
+    }
+
+    /// Off macOS: asks for RPG Maker games' folders and adds them to the
+    /// library.
+    fn add_game_folders(
+        &mut self,
+        _: &AddGameFolders,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_chosen(Choose::Folders, window, cx);
+    }
+
+    /// Opens the menu the window draws off macOS, or closes it if it is
+    /// open: from its button, or with F10 from the keyboard, which chooses
+    /// its first menu.
+    fn toggle_app_menu(
+        &mut self,
+        from_keyboard: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.app_menu.is_some() {
+            self.close_app_menu(window, cx);
+            return;
+        }
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let menus = cx.get_menus().unwrap_or_else(|| {
+            crate::app::menus(self.menu_checks())
+                .into_iter()
+                .map(gpui::Menu::owned)
+                .collect()
+        });
+        let anchor = gpui::point(px(chrome::MENU_BUTTON_LEFT), px(TOP_BAR - 4.0));
+        let menu = cx.new(|cx| AppMenu::new(menus, anchor, from_keyboard, window, cx));
+        let subscription = cx.subscribe_in(&menu, window, Self::app_menu_event);
+        let before = window.focused(cx);
+        menu.read(cx).focus(window);
+        self.app_menu = Some((menu, subscription, before));
+        cx.notify();
+    }
+
+    /// Closes the menu the window draws, giving the keyboard back to what
+    /// had it.
+    fn close_app_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, _, before)) = self.app_menu.take() {
+            before.unwrap_or_else(|| self.focus.clone()).focus(window);
+            cx.notify();
+        }
+    }
+
+    fn app_menu_event(
+        &mut self,
+        _: &Entity<AppMenu>,
+        event: &AppMenuEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_app_menu(window, cx);
+        if let AppMenuEvent::Run(action) = event {
+            window.dispatch_action(action.boxed_clone(), cx);
+        }
     }
 
     /// Restarts the running game linked to a second one: by link cable
@@ -2495,10 +2650,15 @@ impl EmulatorView {
 
     /// Rebuilds the menus to check what is chosen now.
     fn refresh_menus(&self, cx: &mut Context<Self>) {
-        cx.set_menus(crate::app::menus(MenuChecks {
+        cx.set_menus(crate::app::menus(self.menu_checks()));
+    }
+
+    /// What the menus show checked now.
+    fn menu_checks(&self) -> MenuChecks {
+        MenuChecks {
             fast_forward: self.speeds.fast_forward,
             show_fps: self.show_fps,
-        }));
+        }
     }
 
     /// Opens the debugger window, or brings it to the front.
@@ -3011,9 +3171,13 @@ impl Render for EmulatorView {
                 }
             }))
             .on_action(cx.listener(|this, _: &RemoveFromLibrary, _, cx| {
-                if this.session.is_none() {
+                if this.session.is_none() && this.app_menu.is_none() {
                     this.library
                         .update(cx, |library, cx| library.remove_chosen(cx));
+                } else if !cfg!(target_os = "macos") {
+                    // Off macOS it is Delete alone, which is the game's
+                    // while one runs, and the menu's while it is open.
+                    cx.propagate();
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseGame, window, cx| this.close_game(window, cx)))
@@ -3161,6 +3325,11 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
             }))
+            .on_action(cx.listener(Self::open_game_folder))
+            .on_action(cx.listener(Self::add_game_folders))
+            .on_action(cx.listener(|this, _: &ShowAppMenu, window, cx| {
+                this.toggle_app_menu(true, window, cx);
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
@@ -3204,6 +3373,13 @@ impl Render for EmulatorView {
         } else {
             BACKGROUND
         }));
+        // Off macOS, the top bar drags the window where the app frames
+        // it, under everything drawn there (`chrome.rs`).
+        let framed = !cfg!(target_os = "macos") && chrome::frame(window) != chrome::Frame::System;
+        if framed && !fullscreen && !self.touchscreen_in_top_bar() {
+            let strip = div().absolute().top_0().left_0().right_0().h(px(TOP_BAR));
+            root = root.child(chrome::drag_area(strip, "drag-area", window, cx));
+        }
         let shown = self.shown_layout();
         let mut upscaler_failed = None;
         let mut guide_width = None;
@@ -3338,11 +3514,28 @@ impl Render for EmulatorView {
             self.placements.clear();
             root = root.child(self.library.clone());
         }
-        if let Some(error) = upscaler_failed {
+        // Off macOS the upscaler has no GPU half yet and the CPU's draws
+        // the pictures, as it is meant to: nothing to say.
+        let expected =
+            !cfg!(target_os = "macos") && matches!(upscaler_failed, Some(GpuError::NoDevice));
+        if let Some(error) = upscaler_failed.filter(|_| !expected) {
             self.show_notice(format!("Upscaling is off: {error}"), cx);
         }
         root = root.children(self.cursor_marks());
-        if self.window_controls && !fullscreen && self.session.is_some() {
+        // Off macOS the menu's button and the window's own (where the app
+        // draws them) stand in the top bar as the traffic lights do on
+        // macOS, hidden with them, and shown again as the pointer comes
+        // into the bar; in full screen only the menu's.
+        let off_mac = !cfg!(target_os = "macos");
+        let controls_shown = self.window_controls && !fullscreen;
+        let chrome_shown =
+            off_mac && (controls_shown || self.title_hovered || self.app_menu.is_some());
+        let shaded = if off_mac {
+            chrome_shown
+        } else {
+            controls_shown
+        };
+        if shaded && self.session.is_some() {
             root = root.child(top_bar_shade());
         }
         // Guide, drawn as its own cached view: game frames reuse its last
@@ -3377,13 +3570,19 @@ impl Render for EmulatorView {
             .then(recording_mark);
         if pill.is_some() || recording.is_some() {
             // As far in from the right as down from the top, for the
-            // plates and, with their padding, for the words in them.
+            // plates and, with their padding, for the words in them; clear
+            // of the window's buttons where the app draws them.
             let corner = TOP_BAR / 2.0 - CORNER_PLATE / 2.0;
+            let buttons = if guide_width.is_none() && chrome_shown && !fullscreen {
+                chrome::trailing_room(window, true)
+            } else {
+                0.0
+            };
             root = root.child(
                 div()
                     .absolute()
                     .top(px(corner))
-                    .right(px(guide_width.unwrap_or(0.0) + corner))
+                    .right(px(guide_width.unwrap_or(0.0) + corner + buttons))
                     .flex()
                     .items_center()
                     .gap(px(8.0))
@@ -3393,6 +3592,60 @@ impl Render for EmulatorView {
         }
         if let Some((menu, _)) = &self.menu {
             root = root.child(menu.clone());
+            // The game menu's backdrop takes every press; its top bar still
+            // drags the window where the app frames it.
+            if framed && !fullscreen {
+                let strip = div().absolute().top_0().left_0().right_0().h(px(TOP_BAR));
+                root = root.child(chrome::drag_area(strip, "menu-drag-area", window, cx));
+            }
+        }
+        if off_mac {
+            let tone = if self.session.is_some() {
+                Tone::Stage
+            } else {
+                Tone::Paper
+            };
+            if chrome_shown {
+                root = root.child(
+                    div()
+                        .absolute()
+                        .top(px(chrome::MENU_BUTTON_TOP))
+                        .left(px(chrome::MENU_BUTTON_LEFT))
+                        .child(
+                            chrome::menu_button(tone, self.app_menu.is_some())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_app_menu(false, window, cx);
+                                }))
+                                .children(probe::part("button:menu")),
+                        ),
+                );
+                if !fullscreen && let Some(buttons) = chrome::buttons_for(window, tone, true) {
+                    root = root.child(div().absolute().top_0().right_0().child(buttons));
+                }
+            }
+            // While they are hidden, the pointer coming into the top bar
+            // shows them: the bar notes it, without taking any presses.
+            if !controls_shown {
+                root = root.child(
+                    div()
+                        .id("title-reveal")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(TOP_BAR))
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if this.title_hovered != *hovered {
+                                this.title_hovered = *hovered;
+                                cx.notify();
+                            }
+                        })),
+                );
+            }
+            root = root.children(chrome::window_edges(window, tone, true));
+            if let Some((menu, _, _)) = &self.app_menu {
+                root = root.child(menu.clone());
+            }
         }
 
         // A preview only lives as long as its notice.
@@ -3438,6 +3691,14 @@ impl Render for EmulatorView {
                 .flex_col()
                 .items_start()
                 .gap(px(6.0));
+            // Off macOS, where a notice may carry a system's error, a long
+            // one wraps short of the right inset and of Guide.
+            let cards = if off_mac {
+                let room = viewport.0 - 2.0 * INSET - guide_width.unwrap_or(0.0);
+                cards.max_w(px(room.max(0.0)))
+            } else {
+                cards
+            };
             // Over the game menu, notices go to the top, clear of it.
             let cards = if self.menu.is_some() {
                 cards.top(px(TOP_BAR + 4.0))
@@ -3535,7 +3796,7 @@ fn shape(draw: &Draw, placement: &Placement, size: ScreenSize) -> Vec<Div> {
                     .left(px(left + offset))
                     .top(px(top + offset))
                     .whitespace_nowrap()
-                    .font_family("Menlo")
+                    .font_family(fonts::MONO)
                     .text_size(px(height * 0.9))
                     .line_height(px(height))
                     .text_color(rgba(color))
@@ -3692,7 +3953,7 @@ fn speed_readout(text: SharedString) -> Div {
         LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
     div()
         .font(Font {
-            family: ".SystemUIFont".into(),
+            family: fonts::UI.into(),
             features: FIGURES.clone(),
             fallbacks: None,
             weight: FontWeight::MEDIUM,
@@ -3789,6 +4050,12 @@ fn prepare(
     }
 }
 
+/// Why the games at `paths` can't be played on this system, if they
+/// can't: 3DS games, until 3DS games play here (`emu_3ds::UNSUPPORTED`).
+fn refused(paths: &[PathBuf]) -> Option<&'static str> {
+    emu_3ds::UNSUPPORTED.filter(|_| paths.iter().any(|path| emu_3ds::is_game(path)))
+}
+
 /// What to say while the games at `paths`, called `name`, load: that the
 /// 3DS core is being downloaded first, for a 3DS game the first time one
 /// is played, as that takes a while.
@@ -3802,6 +4069,46 @@ fn loading_notice(paths: &[PathBuf], name: &str) -> String {
         )
     } else {
         format!("Loading {name}…")
+    }
+}
+
+/// What a file dialog asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choose {
+    /// Games: their files, and on macOS their folders too, as an RPG
+    /// Maker game is one. Linux's and Windows's dialogs can't take both at
+    /// once: asked for folders, they take only folders.
+    Games,
+    /// RPG Maker games' folders, which off macOS get a dialog of their own.
+    Folders,
+}
+
+impl Choose {
+    fn options(self, multiple: bool, prompt: &'static str) -> PathPromptOptions {
+        let (files, directories) = match self {
+            Self::Games => (true, cfg!(target_os = "macos")),
+            Self::Folders => (false, true),
+        };
+        PathPromptOptions {
+            files,
+            directories,
+            multiple,
+            prompt: Some(prompt.into()),
+        }
+    }
+}
+
+/// What to say when a file dialog can't open: on Linux, when no desktop
+/// portal runs to show one (GPUI asks xdg-desktop-portal over D-Bus).
+pub fn dialog_failed(error: &anyhow::Error) -> String {
+    let said = format!("{error:#}");
+    let no_portal = ["xdg-desktop-portal", "ZBus", "org.freedesktop"]
+        .iter()
+        .any(|sign| said.contains(sign));
+    if no_portal {
+        "No file dialog: it needs the desktop portal (xdg-desktop-portal), which isn't running. Drop games on the window instead.".to_owned()
+    } else {
+        format!("The file dialog didn't open: {said}")
     }
 }
 
@@ -3931,6 +4238,22 @@ mod tests {
         let (stage, width) = guide_stage(true, &layout, &DS, 1, (800.0, 860.0));
         assert_eq!(width, Some(guide::COLUMN_WIDTH));
         assert_eq!(stage, (800.0 - guide::COLUMN_WIDTH, 860.0));
+    }
+
+    #[test]
+    fn a_file_dialog_without_a_desktop_portal_says_so_plainly() {
+        let missing = anyhow::anyhow!(
+            "Couldn't open file picker due to missing xdg-desktop-portal implementation."
+        );
+        assert!(dialog_failed(&missing).starts_with("No file dialog: it needs the desktop portal"));
+        let no_bus =
+            anyhow::anyhow!("ZBus Error: Failed to connect to address `unix:path=/run/user/0/bus`");
+        assert_eq!(dialog_failed(&no_bus), dialog_failed(&missing));
+        let other = anyhow::anyhow!("the dialog was refused");
+        assert_eq!(
+            dialog_failed(&other),
+            "The file dialog didn't open: the dialog was refused"
+        );
     }
 
     #[test]

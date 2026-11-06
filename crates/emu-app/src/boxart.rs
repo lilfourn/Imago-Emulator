@@ -491,7 +491,11 @@ pub fn fetch(url: &str, max_seconds: u32) -> anyhow::Result<Option<Vec<u8>>> {
         .args(["--silent", "--show-error", "--location", "--compressed"])
         .args([
             "--user-agent",
-            concat!("ds-emulator/", env!("CARGO_PKG_VERSION")),
+            concat!(
+                "ImagoEmulator/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://imagoemulator.com)"
+            ),
         ])
         .args(["--connect-timeout", "10", "--max-time"])
         .arg(max_seconds.to_string())

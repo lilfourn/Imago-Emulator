@@ -416,14 +416,15 @@ fn attempt_once(
         .arg(IDLE_SECONDS.to_string())
         .args([
             "--user-agent",
-            concat!("ds-emulator/", env!("CARGO_PKG_VERSION"), " (Guide)"),
+            concat!(
+                "ImagoEmulator/",
+                env!("CARGO_PKG_VERSION"),
+                " (Guide; +https://imagoemulator.com)"
+            ),
         ])
         .args(["--header", "Content-Type: application/json"])
-        .args([
-            "--header",
-            "HTTP-Referer: https://github.com/lilfourn/ds-emulator",
-        ])
-        .args(["--header", "X-OpenRouter-Title: DS Emulator"])
+        .args(["--header", "HTTP-Referer: https://imagoemulator.com"])
+        .args(["--header", "X-OpenRouter-Title: Imago Emulator"])
         .args(["--write-out", "\n%{http_code}\n", "--config", "-"])
         .arg(endpoints.chat_url())
         .stdin(Stdio::piped())
@@ -827,7 +828,7 @@ mod tests {
             |request| {
                 let fine = request.header("authorization") == Some("Bearer sk-or-test")
                     && request.json()["messages"][1]["content"] == "Where is Ralts?"
-                    && request.header("x-openrouter-title") == Some("DS Emulator");
+                    && request.header("x-openrouter-title") == Some("Imago Emulator");
                 (if fine { 200 } else { 400 }, recorded())
             },
             Duration::ZERO,

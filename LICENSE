@@ -1,0 +1,70 @@
+Imago Emulator
+Copyright (c) 2026 Luke Fournier. All rights reserved.
+https://imagoemulator.com
+
+The source code of Imago Emulator is not published, and nothing in this
+file grants any right to it. The terms below cover the app.
+
+LICENSE TO USE THE APP
+
+Imago Emulator ("the software") is free. Luke Fournier ("the author")
+grants you a personal, non-exclusive, non-transferable and revocable
+license to download, install and run the software on computers you own or
+control.
+
+You may not:
+
+1. sell, rent, lease or sublicense the software, or charge for access to
+   it;
+2. redistribute the software or host it for download without the author's
+   written permission (linking to https://imagoemulator.com is welcome);
+3. distribute a modified copy of the software, or remove or change its
+   copyright, trademark or license notices.
+
+GAMES AND SYSTEM FILES
+
+The software contains no games, BIOS, firmware or encryption keys, and the
+author supplies none. You are responsible for having the right to use every
+game and file you open with it: use it with games you own and have dumped
+yourself, or that their authors share freely.
+
+THIRD-PARTY SOFTWARE AND SERVICES
+
+The software includes open-source components, each under its own license,
+which these terms do not change. Their notices are in the app's About panel
+(Imago Emulator > About Imago Emulator) and in Acknowledgements.html beside
+this file.
+
+Programs the software downloads the first time they are needed (Azahar's
+libretro core, MoltenVK, the Universal Pokemon Randomizer FVX and its Java
+runtime) and programs you provide (such as an RPG Maker game's mkxp-z
+player) are not part of the software. Each comes from its own publisher
+under its own license.
+
+The game store downloads homebrew from Homebrew Hub and Universal-DB, under
+each game's own terms. Guide sends your questions, and screenshots when you
+ask it to, to OpenRouter through your own OpenRouter account, under
+OpenRouter's terms.
+
+NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING THE
+LOSS OF SAVES OR OTHER DATA, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS
+USE.
+
+TERMINATION
+
+This license ends automatically if you break these terms. You must then
+stop using the software and delete it.
+
+TRADEMARKS
+
+The name Imago Emulator and its icon belong to the author. Nintendo, Game
+Boy, Game Boy Color, Game Boy Advance, Nintendo DS and Nintendo 3DS are
+trademarks of Nintendo. Pokemon is a trademark of Nintendo, Creatures Inc.
+and GAME FREAK inc. Imago Emulator is not affiliated with, endorsed by or
+sponsored by Nintendo or any other game company.

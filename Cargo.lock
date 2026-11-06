@@ -1627,6 +1627,8 @@ dependencies = [
  "libloading",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
@@ -1669,6 +1671,8 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
+ "wayland-client",
+ "x11rb",
  "zip",
 ]
 
@@ -1772,9 +1776,11 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "emu-core",
+ "getrandom 0.3.4",
  "libc",
  "serde_json",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

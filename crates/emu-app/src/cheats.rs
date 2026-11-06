@@ -41,7 +41,9 @@ pub fn create_if_missing(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Opens `path` in the default text editor.
+/// Opens `path` in the default text editor: TextEdit, or whichever the
+/// user chose, on macOS; Notepad on Windows; the desktop's own, through
+/// `xdg-open`, on Linux.
 pub fn open_in_editor(path: &Path) -> io::Result<()> {
     emu_os::process::open_in_text_editor(path)
 }

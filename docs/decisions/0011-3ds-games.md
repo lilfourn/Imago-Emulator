@@ -299,3 +299,120 @@ Azahar's contributing rules turn away issues and pull requests written by
 AI, so the fix isn't reported upstream yet. A draft for a person to check
 and file is in the 3DS research kit. Once Azahar ships the fix, the next
 pinned core needs no `jit_fix`.
+
+## Update, 2026-11-06: Linux and Windows
+
+3DS games now play on x86-64 Linux and x86-64 Windows as they do on a
+Mac: the same helper, both screens, the app's controls, touch, sound, save
+states, the 3D resolution and texture upscaling. Azahar 2126.2 makes a
+libretro core for each, and both get Vulkan from the frontend, as the
+macOS one does ([research](../research/3ds.md#linux-and-windows)). macOS
+is unchanged.
+
+1. **A core pinned for each system.** `emu_3ds::install` pins, for each
+   system and architecture, the download, its size and its SHA-256,
+   each checked by downloading it:
+
+   | System | Download | Size | SHA-256 | Library |
+   |---|---|---:|---|---|
+   | macOS, Apple silicon | `azahar-libretro-macos-arm64-2126.2.zip`, and MoltenVK 1.4.2 | 7,351,896 + 59,563,008 | `52c51e8c…7494`, `f95765a6…024e` | `azahar_libretro.dylib`, `libMoltenVK.dylib` |
+   | macOS, Intel | `azahar-libretro-macos-x86_64-2126.2.zip`, and MoltenVK | 8,280,438 + 59,563,008 | `d65abafb…aaae`, as above | as above |
+   | Linux, x86-64 | `azahar-libretro-linux-x86_64-2126.2.zip` | 14,742,826 | `2223444b…c26e` | `azahar_libretro.so` |
+   | Windows, x86-64 | `azahar-libretro-windows-x86_64-2126.2.zip` | 12,097,452 | `d863711c…f888` | `azahar_libretro.dll` |
+
+   They go in `ds-emulator/3DS` in the system's data folder: `~/.local/share`
+   on Linux and `%LOCALAPPDATA%` on Windows. The first 3DS game downloads
+   15 MB on Linux and 12 MB on Windows, against 67 MB on a Mac. Off macOS
+   the zip is unpacked with the zip crate, and curl comes from `PATH`
+   (Windows 10 and 11 have it in System32); macOS keeps ditto, tar and
+   `/usr/bin/curl`. The Linux core needs glibc 2.34 and GCC 12's libstdc++
+   (Ubuntu 22.04, Debian 12 or newer); a system too old to open it is told
+   so. The Windows core is a MinGW build on the system's `msvcrt.dll`, so
+   it needs no Visual C++ runtime.
+2. **The system's Vulkan loader for MoltenVK.** `install::Parts::moltenvk`
+   is `None` off macOS, and the helper loads `libvulkan.so.1` or
+   `vulkan-1.dll` and the drivers they find. Where there are several GPUs
+   it takes one of its own over an integrated one, and either over a
+   virtual one or one that is the CPU, such as Mesa's lavapipe; on macOS
+   it still takes MoltenVK's first. Without a loader, or with no driver,
+   the core draws in software, as it does on a Mac with no Vulkan device,
+   and the log says why. A CPU's Vulkan is still taken over the core's
+   software renderer: on Mesa's lavapipe, Craftus Reloaded's title ran 4.7
+   times as fast and 3d-platformer 1.8 times.
+3. **The helper on Windows.** It is the app's executable again, started
+   with `--3ds-helper` without a console window of its own
+   (`CREATE_NO_WINDOW`), as curl is. The link is the same pipes, read and
+   written as raw bytes, never through a C runtime's text mode. Keeping
+   the core's printing off the link takes more than on Unix, where one
+   `dup2` moves descriptor 1: each C runtime in a Windows process keeps
+   its own descriptor 1, made from the standard output when it started,
+   and the core prints through `msvcrt.dll`, which other system libraries
+   have usually started by then. So the helper points descriptor 1 of
+   every C runtime already running (`msvcrt.dll`, `ucrtbase.dll` and the
+   app's own) at the log, keeping the link's handle from being closed
+   while it does, and then makes the log the standard output, which
+   Rust's printing and any later C runtime start from. It leaves with
+   `TerminateProcess`: Windows's own exit stops the other threads and then
+   tells each library, and the core's would run its static destructors
+   with its threads gone, which `_exit` avoids on Unix.
+4. **The helper still goes with the app.** It reads the app's requests
+   from its stdin. When the app ends, however it ends, the pipe closes,
+   the helper reads the end of it and closes the game, on every system;
+   Rust reads a closed pipe on Windows as its end. A helper stuck inside
+   the core would not notice, as on a Mac.
+5. **Scheduling stays macOS's.** Following Game Mode's role and asking for
+   the user-interactive class are macOS's alone. Linux doesn't hold back a
+   process without a window. Windows 11 may run one in its efficiency mode
+   (EcoQoS) on battery; whether the helper needs to opt out, as the app
+   might, is left to the work on threads and timing for all of the app.
+6. **No 3DS games on Linux for ARM.** Azahar makes no core for it, in its
+   release or on libretro's buildbot. Building one and hosting it would
+   make the project distribute a GPL-3.0 binary and owe its source, which
+   point 1 of this decision avoids, so `emu_3ds::UNSUPPORTED` says "3DS
+   games need an x86-64 PC on Linux: Azahar's 3DS core isn't made for ARM
+   Linux", before anything is downloaded. The same goes for Windows on
+   ARM.
+7. **The shader JIT's fix stays the Apple silicon core's.** The `LG2` bug
+   that drew Magikarp white is the arm64 JIT's: Azahar 2126.2's x86-64
+   JIT (`shader_jit_x64_compiler.cpp`) converts the exponent with
+   `cvtsi2ss`, as signed, so the Linux, Windows and Intel Mac cores need
+   no fix.
+
+### Verification
+
+Linux x86-64 ran in an Ubuntu 24.04 amd64 container on this Mac
+(OrbStack, through Rosetta, one CPU), with Mesa's lavapipe as its only
+Vulkan device (`scripts/linux/cross.sh` with `DS_LINUX_ARCH=x86_64`). Frame
+rates there are a CPU drawing for an emulated CPU, so they say nothing of
+a real PC.
+
+- The pinned core downloaded, matched its digest, unpacked and loaded in
+  the helper (the `real_core` test, below): 2.5 s to install, 2.8 s to
+  start, then Vulkan on llvmpipe.
+- emu-headless played 3DS Button Tester (from its `.cia`'s executable):
+  holding A from a Lua script showed "You Pressed A", and Right with L
+  "You Pressed DPadRight". A state saved at frame 150 and loaded at 250,
+  and the presses after it were undone. `--scale 2` gave 800×480 and
+  640×480 screens.
+- The play example touched Craftus Reloaded's "New World" button at
+  (85, 203), and its world type menu opened.
+- With no driver (`VK_ICD_FILENAMES` pointing nowhere) and with no loader
+  (`/dev/null` in place of `libvulkan.so.1`), the helper drew in software
+  and the game played.
+- Neither homebrew game makes sound without DSP firmware, as on a Mac, so
+  sound was only checked as far as the link, which carries it the same
+  way on every system.
+
+Windows can't run on this Mac, so only CI runs it. Two tests do it there
+on every run: `host::tests::what_else_prints_goes_to_the_log_not_the_link`
+starts a copy of the tests that takes stdout as the helper does and then
+prints through Rust, the app's C runtime and `msvcrt.dll`, and checks only
+the link's own bytes reach the link; and `crates/emu-3ds/tests/real_core.rs`
+downloads the pinned core, checks its digest and plays a homebrew game it
+writes itself, a 3DSX whose program is one instruction branching to
+itself, through the helper: frames, both screens, the texture filter, a
+state saved and loaded (or under Vulkan, the refusal homebrew gets), and
+2×. Elsewhere it runs when asked, with `cargo test -p emu-3ds
+--test real_core -- --ignored`. On this Mac it installed the core and
+MoltenVK and played at 186 fps on Vulkan; on Linux for ARM it checks the
+install refuses, with the words above.

@@ -35,7 +35,11 @@ pub fn request(
         .args(["--silent", "--show-error", "--connect-timeout", "10"])
         .args([
             "--user-agent",
-            concat!("ds-emulator/", env!("CARGO_PKG_VERSION"), " (Guide)"),
+            concat!(
+                "ImagoEmulator/",
+                env!("CARGO_PKG_VERSION"),
+                " (Guide; +https://imagoemulator.com)"
+            ),
         ])
         .arg("--max-time")
         .arg(max_seconds.to_string())

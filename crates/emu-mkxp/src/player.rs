@@ -1,16 +1,25 @@
-//! The hidden player: a copy of the game's own player app that runs the
-//! game unseen.
+//! The hidden player: a copy of the game's own player that runs the game
+//! unseen.
 //!
-//! mkxp-z takes `Contents/Game` inside its app, when there is one, as the
-//! game's folder. The copy's holds only an `mkxp.json` (see [`config`]):
-//! the game's own settings, pointed at the real folder, with the bridge
-//! script loaded first. The game's folder stays as it is, and the game
-//! keeps its saves where it always has.
+//! On macOS, mkxp-z takes `Contents/Game` inside its app, when there is one,
+//! as the game's folder. The copy's holds only an `mkxp.json` (see
+//! [`config`]): the game's own settings, pointed at the real folder, with
+//! the bridge script loaded first. The game's folder stays as it is, and
+//! the game keeps its saves where it always has.
 //!
 //! The copy is an agent app (`LSUIElement`), so it has no Dock icon or menu
 //! bar, and opts out of App Nap, which would slow it once hidden. `open -j`
 //! starts it hidden, and SDL is asked not to bring it to the front, so the
 //! app keeps the keyboard.
+//!
+//! On Linux and Windows the player is mkxp-z's program itself: the one the
+//! game ships, or the one put in the players' folder for every game (see
+//! [`crate::SHARED_PLAYER`]). It is started directly, with its `mkxp.json`
+//! in a folder of the game's own: on Linux, mkxp-z reads it from `SRCDIR`;
+//! on Windows, only from beside the program, so the program and its
+//! libraries are copied there. On Linux it draws on a private X display,
+//! Xvfb, when there is one, where nothing shows; otherwise on the user's,
+//! where the bridge hides its window as it starts, as it does on Windows.
 //!
 //! A game has one hidden player at a time. Its copy, socket and logs are
 //! the game's, so a second player started beside the first, as a double
@@ -25,10 +34,18 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(target_os = "macos"))]
+use std::process::{Child, Stdio};
+#[cfg(not(target_os = "macos"))]
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
+#[cfg(not(target_os = "macos"))]
+use std::time::Instant;
 
-use crate::{Error, config, player_app};
+#[cfg(target_os = "linux")]
+use crate::display::Display;
+use crate::{Error, config};
 
 /// The script the player runs before the game's own, ds-emulator's end of
 /// the link (see [`crate::link`]).
@@ -39,6 +56,7 @@ const QUIT_GRACE: Duration = Duration::from_secs(2);
 /// icon or menu bar, no App Nap, and a screen of the game's own size. On a
 /// Retina screen mkxp-z's OpenGL drawing read back a quarter of the screen,
 /// twice as large.
+#[cfg(target_os = "macos")]
 const PLIST_CHANGES: [(&str, &str, &str); 3] = [
     ("LSUIElement", "-bool", "true"),
     ("LSAppNapIsDisabled", "-bool", "true"),
@@ -48,7 +66,13 @@ const PLIST_CHANGES: [(&str, &str, &str); 3] = [
 /// A game's hidden player.
 #[derive(Debug)]
 pub struct Player {
+    /// What is started: on macOS the copy of the player app, elsewhere
+    /// mkxp-z's program.
     app: PathBuf,
+    /// On Linux, the folder of the player's own files: its settings, logs
+    /// and display's.
+    #[cfg(target_os = "linux")]
+    dir: PathBuf,
     socket: PathBuf,
     sound_pipe: PathBuf,
     sound_settings: PathBuf,
@@ -56,8 +80,21 @@ pub struct Player {
     output: PathBuf,
     errors: PathBuf,
     pid: Option<u32>,
+    /// The player's process, and on Linux its display, once started.
+    #[cfg(not(target_os = "macos"))]
+    running: Mutex<Option<Running>>,
     /// Locked for as long as this is the game's player.
     _lock: File,
+}
+
+/// A player started directly, off macOS.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug)]
+struct Running {
+    process: Child,
+    /// Where it draws, which goes once it does.
+    #[cfg(target_os = "linux")]
+    _display: Display,
 }
 
 impl Player {
@@ -67,10 +104,11 @@ impl Player {
     ///
     /// # Errors
     ///
-    /// Fails if the game has no player app, its settings cannot be read, or
-    /// the copy cannot be made.
+    /// Fails if there is no player for the game, its settings cannot be
+    /// read, or the copy cannot be made.
     pub fn prepare(game: &Path, work_dir: &Path) -> Result<Self, Error> {
-        let source = player_app(game).ok_or_else(|| Error::NotAGame(game.to_owned()))?;
+        #[cfg(target_os = "macos")]
+        let source = crate::player_app(game).ok_or_else(|| Error::NotAGame(game.to_owned()))?;
         let id = format!(
             "{:08X}",
             crc32fast::hash(game.as_os_str().as_encoded_bytes())
@@ -91,29 +129,60 @@ impl Player {
         };
         let settings = config::player_settings(game_settings.as_deref(), game, &bridge)
             .map_err(Error::Settings)?;
-        let app = dir.join("Player.app");
-        copy_player(&source, &app, &id)?;
-        let settings_path = app.join("Contents/Game/mkxp.json");
-        if write_if_changed(&settings_path, &settings)
-            .map_err(Error::io(format!("writing {}", settings_path.display())))?
-        {
-            sign(&app)?;
-        }
+        #[cfg(target_os = "macos")]
+        let app = {
+            let app = dir.join("Player.app");
+            copy_player(&source, &app, &id)?;
+            let settings_path = app.join("Contents/Game/mkxp.json");
+            if write_if_changed(&settings_path, &settings)
+                .map_err(Error::io(format!("writing {}", settings_path.display())))?
+            {
+                sign(&app)?;
+            }
+            app
+        };
+        #[cfg(not(target_os = "macos"))]
+        let app = {
+            let shared = work_dir.join(crate::SHARED_PLAYER);
+            let source = crate::mkxp_z(game)
+                .or_else(|| crate::mkxp_z_in(&shared))
+                .ok_or(Error::NoPlayer(shared))?;
+            let folder = dir.join("player");
+            #[cfg(windows)]
+            let app = copy_program(&source, &folder)?;
+            #[cfg(not(windows))]
+            let app = source;
+            let settings_path = folder.join("mkxp.json");
+            write_if_changed(&settings_path, &settings)
+                .map_err(Error::io(format!("writing {}", settings_path.display())))?;
+            app
+        };
         // Sockets' paths are short, so these go in the temporary folder.
         let temp = std::env::temp_dir();
+        // Windows's pipes have names of their own, and this process's, as
+        // two copies of the app each keep a player of their own.
+        let sound_pipe = if cfg!(windows) {
+            PathBuf::from(format!(r"\\.\pipe\ds-emulator-{id}-{}", std::process::id()))
+        } else {
+            temp.join(format!("ds-emulator-{id}.fifo"))
+        };
         Ok(Self {
             app,
             socket: temp.join(format!("ds-emulator-{id}.sock")),
-            sound_pipe: temp.join(format!("ds-emulator-{id}.fifo")),
+            sound_pipe,
             sound_settings: dir.join("alsoft.conf"),
             output: dir.join("player.log"),
             errors: dir.join("player-errors.log"),
+            #[cfg(target_os = "linux")]
+            dir,
             pid: None,
+            #[cfg(not(target_os = "macos"))]
+            running: Mutex::new(None),
             _lock: lock,
         })
     }
 
-    /// Where the bridge connects.
+    /// Where the bridge connects, on macOS and Linux.
     pub fn socket(&self) -> &Path {
         &self.socket
     }
@@ -129,25 +198,24 @@ impl Player {
         &self.sound_settings
     }
 
-    /// Starts the player, hidden.
+    /// Starts the player, hidden, with `link` in its environment: what the
+    /// bridge needs to connect (see [`crate::link::Listener::environment`]).
     ///
     /// # Errors
     ///
-    /// Fails if macOS cannot open it.
-    pub fn start(&self) -> Result<(), Error> {
+    /// Fails if macOS cannot open it, or elsewhere, if it cannot be started
+    /// or has nowhere to draw.
+    #[cfg(target_os = "macos")]
+    pub fn start(&mut self, link: &[(&str, String)]) -> Result<(), Error> {
         fs::remove_file(&self.output).ok();
         fs::remove_file(&self.errors).ok();
         let env = |name: &str, path: &Path| format!("{name}={}", path.display());
-        let output = Command::new("open")
-            .args([
-                "-n",
-                "-j",
-                "-g",
-                "--env",
-                "SDL_MAC_BACKGROUND_APP=1",
-                "--env",
-            ])
-            .arg(env("DS_EMULATOR_LINK", &self.socket))
+        let mut open = Command::new("open");
+        open.args(["-n", "-j", "-g", "--env", "SDL_MAC_BACKGROUND_APP=1"]);
+        for (name, value) in link {
+            open.arg("--env").arg(format!("{name}={value}"));
+        }
+        let output = open
             .arg("--env")
             .arg(env("ALSOFT_CONF", &self.sound_settings))
             .arg("--stdout")
@@ -164,6 +232,78 @@ impl Player {
                 String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             ))
         }
+    }
+
+    /// Starts the player, hidden, with `link` in its environment: what the
+    /// bridge needs to connect (see [`crate::link::Listener::environment`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails if macOS cannot open it, or elsewhere, if it cannot be started
+    /// or has nowhere to draw.
+    #[cfg(not(target_os = "macos"))]
+    pub fn start(&mut self, link: &[(&str, String)]) -> Result<(), Error> {
+        let log = |path: &Path| {
+            fs::remove_file(path).ok();
+            // Appended to, as the bridge on Windows opens the error log
+            // again for Ruby's own errors.
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(Error::io(format!("making {}", path.display())))
+        };
+        let mut command = Command::new(&self.app);
+        command
+            .envs(link.iter().map(|(name, value)| (name, value)))
+            .env("ALSOFT_CONF", &self.sound_settings)
+            .stdin(Stdio::null())
+            .stdout(log(&self.output)?)
+            .stderr(log(&self.errors)?);
+        #[cfg(target_os = "linux")]
+        let display = {
+            command.env("SRCDIR", self.dir.join("player"));
+            let display = Display::start(&self.dir)?;
+            display.apply(&mut command);
+            display
+        };
+        #[cfg(windows)]
+        {
+            // Shown for a moment before the bridge hides it, the window
+            // leaves the keyboard where it is. mkxp-z sends Ruby's errors
+            // nowhere on Windows, so the bridge sends them to the log.
+            command
+                .env("SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN", "1")
+                .env("DS_EMULATOR_HIDE_WINDOW", "1")
+                .env("DS_EMULATOR_ERRORS", &self.errors);
+        }
+        let process = command
+            .spawn()
+            .map_err(Error::io(format!("starting {}", self.app.display())))?;
+        #[cfg(windows)]
+        windows_process::unthrottle(&process);
+        self.pid = Some(process.id());
+        *self.running.lock().unwrap_or_else(PoisonError::into_inner) = Some(Running {
+            process,
+            #[cfg(target_os = "linux")]
+            _display: display,
+        });
+        Ok(())
+    }
+
+    /// Whether the player may still be running: on macOS, where `open`
+    /// starts it apart, always.
+    pub fn running(&self) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        if let Some(running) = self
+            .running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            return matches!(running.process.try_wait(), Ok(None));
+        }
+        true
     }
 
     /// Records the player's process ID, from the bridge's hello.
@@ -193,13 +333,15 @@ impl Player {
             (
                 io::ErrorKind::UnexpectedEof
                 | io::ErrorKind::BrokenPipe
-                | io::ErrorKind::ConnectionReset,
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted,
                 Some(said),
             ) => format!("The game stopped: {said}"),
             (
                 io::ErrorKind::UnexpectedEof
                 | io::ErrorKind::BrokenPipe
-                | io::ErrorKind::ConnectionReset,
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted,
                 None,
             ) => "The game quit".to_owned(),
             (_, _) => format!("The link to the game failed: {error}"),
@@ -219,6 +361,7 @@ impl Player {
     }
 
     /// Stops the player now.
+    #[cfg(target_os = "macos")]
     pub fn stop(&self) {
         match self.pid {
             Some(pid) => {
@@ -238,8 +381,18 @@ impl Player {
         }
     }
 
+    /// Stops the player now.
+    #[cfg(not(target_os = "macos"))]
+    pub fn stop(&self) {
+        if let Some(mut running) = self.take_running() {
+            running.process.kill().ok();
+            running.process.wait().ok();
+        }
+    }
+
     /// Stops the player if it has not quit by itself in a moment, on a
     /// thread of its own.
+    #[cfg(target_os = "macos")]
     pub fn stop_soon(&self) {
         let Some(pid) = self.pid else {
             self.stop();
@@ -257,10 +410,49 @@ impl Player {
             }
         });
     }
+
+    /// Stops the player if it has not quit by itself in a moment, on a
+    /// thread of its own.
+    #[cfg(not(target_os = "macos"))]
+    pub fn stop_soon(&self) {
+        let Some(mut running) = self.take_running() else {
+            return;
+        };
+        thread::spawn(move || {
+            let deadline = Instant::now() + QUIT_GRACE;
+            while Instant::now() < deadline {
+                match running.process.try_wait() {
+                    Ok(None) => thread::sleep(Duration::from_millis(20)),
+                    _ => return,
+                }
+            }
+            running.process.kill().ok();
+            running.process.wait().ok();
+        });
+    }
+
+    /// The player's process, if it was started and not yet stopped.
+    #[cfg(not(target_os = "macos"))]
+    fn take_running(&self) -> Option<Running> {
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
+/// A player left running stops with it, off macOS, where it is this
+/// process's child.
+#[cfg(not(target_os = "macos"))]
+impl Drop for Player {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 /// Makes `app` a hidden copy of the player app `source`, unless it already
 /// is one of the player as it is now.
+#[cfg(target_os = "macos")]
 fn copy_player(source: &Path, app: &Path, id: &str) -> Result<(), Error> {
     let stamp_path = app.with_extension("source");
     let modified = fs::metadata(source.join("Contents/Info.plist"))
@@ -295,13 +487,107 @@ fn copy_player(source: &Path, app: &Path, id: &str) -> Result<(), Error> {
 }
 
 /// Signs `app` for this Mac alone, as its contents changed.
+#[cfg(target_os = "macos")]
 fn sign(app: &Path) -> Result<(), Error> {
     run(Command::new("codesign")
         .args(["--force", "--sign", "-"])
         .arg(app))
 }
 
+/// What Windows does to the player's process, which it would otherwise
+/// treat as a background program: it has no window in sight.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_process {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    use windows_sys::Win32::System::Threading::{
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+
+    /// Keeps Windows from throttling `player`, as the app keeps itself
+    /// (emu-app's `qos.rs`): Windows 11 slows a process with no window in
+    /// sight to its efficiency cores (EcoQoS) and stops honouring its timer
+    /// period, which would hold back the sound's writes as Game Mode did on
+    /// macOS. Each on its own, as Windows 10 knows only the first. The
+    /// bridge raises the frame thread and asks for millisecond timers from
+    /// inside, as only the player can.
+    pub(super) fn unthrottle(player: &Child) {
+        for control in [
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        ] {
+            // A control bit with its state bit clear turns that throttling
+            // off.
+            let state = PROCESS_POWER_THROTTLING_STATE {
+                Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask: control,
+                StateMask: 0,
+            };
+            // SAFETY: the handle is the child's, open with all access while
+            // `player` lives, and the pointer and size are those of `state`,
+            // a PROCESS_POWER_THROTTLING_STATE, which the call only reads.
+            // A refusal leaves the process as it was.
+            unsafe {
+                SetProcessInformation(
+                    player.as_raw_handle(),
+                    ProcessPowerThrottling,
+                    (&raw const state).cast(),
+                    size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+                );
+            }
+        }
+    }
+}
+
+/// Copies the program `source` and the libraries beside it into `folder`,
+/// where its `mkxp.json` goes, unless they are already copies of them as
+/// they are now. Hard links where they can be, as the program is large.
+/// What it copied the program to.
+#[cfg(windows)]
+fn copy_program(source: &Path, folder: &Path) -> Result<PathBuf, Error> {
+    let from = source.parent().unwrap_or(Path::new("."));
+    let name = source.file_name().unwrap_or_default();
+    let program = folder.join(name);
+    let stamp_path = folder.join("player.source");
+    let metadata =
+        fs::metadata(source).map_err(Error::io(format!("reading {}", source.display())))?;
+    let stamp = format!(
+        "{}\n{:?}\n{}\n",
+        source.display(),
+        metadata.modified().ok(),
+        metadata.len()
+    );
+    if program.is_file() && fs::read_to_string(&stamp_path).ok().as_deref() == Some(&stamp) {
+        return Ok(program);
+    }
+    let copying = |what: &Path| Error::io(format!("copying {}", what.display()));
+    fs::remove_dir_all(folder).ok();
+    fs::create_dir_all(folder).map_err(Error::io(format!("making {}", folder.display())))?;
+    let libraries = fs::read_dir(from)
+        .map_err(copying(from))?
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+                && path.is_file()
+        });
+    for file in [source.to_owned()].into_iter().chain(libraries) {
+        let to = folder.join(file.file_name().unwrap_or_default());
+        fs::hard_link(&file, &to)
+            .or_else(|_| fs::copy(&file, &to).map(|_| ()))
+            .map_err(copying(&file))?;
+    }
+    fs::write(&stamp_path, stamp)
+        .map_err(Error::io(format!("writing {}", stamp_path.display())))?;
+    Ok(program)
+}
+
 /// Runs `command`, failing with what it said if it fails.
+#[cfg(target_os = "macos")]
 fn run(command: &mut Command) -> Result<(), Error> {
     let what = format!("running {}", command.get_program().to_string_lossy());
     let output = command.output().map_err(Error::io(what.clone()))?;
@@ -336,6 +622,8 @@ mod tests {
         fs::write(dir.join("player-errors.log"), errors).expect("log");
         let player = Player {
             app: dir.join("Player.app"),
+            #[cfg(target_os = "linux")]
+            dir: dir.clone(),
             socket: dir.join("link.sock"),
             sound_pipe: dir.join("sound.fifo"),
             sound_settings: dir.join("alsoft.conf"),
@@ -343,6 +631,8 @@ mod tests {
             errors: dir.join("player-errors.log"),
             // Never signalled: these tests end without a timeout.
             pid: None,
+            #[cfg(not(target_os = "macos"))]
+            running: Mutex::new(None),
             _lock: File::create(dir.join("player.lock")).expect("lock"),
         };
         (dir, player)
@@ -350,6 +640,7 @@ mod tests {
 
     /// A game folder in `dir` whose player app is a stand-in, enough for
     /// [`Player::prepare`] to copy and sign.
+    #[cfg(target_os = "macos")]
     fn fake_game(dir: &Path) -> PathBuf {
         let game = dir.join("Game");
         let contents = game.join("Game.app/Contents");
@@ -371,11 +662,17 @@ mod tests {
         game
     }
 
+    /// A game folder in `dir` with a stand-in for mkxp-z, enough for
+    /// [`Player::prepare`] to find and, on Windows, copy.
+    #[cfg(not(target_os = "macos"))]
+    fn fake_game(dir: &Path) -> PathBuf {
+        let game = dir.join("Game");
+        fs::create_dir_all(&game).expect("game");
+        crate::tests::fake_mkxp_z(&game);
+        game
+    }
+
     #[test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "Linux, Windows: the hidden player is a Mac app, changed with plutil and signed with codesign; needs mkxp-z's Linux and Windows players (RPG Maker stream)"
-    )]
     fn a_game_has_one_player_at_a_time() {
         use std::sync::mpsc;
 

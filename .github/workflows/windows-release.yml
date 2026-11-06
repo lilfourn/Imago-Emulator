@@ -1,0 +1,79 @@
+name: Windows release build
+
+# The release build of the app for Windows, which only builds on Windows:
+# GPUI's build script compiles its HLSL shaders with fxc.exe from the
+# Windows SDK, and embeds its DPI-awareness manifest, only there. It takes
+# a while on GitHub's two cores, so it runs once per push to main, on
+# request, and on pull requests that change how it builds; packaging
+# builds on it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/windows-release.yml
+      - .cargo/**
+      - Cargo.lock
+      - Cargo.toml
+      - crates/emu-app/Cargo.toml
+      - crates/emu-app/build.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Windows x86-64 release
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Fetch test ROMs
+        run: scripts/fetch-test-roms.sh
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release
+          cache-on-failure: true
+      # GPUI looks for fxc.exe in GPUI_FXC_PATH, then on PATH, then in one
+      # SDK version's folder; the runner's SDK may be another version.
+      - name: Find fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object { try { [version]$_.Directory.Parent.Name } catch { [version]"0.0" } } | Select-Object -Last 1
+          if (-not $fxc) { throw 'no fxc.exe in the Windows SDK' }
+          Write-Host "fxc.exe: $($fxc.FullName)"
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Add-Content $env:GITHUB_ENV
+      - name: Build
+        run: cargo build --release -p emu-app
+      - name: Smoke test
+        continue-on-error: true
+        shell: pwsh
+        run: scripts/windows/smoke.ps1 -Exe target/release/ds-emulator.exe -Out target/smoke-release
+      - name: Smoke screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-windows-x86-64-release
+          path: target/smoke-release
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: The app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ds-emulator-windows-x86-64
+          path: target/release/ds-emulator.exe
+          retention-days: 14
