@@ -2,11 +2,14 @@
 //!
 //! mkxp-z is an open-source player for RPG Maker XP, VX and VX Ace games.
 //! A fan game made for Windows runs on a Mac in it: the game's folder holds
-//! a player app (an mkxp-z build) and its settings, `mkxp.json`. This crate
-//! runs a hidden copy of that player in a process of its own and makes it a
-//! [`Core`]. Each frame it sends the buttons held and takes the picture
-//! back, so the app paces, shows, records and controls the game as it does
-//! a cartridge's. The player's sound comes back too.
+//! a player app (an mkxp-z build) and its settings, `mkxp.json`. On Linux
+//! and Windows the player is mkxp-z's program for that system: one the game
+//! ships, or one put once in the players' folder for every game
+//! ([`SHARED_PLAYER`]). This crate runs a hidden copy of that player in a
+//! process of its own and makes it a [`Core`]. Each frame it sends the
+//! buttons held and takes the picture back, so the app paces, shows,
+//! records and controls the game as it does a cartridge's. The player's
+//! sound comes back too.
 //!
 //! It is the one core that is not deterministic: the game is a Ruby
 //! program in another process. Its save states are the game's own saves,
@@ -21,11 +24,15 @@
 
 pub mod audio;
 pub mod config;
+#[cfg(target_os = "linux")]
+mod display;
 pub mod link;
 pub mod player;
 
 use std::cell::RefCell;
 use std::fs;
+#[cfg(not(target_os = "macos"))]
+use std::fs::File;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -60,11 +67,11 @@ pub const INFO: CoreInfo = CoreInfo {
 };
 
 /// Why RPG Maker games can't play on this system, or `None` where they
-/// can. The hidden player is a Mac app, and only macOS has it so far.
-pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") {
+/// can: on macOS and Linux. On Windows the player starts, links, plays its
+/// sound and takes buttons and states (tried under Wine), but no frame has
+/// been drawn on Windows itself yet.
+pub const UNSUPPORTED: Option<&str> = if cfg!(any(target_os = "macos", target_os = "linux")) {
     None
-} else if cfg!(target_os = "linux") {
-    Some("RPG Maker games aren't supported on Linux yet")
 } else if cfg!(windows) {
     Some("RPG Maker games aren't supported on Windows yet")
 } else {
@@ -80,6 +87,16 @@ pub enum Error {
     /// The path is not a game folder with a player app.
     #[error("{} is not an RPG Maker game set up for mkxp-z: it needs a Game.ini and a player app", .0.display())]
     NotAGame(PathBuf),
+    /// Off macOS: neither the game's folder nor the players' folder, this
+    /// one, holds an mkxp-z for this system.
+    #[error("{}", no_player(.0))]
+    NoPlayer(PathBuf),
+    /// On Linux: there is neither Xvfb nor an X display for the player to
+    /// draw on.
+    #[error(
+        "RPG Maker games play on Linux through mkxp-z on an X display: install Xvfb (the xvfb package), so it plays unseen, or play in a session with an X display"
+    )]
+    NoDisplay,
     /// Preparing or starting the player failed.
     #[error("{what}: {source}")]
     Io {
@@ -104,6 +121,22 @@ impl Error {
     }
 }
 
+/// Why there is no player for a game, with `shared`, the players' folder.
+fn no_player(shared: &Path) -> String {
+    let system = if cfg!(windows) { "Windows" } else { "Linux" };
+    format!(
+        "This game needs mkxp-z for {system} ({}) to play: put an mkxp-z build for {system} in {}, for every game, or in the game's folder",
+        std::env::consts::ARCH,
+        shared.display()
+    )
+}
+
+/// The folder, in the work folder [`Mkxp::open`] is given, that holds the
+/// mkxp-z every game without one of its own plays in, off macOS: an mkxp-z
+/// build for the system, as it comes, such as `mkxp-z.x86_64` with its
+/// `stdlib` folder on Linux or `mkxp-z.x86_64.exe` on Windows.
+pub const SHARED_PLAYER: &str = "mkxp-z";
+
 /// The game folder `path` names: `path` itself, if it holds an RPG Maker
 /// game (its `Game.ini`) and a player app, or the folder of the player app
 /// `path` is.
@@ -113,8 +146,20 @@ pub fn game_folder(path: &Path) -> Option<PathBuf> {
     game.then(|| folder.to_owned())
 }
 
-/// The player app in a game's folder: its first `.app`, by name, leaving
-/// out hidden ones.
+/// The player app in a game's folder: on macOS its first `.app`, by name,
+/// leaving out hidden ones. Elsewhere, the game's program: the mkxp-z the
+/// folder holds for this system, or else its `Game.exe`, in whose place the
+/// players' mkxp-z plays (see [`SHARED_PLAYER`]); its icon is the game's.
+#[cfg(not(target_os = "macos"))]
+pub fn player_app(folder: &Path) -> Option<PathBuf> {
+    mkxp_z_in(folder).or_else(|| file_named(folder, "Game.exe"))
+}
+
+/// The player app in a game's folder: on macOS its first `.app`, by name,
+/// leaving out hidden ones. Elsewhere, the game's program: the mkxp-z the
+/// folder holds for this system, or else its `Game.exe`, in whose place the
+/// players' mkxp-z plays (see [`SHARED_PLAYER`]); its icon is the game's.
+#[cfg(target_os = "macos")]
 pub fn player_app(folder: &Path) -> Option<PathBuf> {
     let mut apps: Vec<PathBuf> = fs::read_dir(folder)
         .ok()?
@@ -134,6 +179,125 @@ fn is_app(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
         && path.is_dir()
+}
+
+/// The file in `folder` called `name`, in any case.
+#[cfg(not(target_os = "macos"))]
+fn file_named(folder: &Path, name: &str) -> Option<PathBuf> {
+    fs::read_dir(folder)
+        .ok()?
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.is_file())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|file| file.eq_ignore_ascii_case(name))
+        })
+}
+
+/// The mkxp-z that plays the game in `game`: the one its folder holds for
+/// this system, which on Windows may be its `Game.exe`.
+#[cfg(not(target_os = "macos"))]
+fn mkxp_z(game: &Path) -> Option<PathBuf> {
+    let named = mkxp_z_in(game);
+    #[cfg(windows)]
+    let named = named.or_else(|| file_named(game, "Game.exe").filter(|exe| is_mkxp_z(exe)));
+    named
+}
+
+/// The mkxp-z program for this system in `folder`, by its name: the first
+/// file whose name starts with `mkxp-z` and that runs here, an x86-64 or
+/// arm64 Linux program (such as `mkxp-z.x86_64`) for this processor, or a
+/// Windows program (`mkxp-z.x86_64.exe`).
+#[cfg(not(target_os = "macos"))]
+fn mkxp_z_in(folder: &Path) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(folder)
+        .ok()?
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("mkxp-z")
+            })
+        })
+        .filter(|path| path.is_file() && runs_here(path))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+/// Whether the program at `path` runs on this system and processor: an
+/// ELF program for it on Linux, or a Windows program that Windows runs here
+/// (with a name ending `.exe`).
+#[cfg(not(target_os = "macos"))]
+fn runs_here(path: &Path) -> bool {
+    use std::io::Read as _;
+
+    let mut header = [0; 0x400];
+    let Ok(read) = File::open(path).and_then(|mut file| file.read(&mut header)) else {
+        return false;
+    };
+    let header = &header[..read];
+    let word = |at: usize| Some(u16::from_le_bytes([*header.get(at)?, *header.get(at + 1)?]));
+    if cfg!(windows) {
+        // MZ, then where the PE header is, its signature and its machine.
+        let pe = header.get(0x3C..0x40).map_or(0, |at| {
+            u32::from_le_bytes([at[0], at[1], at[2], at[3]]) as usize
+        });
+        let machine = word(pe + 4);
+        let runs = match std::env::consts::ARCH {
+            // x86 (WoW64) and x86-64 programs; arm64 Windows runs all three.
+            "x86_64" => [Some(0x014C), Some(0x8664)].contains(&machine),
+            "aarch64" => [Some(0x014C), Some(0x8664), Some(0xAA64)].contains(&machine),
+            _ => machine == Some(0x014C),
+        };
+        header.starts_with(b"MZ")
+            && header.get(pe..pe + 4) == Some(&b"PE\0\0"[..])
+            && runs
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    } else {
+        // A little-endian ELF program for this processor.
+        let machine = match std::env::consts::ARCH {
+            "x86_64" => Some(62),
+            "aarch64" => Some(183),
+            _ => None,
+        };
+        header.starts_with(b"\x7fELF") && header.get(5) == Some(&1) && word(18) == machine
+    }
+}
+
+/// Whether the Windows program at `exe` is mkxp-z, as a `Game.exe` that
+/// Pokémon Essentials' newer games ship may be: it names itself. RPG
+/// Maker's own `Game.exe` is a small program that loads RGSS from a DLL.
+#[cfg(windows)]
+fn is_mkxp_z(exe: &Path) -> bool {
+    use std::io::Read as _;
+
+    const NAME: &[u8] = b"mkxp-z";
+    let Ok(file) = File::open(exe) else {
+        return false;
+    };
+    let mut reader = io::BufReader::new(file);
+    let mut chunk = vec![0; 1 << 16];
+    // The end of the last chunk, in case the name spans two.
+    let mut kept = 0;
+    loop {
+        let read = match reader.read(&mut chunk[kept..]) {
+            Ok(0) | Err(_) => return false,
+            Ok(read) => read,
+        };
+        let end = kept + read;
+        if chunk[..end]
+            .windows(NAME.len())
+            .any(|window| window == NAME)
+        {
+            return true;
+        }
+        kept = (NAME.len() - 1).min(end);
+        chunk.copy_within(end - kept..end, 0);
+    }
 }
 
 /// The extensions of RPG Maker XP's, VX's and VX Ace's save files.
@@ -218,26 +382,38 @@ impl Mkxp {
     /// # Errors
     ///
     /// Fails if RPG Maker games don't play on this system ([`UNSUPPORTED`]),
-    /// `path` names no game, the player cannot be made or started, or the
-    /// game does not draw its first frame within a minute.
+    /// `path` names no game, there is no mkxp-z for it ([`SHARED_PLAYER`]),
+    /// the player cannot be made or started, or the game does not draw its
+    /// first frame within a minute.
     pub fn open(path: &Path, work_dir: &Path) -> Result<Self, Error> {
         if let Some(why) = UNSUPPORTED {
             return Err(Error::Unsupported(why));
         }
-        let game = game_folder(path).ok_or_else(|| Error::NotAGame(path.to_owned()))?;
-        let mut player = Player::prepare(&game, work_dir)?;
+        // The player runs in another folder, where a relative path would
+        // name another place.
+        let absolute = |path: &Path| {
+            std::path::absolute(path).map_err(Error::io(format!("finding {}", path.display())))
+        };
+        let (path, work_dir) = (absolute(path)?, absolute(work_dir)?);
+        let game = game_folder(&path).ok_or_else(|| Error::NotAGame(path.clone()))?;
+        let mut player = Player::prepare(&game, &work_dir)?;
         let listener =
             link::listen(player.socket()).map_err(Error::io("listening for the game"))?;
         let sound = Capture::start(player.sound_pipe(), player.sound_settings())
             .map_err(Error::io("setting up the game's sound"))?;
-        player.start()?;
-        let started = link::accept(&listener, STARTUP_TIMEOUT).and_then(|stream| {
-            stream.set_read_timeout(Some(FRAME_TIMEOUT))?;
-            stream.set_write_timeout(Some(FRAME_TIMEOUT))?;
-            let mut link = Link::new(stream);
-            let hello = link.hello()?;
-            Ok((link, hello))
-        });
+        let link = listener
+            .environment()
+            .map_err(Error::io("listening for the game"))?;
+        player.start(&link)?;
+        let started = link::accept_while(&listener, STARTUP_TIMEOUT, || player.running()).and_then(
+            |stream| {
+                stream.set_read_timeout(Some(FRAME_TIMEOUT))?;
+                stream.set_write_timeout(Some(FRAME_TIMEOUT))?;
+                let mut link = Link::new(stream);
+                let hello = link.hello()?;
+                Ok((link, hello))
+            },
+        );
         player.forget_socket();
         let (link, hello) = started.map_err(|error| {
             let why = player.why_it_ended(&error);
@@ -418,7 +594,51 @@ mod tests {
         dir
     }
 
+    /// The start of a program for this system and processor, enough for
+    /// [`runs_here`], as `name` in `folder`, or its usual name.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn fake_program(folder: &Path, name: &str) -> PathBuf {
+        let mut header = vec![0; 0x100];
+        if cfg!(windows) {
+            header[..2].copy_from_slice(b"MZ");
+            header[0x3C] = 0x80;
+            header[0x80..0x84].copy_from_slice(b"PE\0\0");
+            let machine: u16 = if cfg!(target_arch = "aarch64") {
+                0xAA64
+            } else {
+                0x8664
+            };
+            header[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+        } else {
+            header[..4].copy_from_slice(b"\x7fELF");
+            header[4] = 2;
+            header[5] = 1;
+            let machine: u16 = if cfg!(target_arch = "aarch64") {
+                183
+            } else {
+                62
+            };
+            header[18..20].copy_from_slice(&machine.to_le_bytes());
+        }
+        let path = folder.join(name);
+        fs::write(&path, header).expect("program");
+        path
+    }
+
+    /// A stand-in for mkxp-z for this system in `folder`, by the name its
+    /// builds have.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn fake_mkxp_z(folder: &Path) -> PathBuf {
+        let name = format!(
+            "mkxp-z.{}{}",
+            std::env::consts::ARCH,
+            std::env::consts::EXE_SUFFIX
+        );
+        fake_program(folder, &name)
+    }
+
     #[test]
+    #[cfg(target_os = "macos")]
     fn a_game_folder_has_a_game_ini_and_a_player_app() {
         let dir = temp_dir("folder");
         let game = dir.join("My Game");
@@ -436,6 +656,67 @@ mod tests {
         assert_eq!(title(&game).as_deref(), Some("My Game"));
         fs::remove_dir_all(game.join("My Game.app")).expect("removed");
         assert_eq!(game_folder(&game), None, "no player app");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_game_folder_has_a_game_ini_and_a_program() {
+        let dir = temp_dir("folder");
+        let game = dir.join("My Game");
+        fs::create_dir_all(game.join("My Game.app/Contents")).expect("a Mac player");
+        assert_eq!(game_folder(&game), None, "no Game.ini yet");
+        fs::write(
+            game.join("Game.ini"),
+            "[Game]\r\nLibrary=RGSS104E.dll\r\nTitle=My Game\r\n",
+        )
+        .expect("Game.ini");
+        assert_eq!(game_folder(&game), None, "a Mac app plays only on a Mac");
+        assert_eq!(title(&game).as_deref(), Some("My Game"));
+        // RPG Maker's own Game.exe: the shared mkxp-z plays the game.
+        let exe = fake_program(&game, "GAME.EXE");
+        assert_eq!(game_folder(&game), Some(game.clone()));
+        assert_eq!(player_app(&game), Some(exe.clone()));
+        assert_eq!(
+            mkxp_z(&game),
+            None,
+            "RPG Maker's own Game.exe is not mkxp-z"
+        );
+        // A build for another system or processor does not play here.
+        let other = if cfg!(windows) {
+            "mkxp-z.aarch64"
+        } else {
+            "mkxp-z.exe"
+        };
+        fs::write(game.join(other), b"\x7fELF").expect("another system's");
+        assert_eq!(mkxp_z(&game), None);
+        let mkxp = fake_mkxp_z(&game);
+        assert_eq!(player_app(&game), Some(mkxp.clone()));
+        assert_eq!(mkxp_z(&game), Some(mkxp));
+        let shared = dir.join("work").join(SHARED_PLAYER);
+        fs::create_dir_all(&shared).expect("players' folder");
+        assert_eq!(mkxp_z_in(&shared), None);
+        let theirs = fake_mkxp_z(&shared);
+        assert_eq!(mkxp_z_in(&shared), Some(theirs));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_game_without_mkxp_z_says_where_to_put_it() {
+        let dir = temp_dir("no-player");
+        let game = dir.join("Game");
+        fs::create_dir_all(&game).expect("game");
+        fs::write(game.join("Game.ini"), "[Game]\r\nTitle=Game\r\n").expect("Game.ini");
+        fake_program(&game, "Game.exe");
+        let work = dir.join("work");
+        let why = Player::prepare(&game, &work)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        let shared = work.join(SHARED_PLAYER);
+        assert!(why.contains(&shared.display().to_string()), "{why}");
+        assert!(why.contains("mkxp-z for"), "{why}");
         fs::remove_dir_all(&dir).ok();
     }
 

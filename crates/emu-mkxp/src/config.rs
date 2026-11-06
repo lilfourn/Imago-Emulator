@@ -1,6 +1,6 @@
 //! The hidden player's `mkxp.json`: the game's own settings, run from the
-//! game's folder with the bridge script loaded first, drawing with OpenGL,
-//! and never in its own window.
+//! game's folder with the bridge script loaded first, drawing with OpenGL
+//! on macOS and Linux, and never in its own window.
 
 use std::path::Path;
 
@@ -8,14 +8,17 @@ use serde_json::{Map, Value};
 
 /// mkxp-z's `renderer` setting for OpenGL. The bridge reads each frame
 /// back from the GPU, which took 7.8 ms a frame with mkxp-z's usual Metal
-/// and 1.2 ms with OpenGL, for the same pixels.
+/// and 1.2 ms with OpenGL, for the same pixels. On Linux it is the system's
+/// OpenGL. On Windows mkxp-z draws through ANGLE whatever the setting, and
+/// its OpenGL there is ANGLE over the driver's, so it keeps its own choice,
+/// Direct3D 11.
 const OPENGL: u64 = 2;
 
 /// The hidden player's settings: the game's own, `game_settings` (its
 /// `mkxp.json`, if it has one), with `gameFolder` set to `game` and
 /// `bridge` loaded before the game's own preload scripts. mkxp-z reads
 /// every other path in them from the game's folder, as before. It draws
-/// with OpenGL, unless the game chose how.
+/// with OpenGL, unless the game chose how, but on Windows.
 ///
 /// # Errors
 ///
@@ -40,9 +43,11 @@ pub fn player_settings(
             .ok_or_else(|| format!("{} is not a UTF-8 path", path.display()))
     };
     settings.insert("gameFolder".to_owned(), path(game)?);
-    settings
-        .entry("renderer")
-        .or_insert_with(|| Value::from(OPENGL));
+    if !cfg!(windows) {
+        settings
+            .entry("renderer")
+            .or_insert_with(|| Value::from(OPENGL));
+    }
     // Its window is never seen, so it need not draw there: the bridge
     // lifts mkxp-z's frame limit, so with frame skipping on, mkxp-z is
     // always behind and skips it. Drawing there stalled a frame by about
@@ -135,7 +140,11 @@ mod tests {
         let settings: Value = serde_json::from_str(&text).expect("JSON");
         assert_eq!(settings["gameFolder"], "/Games/My Game");
         assert_eq!(settings["rgssVersion"], 1);
-        assert_eq!(settings["renderer"], OPENGL);
+        if cfg!(windows) {
+            assert_eq!(settings.get("renderer"), None, "mkxp-z's own choice");
+        } else {
+            assert_eq!(settings["renderer"], OPENGL);
+        }
         assert_eq!(settings["frameSkip"], true);
         assert_eq!(
             settings["preloadScript"],
