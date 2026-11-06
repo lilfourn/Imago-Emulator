@@ -258,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing on real hardware: CI's virtual machines wake sleeps 10 ms late or more; run with --ignored"]
     fn sleeps_wake_well_within_a_millisecond_of_their_deadlines() {
         // As the emulation thread sleeps: with its timers, a frame's worth
         // of time at a time. A system timer ticking every 15.6 ms, as
