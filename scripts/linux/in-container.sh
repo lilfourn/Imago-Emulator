@@ -3,6 +3,8 @@
 # Ubuntu container. The checkout, the program's folder and the current
 # folder are mounted at the same paths as on the Mac, and cargo's CARGO_*
 # and RUST_* variables pass through, so tests find their fixtures.
+# DS_LINUX_PLATFORM (cross.sh sets it for x86-64) is Docker's --platform
+# option for the image, such as --platform=linux/amd64.
 set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -36,4 +38,6 @@ if [ "$real" != "$root" ]; then
     set -- -v "$real:$real" "$@"
 fi
 
-exec docker run --rm -i --init -v "$root:$root" -w "$PWD" "$@"
+# Empty for the arm64 image, so the command stays as it was.
+platform="${DS_LINUX_PLATFORM:-}"
+exec docker run --rm -i --init $platform -v "$root:$root" -w "$PWD" "$@"

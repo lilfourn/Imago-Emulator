@@ -7,7 +7,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Vulkan, for the core's hardware renderer: MoltenVK, loaded at run time.
+# Vulkan, for the core's hardware renderer, loaded at run time: MoltenVK on
+# macOS, the system's Vulkan loader elsewhere.
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 crc32fast.workspace = true
 emu-core.workspace = true
@@ -19,6 +20,30 @@ libloading = "0.8"
 # Checks the downloads against the digests pinned here.
 sha2 = "0.10"
 thiserror.workspace = true
+
+# Unpacks the core's zip off macOS, where there is no ditto. The same
+# version and features as emu-app's.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# The helper's standard handles, its exit, and starting programs without a
+# console window, on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# Makes the zips the install tests unpack, on every system.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# Plays a game on the real core, through the helper, which is this test's
+# own executable started again: so it has a main of its own.
+[[test]]
+name = "real_core"
+harness = false
 
 [lints]
 workspace = true

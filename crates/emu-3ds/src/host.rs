@@ -44,7 +44,8 @@ pub(crate) const NO_HOMEBREW_STATES: &str = "Save states don't work for this hom
 /// Which of the core's renderers draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Renderer {
-    /// The GPU, through MoltenVK.
+    /// The GPU, through Vulkan: MoltenVK on macOS, the system's loader
+    /// elsewhere.
     Vulkan,
     /// The CPU: slow, but needs no GPU.
     Software,
@@ -216,7 +217,8 @@ fn shared() -> MutexGuard<'static, Shared> {
 /// as one ([`crate::HELPER_FLAG`] as its first argument); `None` otherwise.
 /// Call it first thing in `main`.
 ///
-/// The helper's arguments are the core, MoltenVK, the game and the folder
+/// The helper's arguments are the core, MoltenVK (empty off macOS, where
+/// the helper loads the system's Vulkan loader), the game and the folder
 /// for the core's files.
 #[must_use]
 pub fn run_helper_if_asked() -> Option<i32> {
@@ -229,6 +231,7 @@ pub fn run_helper_if_asked() -> Option<i32> {
         eprintln!("usage: {} CORE MOLTENVK GAME DATA", crate::HELPER_FLAG);
         return Some(2);
     };
+    let moltenvk = (!moltenvk.as_os_str().is_empty()).then_some(moltenvk.as_path());
     let code = match serve(core, moltenvk, game, data) {
         Ok(()) => 0,
         Err(error) => {
@@ -240,8 +243,33 @@ pub fn run_helper_if_asked() -> Option<i32> {
     // run, and a crash would show the player macOS's report for nothing:
     // leave without them. Everything worth keeping is written by now.
     let _ = io::stderr().flush();
+    leave(code)
+}
+
+/// Ends the helper at once with `code`, without running the core's static
+/// destructors.
+fn leave(code: i32) -> ! {
+    #[cfg(unix)]
     // SAFETY: _exit ends the process at once; nothing after it runs.
-    unsafe { libc::_exit(code) }
+    unsafe {
+        libc::_exit(code)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        // Windows's own exit, and the C runtime's _exit, which ends in it,
+        // first stop every other thread and then tell each library the
+        // process is ending, and the core's runs its static destructors
+        // then, with its threads gone mid-way. TerminateProcess tells no
+        // library.
+        // SAFETY: ends this process at once; nothing after it runs.
+        unsafe {
+            TerminateProcess(GetCurrentProcess(), code.cast_unsigned());
+        }
+        std::process::exit(code)
+    }
+    #[cfg(not(any(unix, windows)))]
+    std::process::exit(code)
 }
 
 /// How long a helper waits for the one before it to let go of the
@@ -297,10 +325,104 @@ fn take_stdout() -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(link) })
 }
 
-/// Windows has no helper yet ([`crate::UNSUPPORTED`]): keeping the core's
-/// printing off the link there needs its standard handles, not the C
-/// runtime's descriptors.
-#[cfg(not(unix))]
+/// Takes the protocol's end of stdout, and sends what anything else in the
+/// process prints there to stderr, the helper's log, so it cannot break
+/// the link.
+///
+/// On Windows the standard output is a handle, and each C runtime in the
+/// process keeps its own descriptor 1, set from that handle when the
+/// runtime started. The core is a MinGW build that prints through the
+/// system's `msvcrt.dll`, which other system libraries have usually
+/// started before the helper runs; the app's own C runtime is linked in.
+/// So each C runtime already running has its descriptor 1 pointed at the
+/// log, and then the standard output itself, which Rust's printing reads
+/// each time and any C runtime started later starts from.
+///
+/// A C runtime's `_dup2` closes the handle its descriptor had first, here
+/// the link's. The handle is kept from closing while they do, so it stays
+/// the link's, and no runtime's new handle can take its number while
+/// another still names it.
+///
+/// The link is a pipe the app reads with Rust's own pipes, never through a
+/// C runtime's text mode, so its bytes cross as they are.
+#[cfg(windows)]
+fn take_stdout() -> io::Result<File> {
+    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        HANDLE, HANDLE_FLAG_PROTECT_FROM_CLOSE, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+
+    // SAFETY: GetStdHandle reads the process's standard handles.
+    let (link, log) = unsafe {
+        (
+            GetStdHandle(STD_OUTPUT_HANDLE),
+            GetStdHandle(STD_ERROR_HANDLE),
+        )
+    };
+    let usable = |handle: HANDLE| !handle.is_null() && handle != INVALID_HANDLE_VALUE;
+    if !usable(link) || !usable(log) || link == log {
+        return Err(io::Error::other(
+            "the 3DS helper needs a stdout and a stderr of its own",
+        ));
+    }
+    let protect = |flags: u32| {
+        // SAFETY: `link` is one of this process's open handles; this sets
+        // only whether it may be closed.
+        if unsafe { SetHandleInformation(link, HANDLE_FLAG_PROTECT_FROM_CLOSE, flags) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+    protect(HANDLE_FLAG_PROTECT_FROM_CLOSE)?;
+    for runtime in ["msvcrt.dll", "ucrtbase.dll"] {
+        point_stdout_at_stderr(runtime);
+    }
+    // SAFETY: the app's own C runtime's dup2 takes two of its descriptors,
+    // which it checks; 2 is the log, open for the life of the process.
+    unsafe {
+        libc::dup2(2, 1);
+    }
+    // The file may close it, as it is the file's alone now.
+    let _ = protect(0);
+    // SAFETY: `log` is the process's standard error, open for its life.
+    if unsafe { SetStdHandle(STD_OUTPUT_HANDLE, log) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `link` is open, and nothing else in the process names it any
+    // more, so the file owns it from here.
+    Ok(File::from(unsafe { OwnedHandle::from_raw_handle(link) }))
+}
+
+/// Points the C runtime `runtime`'s descriptor 1 at its descriptor 2, the
+/// log, if the runtime is running in the process. One that starts later
+/// starts from the standard output, which is the log by then.
+#[cfg(windows)]
+fn point_stdout_at_stderr(runtime: &str) {
+    let Ok(library) = libloading::os::windows::Library::open_already_loaded(runtime) else {
+        return;
+    };
+    // SAFETY: every Windows C runtime exports _dup2, which takes two
+    // descriptors and returns 0 or -1.
+    let dup2 = unsafe {
+        library.get::<unsafe extern "C" fn(std::ffi::c_int, std::ffi::c_int) -> std::ffi::c_int>(
+            b"_dup2\0",
+        )
+    };
+    if let Ok(dup2) = dup2 {
+        // SAFETY: _dup2 checks both descriptors; 2 is the log, open for the
+        // life of the process.
+        unsafe {
+            dup2(2, 1);
+        }
+    }
+}
+
+/// Only Unix and Windows have a helper.
+#[cfg(not(any(unix, windows)))]
 fn take_stdout() -> io::Result<File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -327,7 +449,7 @@ pub(crate) fn interactive_thread() {
 
 /// Loads the game and answers the app's requests until it says to quit
 /// or goes.
-fn serve(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> io::Result<()> {
+fn serve(core: &Path, moltenvk: Option<&Path>, game: &Path, data: &Path) -> io::Result<()> {
     interactive_thread();
     // Held until the process ends.
     let _console = take_console(data);
@@ -484,8 +606,15 @@ struct Session {
 
 impl Session {
     /// Opens the core, picks the renderer and loads `game`, saying why
-    /// not in words for the player.
-    fn start(core: &Path, moltenvk: &Path, game: &Path, data: &Path) -> Result<Self, String> {
+    /// not in words for the player. Vulkan comes from `moltenvk`, or with
+    /// none, from the system's loader; without Vulkan the core draws in
+    /// software.
+    fn start(
+        core: &Path,
+        moltenvk: Option<&Path>,
+        game: &Path,
+        data: &Path,
+    ) -> Result<Self, String> {
         let renderer = match std::env::var("DS_EMULATOR_3DS_RENDERER").as_deref() {
             Ok("software") => Renderer::Software,
             _ => match crate::vulkan::probe(moltenvk) {
@@ -512,8 +641,7 @@ impl Session {
 
         // SAFETY: `core` is Azahar's libretro core, checked against its
         // pinned digest when it was installed.
-        let api = unsafe { Api::open(core) }
-            .map_err(|error| format!("Could not open the 3DS core: {error}"))?;
+        let api = unsafe { Api::open(core) }.map_err(|error| could_not_open(&error.to_string()))?;
         // SAFETY: these are the core's entry points, called in the order
         // libretro gives: callbacks, init, then the game. The callbacks
         // are plain functions that live as long as the process.
@@ -685,6 +813,18 @@ impl Session {
         // leave both for the process's end.
         std::mem::forget(self);
     }
+}
+
+/// Why the core could not be opened, in words for the player. On Linux,
+/// a system older than the core's libraries says which versions it lacks.
+fn could_not_open(error: &str) -> String {
+    let mut why = format!("Could not open the 3DS core: {error}");
+    if cfg!(target_os = "linux") && error.contains("GLIBC") {
+        why.push_str(
+            ". It needs glibc 2.34 and libstdc++ from GCC 12 or newer, as in Ubuntu 22.04 and Debian 12",
+        );
+    }
+    why
 }
 
 /// Whether the game at `path` has a title ID, as cartridges, executables
@@ -1053,6 +1193,100 @@ mod tests {
         letting_go.join().unwrap();
         drop(next);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Set in the copy of the tests that
+    /// `what_else_prints_goes_to_the_log_not_the_link` starts.
+    const PRINTING_COPY: &str = "EMU_3DS_TEST_PRINTING_COPY";
+    const LINK_WORDS: &str = "only the link's own words";
+
+    /// What the copy prints through each way a library in the helper might,
+    /// after taking stdout as the helper does.
+    fn print_every_way() -> ! {
+        // The core's C runtime, started before the helper takes stdout, as
+        // other system libraries start it in the app.
+        #[cfg(windows)]
+        // SAFETY: msvcrt.dll is the system's C runtime; loading it runs its
+        // own start-up alone.
+        let msvcrt = unsafe { libloading::Library::new("msvcrt.dll") }.expect("msvcrt.dll");
+        let mut link = take_stdout().expect("take stdout");
+        let mut stdout = io::stdout();
+        stdout.write_all(b"printed by Rust\n").unwrap();
+        stdout.flush().unwrap();
+        // SAFETY: puts takes a NUL-terminated string, and fflush(NULL)
+        // flushes every stream.
+        unsafe {
+            libc::puts(c"printed by the app's C runtime".as_ptr());
+            libc::fflush(std::ptr::null_mut());
+        }
+        #[cfg(windows)]
+        // SAFETY: msvcrt.dll's puts and fflush have these signatures, and
+        // take what they are given here as above.
+        unsafe {
+            let puts = msvcrt
+                .get::<unsafe extern "C" fn(*const c_char) -> std::ffi::c_int>(b"puts\0")
+                .expect("puts");
+            let fflush = msvcrt
+                .get::<unsafe extern "C" fn(*mut c_void) -> std::ffi::c_int>(b"fflush\0")
+                .expect("fflush");
+            puts(c"printed by msvcrt.dll".as_ptr());
+            fflush(std::ptr::null_mut());
+        }
+        link.write_all(LINK_WORDS.as_bytes()).unwrap();
+        link.flush().unwrap();
+        leave(0)
+    }
+
+    #[test]
+    fn what_else_prints_goes_to_the_log_not_the_link() {
+        if std::env::var_os(PRINTING_COPY).is_some() {
+            print_every_way();
+        }
+        let dir = std::env::temp_dir().join(format!("emu-3ds-printing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("helper.log");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host::tests::what_else_prints_goes_to_the_log_not_the_link",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PRINTING_COPY, "1")
+            .stdin(std::process::Stdio::null())
+            .stderr(File::create(&log).unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.status);
+        let link = String::from_utf8_lossy(&output.stdout);
+        let log = std::fs::read_to_string(&log).unwrap();
+        // What the tests print first, before stdout is taken, comes first.
+        assert!(link.ends_with(LINK_WORDS), "the link: {link:?}");
+        let mut printed = vec!["printed by Rust", "printed by the app's C runtime"];
+        if cfg!(windows) {
+            printed.push("printed by msvcrt.dll");
+        }
+        for words in printed {
+            assert!(!link.contains(words), "{words:?} on the link: {link:?}");
+            assert!(log.contains(words), "{words:?} not in the log: {log:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_linux_too_old_for_the_core_says_what_it_needs() {
+        let old = "/lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found";
+        let why = could_not_open(old);
+        assert!(
+            why.starts_with("Could not open the 3DS core: /lib"),
+            "{why}"
+        );
+        assert_eq!(why.contains("Ubuntu 22.04"), cfg!(target_os = "linux"));
+        assert_eq!(
+            could_not_open("no such file"),
+            "Could not open the 3DS core: no such file"
+        );
     }
 
     #[test]

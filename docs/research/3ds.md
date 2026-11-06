@@ -34,7 +34,7 @@ This research follows that path.
 
 | Emulator | State | For ds-emulator |
 |---|---|---|
-| Azahar | GPL-3.0, Citra's successor, releases every few weeks, official libretro cores for macOS arm64 and x86_64 | Host it |
+| Azahar | GPL-3.0, Citra's successor, releases every few weeks, official libretro cores for macOS (arm64 and x86_64), Linux x86_64 and Windows x86_64 | Host it |
 | Panda3DS | GPL-3.0, smaller, last release v0.9 (Dec 2024) | Not now |
 | AzaharPlus | A fork that loads encrypted games | Out: it needs keys (PRD 9.5) |
 | Citra, Lime3DS | Retired; Azahar continues them | None |
@@ -199,6 +199,55 @@ Universal-DB lists 126 games for the 3DS alone:
 The compatibility sweep (`scripts/store-compat.py`) could run them through
 the helper with the software renderer, as it does other games through
 emu-headless.
+
+## Linux and Windows
+
+Checked 2026-11-06 for the port to Linux and Windows
+([decision 0011's update](../decisions/0011-3ds-games.md#update-2026-11-06-linux-and-windows)).
+Azahar 2126.2's release has libretro cores for Linux x86-64 and Windows
+x86-64 beside the Mac ones. Both were downloaded and their digests
+checked against GitHub's:
+
+| Download | Size | SHA-256 | Holds |
+|---|---:|---|---|
+| `azahar-libretro-linux-x86_64-2126.2.zip` | 14,742,826 | `2223444b74de2c922bae1efcfed60002f696b3c2aaf4fc73fc03e66a395dc26e` | `azahar_libretro.so` alone, 47,174,368 bytes |
+| `azahar-libretro-windows-x86_64-2126.2.zip` | 12,097,452 | `d863711cff775ed697ba0cc5a963f2145b9672c4ad9a891367821d7f3cc1f888` | `azahar_libretro.dll` alone, 33,769,472 bytes |
+
+- **Linux.** The core needs `libstdc++.so.6`, `libm`, `libmvec`,
+  `libgcc_s`, `libc` and `ld-linux-x86-64`, with symbols up to
+  `GLIBC_2.34` and `GLIBCXX_3.4.30` (GCC 12's libstdc++): Ubuntu 22.04,
+  Debian 12 or newer.
+- **Windows.** The core is a MinGW build. It imports `msvcrt.dll`,
+  `KERNEL32`, `ADVAPI32`, `bcrypt`, `CRYPT32`, `ole32`, `SHELL32`, `WINMM`
+  and `WS2_32`, so it needs no Visual C++ runtime, and it prints through
+  `msvcrt.dll`'s `printf`, `puts` and `fwrite`. It doesn't import
+  `vulkan-1.dll`.
+- **Renderers.** Both have Vulkan, OpenGL and software renderers. Vulkan
+  comes from the frontend, as on a Mac, so the helper loads the system's
+  Vulkan loader where it loaded MoltenVK. OpenGL would need the helper to
+  make a GL context, and isn't used.
+- **No core for Linux on ARM.** Neither Azahar's release nor libretro's
+  buildbot has one (`nightly/linux/aarch64/latest/azahar_libretro.so.zip`
+  is a 404). Building one would mean hosting a GPL-3.0 binary, so 3DS
+  games aren't offered there.
+- **The white-Pokémon bug is the arm64 JIT's alone.** Azahar 2126.2's
+  `shader_jit_x64_compiler.cpp` converts `LG2`'s exponent with
+  `cvtsi2ss`, as signed, where `shader_jit_a64_compiler.cpp` uses `UCVTF`.
+
+In an Ubuntu 24.04 amd64 container on this Mac (OrbStack running it
+through Rosetta, one CPU, Mesa 25.2.8's lavapipe as the only Vulkan
+device), through the helper:
+
+| Homebrew | Vulkan on lavapipe | Software | Checked |
+|---|---:|---:|---|
+| 3DS Button Tester (its `.cia`'s executable) | 19.4 fps | 41.5 fps | Buttons from a Lua script, a state saved and loaded, 2× |
+| Craftus Reloaded 0.3 | 17.3 fps | 3.7 fps | Touching its New World button |
+| 3d-platformer 1.0 | 14.5 fps | 8.2 fps | |
+
+These rates are a CPU drawing for an emulated CPU, so only the ratios
+mean anything: a CPU's Vulkan beats the core's software renderer for 3D,
+and the helper takes it when there is no GPU. A real PC draws on its
+GPU.
 
 ## A stopgap: open the game in Azahar's own app
 
