@@ -4,16 +4,18 @@
 //!
 //! It runs on Linux and Windows when `DS_EMULATOR_MKXP_Z` names a folder
 //! holding an mkxp-z build for the system, as it comes (such as
-//! `mkxp-z.x86_64` on Linux, or `mkxp-z.x86_64.exe` on Windows), and is
-//! skipped otherwise, saying so. On Linux it needs Mesa's OpenGL and Xvfb
-//! or an X display. On macOS the player is the game's own app, which this
-//! test does not make.
+//! `mkxp-z.x86_64` on Linux, or `mkxp-z.x86_64.exe` on Windows), or is
+//! `hosted`: then the game starts as a player's first game does, with the
+//! hosted build downloaded into its own temporary folders. It is skipped
+//! otherwise, saying so. On Linux it needs Mesa's OpenGL and Xvfb or an X
+//! display. On macOS the player is the game's own app, which this test does
+//! not make. Should it fail, it prints the player's logs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use emu_core::{Button, Buttons, Core, Input, StereoSample, rgb};
-use emu_mkxp::{Mkxp, SHARED_PLAYER, UNSUPPORTED};
+use emu_mkxp::{Mkxp, SHARED_PLAYER, UNSUPPORTED, downloads_player};
 
 /// The game: a dark blue screen with a yellow 32×32 square at
 /// `$pos`, moved 4 pixels a frame by the buttons the bridge says are held.
@@ -58,9 +60,18 @@ fn a_real_mkxp_z_plays_takes_buttons_and_states_and_sounds() {
     fs::remove_dir_all(&dir).ok();
     let game = make_game(&dir.join("Square"));
     let work = dir.join("work");
-    copy_build(&build, &work.join(SHARED_PLAYER));
+    let _logs = Logs(work.clone());
+    if build.as_os_str() == "hosted" {
+        assert!(
+            downloads_player(&game, &work),
+            "the first game downloads mkxp-z"
+        );
+    } else {
+        copy_build(&build, &work.join(SHARED_PLAYER));
+    }
 
-    let mut core = Mkxp::open(&game, &work).expect("the game starts");
+    let mut core = Mkxp::open(&game, &work).unwrap_or_else(|error| panic!("{error}"));
+    assert!(!downloads_player(&game, &work), "and the next one need not");
     let mut audio = Vec::new();
     assert_eq!(run(&mut core, &mut audio, &[], 5), Some((100, 100)));
     assert_eq!(
@@ -109,6 +120,26 @@ fn run(
         assert_eq!(core.ended(), None);
     }
     square(core)
+}
+
+/// Prints the players' logs in the work folder it names, if the test fails.
+struct Logs(PathBuf);
+
+impl Drop for Logs {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let players = fs::read_dir(&self.0).into_iter().flatten().flatten();
+        for player in players.filter(|entry| entry.path().is_dir()) {
+            for log in ["player.log", "player-errors.log", "display.log"] {
+                let path = player.path().join(log);
+                if let Ok(text) = fs::read_to_string(&path) {
+                    eprintln!("--- {}\n{text}", path.display());
+                }
+            }
+        }
+    }
 }
 
 /// Where the square's top-left corner is on the screen.

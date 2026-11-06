@@ -26,6 +26,7 @@ pub mod audio;
 pub mod config;
 #[cfg(target_os = "linux")]
 mod display;
+pub mod install;
 pub mod link;
 pub mod player;
 
@@ -67,16 +68,13 @@ pub const INFO: CoreInfo = CoreInfo {
 };
 
 /// Why RPG Maker games can't play on this system, or `None` where they
-/// can: on macOS and Linux. On Windows the player starts, links, plays its
-/// sound and takes buttons and states (tried under Wine), but no frame has
-/// been drawn on Windows itself yet.
-pub const UNSUPPORTED: Option<&str> = if cfg!(any(target_os = "macos", target_os = "linux")) {
-    None
-} else if cfg!(windows) {
-    Some("RPG Maker games aren't supported on Windows yet")
-} else {
-    Some("RPG Maker games aren't supported on this system yet")
-};
+/// can: on macOS, Linux and Windows.
+pub const UNSUPPORTED: Option<&str> =
+    if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
+        None
+    } else {
+        Some("RPG Maker games aren't supported on this system yet")
+    };
 
 /// Why a game could not start.
 #[derive(Debug, thiserror::Error)]
@@ -88,9 +86,24 @@ pub enum Error {
     #[error("{} is not an RPG Maker game set up for mkxp-z: it needs a Game.ini and a player app", .0.display())]
     NotAGame(PathBuf),
     /// Off macOS: neither the game's folder nor the players' folder, this
-    /// one, holds an mkxp-z for this system.
-    #[error("{}", no_player(.0))]
+    /// one, holds an mkxp-z for this system, and there is no build of it to
+    /// download.
+    #[error(
+        "there is no mkxp-z build for {SYSTEM} ({}) to download: put one in {}, for every game, or in the game's folder",
+        std::env::consts::ARCH,
+        .0.display()
+    )]
     NoPlayer(PathBuf),
+    /// Off macOS: the game needed the hosted mkxp-z, and it could not be
+    /// installed.
+    #[error("{source}. An mkxp-z build for {SYSTEM} put in {} plays instead", .players.display())]
+    Install {
+        /// Why.
+        #[source]
+        source: install::InstallError,
+        /// The players' folder.
+        players: PathBuf,
+    },
     /// On Linux: there is neither Xvfb nor an X display for the player to
     /// draw on.
     #[error(
@@ -121,20 +134,53 @@ impl Error {
     }
 }
 
-/// Why there is no player for a game, with `shared`, the players' folder.
-fn no_player(shared: &Path) -> String {
-    let system = if cfg!(windows) { "Windows" } else { "Linux" };
-    format!(
-        "This game needs mkxp-z for {system} ({}) to play: put an mkxp-z build for {system} in {}, for every game, or in the game's folder",
-        std::env::consts::ARCH,
-        shared.display()
-    )
+/// What the system is called, in messages.
+const SYSTEM: &str = if cfg!(windows) {
+    "Windows"
+} else if cfg!(target_os = "linux") {
+    "Linux"
+} else if cfg!(target_os = "macos") {
+    "macOS"
+} else {
+    "this system"
+};
+
+/// The app's work folder for RPG Maker games, which it gives
+/// [`Mkxp::open`]: `RPG Maker` in its data folder, which holds each game's
+/// hidden player and, off macOS, the players' folder ([`SHARED_PLAYER`]).
+/// `None` if there is no data folder.
+pub fn data_dir() -> Option<PathBuf> {
+    Some(emu_os::data_dir()?.join("ds-emulator").join("RPG Maker"))
 }
 
-/// The folder, in the work folder [`Mkxp::open`] is given, that holds the
-/// mkxp-z every game without one of its own plays in, off macOS: an mkxp-z
-/// build for the system, as it comes, such as `mkxp-z.x86_64` with its
-/// `stdlib` folder on Linux or `mkxp-z.x86_64.exe` on Windows.
+/// Whether opening the game `path` names with [`Mkxp::open`] and
+/// `work_dir` downloads mkxp-z first: off macOS, when neither the game's
+/// folder nor the players' folder has an mkxp-z for this system and the
+/// hosted one is not installed yet. For the app to say so before it starts
+/// ([`install::DOWNLOAD_MB`]).
+pub fn downloads_player(path: &Path, work_dir: &Path) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        // The game's own last: on Windows its Game.exe may be read through.
+        let players = work_dir.join(SHARED_PLAYER);
+        install::PIN.is_some()
+            && install::installed(&players).is_none()
+            && mkxp_z_in(&players).is_none()
+            && game_folder(path).is_some_and(|game| mkxp_z(&game).is_none())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (path, work_dir);
+        false
+    }
+}
+
+/// The players' folder, in the work folder [`Mkxp::open`] is given, off
+/// macOS. A game without an mkxp-z of its own plays in the build the player
+/// put there, as it comes (such as `mkxp-z.x86_64` on Linux or
+/// `mkxp-z.x86_64.exe` on Windows), or else in the hosted build, which is
+/// downloaded into a folder of its own there the first time it is needed
+/// ([`install`]).
 pub const SHARED_PLAYER: &str = "mkxp-z";
 
 /// The game folder `path` names: `path` itself, if it holds an RPG Maker
@@ -377,14 +423,15 @@ impl Mkxp {
     /// player, which [`player`] makes in `work_dir`, and waits for its
     /// first frame.
     ///
-    /// Blocking: the game may take some seconds to start.
+    /// Blocking: the game may take some seconds to start, and off macOS the
+    /// first game may download mkxp-z ([`downloads_player`]).
     ///
     /// # Errors
     ///
     /// Fails if RPG Maker games don't play on this system ([`UNSUPPORTED`]),
-    /// `path` names no game, there is no mkxp-z for it ([`SHARED_PLAYER`]),
-    /// the player cannot be made or started, or the game does not draw its
-    /// first frame within a minute.
+    /// `path` names no game, there is no mkxp-z for it and the hosted one
+    /// cannot be downloaded ([`SHARED_PLAYER`]), the player cannot be made or
+    /// started, or the game does not draw its first frame within a minute.
     pub fn open(path: &Path, work_dir: &Path) -> Result<Self, Error> {
         if let Some(why) = UNSUPPORTED {
             return Err(Error::Unsupported(why));
@@ -703,21 +750,53 @@ mod tests {
 
     #[test]
     #[cfg(not(target_os = "macos"))]
-    fn a_game_without_mkxp_z_says_where_to_put_it() {
-        let dir = temp_dir("no-player");
+    fn a_game_plays_in_its_own_mkxp_z_then_the_players_then_the_hosted_one() {
+        let dir = temp_dir("lookup");
         let game = dir.join("Game");
         fs::create_dir_all(&game).expect("game");
         fs::write(game.join("Game.ini"), "[Game]\r\nTitle=Game\r\n").expect("Game.ini");
         fake_program(&game, "Game.exe");
-        let work = dir.join("work");
-        let why = Player::prepare(&game, &work)
-            .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default();
-        let shared = work.join(SHARED_PLAYER);
-        assert!(why.contains(&shared.display().to_string()), "{why}");
-        assert!(why.contains("mkxp-z for"), "{why}");
+        let players = dir.join("work").join(SHARED_PLAYER);
+        let pin = install::PIN.expect("a hosted build for this system");
+        // The hosted build, as an earlier game installed it.
+        let hosted = players.join(pin.folder);
+        fs::create_dir_all(&hosted).expect("hosted folder");
+        let hosted = fake_program(&hosted, pin.program);
+        assert!(!downloads_player(&game, &dir.join("work")));
+        assert_eq!(player::player_program(&game, &players).ok(), Some(hosted));
+        let theirs = fake_mkxp_z(&players);
+        assert_eq!(player::player_program(&game, &players).ok(), Some(theirs));
+        let own = fake_mkxp_z(&game);
+        assert_eq!(player::player_program(&game, &players).ok(), Some(own));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn without_a_player_the_game_says_where_one_goes() {
+        let players = Path::new("/home/me/.local/share/ds-emulator/RPG Maker/mkxp-z");
+        let system = if cfg!(windows) { "Windows" } else { "Linux" };
+        let arch = std::env::consts::ARCH;
+        assert_eq!(
+            Error::NoPlayer(players.to_owned()).to_string(),
+            format!(
+                "there is no mkxp-z build for {system} ({arch}) to download: put one in {}, for every game, or in the game's folder",
+                players.display()
+            )
+        );
+        let failed = Error::Install {
+            source: install::InstallError::Download(
+                "curl, which downloads it, is not installed".to_owned(),
+            ),
+            players: players.to_owned(),
+        };
+        assert_eq!(
+            failed.to_string(),
+            format!(
+                "could not download mkxp-z: curl, which downloads it, is not installed. An mkxp-z build for {system} put in {} plays instead",
+                players.display()
+            )
+        );
     }
 
     #[test]
