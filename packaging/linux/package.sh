@@ -162,7 +162,7 @@ make_deb() {
 Package: imago-emulator
 Version: $version
 Architecture: $deb_arch
-Maintainer: ${MAINTAINER:-Luke Fournier <https://imagoemulator.com>}
+Maintainer: ${MAINTAINER:-Luke Fournier <hello@imagoemulator.com>}
 Installed-Size: $size
 Depends: $depends
 Recommends: $recommends
