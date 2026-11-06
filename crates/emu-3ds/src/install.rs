@@ -724,6 +724,13 @@ mod tests {
         }
     }
 
+    /// `path` as a "URL" for [`copy`]: with `/` between its parts on every
+    /// system, as a URL has, so the file name the install takes from it
+    /// is the file's own. Windows opens paths written this way too.
+    fn url(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
     /// Fetches a "URL" that is a local path by copying it.
     fn copy(url: &str, to: &Path) -> Result<(), String> {
         fs::copy(url, to)
@@ -968,7 +975,7 @@ mod tests {
         let dir = temp_dir("core-alone");
         let zip = core_zip(&dir);
         let zip_sha = sha256(&zip).expect("sha");
-        let zip = zip.to_string_lossy();
+        let zip = url(&zip);
         let pins = local_pins(&zip, &zip_sha, None);
         let data = dir.join("3DS");
 
@@ -995,7 +1002,7 @@ mod tests {
             let dir = temp_dir("local");
             let (zip, tar) = (core_zip(&dir), moltenvk_tar(&dir));
             let (zip_sha, tar_sha) = (sha256(&zip).expect("sha"), sha256(&tar).expect("sha"));
-            let (zip, tar) = (zip.to_string_lossy(), tar.to_string_lossy());
+            let (zip, tar) = (url(&zip), url(&tar));
             let pins = local_pins(&zip, &zip_sha, Some((&tar, &tar_sha)));
             let data = dir.join("3DS");
             // An install the app quit during left this behind.
@@ -1038,7 +1045,7 @@ mod tests {
     fn a_failed_install_leaves_nothing_behind() {
         let dir = temp_dir("failed");
         let zip_path = core_zip(&dir);
-        let zip = zip_path.to_string_lossy();
+        let zip = url(&zip_path);
         let data = dir.join("3DS");
 
         let wrong = local_pins(&zip, CORE_MACOS_ARM64.sha256, None);
@@ -1064,7 +1071,7 @@ mod tests {
         {
             let zip_sha = sha256(&zip_path).expect("sha");
             let tar = moltenvk_tar(&dir);
-            let tar = tar.to_string_lossy();
+            let tar = url(&tar);
             let pins = local_pins(&zip, &zip_sha, Some((&tar, MOLTENVK.sha256)));
             let error = pins
                 .install(&data, &copy)
