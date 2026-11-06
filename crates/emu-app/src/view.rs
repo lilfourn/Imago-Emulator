@@ -3790,15 +3790,23 @@ fn prepare(
 }
 
 /// What to say while the games at `paths`, called `name`, load: that the
-/// 3DS core is being downloaded first, for a 3DS game the first time one
-/// is played, as that takes a while.
+/// 3DS core, or off macOS mkxp-z for an RPG Maker game, is being downloaded
+/// first, the first time one is played, as that takes a while.
 fn loading_notice(paths: &[PathBuf], name: &str) -> String {
     let downloading = matches!(paths, [path] if emu_3ds::is_game(path))
         && emu_3ds::data_dir().is_some_and(|data| emu_3ds::install::installed(&data).is_none());
+    let rpg_maker = emu_cores::rpg_maker::data_dir().is_some_and(
+        |work| matches!(paths, [path] if emu_cores::rpg_maker::downloads_player(path, &work)),
+    );
     if downloading {
         format!(
             "Downloading the 3DS core, about {} MB, the first time only, then loading {name}…",
             emu_3ds::install::DOWNLOAD_MB
+        )
+    } else if rpg_maker {
+        format!(
+            "Downloading mkxp-z, the RPG Maker player, about {} MB, the first time only, then loading {name}…",
+            emu_cores::rpg_maker::install::DOWNLOAD_MB
         )
     } else {
         format!("Loading {name}…")

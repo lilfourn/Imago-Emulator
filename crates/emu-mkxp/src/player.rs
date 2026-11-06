@@ -13,8 +13,9 @@
 //! app keeps the keyboard.
 //!
 //! On Linux and Windows the player is mkxp-z's program itself: the one the
-//! game ships, or the one put in the players' folder for every game (see
-//! [`crate::SHARED_PLAYER`]). It is started directly, with its `mkxp.json`
+//! game ships, or the one put in the players' folder for every game, or
+//! else the hosted one, downloaded there the first time (see
+//! [`crate::SHARED_PLAYER`] and [`crate::install`]). It is started directly, with its `mkxp.json`
 //! in a folder of the game's own: on Linux, mkxp-z reads it from `SRCDIR`;
 //! on Windows, only from beside the program, so the program and its
 //! libraries are copied there. On Linux it draws on a private X display,
@@ -143,10 +144,7 @@ impl Player {
         };
         #[cfg(not(target_os = "macos"))]
         let app = {
-            let shared = work_dir.join(crate::SHARED_PLAYER);
-            let source = crate::mkxp_z(game)
-                .or_else(|| crate::mkxp_z_in(&shared))
-                .ok_or(Error::NoPlayer(shared))?;
+            let source = player_program(game, &work_dir.join(crate::SHARED_PLAYER))?;
             let folder = dir.join("player");
             #[cfg(windows)]
             let app = copy_program(&source, &folder)?;
@@ -492,6 +490,23 @@ fn sign(app: &Path) -> Result<(), Error> {
     run(Command::new("codesign")
         .args(["--force", "--sign", "-"])
         .arg(app))
+}
+
+/// The mkxp-z that plays the game in `game`, off macOS: the game's own,
+/// then one the player put in `players`, the players' folder, then the
+/// hosted one there, downloaded if it is not yet.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn player_program(game: &Path, players: &Path) -> Result<PathBuf, Error> {
+    if let Some(program) = crate::mkxp_z(game).or_else(|| crate::mkxp_z_in(players)) {
+        return Ok(program);
+    }
+    crate::install::ensure(players).map_err(|source| match source {
+        crate::install::InstallError::NoBuild(_) => Error::NoPlayer(players.to_owned()),
+        source => Error::Install {
+            source,
+            players: players.to_owned(),
+        },
+    })
 }
 
 /// What Windows does to the player's process, which it would otherwise

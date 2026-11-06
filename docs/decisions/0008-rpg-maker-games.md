@@ -313,3 +313,74 @@ sound comes. emu-headless with Lua scripts gave the same picture
 `0e013883` idle, and wrote the sound to a WAV, both on a private Xvfb and
 on an X display with the window withdrawn.
 
+Update, 2026-11-06, later: mkxp-z downloaded at first use. Luke Fournier
+chose to host pinned mkxp-z builds, so an RPG Maker game plays in one
+click on Linux and Windows. They are in the public repository
+`lilfourn/imago-mkxp-z`, one release per upstream commit. The first,
+`mkxp-z-37a04d1`, holds upstream's CI artifacts from run 37110075912
+(commit `37a04d14413454551a7b6aadbb4e93e67168accb`, 2026-10-03):
+`mkxp-z.linux.ubuntu.xenial.x86_64`, `mkxp-z.linux.ubuntu.xenial.arm64`
+and `mkxp-z.windows.cross.x86_64`, and beside them the complete source,
+`mkxp-z.source-with-dependencies.dev-37a04d1.tar.zst`.
+
+Why this meets GPL-3.0 §6. The builds are GPL-3.0-or-later, and handing
+them out is conveying object code, so §6 applies. We take §6(d):
+"offering access from a designated place … and offer equivalent access to
+the Corresponding Source in the same way through the same place at no
+further charge":
+- **Same place, same way, no charge.** The binaries and the source are
+  assets of the same public GitHub release, downloaded the same way, free,
+  and the repository's README points to both. The app downloads only the
+  binary, as §6(d) allows ("you need not require recipients to copy the
+  Corresponding Source along with the object code").
+- **It is the Corresponding Source** (§1). The source tarball is the one
+  upstream's own CI made from the same commit as the binaries. It holds
+  mkxp-z's source, its Meson build files, the CI workflow that built these
+  binaries (`.github/workflows/autobuild.yml`), the cross files, and
+  the source archives and patches of all 56 libraries the build vendors
+  (SDL 2.28.1, OpenAL Soft 1.24.3, Ruby 3.1.3, ANGLE, OpenSSL 3.0.8,
+  Mesa's headers and the rest). The builds use only those vendored copies:
+  upstream's `default_system` option is `disabled`. What §1 leaves out
+  is not in it: System Libraries (glibc and `libgcc_s` on Linux, Windows'
+  own DLLs) and general-purpose tools (Clang; Ubuntu's MinGW-w64 GCC 13).
+  The GCC runtime linked into the binaries (libstdc++, libgcc) comes under
+  GCC's Runtime Library Exception 3.1. The Windows build's MinGW-w64 runtime
+  (public domain and ZPL) and winpthreads (MIT) are permissively licensed.
+  Their notices are in the repository.
+- **Unmodified.** Each file's SHA-256 is the digest GitHub recorded when
+  upstream's CI uploaded it (`gh api
+  repos/mkxp-z/mkxp-z/actions/artifacts/<id>` gives `digest`), so there
+  are no modifications to mark (§5a) or to give source for. The
+  `LICENSE.txt` in each build is upstream's own.
+- **Notices** (§4). The repository has the GPL-3.0 text, upstream's
+  `COPYING` and `LICENSE.mkxp-z-with-https.txt`, and the GCC and MinGW-w64
+  runtime licences.
+- **For as long as needed.** A release's source stays beside its binaries
+  for as long as the binaries are offered. A later pin is a new release
+  with its own source, and releases are never trimmed to the binaries.
+  Upstream's artifacts expire on 2027-01-01; these copies do not.
+- **Installation Information** (§6, last paragraphs) concerns User
+  Products, devices that run the software. A program downloaded to a PC
+  is not one.
+
+How the app gets it (`emu-mkxp`'s `install.rs`). A game plays in the
+mkxp-z its folder has for the system, then in one the player put in the
+players' folder (`<data>/ds-emulator/RPG Maker/mkxp-z/`), and only then
+in the hosted build. That one is downloaded the first time it is needed,
+with the app's usual notice ("Downloading mkxp-z, the RPG Maker player,
+about 20 MB, the first time only…"). The pins are a URL, size and
+SHA-256 per system and processor: Linux x86-64, Linux arm64 and Windows
+x64 (which Windows on ARM also runs). curl from `PATH` downloads the zip,
+with no console window on Windows, into a temporary folder. The download
+is checked against its pin; the program and its `LICENSE.txt` are taken
+out, and the folder is renamed into place as `mkxp-z/mkxp-z-37a04d1/`, so a
+later pin installs beside it. A lock keeps two installs from racing. With
+no build for the system, or a failed download, the game says where a
+build can be put instead.
+
+Imago itself stays closed source. It runs mkxp-z as a separate program
+that it starts and talks to over a socket and a pipe, as two programs
+communicate, and it neither links nor modifies mkxp-z. The bridge script
+is a game script that mkxp-z interprets, as it interprets any game's.
+Nothing from this repository is in `lilfourn/imago-mkxp-z`.
+
