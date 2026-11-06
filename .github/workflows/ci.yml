@@ -90,15 +90,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        if: success() || failure()
-        run: cargo test --workspace --no-fail-fast
       # An RPG Maker game end to end in mkxp-z, the hosted Windows build,
       # downloaded into the test's own folders as a player's first game
       # downloads it (crates/emu-mkxp/tests/mkxp_z.rs). Windows' software
       # renderer, WARP, stands in for a GPU under ANGLE's Direct3D 11.
+      # Before the whole workspace's tests, which come near the job's time
+      # limit.
       - name: RPG Maker player
         if: success() || failure()
         env:
           DS_EMULATOR_MKXP_Z: hosted
         run: cargo test -p emu-mkxp --test mkxp_z -- --nocapture
+      - name: Test
+        if: success() || failure()
+        run: cargo test --workspace --no-fail-fast
