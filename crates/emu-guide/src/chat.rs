@@ -7,7 +7,7 @@
 //! the HTTP status that `--write-out` adds after the body.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -407,7 +407,7 @@ fn attempt_once(
     stop: &Stop,
     on_event: &mut dyn FnMut(Event),
 ) -> Outcome {
-    let spawned = Command::new("curl")
+    let spawned = emu_os::process::command("curl")
         .args(["--silent", "--show-error", "--no-buffer"])
         .args(["--connect-timeout", "10"])
         // Fails a stream that sends nothing, keep-alives included, for a
@@ -433,7 +433,10 @@ fn attempt_once(
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
-        Err(error) => return Outcome::Failed(ChatError::Unreachable(error.to_string())),
+        Err(error) => {
+            let why = emu_os::process::why_not_started("curl", &error);
+            return Outcome::Failed(ChatError::Unreachable(why));
+        }
     };
     let input = child.stdin.take();
     let output = child.stdout.take();

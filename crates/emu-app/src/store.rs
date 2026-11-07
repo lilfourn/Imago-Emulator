@@ -32,6 +32,7 @@ use serde_json::Value;
 use crate::archive;
 use crate::boxart;
 use crate::leftovers::WorkFolder;
+use crate::persist;
 use crate::rom_info::Platform;
 
 /// Homebrew Hub's API and files.
@@ -653,7 +654,8 @@ fn file_name(path: &str) -> Option<String> {
 }
 
 /// `name` with what a file name cannot safely hold replaced, and never
-/// `.` or `..`.
+/// `.` or `..`; on Windows, never a device's name such as `CON` either
+/// (see [`persist::safe_file_name`]). Empty if nothing is left.
 fn safe_name(name: &str) -> String {
     let name: String = name
         .chars()
@@ -666,7 +668,10 @@ fn safe_name(name: &str) -> String {
         })
         .collect();
     let name = name.trim().trim_start_matches('.');
-    name.to_owned()
+    if name.is_empty() {
+        return String::new();
+    }
+    persist::safe_file_name(name).into_owned()
 }
 
 /// A JSON string, trimmed, if it is one and not empty.
@@ -1264,6 +1269,19 @@ mod tests {
         assert_eq!(file_name("../../evil.gb").as_deref(), Some("evil.gb"));
         assert_eq!(file_name("..").as_deref(), None);
         assert_eq!(safe_name("a/b:c"), "a_b_c");
+        // Windows can't hold a device's name, or a dot at the end.
+        let windows = |on_windows: &'static str, elsewhere: &'static str| {
+            if cfg!(windows) { on_windows } else { elsewhere }
+        };
+        assert_eq!(safe_name("con"), windows("con_", "con"));
+        assert_eq!(
+            safe_name("Game v1.").as_str(),
+            windows("Game v1", "Game v1.")
+        );
+        assert_eq!(
+            file_name("files/NUL.gb").as_deref(),
+            Some(windows("NUL_.gb", "NUL.gb"))
+        );
         let offers = read_offers(Source::HomebrewHub, HUB, &HashMap::new()).expect("parses");
         let mut offer = offers[0].clone();
         offer.slug = "../../up".to_owned();

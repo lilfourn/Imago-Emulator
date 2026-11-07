@@ -43,7 +43,11 @@ Facts that shaped the choice:
    pinned SHA-256, and unpacked with ditto into
    `~/Library/Application Support/ds-emulator/Randomizer/upr-fvx-1.6.2`.
    The zip keeps no permissions, so its Java is made executable. Nothing
-   needs installing first, and no GPL code is built into the app.
+   needs installing first, and no GPL code is built into the app. Since
+   2026-11-06, Linux (x86-64 and arm64) and Windows (x86-64) get FVX
+   1.6.2's own builds for them, each pinned the same way, laid out as the
+   Mac's and unpacked in the app with the `zip` crate. On Windows it runs
+   `java\bin\javaw.exe`, with no console window.
 2. **It runs as a separate program**, on its command line, headless:
    `java -Xmx4608M -Djava.awt.headless=true -jar UPR-FVX.jar cli -i <game>
    -o <out> -S <settings> -z <seed> -l`, in its own folder, where it reads

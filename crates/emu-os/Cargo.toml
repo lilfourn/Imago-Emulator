@@ -1,6 +1,6 @@
 [package]
 name = "emu-os"
-description = "The folders the app keeps its data, settings and caches in, on each system."
+description = "The folders the app keeps its data, settings and caches in, on each system, and how it runs other programs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

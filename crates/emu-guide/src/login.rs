@@ -1,5 +1,5 @@
 //! Connect OpenRouter, as Imago does: OpenRouter's OAuth PKCE flow mints a
-//! key for this Mac. The app listens on a loopback port, the browser opens
+//! key for this computer. The app listens on a loopback port, the browser opens
 //! OpenRouter's authorization page, and the code the browser brings back
 //! is exchanged for the key, which is saved.
 //!
@@ -11,7 +11,6 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -70,7 +69,7 @@ pub enum LoginError {
 }
 
 /// The name a key minted on `device` carries in the player's OpenRouter key
-/// list, so keys from different Macs stay apart.
+/// list, so keys from different computers stay apart.
 pub fn label(device: &str) -> String {
     match device.trim() {
         "" => "Imago Emulator".to_owned(),
@@ -78,15 +77,52 @@ pub fn label(device: &str) -> String {
     }
 }
 
-/// This Mac's name, as in Sharing settings, or nothing if it can't be
-/// read.
+/// This computer's name, or nothing if it can't be read: on macOS the
+/// name in Sharing settings, on Windows its computer name, and on Linux the
+/// "pretty" name the desktop's settings give it, or else its host name.
 pub fn device_name() -> String {
-    Command::new("scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    if cfg!(target_os = "macos") {
+        emu_os::process::command("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_default()
+    } else if cfg!(windows) {
+        std::env::var("COMPUTERNAME").unwrap_or_default()
+    } else {
+        let read = |path: &str| std::fs::read_to_string(path).ok();
+        linux_device_name(
+            read("/etc/machine-info").as_deref(),
+            read("/proc/sys/kernel/hostname").as_deref(),
+        )
+    }
+}
+
+/// A Linux computer's name: the `PRETTY_HOSTNAME` in `machine_info`, the
+/// text of `/etc/machine-info` (which `hostnamectl` and the desktop's
+/// settings write), or else `hostname`, its host name.
+fn linux_device_name(machine_info: Option<&str>, hostname: Option<&str>) -> String {
+    let pretty = machine_info.and_then(|info| {
+        info.lines().find_map(|line| {
+            let value = line.trim().strip_prefix("PRETTY_HOSTNAME=")?;
+            let value = value.trim();
+            let unquoted = ['"', '\'']
+                .iter()
+                .find_map(|quote| value.strip_prefix(*quote)?.strip_suffix(*quote));
+            Some(
+                unquoted
+                    .unwrap_or(value)
+                    .replace("\\", "")
+                    .trim()
+                    .to_owned(),
+            )
+        })
+    });
+    pretty
+        .filter(|name| !name.is_empty())
+        .or_else(|| hostname.map(|name| name.trim().to_owned()))
         .unwrap_or_default()
 }
 
@@ -335,6 +371,30 @@ mod tests {
     fn a_key_is_labelled_with_its_mac() {
         assert_eq!(label(" Luke's Mac \n"), "Imago Emulator · Luke's Mac");
         assert_eq!(label(""), "Imago Emulator");
+    }
+
+    #[test]
+    fn a_linux_computer_is_named_as_its_settings_name_it() {
+        let info = "ICON_NAME=computer-laptop\nPRETTY_HOSTNAME=\"Luke's Laptop\"\nCHASSIS=laptop\n";
+        assert_eq!(
+            linux_device_name(Some(info), Some("thinkpad\n")),
+            "Luke's Laptop"
+        );
+        assert_eq!(
+            linux_device_name(Some("PRETTY_HOSTNAME=Desk\n"), Some("desk")),
+            "Desk"
+        );
+        // Without a pretty name, the host name.
+        assert_eq!(
+            linux_device_name(Some("CHASSIS=desktop\n"), Some("thinkpad\n")),
+            "thinkpad"
+        );
+        assert_eq!(
+            linux_device_name(Some("PRETTY_HOSTNAME=\n"), Some("thinkpad")),
+            "thinkpad"
+        );
+        assert_eq!(linux_device_name(None, Some("thinkpad")), "thinkpad");
+        assert_eq!(linux_device_name(None, None), "");
     }
 
     #[test]

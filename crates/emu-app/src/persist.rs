@@ -25,6 +25,7 @@
 //! The names are decided once, as a game starts (see [`GameFiles`]), and
 //! kept for as long as it runs.
 
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -210,7 +211,7 @@ pub fn set_aside(path: &Path) -> io::Result<Option<PathBuf>> {
         if backup.try_exists()? {
             continue;
         }
-        return match fs::rename(path, &backup) {
+        return match rename(path, &backup) {
             Ok(()) => Ok(Some(backup)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
@@ -256,13 +257,153 @@ pub fn file_name(path: &Path) -> String {
         .into_owned()
 }
 
+/// `name`, a file's name, made one this system can hold.
+///
+/// On Windows, each of `<>:"/\|?*` and the control characters becomes
+/// `_`; dots and spaces at the end go, as Windows drops them, which would
+/// make `Game.` and `Game` one file; and a device's name, such as `CON`,
+/// `nul.txt` or `COM1.gb`, gets `_` after its first part (`CON_`,
+/// `nul_.txt`), as Windows would open the device instead. A name that
+/// leaves nothing becomes `_`.
+///
+/// Elsewhere `name` is kept as it is: macOS and Linux take any name
+/// without a `/`, and the names given here are already a path's last part.
+pub fn safe_file_name(name: &str) -> Cow<'_, str> {
+    if cfg!(windows) {
+        Cow::Owned(windows_file_name(name))
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+/// `name` made a file name Windows can hold, as [`safe_file_name`] says.
+/// Built on every system, so its tests run everywhere.
+fn windows_file_name(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|c| {
+            if u32::from(c) < 0x20 || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut safe = replaced.trim_end_matches(['.', ' ']).to_owned();
+    if safe.is_empty() {
+        return "_".to_owned();
+    }
+    // `NUL.tar.gz` is the device too, and so is `NUL .txt`.
+    let first = safe
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ');
+    if is_windows_device(first) {
+        safe.insert(first.len(), '_');
+    }
+    safe
+}
+
+/// Whether `stem` names one of Windows's devices, in any case: `CON`,
+/// `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, or `COM` or `LPT` with a
+/// digit or a superscript one, two or three.
+fn is_windows_device(stem: &str) -> bool {
+    let stem = stem.to_ascii_uppercase();
+    let port = ["COM", "LPT"]
+        .iter()
+        .find_map(|port| stem.strip_prefix(port));
+    ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&stem.as_str())
+        || port.is_some_and(|number| {
+            matches!(number, "\u{b9}" | "\u{b2}" | "\u{b3}")
+                || (number.len() == 1 && number.bytes().all(|digit| digit.is_ascii_digit()))
+        })
+}
+
+/// Renames the file or folder at `from` to `to`, replacing a file there,
+/// as [`fs::rename`] does.
+///
+/// On Windows that can fail for a moment while another program, such as a
+/// virus scanner or the search indexer, has either file open, so it is
+/// tried again for about a second. A read-only file at `to` is made
+/// writable first, as macOS and Linux replace one anyway.
+pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::rename(from, to)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+    use std::thread;
+    use std::time::Duration;
+
+    /// How many times a rename is tried.
+    const TRIES: u32 = 10;
+    /// How long to wait after a rename fails, at first and at most: in all,
+    /// about a second.
+    const FIRST_WAIT: Duration = Duration::from_millis(10);
+    const LONGEST_WAIT: Duration = Duration::from_millis(200);
+
+    /// Windows's `ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION` and
+    /// `ERROR_LOCK_VIOLATION`: another program has the file open.
+    const IN_USE: [i32; 3] = [5, 32, 33];
+
+    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        let mut wait = FIRST_WAIT;
+        for _ in 1..TRIES {
+            match fs::rename(from, to) {
+                Err(error)
+                    if error
+                        .raw_os_error()
+                        .is_some_and(|code| IN_USE.contains(&code)) =>
+                {
+                    if error.kind() == io::ErrorKind::PermissionDenied {
+                        make_writable(to);
+                    }
+                    thread::sleep(wait);
+                    wait = (wait * 2).min(LONGEST_WAIT);
+                }
+                done => return done,
+            }
+        }
+        fs::rename(from, to)
+    }
+
+    /// Clears the read-only flag of the file at `path`, if it has one.
+    #[allow(
+        clippy::permissions_set_readonly_false,
+        reason = "Windows: this clears the file's read-only flag, nothing more"
+    )]
+    fn make_writable(path: &Path) {
+        if let Ok(metadata) = fs::metadata(path)
+            && metadata.is_file()
+            && metadata.permissions().readonly()
+        {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions).ok();
+        }
+    }
+}
+
 /// Replaces `path` with `bytes` so that a crash or power cut mid-write
 /// never leaves a half-written file: the bytes go to a sibling temporary
-/// file first, reach the disk, and only then is it renamed over `path`.
+/// file first, reach the disk, and only then is it renamed over `path`
+/// (with [`rename`], which on Windows waits out a virus scanner).
 ///
 /// On macOS the folder is not synced after the rename: syncing there
 /// flushes the whole drive's cache, which is slow, and without it a power
-/// cut can at worst undo the rename, leaving the old file whole.
+/// cut can at worst undo the rename, leaving the old file whole. Windows
+/// can't open a folder to sync it, and NTFS journals the rename itself.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
@@ -271,8 +412,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&temporary, path)?;
-    #[cfg(not(target_os = "macos"))]
+    rename(&temporary, path)?;
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let folder = match path.parent() {
             Some(folder) if !folder.as_os_str().is_empty() => folder,
@@ -445,6 +586,64 @@ mod tests {
             saves_record_path(&dir.join("a.ss0")),
             dir.join("a.ss0.saves")
         );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn names_windows_cannot_hold_are_made_ones_it_can() {
+        let cases = [
+            (
+                "Pokemon - Platinum (Random 123456).nds",
+                "Pokemon - Platinum (Random 123456).nds",
+            ),
+            ("Pokemon: Platinum?.nds", "Pokemon_ Platinum_.nds"),
+            ("a<b>c\"d|e*f\\g/h.gba", "a_b_c_d_e_f_g_h.gba"),
+            ("tab\there\u{1}.gb", "tab_here_.gb"),
+            ("Game. . ", "Game"),
+            ("...", "_"),
+            ("", "_"),
+            ("CON", "CON_"),
+            ("con.gb", "con_.gb"),
+            ("Nul.tar.gz", "Nul_.tar.gz"),
+            ("NUL .txt", "NUL_ .txt"),
+            ("COM1.gba", "COM1_.gba"),
+            ("lpt9", "lpt9_"),
+            ("COM\u{b9}.nds", "COM\u{b9}_.nds"),
+            ("CONOUT$.sav", "CONOUT$_.sav"),
+            // Only those exact names are devices.
+            ("CONSOLE.nds", "CONSOLE.nds"),
+            ("COM10.gb", "COM10.gb"),
+            ("Aux Battle.gba", "Aux Battle.gba"),
+            ("Pokémon Émeraude.gba", "Pokémon Émeraude.gba"),
+        ];
+        for (name, safe) in cases {
+            assert_eq!(windows_file_name(name), safe, "{name:?}");
+            // What is safe stays so.
+            assert_eq!(windows_file_name(safe), safe, "{safe:?}");
+        }
+        // Only Windows changes names.
+        let kept = safe_file_name("CON.gb: a game?");
+        if cfg!(windows) {
+            assert_eq!(kept, "CON_.gb_ a game_");
+        } else {
+            assert_eq!(kept, "CON.gb: a game?");
+        }
+    }
+
+    #[test]
+    fn a_rename_replaces_the_file_there() {
+        let dir = temp_dir("rename");
+        let (from, to) = (dir.join("game.sav.tmp"), dir.join("game.sav"));
+        fs::write(&from, b"new").expect("write");
+        fs::write(&to, b"old").expect("write");
+        // Read-only, as macOS and Linux replace it anyway.
+        let mut permissions = fs::metadata(&to).expect("metadata").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&to, permissions).expect("read-only");
+        rename(&from, &to).expect("renamed");
+        assert_eq!(fs::read(&to).expect("read"), b"new");
+        assert!(!from.exists());
+        assert!(rename(&from, &to).is_err(), "nothing left to rename");
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
