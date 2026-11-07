@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream's description of the app, for software centres. package.sh
+     fills in @VERSION@ and @DATE@. The ID is the Mac's bundle identifier;
+     the desktop file keeps the name of GPUI's app ID, ds-emulator, so the
+     desktop matches the window to it. -->
+<component type="desktop-application">
+  <id>com.lilfourn.ds-emulator</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary=https://imagoemulator.com</project_license>
+  <name>Imago Emulator</name>
+  <summary>Play Game Boy, Game Boy Advance, Nintendo DS and 3DS games</summary>
+  <developer id="com.imagoemulator">
+    <name>Luke Fournier</name>
+  </developer>
+  <description>
+    <p>
+      Imago Emulator plays Game Boy, Game Boy Color, Game Boy Advance and
+      Nintendo DS games from your own cartridge dumps, and free homebrew
+      from its built-in store. Nintendo 3DS games play too, on Azahar's
+      core, which the app downloads the first time one is opened (on
+      x86-64 PCs).
+    </p>
+    <ul>
+      <li>A library of your games, with their box art</li>
+      <li>Save states, rewind, fast-forward and cheats</li>
+      <li>Two linked consoles, and the DS's GBA slot</li>
+      <li>Keyboard and gamepad controls</li>
+    </ul>
+    <p>
+      The app is free. Imago Emulator is not affiliated with, endorsed by
+      or sponsored by Nintendo.
+    </p>
+  </description>
+  <launchable type="desktop-id">ds-emulator.desktop</launchable>
+  <icon type="stock">ds-emulator</icon>
+  <url type="homepage">https://imagoemulator.com</url>
+  <provides>
+    <binary>ds-emulator</binary>
+    <mediatype>application/x-gameboy-rom</mediatype>
+    <mediatype>application/x-gameboy-color-rom</mediatype>
+    <mediatype>application/x-gba-rom</mediatype>
+    <mediatype>application/x-nintendo-ds-rom</mediatype>
+    <mediatype>application/x-nintendo-3ds-rom</mediatype>
+    <mediatype>application/x-nintendo-3ds-executable</mediatype>
+  </provides>
+  <categories>
+    <category>Game</category>
+    <category>Emulator</category>
+  </categories>
+  <supports>
+    <control>keyboard</control>
+    <control>gamepad</control>
+    <control>pointing</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

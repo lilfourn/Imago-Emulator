@@ -8,6 +8,14 @@
 //!
 //! A 3DS game plays in a helper process: this executable, started again
 //! with `--3ds-helper` (see `emu_3ds::run_helper_if_asked`).
+//!
+//! A release build for Windows is a GUI program, so no console window
+//! opens with it; `console` says where its output goes instead.
+
+// The helper still talks over its standard input and output: Windows
+// gives a GUI program the handles it is started with, and the app starts
+// it with pipes.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod about_window;
 mod ambient;
@@ -25,6 +33,9 @@ mod cheats;
 mod chords;
 mod chrome;
 mod color;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod console;
 mod controls;
 mod cursor;
 mod debugger;
@@ -91,7 +102,14 @@ fn main() {
     if let Some(code) = emu_3ds::run_helper_if_asked() {
         std::process::exit(code);
     }
-    match parse_args(std::env::args_os().skip(1)) {
+    let args = parse_args(std::env::args_os().skip(1));
+    // What a script prints, and the usage below, go to the console of the
+    // prompt that started a Windows release build.
+    #[cfg(windows)]
+    if args.as_ref().map_or(true, |(_, script)| script.is_some()) {
+        console::attach_to_parent();
+    }
+    match args {
         Ok((roms, script)) => app::run(roms, script),
         Err(error) => {
             eprintln!("ds-emulator: {error}");

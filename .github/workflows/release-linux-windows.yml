@@ -1,0 +1,299 @@
+name: Linux and Windows release
+
+# Builds Imago Emulator's Linux and Windows packages (packaging/README.md):
+# a .deb and an AppImage for x86-64 and arm64 Linux, and an installer and
+# a portable zip for Windows x86-64. Each package is installed and started
+# on a clean system before it is kept. On request (Actions > Run workflow,
+# or `gh workflow run release-linux-windows.yml --ref BRANCH`) the
+# packages are the run's artifacts. For a version tag (v0.1.0) they also
+# go on a draft GitHub release of that name, for the Mac's disk image from
+# scripts/macos/release.sh to join by hand before it is published.
+#
+# Windows minutes are paid, so this never runs on pull requests or pushes
+# to a branch.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The open-source notices for each system's crates, and the test ROM the
+  # smoke tests play, made once for every job below.
+  notices:
+    name: Notices
+    runs-on: namespace-profile-default
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Imago Emulator $version" >> "$GITHUB_STEP_SUMMARY"
+          # A tag must name the version it releases.
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::the tag $GITHUB_REF_NAME doesn't match the version in Cargo.toml, $version"
+            exit 1
+          fi
+      - name: No Nintendo files
+        run: scripts/check-no-nintendo-files.sh
+      - name: cargo-about
+        run: |
+          # 0.9.3, as scripts/macos/release.sh uses; GitHub's asset digest.
+          curl -fsSL -o /tmp/cargo-about.tar.gz \
+            https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.3/cargo-about-0.9.3-x86_64-unknown-linux-musl.tar.gz
+          echo "3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4  /tmp/cargo-about.tar.gz" | sha256sum -c
+          tar -xzf /tmp/cargo-about.tar.gz -C /tmp
+          echo "/tmp/cargo-about-0.9.3-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Notices
+        run: |
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            packaging/notices.sh "$target" "notices/$target"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notices
+          path: notices
+          retention-days: 7
+      - name: Test ROM
+        run: |
+          scripts/fetch-test-roms.sh
+          mkdir rom && cp test-roms/armwrestler-ds/armwrestler.nds rom/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-rom
+          path: rom
+          retention-days: 7
+
+  # Built on Ubuntu 22.04, the oldest system the packages are for: the
+  # binary needs the glibc it was built against, or a later one (2.35,
+  # which Debian 12, Fedora 36 and later have), and the .deb asks for the
+  # library versions found here.
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: notices
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: namespace-profile-default
+            target: x86_64-unknown-linux-gnu
+            rustup: 20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+          - arch: aarch64
+            runner: namespace-profile-default-arm64
+            target: aarch64-unknown-linux-gnu
+            rustup: e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    timeout-minutes: 90
+    steps:
+      - name: Packages
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            ca-certificates curl git
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Build and packaging tools
+        run: |
+          scripts/linux/install-build-deps.sh
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            dpkg-dev binutils patchelf desktop-file-utils appstream file
+      - name: Rust toolchain
+        run: |
+          # rustup 1.28.2, by its published SHA-256; the toolchain is
+          # rust-toolchain.toml's.
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/archive/1.28.2/${{ matrix.target }}/rustup-init
+          echo "${{ matrix.rustup }}  /tmp/rustup-init" | sha256sum -c
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" show active-toolchain || "$HOME/.cargo/bin/rustup" toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-${{ matrix.arch }}
+          cache-on-failure: true
+      - name: Build
+        run: cargo build --release --locked -p emu-app
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: notices
+          path: notices
+      - name: Package
+        run: |
+          # The checkout belongs to another user than the container's root.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/linux/package.sh --notices "notices/${{ matrix.target }}" \
+            target/release/ds-emulator target/dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-${{ matrix.arch }}
+          path: target/dist
+          if-no-files-found: error
+          retention-days: 30
+
+  # Each package on clean systems: the .deb on both Ubuntu LTS releases it
+  # is for, the AppImage on Fedora and on Ubuntu 22.04.
+  linux-smoke:
+    name: ${{ matrix.system.format }} ${{ matrix.arch }} on ${{ matrix.system.image }}
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        system:
+          - { format: deb, image: 'ubuntu:22.04', slug: deb-ubuntu-22.04 }
+          - { format: deb, image: 'ubuntu:24.04', slug: deb-ubuntu-24.04 }
+          - { format: AppImage, image: 'ubuntu:22.04', slug: appimage-ubuntu-22.04 }
+          - { format: AppImage, image: 'fedora:44', slug: appimage-fedora-44 }
+    runs-on: ${{ matrix.arch == 'x86_64' && 'namespace-profile-default' || 'namespace-profile-default-arm64' }}
+    container: ${{ matrix.system.image }}
+    timeout-minutes: 20
+    steps:
+      # Without git in the image, checkout downloads the files instead.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-rom
+          path: rom
+      - name: Install and start
+        run: |
+          sh packaging/linux/smoke.sh dist/Imago-Emulator-*-linux-${{ matrix.arch }}.${{ matrix.system.format }} \
+            rom/armwrestler.nds smoke
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: cat smoke/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-${{ matrix.system.slug }}-${{ matrix.arch }}
+          path: smoke
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Built, packaged and smoke-tested on Windows, the only system with the
+  # Windows SDK's fxc.exe (GPUI's shaders) and rc.exe (the exe's icon).
+  windows:
+    name: Windows x86-64
+    needs: notices
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-windows
+          cache-on-failure: true
+      # GPUI looks for fxc.exe in GPUI_FXC_PATH, then on PATH, then in one
+      # SDK version's folder; the runner's SDK may be another version.
+      - name: Find fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object { try { [version]$_.Directory.Parent.Name } catch { [version]"0.0" } } | Select-Object -Last 1
+          if (-not $fxc) { throw 'no fxc.exe in the Windows SDK' }
+          Write-Host "fxc.exe: $($fxc.FullName)"
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Add-Content $env:GITHUB_ENV
+      - name: Build
+        run: cargo build --release --locked -p emu-app
+      - name: NSIS
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            choco install nsis --version=3.11 -y --no-progress
+          }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: notices
+          path: notices
+      - name: Package
+        shell: pwsh
+        run: |
+          packaging/windows/package.ps1 -Exe target/release/ds-emulator.exe `
+            -Notices notices/x86_64-pc-windows-msvc -Out target/dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-x86_64
+          path: target/dist
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-rom
+          path: rom
+      - name: Install, start and uninstall
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem target/dist/Imago-Emulator-*-windows-x86_64.exe | Select-Object -First 1
+          $zip = Get-ChildItem target/dist/Imago-Emulator-*-windows-x86_64-portable.zip | Select-Object -First 1
+          packaging/windows/smoke.ps1 -Setup $setup -Zip $zip -Rom rom/armwrestler.nds -Out smoke
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-windows-x86_64
+          path: smoke
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # A version tag's draft release, with every package and their SHA-256
+  # values. If the draft already exists (made for the Mac's disk image), the
+  # packages are added to it.
+  release:
+    name: Draft release
+    if: github.ref_type == 'tag'
+    needs: [notices, linux, linux-smoke, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: '{linux,windows}-*'
+          path: dist
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.notices.outputs.version }}
+        run: |
+          cd dist
+          sha256sum Imago-Emulator-* > "SHA256SUMS-linux-windows-$VERSION.txt"
+          cat "SHA256SUMS-linux-windows-$VERSION.txt"
+          # GitHub's lookup by tag skips drafts, so look in the list.
+          existing=$(gh release list --limit 100 --json tagName -q \
+            ".[] | select(.tagName == \"$GITHUB_REF_NAME\") | .tagName" | head -1)
+          if [ -n "$existing" ]; then
+            gh release upload "$GITHUB_REF_NAME" ./* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" ./* --draft --verify-tag \
+              --title "Imago Emulator $VERSION" \
+              --notes "Imago Emulator $VERSION for Linux (x86-64 and arm64) and Windows (x86-64). See packaging/README.md for what each file is and what to install."
+          fi

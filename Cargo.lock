@@ -1641,6 +1641,7 @@ dependencies = [
  "chrono",
  "cpal",
  "crc32fast",
+ "embed-resource",
  "emu-3ds",
  "emu-cheats",
  "emu-core",
