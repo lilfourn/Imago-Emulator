@@ -1672,7 +1672,9 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
+ "uuid",
  "wayland-client",
+ "windows 0.62.2",
  "x11rb",
  "zip",
 ]

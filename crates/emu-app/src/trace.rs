@@ -1,8 +1,8 @@
-//! The timing trace, for `scripts/macos/bench.sh`. With `DS_EMULATOR_TRACE`
-//! naming a file, the app writes a line there for each step a key press
-//! and a frame take on their way to the window: `<microseconds> <event>
-//! <values…>`, the microseconds counted from the app's start. Without the
-//! variable, nothing is written.
+//! The timing trace, for `scripts/macos/bench.sh`, and the same on every
+//! OS. With `DS_EMULATOR_TRACE` naming a file, the app writes a line there
+//! for each step a key press and a frame take on their way to the window:
+//! `<microseconds> <event> <values…>`, the microseconds counted from the
+//! app's start. Without the variable, nothing is written.
 //!
 //! The events, by thread:
 //! - main: `send <buttons>` as a key's buttons go to the emulation thread;
@@ -15,7 +15,8 @@
 //!   <µs>` for how long after its deadline the thread woke; `margin <µs>`
 //!   for how long before the window takes a frame a frame of the usual
 //!   length is meant to be ready (`refresh.rs`); `fill <‰>` for how full
-//!   the sound buffer was as a frame's sound went in.
+//!   the sound buffer was as a frame's sound went in; `refresh <µs>` as
+//!   it learns how often the window's display refreshes, 0 if unknown.
 
 use std::fs::File;
 use std::io::Write as _;

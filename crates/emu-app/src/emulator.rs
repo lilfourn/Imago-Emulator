@@ -641,6 +641,7 @@ impl Emulator {
             .spawn(move || {
                 // Each frame must be ready before the refresh that shows it.
                 qos::interactive();
+                let _timers = qos::Timers::fine();
                 let mut runner = runner;
                 let ran = panic::catch_unwind(AssertUnwindSafe(|| runner.run(&receiver)));
                 if let Err(panic) = ran {
@@ -1056,7 +1057,10 @@ impl Runner {
                 }
             }
             Command::SetSpeed(speed) => self.speed = speed,
-            Command::SetRefresh(refresh) => self.lock.set_refresh(refresh),
+            Command::SetRefresh(refresh) => {
+                trace::event("refresh", &[refresh.map_or(0, trace::micros)]);
+                self.lock.set_refresh(refresh);
+            }
             Command::SetRewind(on) => {
                 let can = self.loaded.core.saves_every_frame();
                 if on && !can {
@@ -2618,9 +2622,20 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         assert_eq!(latest_count(&emulator), saved);
 
-        let notices: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
-        assert!(notices.contains(&Event::Notice("Saved state 2".to_owned())));
-        assert!(notices.contains(&Event::Notice("Loaded state 2".to_owned())));
+        // Both notices, however long they take: the state is written on
+        // another thread, and Windows took longer than the sleeps above.
+        let mut waiting = vec!["Saved state 2", "Loaded state 2"];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !waiting.is_empty() {
+            match events.try_recv() {
+                Ok(Event::Notice(text)) => waiting.retain(|notice| *notice != text),
+                Ok(_) => {}
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "no notices {waiting:?}");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
         drop(emulator);
         fs::remove_dir_all(&dir).expect("clean up");
     }

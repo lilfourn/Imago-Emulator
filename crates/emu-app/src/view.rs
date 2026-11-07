@@ -10,12 +10,11 @@ use std::time::{Duration, Instant};
 use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
-    Animation, AnimationExt, App, BoxShadow, Context, DisplayId, Div, Entity, ExternalPaths,
-    FocusHandle, Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent, KeyUpEvent,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, RenderImage, SharedString, StyleRefinement, Subscription, Task, Window,
-    WindowBounds, WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
-    rgba,
+    Animation, AnimationExt, App, BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle,
+    Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions,
+    RenderImage, SharedString, StyleRefinement, Subscription, Task, Window, WindowBounds,
+    WindowHandle, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
 };
 
 use crate::ambient::{self, Backdrop};
@@ -295,7 +294,7 @@ struct Session {
     ambient: Option<Glow>,
     /// The display whose refresh the emulation thread was last told of,
     /// once it has been told.
-    display: Option<Option<DisplayId>>,
+    display: Option<window_chrome::DisplayKey>,
     /// When the window last took a new frame.
     taken_at: Option<Instant>,
     /// Redraws the backdrop's fade once frames stop coming.
@@ -3423,10 +3422,10 @@ impl Render for EmulatorView {
             }
             // Frames keep in step with the refreshes of the display the
             // window is on.
-            let display = window.display(cx).map(|display| display.id());
+            let display = window_chrome::display_key(window, cx);
             if session.display != Some(display) {
                 session.display = Some(display);
-                let refresh = window_chrome::refresh_interval(window);
+                let refresh = window_chrome::refresh_interval(window, cx);
                 session.emulator.send(Command::SetRefresh(refresh));
             }
             let refreshing = Instant::now();
