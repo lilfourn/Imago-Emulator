@@ -225,10 +225,10 @@ which the project doesn't take (see the
 View > 3D Resolution draws DS and 3DS 3D larger than its own resolution:
 polygon edges, textures and shading come out smooth, and the 2D layers
 around them stay pixel for pixel. **Match Display**, the default, draws it
-about as large as the screens are shown on your display, up to 4×, and
-keeps the speed you asked for first: when the game falls behind, as 4× 3D
-does at 3× fast-forward, it draws 3D a step smaller each second until the
-game keeps up, and tries the full size again when you change speed or the
+about as large as the screens are shown on your display, up to 2× for
+DS games and 4× for 3DS games, and keeps the speed you asked for first:
+when the game falls behind, it draws 3D a step smaller each second until
+the game keeps up, and tries the full size again when you change speed or the
 window, display or layout changes. Or pick Native (1×), 2×, 3×, 4×, 6× or 8× (`resolution_3d` under
 `[video]` in settings.toml: `"auto"` or 1 to 8). The game still sees native 3D wherever it reads
 it back, so emulation and save states are the same at every resolution.

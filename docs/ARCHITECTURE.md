@@ -374,7 +374,8 @@ ScaleForce blurs.
 Match Display, the default 3D resolution (`picture::matched_resolution`),
 draws DS and 3DS 3D about as large as the screens are shown: for each
 screen, its device pixels over its console pixels, rounded up unless a
-quarter or less above a whole number, at most 4×. It keeps the speed
+quarter or less above a whole number, at most 2× for the DS and 4× for
+the 3DS (`picture::match_display_cap`). It keeps the speed
 asked for first (`picture::keep_speed`): every second the view compares
 the frames run with the speed asked for, and if the game fell behind by
 more than 5% while running, it draws 3D a step smaller, never stepping
@@ -383,9 +384,15 @@ Platinum's overworld the core took 3.75 ms a frame with 3D at 1×, 5.2 ms
 at 2× and 7.35 ms at 4× (headless), against 5.6 ms a frame at 3×
 fast-forward; with the check, 3× fast-forward ran at 172 frames a second
 instead of about 110, while normal speed keeps 4×. Since the speed-ups of
-November 2026 it takes about 2.5, 3.4 and 4.2–4.6 ms, so 3× fast-forward
-can keep 4× and the check steps down less often. The view sends the
-core a new render scale only when the scale changes.
+November 2026 it takes about 2.5, 3.4 and 4.2–4.6 ms. Those are wall
+times, with the larger 3D spread over worker threads: in CPU time a frame
+cost 6.5 ms at 1×, 22 ms at 2× and 70 ms at 4×, so at normal speed 4× kept
+four to five cores busy and made video in other apps stutter. The DS's
+cap is 2× for that reason; its textures are pixel art, so 4× barely
+changes the picture, and 3×–8× stay a menu choice. The 3DS draws on the
+GPU and keeps 4×. The workers are half the processors
+(`gpu3d::render::workers`), so a frame never takes every core at once.
+The view sends the core a new render scale only when the scale changes.
 
 DS 3D upscaling is the core's job, as that decision planned. At a render
 scale above 1, the DS draws each 3D frame twice: at the native
