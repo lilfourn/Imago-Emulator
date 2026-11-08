@@ -27,6 +27,10 @@
 	<string>@BUILD@</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.games</string>
+	<!-- No Game Mode: full screen would turn it on for a games app, and it
+	     slows every other app, so video beside a game stutters. -->
+	<key>LSSupportsGameMode</key>
+	<false/>
 	<key>LSMinimumSystemVersion</key>
 	<string>@MINIMUM_SYSTEM@</string>
 	<key>NSHighResolutionCapable</key>

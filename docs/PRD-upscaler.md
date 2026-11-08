@@ -203,7 +203,7 @@ committed.
 | 3DS | Auto: matches the display, cap raised past 4× by 6.5 | Smooth to finish | Optional texture filter, see 6.5. |
 | RPG Maker | none for now (see 6.6) | Smooth | Essentials art is drawn at twice its pixel size, which pixel-art scalers handle badly. |
 
-As built after the change in 6.2: Auto is Sharp Pixels for the GB, GBC, GBA, DS and RPG Maker, with the DS's 3D at Match Display, and Smooth for the 3DS, with its textures left as the game made them.
+As built after the change in 6.2: Auto is Sharp Pixels for the GB, GBC, GBA, DS and RPG Maker, with the DS's 3D at Match Display (up to 2×, see UQ-4), and Smooth for the 3DS, with its textures left as the game made them.
 
 ### 6.4 DS: 2D beside upscaled 3D
 
@@ -366,7 +366,7 @@ is wanted, **P2** comes later. Phases are in section 9.
 
 | ID | Requirement | Priority · Phase |
 |---|---|---|
-| UP-10 | Match Display for DS and 3DS 3D: the smallest whole factor at least the largest target's device pixels per console pixel, within the system's cap. Recomputed only when targets change, never during play. ✅ capped at 4× for both (UQ-4); rounds up unless a quarter or less above a whole number; old files' 1× becomes Match Display. | P0 · 2 |
+| UP-10 | Match Display for DS and 3DS 3D: the smallest whole factor at least the largest target's device pixels per console pixel, within the system's cap. Recomputed only when targets change, never during play. ✅ capped at 2× for the DS and 4× for the 3DS (UQ-4); rounds up unless a quarter or less above a whole number; old files' 1× becomes Match Display. | P0 · 2 |
 | UP-11 | DS menus and the settings window offer 1–8× (the core's range). ✅ Match Display, 1×, 2×, 3×, 4×, 6×, 8×. | P0 · 2 |
 | UP-12 | The DS's larger 3D is drawn only for frames the window will show. The 3D the game reads and the frame CRCs stay the same. | P1 · 2 |
 | UP-13 | DS 2D beside upscaled 3D gets Pixel Art: per screen when no 3D showed, and per pixel through a 3D mask (6.4). ✅ found from the frame on the GPU, not a core mask (6.4); both screens in one GPU submit, 1.6 ms a frame in Platinum at 4×. | P1 · 2 |
@@ -460,6 +460,6 @@ Acceptance tests:
 | UQ-1 | ~~Should Auto (upscaled) be the default for existing players, or should they opt in?~~ On by default, decided by the owner (2026-11-04): every player starts upscaled and turns it off from View > Picture. Settings files from before View > Picture start on Auto too, whatever filter they had. | Phase 1 |
 | UQ-2 | ~~Which Pixel Art algorithm wins the bake-off: OmniScale, ScaleFX or MMPX?~~ None by default: the owner wants pixel art kept as crisp pixels (6.2). OmniScale stays as the opt-in Rounded Pixels. | Phase 1 |
 | UQ-3 | ~~One View > Picture menu, or keep View > Filter and add View > Upscaling?~~ One View > Picture menu, built. | Phase 1 |
-| UQ-4 | ~~What cap should Match Display use for DS 3D, given 3× fast-forward?~~ 4×, and it keeps the speed asked for first (`picture::keep_speed`). In the app, 4× held fast-forward at about 2× (in Platinum's overworld, headless, the core took 3.75 ms a frame at 1×, 5.2 ms at 2× and 7.35 ms at 4×, against 5.6 ms a frame at 3×). So Match Display measures the speed every second and draws 3D a step smaller while the game falls behind, until the speed or the screens change: 3× fast-forward then ran at 172 frames a second, uneven refresh gaps fell from 11–18 to 2 a second and the app's CPU from 540% to 166%, while normal speed keeps 4×. | Phase 2 |
+| UQ-4 | ~~What cap should Match Display use for DS 3D, given 3× fast-forward?~~ 4×, and it keeps the speed asked for first (`picture::keep_speed`). In the app, 4× held fast-forward at about 2× (in Platinum's overworld, headless, the core took 3.75 ms a frame at 1×, 5.2 ms at 2× and 7.35 ms at 4×, against 5.6 ms a frame at 3×). So Match Display measures the speed every second and draws 3D a step smaller while the game falls behind, until the speed or the screens change: 3× fast-forward then ran at 172 frames a second, uneven refresh gaps fell from 11–18 to 2 a second and the app's CPU from 540% to 166%, while normal speed keeps 4×. On 2026-11-08 the DS's cap came down to 2× (`picture::match_display_cap`): at normal speed 4× kept four to five cores busy (70 ms of CPU time a frame headless, against 22 ms at 2×) and made video in other apps stutter, for a picture barely different, as the DS's textures are pixel art. Platinum at normal speed fell from 340–410% CPU to 135–160%; 3× fast-forward, already stepping down to 2×, stayed near 190%. The 3DS draws on the GPU and keeps 4×; 3×, 4×, 6× and 8× stay in the menu. | Phase 2 |
 | UQ-5 | For zero copy, patch GPUI 0.2.2, or move to a Zed revision that has BGRA surfaces once they merge? That would also bring the `CAMetalDisplayLink` pacing fix (PRD Q2). | Phase 3 |
 | UQ-6 | Should RPG Maker games whose art is drawn at twice its pixel size get Pixel Art at the art's own pixel size, without spoiling their text? | Phase 4 |

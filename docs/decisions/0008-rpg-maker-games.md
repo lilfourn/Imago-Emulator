@@ -157,6 +157,13 @@ a demotion is undone within 0.2 s. With its role back under Game Mode,
 the player ran at priority 54 and its sound came every 21 ms, as stdio
 fills its 4 KB buffer.
 
+Update, 2026-11-08: the app now opts out of Game Mode
+(`LSSupportsGameMode` false in its `Info.plist`), as Game Mode also slows
+every other app, and video playing beside a game stuttered. With the key,
+gamepolicyd no longer counts a full-screen games app as a game, and Game
+Mode stays off; without it, the same test app turned it on. The bridge
+still copies the app's role, which now keeps the player at the app's own.
+
 Even so, the sound reached the buffer only after each frame, and a
 frame that loads a map can take a third of a second while the music plays
 on: replayed, 0.1 s of silence and 0.4 s dropped a minute without Game

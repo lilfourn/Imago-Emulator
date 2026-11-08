@@ -13,9 +13,9 @@
 //!
 //! The DS and 3DS also draw their 3D larger (View > 3D Resolution). Match
 //! Display, the default, draws it as large as the screens are shown, up
-//! to [`MATCH_DISPLAY_CAP`], and the upscaler covers the rest. It keeps
-//! the speed asked for first: when the game falls behind, as 4× 3D does
-//! at 3× fast-forward, it draws 3D a step smaller ([`keep_speed`]).
+//! to [`match_display_cap`], and the upscaler covers the rest. It keeps
+//! the speed asked for first: when the game falls behind, it draws 3D a
+//! step smaller ([`keep_speed`]).
 
 use emu_core::{ScreenSize, System, TextureUpscaling};
 
@@ -94,20 +94,39 @@ pub const RESOLUTIONS_3D: [Resolution3d; 7] = [
     Resolution3d::Times(8),
 ];
 
-/// The most Match Display draws 3D at. The DS's 3D costs the most CPU of
-/// anything the app does: in Pokémon White's bedroom, headless on an M5
-/// Max, the DS ran at 3.2× full speed with 3D at 2× and 2.7× at 4×, so 4×
-/// keeps fast-forward near 3×. The 3DS's helper reads back at most 4×
-/// (`emu-3ds` `host.rs`). The upscaler enlarges past it.
-pub const MATCH_DISPLAY_CAP: u32 = 4;
+/// The most Match Display draws 3D at for a game of `system`; the
+/// upscaler enlarges past it.
+///
+/// The DS draws its 3D on the CPU, the costliest thing the app does, and
+/// the cost grows with the pixels: in Pokémon Platinum's overworld,
+/// headless on an M5 Max, a frame took 6.5 ms of CPU time at 1×, 22 ms at
+/// 2× and 70 ms at 4×. At 60 frames a second 4× kept four to five cores
+/// busy and slowed the video and windows of the apps beside it, for a
+/// picture barely different from 2×: the DS's textures are pixel art, so
+/// only polygon edges get finer. Larger stays a menu choice.
+///
+/// The 3DS draws on the GPU, where resolution costs little, and its
+/// helper reads back at most 4× (`emu-3ds` `host.rs`).
+///
+/// The other systems draw no 3D, so 1.
+pub fn match_display_cap(system: System) -> u32 {
+    match system {
+        System::Nds => 2,
+        System::N3ds => 4,
+        System::Gb | System::Gba | System::RpgMaker => 1,
+    }
+}
 
 /// The 3D resolution that draws each screen at least about as large as it
 /// is shown: for each `(target, native)` pair, a screen shown `target`
 /// device pixels across whose console draws it `native` pixels across
 /// (turned as shown), the whole factor its device pixels need, rounded up
 /// unless a quarter or less above a whole number, as the upscaler covers
-/// that much; the largest, from 1 to [`MATCH_DISPLAY_CAP`].
-pub fn matched_resolution(screens: impl IntoIterator<Item = ((u32, u32), ScreenSize)>) -> u32 {
+/// that much; the largest, from 1 to `cap` ([`match_display_cap`]).
+pub fn matched_resolution(
+    screens: impl IntoIterator<Item = ((u32, u32), ScreenSize)>,
+    cap: u32,
+) -> u32 {
     let factor = |device: u32, console: u16| {
         let console = u32::from(console.max(1));
         // ceil(device / console - 1/4), in whole numbers.
@@ -120,7 +139,7 @@ pub fn matched_resolution(screens: impl IntoIterator<Item = ((u32, u32), ScreenS
         })
         .max()
         .unwrap_or(1)
-        .clamp(1, MATCH_DISPLAY_CAP)
+        .clamp(1, cap.max(1))
 }
 
 /// How often Match Display checks that the game keeps its speed.
@@ -132,7 +151,7 @@ pub const SPEED_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 /// `normal` frames a second: a step smaller if the game fell behind, by
 /// more than 5%, and was running at all (not paused or loading), else as
 /// it was. It never steps up; the view starts it again at
-/// [`MATCH_DISPLAY_CAP`] when the speed asked for or the screens change.
+/// [`match_display_cap`] when the speed asked for or the screens change.
 ///
 /// The DS's 3D is the costliest thing the app does: in Pokémon Platinum's
 /// overworld, headless on an M5 Max, the core took 3.75 ms a frame with 3D
@@ -333,24 +352,47 @@ mod tests {
     fn match_display_follows_the_displays_pixels() {
         let ds = ScreenSize::new(256, 192);
         let three_ds_top = ScreenSize::new(400, 240);
-        // A stacked DS filling the MacBook Pro's height wants 5.1×, the
-        // external display's 6.75×: both capped.
-        assert_eq!(matched_resolution([((1309, 982), ds)]), 4);
-        assert_eq!(matched_resolution([((1728, 1296), ds)]), 4);
+        // Any cap; 4 is the 3DS's, past the DS's own.
+        let cap = 4;
+        // A DS stacked to fill the MacBook Pro's height would want 5.1×,
+        // the external display 6.75×: both capped.
+        assert_eq!(matched_resolution([((1309, 982), ds)], cap), 4);
+        assert_eq!(matched_resolution([((1728, 1296), ds)], cap), 4);
         // On a 1080p 1× monitor, 2.8× rounds up to 3×.
-        assert_eq!(matched_resolution([((720, 540), ds)]), 3);
+        assert_eq!(matched_resolution([((720, 540), ds)], cap), 3);
         // A quarter or less above a whole number rounds down: the 3DS's
         // top screen at 4.09× draws at 4×, a small DS window at 2.08× at 2×.
-        assert_eq!(matched_resolution([((1636, 982), three_ds_top)]), 4);
-        assert_eq!(matched_resolution([((533, 400), ds)]), 2);
+        assert_eq!(matched_resolution([((1636, 982), three_ds_top)], cap), 4);
+        assert_eq!(matched_resolution([((533, 400), ds)], cap), 2);
         // The largest screen decides; nothing shown, or tiny, draws at 1×.
-        assert_eq!(matched_resolution([((256, 192), ds), ((720, 540), ds)]), 3);
-        assert_eq!(matched_resolution([]), 1);
-        assert_eq!(matched_resolution([((40, 30), ds)]), 1);
+        assert_eq!(
+            matched_resolution([((256, 192), ds), ((720, 540), ds)], cap),
+            3
+        );
+        assert_eq!(matched_resolution([], cap), 1);
+        assert_eq!(matched_resolution([((40, 30), ds)], cap), 1);
         // A turned screen compares across its turned sides.
         assert_eq!(
-            matched_resolution([((540, 720), ScreenSize::new(192, 256))]),
+            matched_resolution([((540, 720), ScreenSize::new(192, 256))], cap),
             3
+        );
+    }
+
+    #[test]
+    fn the_ds_matches_the_display_at_most_twice_over() {
+        let ds = ScreenSize::new(256, 192);
+        let three_ds_top = ScreenSize::new(400, 240);
+        let ds_cap = match_display_cap(System::Nds);
+        let three_ds_cap = match_display_cap(System::N3ds);
+        // The MacBook Pro's 5.1× and a 1080p monitor's 2.8× both draw the
+        // DS's 3D at 2×; a small window still at less.
+        assert_eq!(matched_resolution([((1309, 982), ds)], ds_cap), 2);
+        assert_eq!(matched_resolution([((720, 540), ds)], ds_cap), 2);
+        assert_eq!(matched_resolution([((300, 225), ds)], ds_cap), 1);
+        // The 3DS's GPU keeps going to 4×.
+        assert_eq!(
+            matched_resolution([((1636, 982), three_ds_top)], three_ds_cap),
+            4
         );
     }
 

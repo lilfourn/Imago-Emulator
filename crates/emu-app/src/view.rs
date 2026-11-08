@@ -325,9 +325,10 @@ struct Keeping {
 }
 
 impl Keeping {
-    fn new() -> Self {
+    /// Starting from `cap`, the system's [`picture::match_display_cap`].
+    fn new(cap: u32) -> Self {
         Self {
-            ceiling: picture::MATCH_DISPLAY_CAP,
+            ceiling: cap,
             set_for: None,
             measured: None,
         }
@@ -341,7 +342,7 @@ impl Session {
     fn keep_speed(&mut self, matched: u32, speed: Speed) -> u32 {
         let keeping = &mut self.keeping;
         if keeping.set_for != Some((matched, speed)) {
-            *keeping = Keeping::new();
+            *keeping = Keeping::new(picture::match_display_cap(self.info.system));
             keeping.set_for = Some((matched, speed));
         }
         let now = Instant::now();
@@ -860,7 +861,7 @@ impl EmulatorView {
             recording: false,
             images: Vec::new(),
             render_scale,
-            keeping: Keeping::new(),
+            keeping: Keeping::new(picture::match_display_cap(info.system)),
             ambient: None,
             display: None,
             taken_at: None,
@@ -2418,19 +2419,22 @@ impl EmulatorView {
     /// next launch. The next draw sends the core the scale it comes to.
     fn set_resolution_3d(&mut self, resolution: Resolution3d, cx: &mut Context<Self>) {
         self.resolution_3d = resolution;
-        let three_d = matches!(
-            self.session.as_ref().map(|session| session.info.system),
-            Some(System::Nds | System::N3ds) | None
-        );
-        let mut message = match resolution {
-            Resolution3d::MatchDisplay => format!(
+        let system = self.session.as_ref().map(|session| session.info.system);
+        let three_d = matches!(system, Some(System::Nds | System::N3ds) | None);
+        let mut message = match (resolution, system) {
+            (Resolution3d::MatchDisplay, Some(system @ (System::Nds | System::N3ds))) => format!(
                 "3D resolution matches the display, up to {}×",
-                picture::MATCH_DISPLAY_CAP
+                picture::match_display_cap(system)
             ),
-            Resolution3d::Times(1) => "3D at the native resolution".to_owned(),
-            Resolution3d::Times(scale) => format!("3D at {scale}× resolution"),
+            (Resolution3d::MatchDisplay, _) => format!(
+                "3D resolution matches the display, up to {}× for DS games and {}× for 3DS games",
+                picture::match_display_cap(System::Nds),
+                picture::match_display_cap(System::N3ds)
+            ),
+            (Resolution3d::Times(1), _) => "3D at the native resolution".to_owned(),
+            (Resolution3d::Times(scale), _) => format!("3D at {scale}× resolution"),
         };
-        if !three_d {
+        if !three_d && resolution != Resolution3d::MatchDisplay {
             message.push_str(", for DS and 3DS games");
         }
         self.show_notice(message, cx);
@@ -3998,12 +4002,15 @@ fn render_scale(
     match resolution {
         Resolution3d::Times(scale) => scale,
         Resolution3d::MatchDisplay if matches!(info.system, System::Nds | System::N3ds) => {
-            picture::matched_resolution(placements.iter().filter_map(|placement| {
-                let native = info.screens.get(placement.screen)?;
-                let rect = placement.rect;
-                let target = picture::device_size(rect.width, rect.height, scale_factor);
-                Some((target, placement.rotation.turn_size(*native)))
-            }))
+            picture::matched_resolution(
+                placements.iter().filter_map(|placement| {
+                    let native = info.screens.get(placement.screen)?;
+                    let rect = placement.rect;
+                    let target = picture::device_size(rect.width, rect.height, scale_factor);
+                    Some((target, placement.rotation.turn_size(*native)))
+                }),
+                picture::match_display_cap(info.system),
+            )
         }
         Resolution3d::MatchDisplay => 1,
     }
