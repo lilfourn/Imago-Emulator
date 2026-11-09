@@ -1688,6 +1688,165 @@ fn a_game_that_saves_only_when_asked_with_no_record_is_left_alone() {
     fs::remove_dir_all(&dir).expect("clean up");
 }
 
+/// Every file under `dir`, by its path from there, with what it holds.
+fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(dir: &Path, root: &Path, files: &mut Vec<(String, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(&path, root, files);
+            } else {
+                let name = path.strip_prefix(root).expect("under the root");
+                let name = name.to_string_lossy().replace('\\', "/");
+                files.push((name, fs::read(&path).expect("read")));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files);
+    files.sort();
+    files
+}
+
+/// `files` as [`tree`] gives them.
+fn holding(files: &[(&str, &[u8])]) -> Vec<(String, Vec<u8>)> {
+    let files = files.iter();
+    files
+        .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
+        .collect()
+}
+
+#[test]
+fn starting_an_rpg_maker_game_over_sets_the_saves_it_made_aside() {
+    let dir = empty_dir("start-over-rpg-maker");
+    let game = dir.join("Game 1.2");
+    let saves = dir.join("saves");
+    fs::create_dir_all(&game).expect("the game's folder");
+    fs::create_dir_all(&saves).expect("its save folder");
+    // Saved in the game, with a second file; its checkpoint beside its
+    // folder; and files that are no saves.
+    fs::write(saves.join("Game.rxdata"), b"eight badges").expect("write");
+    fs::write(saves.join("Save2.rxdata"), b"another file").expect("write");
+    fs::write(saves.join("mkxp.json"), b"settings").expect("write");
+    fs::write(game.join("Game.ini"), b"Title=Game").expect("write");
+    for (name, bytes) in [
+        ("Game 1.2.ss0", &b"checkpoint"[..]),
+        ("Game 1.2.ss0.saves", b"record"),
+        ("Game 1.2.ss0.png", b"picture"),
+        ("Game 1.2.ss1", b"a state the player saved"),
+    ] {
+        fs::write(dir.join(name), bytes).expect("write");
+    }
+    let files = GameFiles::of_folder(&game);
+    let states = StateFiles::new(files.clone(), false, None, System::RpgMaker, 0);
+    let own = OwnSaves::RpgMaker(rpg_maker::SaveFolders::new(vec![saves.clone(), game]));
+
+    let said = erase_progress(&states, &files.backup(), &own).expect("erased");
+    assert_eq!(
+        said.as_deref(),
+        Some("Your 2 old saves are kept beside the game's, renamed to end in .bak")
+    );
+    assert_eq!(
+        tree(&dir),
+        holding(&[
+            ("Game 1.2.ss1", b"a state the player saved"),
+            ("Game 1.2/Game.ini", b"Title=Game"),
+            ("saves/Game.rxdata.bak", b"eight badges"),
+            ("saves/Save2.rxdata.bak", b"another file"),
+            ("saves/mkxp.json", b"settings"),
+        ])
+    );
+
+    // Started over again after playing on: the first is never replaced.
+    fs::write(saves.join("Game.rxdata"), b"one badge").expect("write");
+    let said = erase_progress(&states, &files.backup(), &own).expect("erased");
+    assert_eq!(
+        said.as_deref(),
+        Some("Your old save is kept as Game.rxdata.bak2")
+    );
+    assert_eq!(
+        fs::read(saves.join("Game.rxdata.bak")).expect("the first"),
+        b"eight badges"
+    );
+    assert_eq!(
+        fs::read(saves.join("Game.rxdata.bak2")).expect("the second"),
+        b"one badge"
+    );
+    assert!(!saves.join("Game.rxdata").exists());
+    // With nothing saved, there is nothing to say.
+    assert_eq!(
+        erase_progress(&states, &files.backup(), &own).expect("erased"),
+        None
+    );
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
+fn starting_over_sets_the_battery_save_aside_and_removes_the_checkpoint() {
+    let dir = empty_dir("start-over-battery");
+    for (name, bytes) in [
+        ("game.sav", &b"twenty hours"[..]),
+        ("game.ss0", b"checkpoint"),
+        ("game.ss0.saves", b"record"),
+        ("game.ss0.png", b"picture"),
+        ("game.ss2", b"a state the player saved"),
+        ("game.cht", b"cheats"),
+    ] {
+        fs::write(dir.join(name), bytes).expect("write");
+    }
+    let files = GameFiles::of(&dir.join("game.gba"));
+    let states = StateFiles::new(files.clone(), false, None, System::Gba, 0);
+    let said = erase_progress(&states, &files.backup(), &OwnSaves::None).expect("erased");
+    assert_eq!(
+        said.as_deref(),
+        Some("Your old save is kept as game.sav.bak")
+    );
+    assert_eq!(
+        tree(&dir),
+        holding(&[
+            ("game.cht", b"cheats"),
+            ("game.sav.bak", b"twenty hours"),
+            ("game.ss2", b"a state the player saved"),
+        ])
+    );
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
+fn starting_a_3ds_game_over_sets_its_save_folders_aside() {
+    let dir = empty_dir("start-over-3ds");
+    // A 3DS executable with a title ID, and the save data the core made
+    // for it on its SD card.
+    let mut rom = vec![0; 0x200];
+    rom[0x100..0x104].copy_from_slice(b"NCCH");
+    rom[0x118..0x120].copy_from_slice(&0x0004_0000_0011_C400_u64.to_le_bytes());
+    let game = dir.join("Game.cxi");
+    fs::write(&game, &rom).expect("write");
+    let data = dir.join("3DS");
+    let own = emu_3ds::SaveData::of(&game, &data);
+    let ids = data.join("Azahar/sdmc/Nintendo 3DS/0000/0000");
+    let save_data = ids.join("title/00040000/0011c400/data");
+    fs::create_dir_all(save_data.join("00000001.sav")).expect("save data");
+    fs::write(save_data.join("00000001.sav/main"), b"the game's save").expect("write");
+    assert_eq!(
+        own.folders(),
+        std::slice::from_ref(&save_data),
+        "found by its title ID"
+    );
+
+    let files = GameFiles::of(&game);
+    let states = StateFiles::new(files.clone(), false, None, System::N3ds, 0);
+    let said = erase_progress(&states, &files.backup(), &OwnSaves::ThreeDs(own));
+    assert_eq!(
+        said.expect("erased").as_deref(),
+        Some("Your old save is kept on the 3DS's SD card, in folders renamed to end in .bak")
+    );
+    assert!(!save_data.exists());
+    let kept = ids.join("title/00040000/0011c400/data.bak/00000001.sav/main");
+    assert_eq!(fs::read(kept).expect("kept"), b"the game's save");
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
 #[test]
 fn pausing_writes_the_battery_save() {
     let dir = empty_dir("pause-flush");

@@ -48,7 +48,7 @@ use crate::controls::{Controls, HeldState};
 use crate::cursor::{self, Cursor};
 use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
-use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Loaded};
+use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Loaded, OwnSaves};
 use crate::filter::Filter;
 use crate::fonts;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
@@ -276,6 +276,8 @@ struct Session {
     files: Vec<GameFiles>,
     /// Where the session's save states are.
     states: StateFiles,
+    /// Where the game keeps the saves it makes itself.
+    own_saves: OwnSaves,
     frames: Vec<Frame>,
     sequence: u64,
     /// Per player: the cheat file's text when last sent to the emulator.
@@ -886,6 +888,7 @@ impl EmulatorView {
         let player_rom_paths = loaded.player_rom_paths().to_vec();
         let files = loaded.files().to_vec();
         let states = loaded.states();
+        let own_saves = loaded.own_saves();
         let emulator = Emulator::start(loaded, events, audio_sink);
         // As the window lays the game out now; drawing it corrects this if
         // its screens come out another size.
@@ -939,6 +942,7 @@ impl EmulatorView {
             player_rom_paths,
             files,
             states,
+            own_saves,
             frames: Vec::new(),
             sequence: 0,
             cheat_texts: vec![None; info.players.max(1)],
@@ -2157,37 +2161,23 @@ impl EmulatorView {
     /// again. Other cartridges, such as a GBA game in a DS's slot or the
     /// other player's game, keep theirs. The battery save is kept as
     /// `game.sav.bak`, or `.bak2` and so on, never replacing an earlier
-    /// one, in case it was a mistake; so are the folders a 3DS game keeps
-    /// its own save in.
+    /// one, in case it was a mistake; so are the saves an RPG Maker or 3DS
+    /// game makes itself (see [`emulator::erase_progress`]).
     fn start_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let roms = session.rom_paths.clone();
-        let rom = roms.get(self.active_player).cloned();
         let save = session.player_files_of(self.active_player).backup();
         let states = session.states.clone();
-        // Stopping writes the battery saves, so the save is set aside after.
+        let own_saves = session.own_saves.clone();
+        // Stopping writes the battery saves, and stops the player or helper
+        // a game's own saves are open in, so they are set aside after.
         let stopped = self.stop(window, cx);
         self.keep_for_start(stopped);
-        let erased = states
-            .remove(CHECKPOINT)
-            .and_then(|()| persist::set_aside(&save))
-            .and_then(|kept| {
-                // A 3DS game's own save is on the core's SD card.
-                let own = rom
-                    .as_deref()
-                    .map_or(Ok(Vec::new()), emulator::set_aside_own_saves)?;
-                Ok((kept, own))
-            });
         // Said once the game is running again, after the loading notice.
-        let said = match erased {
-            Ok((Some(kept), _)) => Some(format!("Your old save is kept as {}", file_name(&kept))),
-            Ok((None, own)) if !own.is_empty() => Some(
-                "Your old save is kept on the 3DS's SD card, in folders renamed to end in .bak"
-                    .to_owned(),
-            ),
-            Ok((None, _)) => None,
+        let said = match emulator::erase_progress(&states, &save, &own_saves) {
+            Ok(said) => said,
             Err(error) => Some(format!("Cannot erase progress: {error}")),
         };
         self.keep_for_start(said);

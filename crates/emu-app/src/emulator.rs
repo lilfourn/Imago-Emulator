@@ -120,7 +120,7 @@ pub struct Loaded {
 
 /// The saves a game makes itself, outside the app's battery saves.
 #[derive(Debug, Clone, Default)]
-enum OwnSaves {
+pub enum OwnSaves {
     /// None: the game's saves are its battery saves, or it has none.
     #[default]
     None,
@@ -137,6 +137,45 @@ impl OwnSaves {
             Self::None => Vec::new(),
             Self::RpgMaker(folders) => folders.files(),
             Self::ThreeDs(data) => data.files(),
+        }
+    }
+
+    /// Sets the saves aside, so that the game starts from the very
+    /// beginning: each of an RPG Maker game's save files, and each folder
+    /// of a 3DS game's save data and extdata on the core's emulated SD
+    /// card, is renamed beside itself to end in `.bak`, or `.bak2` and so
+    /// on, never replacing an earlier one. Returns where they went. The
+    /// game must have stopped.
+    ///
+    /// # Errors
+    ///
+    /// Fails if one cannot be renamed; those set aside before stay so.
+    fn set_aside(&self) -> std::io::Result<Vec<PathBuf>> {
+        let saves = match self {
+            Self::None => Vec::new(),
+            Self::RpgMaker(folders) => folders.files(),
+            Self::ThreeDs(data) => data.folders(),
+        };
+        let mut kept = Vec::new();
+        for save in saves {
+            kept.extend(persist::set_aside(&save)?);
+        }
+        Ok(kept)
+    }
+
+    /// What to tell the player of the saves set aside to `kept`.
+    fn kept_notice(&self, kept: &[PathBuf]) -> Option<String> {
+        match (self, kept) {
+            (_, []) => None,
+            (Self::ThreeDs(_), _) => Some(
+                "Your old save is kept on the 3DS's SD card, in folders renamed to end in .bak"
+                    .to_owned(),
+            ),
+            (_, [one]) => Some(format!("Your old save is kept as {}", file_name(one))),
+            (_, many) => Some(format!(
+                "Your {} old saves are kept beside the game's, renamed to end in .bak",
+                many.len()
+            )),
         }
     }
 }
@@ -163,6 +202,12 @@ impl Loaded {
     /// Each cartridge's own files, in the order of [`Loaded::rom_paths`].
     pub fn files(&self) -> &[GameFiles] {
         &self.files
+    }
+
+    /// Where the game keeps the saves it makes itself, which Start Over
+    /// sets aside (see [`erase_progress`]).
+    pub fn own_saves(&self) -> OwnSaves {
+        self.own_saves.clone()
     }
 
     /// Where the session's save states are: named after the first
@@ -374,25 +419,29 @@ fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
     })
 }
 
-/// Sets aside the saves the game at `rom` keeps outside its battery save,
-/// so that it starts from the very beginning: a 3DS game's save data and
-/// extdata on the core's emulated SD card, each folder renamed beside
-/// itself to `.bak`, or `.bak2` and so on, never replacing an earlier one.
-/// Returns where they went; none for other games.
+/// Erases a stopped game's progress on disk, for Start Over: removes the
+/// session's checkpoint in `states`, and sets aside the battery save at
+/// `save` and the saves the game makes itself, `own`, each renamed to end
+/// in `.bak`, or `.bak2` and so on, never replacing an earlier one. The
+/// game then starts from the very beginning. Returns what to tell the
+/// player of where the old saves are, if there were any.
 ///
 /// # Errors
 ///
-/// Fails if a folder cannot be renamed; those set aside before stay so.
-pub fn set_aside_own_saves(rom: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let Some(data) = emu_3ds::data_dir().filter(|_| emu_3ds::is_game(rom)) else {
-        return Ok(Vec::new());
-    };
-    let folders = emu_3ds::SaveData::of(rom, &data).folders();
-    let mut kept = Vec::new();
-    for folder in folders {
-        kept.extend(persist::set_aside(&folder)?);
-    }
-    Ok(kept)
+/// Fails if a file cannot be removed or renamed; what was done before
+/// stays done.
+pub fn erase_progress(
+    states: &StateFiles,
+    save: &Path,
+    own: &OwnSaves,
+) -> std::io::Result<Option<String>> {
+    states.remove(CHECKPOINT)?;
+    let battery = persist::set_aside(save)?;
+    let kept = own.set_aside()?;
+    Ok(match battery {
+        Some(battery) => Some(format!("Your old save is kept as {}", file_name(&battery))),
+        None => own.kept_notice(&kept),
+    })
 }
 
 /// The file the 3DS core opens for the game at `path`: the game itself,
