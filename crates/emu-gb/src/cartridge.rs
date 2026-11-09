@@ -3,6 +3,7 @@
 //! "MBC5"; Gekkio, "Game Boy: Complete Technical Reference", "MBC1M").
 
 use emu_core::{LoadError, RomPatch, System};
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// Clock cycles per second, for the MBC3 real-time clock.
@@ -18,6 +19,9 @@ pub(crate) struct Cartridge {
     /// bank. Like the ROM, never saved in states.
     #[serde(skip)]
     rom_patches: Box<[RomPatch]>,
+    /// As long as the header says; see [`Cartridge::in_range`] for a
+    /// save state's.
+    #[serde(with = "payload::bytes")]
     ram: Box<[u8]>,
     mbc: Mbc,
     has_battery: bool,
@@ -177,6 +181,13 @@ impl Cartridge {
                 ram_bank,
             } => (*ram_enabled, *rom_bank, *ram_bank) = (false, 1, 0),
         }
+    }
+
+    /// Whether this cartridge, read from a save state, has the RAM its
+    /// controller reads without asking: an MBC2's 512 bytes. The others
+    /// wrap their banks at whatever length the RAM has.
+    pub(crate) fn in_range(&self) -> bool {
+        !matches!(self.mbc, Mbc::Mbc2 { .. }) || self.ram.len() >= 0x200
     }
 
     /// Moves the ROM and its patches out of `other` into `self`; used after
@@ -443,12 +454,12 @@ impl Cartridge {
         } = &mut self.mbc
         {
             rtc.write(*register, value);
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
             return;
         }
         if let Some(index) = self.ram_index(address) {
             self.ram[index] = value;
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 
@@ -461,7 +472,7 @@ impl Cartridge {
         }
         if let Some(index) = self.ram_index_in(usize::from(bank), address) {
             self.ram[index] = value;
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 }
@@ -493,17 +504,23 @@ fn is_mbc1_multicart(rom: &[u8]) -> bool {
 /// wall-clock time that passed since the save's timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Rtc {
+    #[serde(with = "payload::Below::<64>")]
     seconds: u8,
+    #[serde(with = "payload::Below::<64>")]
     minutes: u8,
+    #[serde(with = "payload::Below::<32>")]
     hours: u8,
     /// Nine-bit day counter.
+    #[serde(with = "payload::Below::<512>")]
     days: u16,
     halted: bool,
     /// Set when the day counter overflows; cleared only by the game.
     day_carry: bool,
     /// Clock cycles into the current RTC second. Frozen while halted.
+    #[serde(with = "payload::Below::<{ CYCLES_PER_SECOND as u64 }>")]
     subsecond: u32,
     /// Clock cycles into the current wall-clock second, for `unix_time`.
+    #[serde(with = "payload::Below::<{ CYCLES_PER_SECOND as u64 }>")]
     wall_subsecond: u32,
     /// Seconds, minutes, hours, DL, DH as last latched.
     latched: [u8; 5],
@@ -540,7 +557,8 @@ impl Rtc {
         self.wall_subsecond += cycles;
         if self.wall_subsecond >= CYCLES_PER_SECOND {
             self.wall_subsecond -= CYCLES_PER_SECOND;
-            self.unix_time += 1;
+            // A save state may hold any time.
+            self.unix_time = self.unix_time.wrapping_add(1);
         }
         if self.halted {
             return;

@@ -19,6 +19,7 @@
 //! background palette 0 and object palettes 0 and 1 instead of greys.
 
 use emu_core::rgb;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::compat_palettes::Palettes;
@@ -57,14 +58,18 @@ enum Mode {
 pub(crate) struct Ppu {
     model: Model,
     /// Two 8 KiB banks; bank 1 exists only on CGB.
+    #[serde(with = "payload::Exact::<0x4000>")]
     vram: Box<[u8]>,
+    #[serde(with = "payload::Below::<2>")]
     vram_bank: u8,
+    #[serde(with = "payload::Exact::<0xA0>")]
     oam: Box<[u8]>,
     lcdc: u8,
     /// STAT bits 3–6: which conditions raise the STAT interrupt.
     stat_select: u8,
     scy: u8,
     scx: u8,
+    #[serde(with = "payload::Below::<{ LINES_PER_FRAME as u64 }>")]
     ly: u8,
     lyc: u8,
     bgp: u8,
@@ -74,7 +79,9 @@ pub(crate) struct Ppu {
     wx: u8,
     /// CGB palette RAM: 8 palettes x 4 colours x 2 bytes, little-endian
     /// RGB555.
+    #[serde(with = "payload::Exact::<64>")]
     bg_palettes: Box<[u8]>,
+    #[serde(with = "payload::Exact::<64>")]
     obj_palettes: Box<[u8]>,
     /// BCPS and OCPS: palette RAM index plus auto-increment (bit 7).
     bg_palette_select: u8,
@@ -91,17 +98,21 @@ pub(crate) struct Ppu {
     /// The current line is the one the LCD started on.
     first_line: bool,
     /// Dots elapsed in the current line.
+    #[serde(with = "payload::Below::<{ DOTS_PER_LINE as u64 }>")]
     dot: u16,
     /// Length of mode 3 on this line.
+    #[serde(with = "payload::Below::<{ DOTS_PER_LINE as u64 }>")]
     drawing_dots: u16,
     /// LY matched WY at some point this frame, so the window may show.
     window_in_frame: bool,
     /// The window's own line counter; advances only on lines it is drawn.
+    #[serde(with = "payload::Below::<{ HEIGHT as u64 + 1 }>")]
     window_line: u8,
     /// The OR of all enabled STAT conditions; the interrupt fires on its
     /// rising edge.
     stat_line: bool,
     /// The frame being drawn, as `0xFFRRGGBB`.
+    #[serde(with = "payload::ExactList::<{ WIDTH * HEIGHT }>")]
     pixels: Box<[u32]>,
     frame_ready: bool,
     /// Mode 0 began on a visible line since the last call; drives HBlank

@@ -14,6 +14,7 @@ emu-gba-cart.workspace = true
 # runs the core.
 emu-os.workspace = true
 emu-sched.workspace = true
+emu-state.workspace = true
 postcard.workspace = true
 serde.workspace = true
 

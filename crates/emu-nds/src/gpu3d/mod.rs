@@ -230,6 +230,19 @@ impl Gpu3d {
         self.renderer.set_scale(scale);
     }
 
+    /// Whether this engine, read from a save state, holds polygon lists
+    /// the geometry engine could have stored, which the renderer draws
+    /// without checking again.
+    pub(crate) fn in_range(&self) -> bool {
+        self.geometry.in_range() && self.rendering.in_range()
+    }
+
+    /// How many polygons the rendering engine is drawing.
+    #[cfg(test)]
+    pub(crate) fn polygons_drawn(&self) -> usize {
+        self.rendering.polygons.len()
+    }
+
     /// Moves `other`'s renderer, with its buffers and scale, into this
     /// engine, which replaces it. The next [`Gpu3d::render_frame`]
     /// redraws them.

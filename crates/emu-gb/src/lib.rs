@@ -33,6 +33,7 @@ use emu_core::{
     Core, CoreInfo, Debugger, DmgColors, Frame, FrameRate, Input, LoadError, Media, MemoryRegion,
     RomPatch, ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 pub use cpu::Registers;
@@ -318,8 +319,8 @@ impl Core for Gb {
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let mut machine: Machine = postcard::from_bytes(state)
-            .map_err(|_| StateError::Malformed("not a Game Boy state"))?;
+        let mut machine: Machine = payload::load(state, "not a Game Boy state")?;
+        machine.bus.fits(&self.machine.bus)?;
         machine.bus.take_media_from(&mut self.machine.bus);
         self.machine = machine;
         self.frame_start = None;
@@ -379,6 +380,8 @@ impl Core for Gb {
 
 #[cfg(test)]
 mod tests {
+    use emu_state::mutation;
+
     use super::*;
 
     /// A 32 KiB ROM-only cartridge running `program` at 0x0100.
@@ -397,6 +400,181 @@ mod tests {
             .iter()
             .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
         rom
+    }
+
+    /// A Game Boy Color cartridge with an MBC3, its clock and 32 KiB of
+    /// RAM, running `program`: the most a cartridge puts in a state.
+    fn rom_with_a_clock(program: &[u8]) -> Vec<u8> {
+        let mut rom = rom_for(Model::Cgb, program);
+        rom[0x147] = 0x10;
+        rom[0x149] = 0x03;
+        rom[0x14D] = rom[0x134..0x14D]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+        rom
+    }
+
+    /// Loads into a Game Boy playing `rom` the wrong states made from its
+    /// own after `frames` frames ([`mutation::try_each`]), and runs each
+    /// it takes: two frames, the memory a debugger reads, a save, a reset
+    /// and a frame more.
+    fn try_wrong_states(rom: &[u8], frames: usize, every: usize) -> mutation::Outcome {
+        let mut gb = Gb::new(&Media::new(rom)).expect("valid rom");
+        let mut audio = Vec::new();
+        for _ in 0..frames {
+            gb.run_frame(&[Input::default()], &mut audio);
+        }
+        let mut good = Vec::new();
+        gb.save_state(&mut good);
+        gb.load_state(&good).expect("its own state loads");
+        let machine = gb.machine.clone();
+        mutation::try_each(&machine, every, |wrong| {
+            if gb.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            gb.run_frame(&[Input::default()], &mut audio);
+            gb.run_frame(&[Input::default()], &mut audio);
+            for address in (0..=0xFFFF).step_by(0x55) {
+                let _ = Core::peek(&gb, 0, address);
+                let _ = gb.peek(address as u16);
+            }
+            let _ = gb.memory(MemoryRegion::VideoRam);
+            let mut saved = Vec::new();
+            gb.save_state(&mut saved);
+            gb.reset();
+            gb.run_frame(&[Input::default()], &mut audio);
+        })
+    }
+
+    /// A state with bytes after it is not that state: a linked pair's
+    /// begins with one console's, and used to load into a console on its
+    /// own, dropping the second player.
+    #[test]
+    fn a_state_with_bytes_left_over_is_refused() {
+        let rom = rom_with_program(&[0x18, 0xFE]);
+        let media = Media::new(&rom);
+        let mut one = Gb::new(&media).expect("valid rom");
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let (mut alone, mut together) = (Vec::new(), Vec::new());
+        one.save_state(&mut alone);
+        pair.save_state(&mut together);
+        assert!(one.load_state(&alone).is_ok() && pair.load_state(&together).is_ok());
+        // As they are after a load, which counts as a write to the save.
+        let (mut before, mut before_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut before);
+        pair.save_state(&mut before_pair);
+        let refused =
+            |result: Result<(), StateError>| matches!(result, Err(StateError::Malformed(_)));
+        assert!(refused(one.load_state(&together)), "a pair's into one");
+        assert!(refused(pair.load_state(&alone)), "one's into a pair");
+        for state in [&mut alone, &mut together] {
+            state.push(0);
+        }
+        assert!(refused(one.load_state(&alone)), "one more byte");
+        assert!(refused(pair.load_state(&together)), "one more byte");
+        // A refused state changes nothing.
+        let (mut after, mut after_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut after);
+        pair.save_state(&mut after_pair);
+        assert!(after == before, "the console is as it was");
+        assert!(after_pair == before_pair, "the pair is as it was");
+    }
+
+    /// As [`try_wrong_states`], for two Game Boys playing `rom` on a link cable:
+    /// the wrong states are made from the pair's own, and each one the
+    /// pair takes runs a frame, saves, resets and runs a frame more.
+    fn try_wrong_pair_states(rom: &[u8], frames: usize, every: usize) -> mutation::Outcome {
+        let media = Media::new(rom);
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let inputs = [Input::default(); 2];
+        let mut audio = Vec::new();
+        for _ in 0..frames {
+            pair.run_frame(&inputs, &mut audio);
+            audio.clear();
+        }
+        let mut good = Vec::new();
+        pair.save_state(&mut good);
+        pair.load_state(&good).expect("its own state loads");
+        let machines: (Machine, Machine) = payload::load(&good, "its own state").expect("reads");
+        mutation::try_each(&machines, every, |wrong| {
+            if pair.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            pair.run_frame(&inputs, &mut audio);
+            let mut saved = Vec::new();
+            pair.save_state(&mut saved);
+            pair.reset();
+            pair.run_frame(&inputs, &mut audio);
+        })
+    }
+
+    /// A state that is wrong in one place is refused, or loads and runs:
+    /// it never panics or hangs the core. This tries every place in one
+    /// cartridge's state and a sample of a linked pair's;
+    /// `every_wrong_state_is_refused_or_runs` tries more machines.
+    #[test]
+    fn a_wrong_state_is_refused_or_runs() {
+        // LD A, 0x0A; LD (0x0000), A; LD A, 0x08; LD (0x4000), A; JR -2:
+        // RAM on and the clock's seconds mapped, then spin.
+        let program = [
+            0x3E, 0x0A, 0xEA, 0x00, 0x00, 0x3E, 0x08, 0xEA, 0x00, 0x40, 0x18, 0xFE,
+        ];
+        let outcome = try_wrong_states(&rom_with_a_clock(&program), 3, 1);
+        assert!(outcome.tried > 1500, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+        let outcome = try_wrong_pair_states(&rom_with_a_clock(&program), 3, 29);
+        assert!(outcome.tried > 100, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+    }
+
+    /// Every place in the states of a cartridge of each kind, and of the
+    /// test ROMs that use the most of the machine, if they are there
+    /// (`scripts/fetch-test-roms.sh`), each on a thread of its own. A
+    /// minute or two.
+    #[test]
+    #[ignore = "minutes: every byte of several states' structure"]
+    fn every_wrong_state_is_refused_or_runs() {
+        let program = [
+            0x3E, 0x0A, 0xEA, 0x00, 0x00, 0x3E, 0x08, 0xEA, 0x00, 0x40, 0x18, 0xFE,
+        ];
+        let mut machines: Vec<(String, Box<dyn FnOnce() -> mutation::Outcome + Send>)> = Vec::new();
+        // ROM only, MBC1, MBC2, MBC3 with its clock, MBC5.
+        for kind in [0x00, 0x03, 0x06, 0x10, 0x1B] {
+            let mut rom = rom_with_a_clock(&program);
+            rom[0x147] = kind;
+            rom[0x14D] = rom[0x134..0x14D]
+                .iter()
+                .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+            machines.push((
+                format!("cartridge type {kind:#04X}"),
+                Box::new(move || try_wrong_states(&rom, 3, 1)),
+            ));
+        }
+        let linked = rom_with_a_clock(&program);
+        machines.push((
+            "a linked pair".to_owned(),
+            Box::new(move || try_wrong_pair_states(&linked, 3, 1)),
+        ));
+        let roms = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-roms/game-boy-test-roms");
+        for (name, frames) in [
+            ("blargg/cgb_sound/cgb_sound.gb", 700),
+            ("blargg/dmg_sound/dmg_sound.gb", 300),
+            ("cgb-acid2/cgb-acid2.gbc", 30),
+            ("dmg-acid2/dmg-acid2.gb", 30),
+        ] {
+            let Ok(rom) = std::fs::read(roms.join(name)) else {
+                eprintln!("skipping {name}: run scripts/fetch-test-roms.sh");
+                continue;
+            };
+            machines.push((
+                name.to_owned(),
+                Box::new(move || try_wrong_states(&rom, frames, 1)),
+            ));
+        }
+        mutation::sweep(machines).assert_no_panics();
     }
 
     #[test]

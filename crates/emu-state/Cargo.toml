@@ -1,6 +1,6 @@
 [package]
 name = "emu-state"
-description = "Save-state container format: a versioned, checksummed header around a core's state bytes."
+description = "Save states: the container, a versioned, checksummed header around a core's state bytes, and the checked reading and writing of those bytes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 crc32fast.workspace = true
 emu-core.workspace = true
+postcard.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [lints]

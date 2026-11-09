@@ -72,11 +72,23 @@ impl Rtc {
         }
     }
 
+    /// Whether this clock, read from a save state, has its counters
+    /// within the byte it shifts and the second it counts, and no more of
+    /// a reply than the longest command's.
+    pub(crate) fn in_range(&self) -> bool {
+        self.bits < 8 && self.subsecond < CYCLES_PER_SECOND && self.reply.len() <= 7
+    }
+
     /// Brings the clock up to system cycle `now`.
     fn sync(&mut self, now: u64) {
-        self.subsecond += now.saturating_sub(self.synced);
+        // A save state may hold any time and any cycle it was read at.
+        self.subsecond = self
+            .subsecond
+            .saturating_add(now.saturating_sub(self.synced));
         self.synced = now;
-        self.unix_time += i64::try_from(self.subsecond / CYCLES_PER_SECOND).unwrap_or(0);
+        self.unix_time = self
+            .unix_time
+            .wrapping_add(i64::try_from(self.subsecond / CYCLES_PER_SECOND).unwrap_or(0));
         self.subsecond %= CYCLES_PER_SECOND;
     }
 

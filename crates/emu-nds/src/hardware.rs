@@ -6,7 +6,9 @@
 //! the ARM7 counts bus cycles (33.51 MHz) and the ARM9 counts its own
 //! cycles, two per bus cycle. The scheduler runs in bus cycles.
 
+use emu_core::StateError;
 use emu_sched::Scheduler;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::cart::{Cart, RomEvent};
@@ -36,7 +38,7 @@ pub(crate) enum Event {
     /// The next line starts.
     LineStart,
     /// One CPU's timer counts past 0xFFFF.
-    TimerOverflow(Side, u8),
+    TimerOverflow(Side, #[serde(with = "payload::Below::<4>")] u8),
     /// Time for the next audio output sample.
     SoundSample,
     /// The game card's ROM transfer moves on.
@@ -92,11 +94,11 @@ impl CpuIo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Hardware {
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::Exact::<MAIN_RAM_SIZE>")]
     pub(crate) main_ram: Box<[u8]>,
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::Exact::<0x8000>")]
     pub(crate) shared_wram: Box<[u8]>,
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::Exact::<0x1_0000>")]
     pub(crate) arm7_wram: Box<[u8]>,
     pub(crate) vram: Vram,
     /// WRAMCNT: how the 32 KiB shared WRAM splits between the CPUs.
@@ -107,7 +109,9 @@ pub(crate) struct Hardware {
     pub(crate) gpu3d: Gpu3d,
     /// What each engine drew this frame, 256×192 pixels as 0xFFRRGGBB.
     /// Saved in states, so a state loaded while paused shows its frame.
+    #[serde(with = "payload::ExactList::<{ 256 * 192 }>")]
     pub(crate) screen_a: Box<[u32]>,
+    #[serde(with = "payload::ExactList::<{ 256 * 192 }>")]
     pub(crate) screen_b: Box<[u32]>,
     /// The same, larger, with upscaled 3D: a display setting, not saved.
     #[serde(skip)]
@@ -137,6 +141,7 @@ pub(crate) struct Hardware {
     /// EXMEMCNT: GBA and DS slot ownership and timing.
     pub(crate) exmemcnt: u16,
     /// The line being drawn, 0–262.
+    #[serde(with = "payload::Below::<263>")]
     pub(crate) vcount: u16,
     /// Between HBlank and the next line's start.
     pub(crate) hblank: bool,
@@ -144,12 +149,23 @@ pub(crate) struct Hardware {
     pub(crate) capturing: bool,
     /// Raw values of I/O registers without side effects, for reading back:
     /// one 0x2000-byte page per CPU.
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::Exact::<0x2000>")]
     pub(crate) io9: Box<[u8]>,
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::Exact::<0x2000>")]
     pub(crate) io7: Box<[u8]>,
     pub(crate) scheduler: Scheduler<Event>,
 }
+
+/// The most events a state's scheduler may hold, far more than the dozen
+/// the machine ever has pending, and how long overdue one may be: events
+/// run at the end of the slice they come due in, so about not at all.
+const EVENTS_MOST: usize = 256;
+const EVENT_BEHIND: u64 = 1 << 16;
+
+/// How far a CPU's own clock, which timers and the wifi are written at,
+/// may stand ahead of the scheduler's between slices in a state: far more
+/// than the longest DMA, which is what leaves it furthest ahead.
+const CLOCK_AHEAD: u64 = 1 << 24;
 
 fn blank_screen() -> Box<[u32]> {
     vec![0xFF00_0000; 256 * 192].into_boxed_slice()
@@ -204,6 +220,59 @@ impl Hardware {
             io7: vec![0; 0x2000].into_boxed_slice(),
             scheduler: Scheduler::new(),
         }
+    }
+
+    /// Makes this hardware, read from a save state, ready to use: checks,
+    /// beyond what each field checks as it is read, that its parts are
+    /// ones the machine could have left, and works out again what follows
+    /// from the rest of the state (the VRAM map).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Malformed`] saying which part is wrong.
+    pub(crate) fn settle(&mut self) -> Result<(), StateError> {
+        payload::check(
+            self.vram.settle(),
+            "the state's video memory banks are not the DS's sizes",
+        )?;
+        payload::check(
+            self.gpu3d.in_range(),
+            "the state's 3D engine holds polygons it cannot",
+        )?;
+        payload::check(
+            self.engine_a.in_range() && self.engine_b.in_range(),
+            "the state's 2D registers hold bits they do not have",
+        )?;
+        payload::check(
+            self.sound.in_range(),
+            "the state's sound channels hold steps they cannot",
+        )?;
+        let now = self.scheduler.now();
+        payload::check(
+            self.arm9.timers.in_range(now, CLOCK_AHEAD)
+                && self.arm7.timers.in_range(now, CLOCK_AHEAD),
+            "the state's timers are not at its time",
+        )?;
+        payload::check(
+            self.arm9.dma.in_range() && self.arm7.dma.in_range(),
+            "the state's DMA channels have more left than they move",
+        )?;
+        payload::check(
+            self.cart.in_range() && self.spi.in_range(),
+            "the state's save or firmware chip is not a size its kind comes in",
+        )?;
+        payload::check(
+            self.gba_slot.in_range(),
+            "the state's GBA cartridge holds what its chips cannot",
+        )?;
+        payload::check(
+            self.wifi.in_range(now, CLOCK_AHEAD),
+            "the state's wifi frames or clock are not ones it could have",
+        )?;
+        payload::check(
+            self.scheduler.plausible(EVENTS_MOST, EVENT_BEHIND),
+            "the state's events are not ones the machine schedules",
+        )
     }
 
     /// Moves the BIOS images and the ROMs out of `other`, which is about to

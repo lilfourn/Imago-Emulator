@@ -12,6 +12,7 @@
 //! addresses, the 2D engines ([`EngineMemory`]) and the 3D engine all read
 //! through regions.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// Bytes per page: the smallest mapping unit (one extended-palette slot).
@@ -118,7 +119,7 @@ pub(crate) trait EngineMemory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Vram {
-    #[serde(with = "crate::bytes::array")]
+    #[serde(with = "payload::bytes::array")]
     banks: [Box<[u8]>; 9],
     /// VRAMCNT_A to VRAMCNT_I.
     control: [u8; 9],
@@ -196,6 +197,24 @@ impl Vram {
     /// (wrapped to its size): bit n for bank n (0 = A … 8 = I).
     pub(crate) fn banks_at(&self, region: Region, offset: u32) -> u16 {
         self.pages[region.index()][(wrap(region, offset) / PAGE) as usize]
+    }
+
+    /// Makes this memory, read from a save state, ready to use: checks
+    /// that each bank is its own size, and works out the map again from
+    /// the VRAMCNT registers, which is all it comes from, so that what a
+    /// state says of it does not matter. Returns whether the banks are
+    /// the right sizes.
+    pub(crate) fn settle(&mut self) -> bool {
+        let sized = self
+            .banks
+            .iter()
+            .zip(BANK_SIZES)
+            .all(|(bank, size)| bank.len() == size as usize);
+        for (bank, mapped) in self.mapped.iter_mut().enumerate() {
+            *mapped = mapping(bank, self.control[bank]);
+        }
+        self.rebuild();
+        sized
     }
 
     /// Writes VRAMCNT for `bank` and remaps.

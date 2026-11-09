@@ -8,6 +8,7 @@
 //! radio to tune here, so its registers only remember their values, and
 //! the exchange finishes at once (W_BB_BUSY always reads 0).
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// The registers that read back a fixed value whatever is written, and
@@ -45,6 +46,7 @@ const READ: u16 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Baseband {
+    #[serde(with = "payload::Exact::<REGISTERS>")]
     registers: Vec<u8>,
     /// W_BB_READ: the byte the last read brought back.
     read: u8,

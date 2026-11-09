@@ -68,6 +68,27 @@ impl<E> Scheduler<E> {
         }
     }
 
+    /// Whether this scheduler, read from a save state, is one a machine
+    /// could have left: at most `most` events pending, none due more than
+    /// `behind` cycles ago, and a clock with centuries left before its
+    /// counters run out.
+    ///
+    /// A machine catches up on an overdue event a period at a time, so one
+    /// due long ago would hold it for as long; and a machine that
+    /// schedules a few kinds of event never has many pending. An event
+    /// far ahead is no trouble: it waits.
+    #[must_use]
+    pub fn plausible(&self, most: usize, behind: u64) -> bool {
+        const LATEST: u64 = 1 << 62;
+        self.now < LATEST
+            && self.next_seq < LATEST
+            && self.queue.len() <= most
+            && self
+                .queue
+                .iter()
+                .all(|entry| entry.time.saturating_add(behind) >= self.now)
+    }
+
     /// The current cycle.
     #[must_use]
     pub const fn now(&self) -> u64 {
@@ -200,6 +221,21 @@ mod tests {
         std::iter::from_fn(|| sched.pop_due())
             .map(|due| due.event)
             .collect()
+    }
+
+    #[test]
+    fn a_scheduler_read_from_a_state_is_checked() {
+        let mut sched = Scheduler::new();
+        sched.advance(1_000);
+        sched.schedule_at(990, 'a');
+        sched.schedule_in(500, 'b');
+        assert!(sched.plausible(2, 10));
+        assert!(!sched.plausible(1, 10), "too many events");
+        assert!(!sched.plausible(2, 9), "one long overdue");
+        sched.schedule_at(u64::MAX, 'c');
+        assert!(sched.plausible(3, 10), "one that never comes due");
+        let late = Scheduler::<char>::restore(1 << 62, []);
+        assert!(!late.plausible(2, 10), "a clock about to run out");
     }
 
     #[test]

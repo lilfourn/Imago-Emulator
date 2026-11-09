@@ -86,6 +86,12 @@ impl Spi {
     }
 
     /// Reads SPICNT (0x040001C0).
+    /// Whether the firmware chip, read from a save state, is one the DS
+    /// could have.
+    pub(crate) fn in_range(&self) -> bool {
+        self.firmware.in_range()
+    }
+
     pub(crate) fn control(&self) -> u16 {
         self.control | if self.busy { BUSY } else { 0 }
     }

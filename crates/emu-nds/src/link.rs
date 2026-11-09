@@ -22,6 +22,8 @@ use emu_core::{
     StereoSample,
 };
 
+use emu_state::payload;
+
 use crate::debug::Checks;
 use crate::display::FRAME_CYCLES;
 use crate::machine::{Machine, Plain, Stepper};
@@ -30,6 +32,11 @@ use crate::{INFO, Nds, SCREEN};
 /// Bus cycles each console runs before the other catches up while either
 /// radio has power: about 15 µs.
 const SLICE_CYCLES: u64 = 512;
+
+/// The furthest apart a state's two clocks may be. They run slice by
+/// slice together, and the console behind runs until it has caught up,
+/// so a state that put them years apart would hold a frame as long.
+const CLOCKS_APART_MOST: u64 = 1 << 24;
 
 /// Two consoles' screens: the first's top and bottom, then the second's.
 const SCREENS: [ScreenSize; 4] = [SCREEN; 4];
@@ -167,7 +174,10 @@ impl Linked {
                     }
                     // A frame ends at VBlank, or after a frame's time if
                     // that never comes.
-                    done[index] |= progress.frame_done || machine.now() - start >= FRAME_CYCLES;
+                    // (A console a debugger stopped part-way through a
+                    // slice may be behind the frame's start.)
+                    done[index] |=
+                        progress.frame_done || machine.now().saturating_sub(start) >= FRAME_CYCLES;
                 }
                 self.carry(index);
             }
@@ -245,14 +255,18 @@ impl Core for Linked {
 
     fn save_state(&self, out: &mut Vec<u8>) {
         let machines = (&self.players[0].machine, &self.players[1].machine);
-        crate::bytes::append(&machines, out);
+        payload::append(&machines, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let (first, second): (Machine, Machine) = postcard::from_bytes(state)
-            .map_err(|_| StateError::Malformed("not a linked Nintendo DS state"))?;
-        self.players[0].check_state(&first)?;
-        self.players[1].check_state(&second)?;
+        let (mut first, mut second): (Machine, Machine) =
+            payload::load(state, "not a linked Nintendo DS state")?;
+        self.players[0].check_state(&mut first)?;
+        self.players[1].check_state(&mut second)?;
+        payload::check(
+            first.now().abs_diff(second.now()) <= CLOCKS_APART_MOST,
+            "the linked state's two consoles are not at the same time",
+        )?;
         for (nds, machine) in self.players.iter_mut().zip([first, second]) {
             nds.install(machine);
         }

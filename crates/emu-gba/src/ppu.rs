@@ -12,6 +12,7 @@
 mod render;
 
 use emu_core::rgb;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const WIDTH: usize = 240;
@@ -47,11 +48,16 @@ pub(crate) struct Signals {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Ppu {
+    #[serde(with = "payload::Exact::<0x400>")]
     palette: Box<[u8]>,
+    #[serde(with = "payload::Exact::<0x1_8000>")]
     vram: Box<[u8]>,
+    #[serde(with = "payload::Exact::<0x400>")]
     oam: Box<[u8]>,
     /// Raw register values, 0x000–0x057.
+    #[serde(with = "payload::Exact::<0x58>")]
     registers: Box<[u8]>,
+    #[serde(with = "payload::Below::<{ LINES as u64 }>")]
     vcount: u16,
     in_hblank: bool,
     /// BG2 and BG3's internal affine reference points (X, Y), 20.8 fixed
@@ -59,6 +65,7 @@ pub(crate) struct Ppu {
     /// then stepped by PB/PD after every line.
     affine_reference: [(i32, i32); 2],
     /// The frame being drawn, as `0xFFRRGGBB`.
+    #[serde(with = "payload::ExactList::<{ WIDTH * HEIGHT }>")]
     pixels: Box<[u32]>,
     frame_ready: bool,
 }

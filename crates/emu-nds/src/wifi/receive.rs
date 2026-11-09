@@ -24,6 +24,20 @@ pub(super) struct Rx {
     address: usize,
 }
 
+impl Rx {
+    /// Whether this, read from a save state, is a frame arriving as one
+    /// can: no more kept than it has, no more written than kept, into
+    /// RAM.
+    pub(super) fn in_range(&self) -> bool {
+        self.frame.in_range()
+            && self.kept <= self.frame.frame().len()
+            && self.written <= self.kept.div_ceil(2)
+            && self.address < RAM_SIZE
+            && self.start < super::TIME_END
+            && self.end < super::TIME_END
+    }
+}
+
 impl Wifi {
     /// The circular buffer's bounds as byte offsets in RAM.
     pub(super) fn ring(&self) -> (usize, usize) {

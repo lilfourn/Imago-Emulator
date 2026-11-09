@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::interrupt::irq;
@@ -49,6 +50,7 @@ struct Port {
     /// not-empty IRQ, 14 error, 15 enable.
     control: u16,
     /// Words this CPU has sent and the other has not read.
+    #[serde(with = "payload::AtMost::<FIFO_DEPTH>")]
     send: VecDeque<u32>,
     /// The last word read, returned again when the FIFO is empty.
     last_received: u32,

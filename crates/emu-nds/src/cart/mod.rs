@@ -123,7 +123,18 @@ impl Cart {
     /// since the state may hold a different save than was last flushed.
     pub(crate) fn take_rom_from(&mut self, other: &mut Self) {
         self.rom.take_data_from(&mut other.rom);
-        self.generation = other.generation + 1;
+        self.generation = other.generation.wrapping_add(1);
+    }
+
+    /// Whether this card, read from a save state, has a save chip with
+    /// memory its addresses can wrap in, and a ROM reply no further on
+    /// than it is long.
+    pub(crate) fn in_range(&self) -> bool {
+        // The longest reply ROMCTRL can ask for.
+        let transfer = self.transfer.is_none_or(|transfer| {
+            transfer.length <= 0x4000 && transfer.position <= transfer.length
+        });
+        self.backup.in_range() && transfer
     }
 
     /// The ROM image, for direct boot to load the header and binaries.
@@ -187,7 +198,7 @@ impl Cart {
     /// release too: the write that shows an unknown chip's type lands then.
     fn count_backup_change(&mut self) {
         if self.backup.take_changed() {
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 

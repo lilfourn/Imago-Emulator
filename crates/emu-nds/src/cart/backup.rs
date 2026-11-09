@@ -12,6 +12,7 @@
 //! rest through to the save chip, 08h asks for its version (AAh), and the
 //! infrared commands find nothing to receive.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use super::eeprom::Eeprom;
@@ -246,7 +247,7 @@ struct Detector {
     /// Bytes received after the instruction.
     count: u32,
     /// Those bytes, for an instruction that changes the chip.
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::bytes")]
     written: Vec<u8>,
 }
 
@@ -365,6 +366,16 @@ impl Backup {
         Self {
             chip,
             infrared: has_infrared(rom).then(Infrared::default),
+        }
+    }
+
+    /// Whether this chip, read from a save state, has memory of a size
+    /// its addresses can wrap in.
+    pub(crate) fn in_range(&self) -> bool {
+        match &self.chip {
+            Chip::Eeprom(eeprom) => eeprom.in_range(),
+            Chip::Flash(flash) => flash.in_range(),
+            Chip::Unknown(_) => true,
         }
     }
 

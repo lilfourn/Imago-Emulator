@@ -1,10 +1,13 @@
-//! Save-state container format.
+//! Save states: the container, and the payload inside it.
 //!
-//! A core writes its own state bytes ([`emu_core::Core::save_state`]); this
-//! crate wraps them in a header that says which system, core state version
-//! and ROM they belong to, an optional screenshot for slot pickers, and a
-//! checksum. Checking the header against the running game is the caller's
-//! job, so a frontend can choose to warn or refuse.
+//! A core writes its own state bytes ([`emu_core::Core::save_state`]),
+//! the payload, with the helpers in [`payload`], which also check what a
+//! core reads back. This crate wraps the payload in a header that says
+//! which system, core state version and ROM it belongs to, an optional
+//! screenshot for slot pickers, and a checksum. Checking the header
+//! against the running game is the caller's job, so a frontend can choose
+//! to warn or refuse. [`mutation`] is for the cores' tests: it loads
+//! states that are wrong in one byte.
 //!
 //! Layout of version 2, all integers little-endian:
 //!
@@ -26,6 +29,9 @@
 //!
 //! Version 1 is the same without the thumbnail fields: a 24-byte header,
 //! the payload, then the checksum. [`decode`] reads both.
+
+pub mod mutation;
+pub mod payload;
 
 use emu_core::System;
 

@@ -25,6 +25,26 @@ struct Timer {
     since: u64,
 }
 
+impl Timers {
+    /// Whether these, read from a save state whose clock is at `now`,
+    /// are timers the machine could have left: each one that counts with
+    /// time began no later than a CPU's clock runs `ahead` of `now`, and
+    /// its overflow is still to come. Overflows are handled at the end of
+    /// the slice they fall in, and a write that finds one overdue catches
+    /// up a period at a time ([`Timers::write_control`]), which for one
+    /// years overdue would never end.
+    pub(crate) fn in_range(&self, now: u64, ahead: u64) -> bool {
+        (0..4).all(|index| {
+            let timer = &self.timers[index];
+            !timer.running(index)
+                || (timer.since <= now.saturating_add(ahead)
+                    && self
+                        .overflow_time(index)
+                        .is_some_and(|time| time.saturating_add(ahead) >= now))
+        })
+    }
+}
+
 impl Timer {
     fn enabled(&self) -> bool {
         self.control & 0x80 != 0

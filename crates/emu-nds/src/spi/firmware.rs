@@ -183,6 +183,12 @@ impl Firmware {
         }
     }
 
+    /// Whether this chip, read from a save state, has memory of a size
+    /// its addresses can wrap in, with room for the header.
+    pub(crate) fn in_range(&self) -> bool {
+        self.flash.in_range() && self.flash.memory().len() >= 0x200
+    }
+
     /// Shifts one byte in and returns the byte shifted out.
     pub(crate) fn transfer(&mut self, input: u8) -> u8 {
         self.flash.transfer(input)

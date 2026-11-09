@@ -7,6 +7,7 @@
 //! Products keep their full 24-bit fractions until each sum is shifted
 //! back to 12 bits, as the hardware's multiply unit does.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// 1.0 in 20.12 fixed point.
@@ -134,6 +135,7 @@ pub(crate) struct Matrices {
     position_stack: [Matrix; 32],
     vector_stack: [Matrix; 32],
     /// 6-bit pointer; entries 31–63 are errors that mirror 0–31.
+    #[serde(with = "payload::Below::<64>")]
     position_pointer: u8,
     texture_stack: Matrix,
     texture_pointer: u8,

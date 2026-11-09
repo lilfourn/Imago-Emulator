@@ -36,6 +36,12 @@ impl Output {
         }
     }
 
+    /// Whether this output, read from a save state, writes in units the
+    /// BIOS does, with less than a unit collected.
+    fn in_range(&self) -> bool {
+        matches!(self.width, 1 | 2 | 4) && self.pending_bytes < self.width
+    }
+
     /// Whether every byte has been produced.
     pub(crate) fn done(&self) -> bool {
         self.remaining == 0
@@ -92,6 +98,23 @@ pub(crate) enum Decoder {
 }
 
 impl Decoder {
+    /// Whether this decoder and its `out`, read from a save state, hold
+    /// only counts they could have reached: the code shifts by them.
+    pub(crate) fn in_range(&self, out: &Output) -> bool {
+        let decoder = match self {
+            Self::Lz77(_) | Self::RunLength(_) => true,
+            // Symbols of up to 15 bits (a header's low nibble), less than
+            // a byte of them collected, and a tree of 512 bytes at most.
+            Self::Huffman(huffman) => {
+                huffman.symbol_bits < 16
+                    && huffman.symbols_bits < 8
+                    && huffman.tree_length <= 512
+                    && huffman.copied <= huffman.tree_length.max(1)
+            }
+        };
+        decoder && out.in_range()
+    }
+
     /// The unit it takes next.
     pub(crate) fn wants(&self) -> Unit {
         match self {

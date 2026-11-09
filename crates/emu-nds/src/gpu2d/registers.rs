@@ -101,6 +101,16 @@ pub(super) struct Registers {
 }
 
 impl Registers {
+    /// Whether these, read from a save state, hold only the bits their
+    /// writes keep where the drawing counts on it: the scroll offsets'
+    /// nine.
+    pub(super) fn in_range(&self) -> bool {
+        self.hofs
+            .iter()
+            .chain(&self.vofs)
+            .all(|&offset| offset < 0x200)
+    }
+
     pub(super) fn new(engine: Engine) -> Self {
         Self {
             dispcnt_mask: match engine {

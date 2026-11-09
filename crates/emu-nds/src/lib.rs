@@ -10,7 +10,6 @@
 mod bios;
 mod boot;
 mod bus;
-mod bytes;
 mod capture;
 mod cart;
 mod debug;
@@ -41,6 +40,7 @@ use emu_core::{
     ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge as GbaCartridge;
+use emu_state::payload;
 pub use link::Linked;
 
 use cart::Cart;
@@ -274,8 +274,10 @@ impl Nds {
         ]
     }
 
-    /// Whether a saved `machine` fits this session.
-    fn check_state(&self, machine: &Machine) -> Result<(), StateError> {
+    /// Whether a saved `machine` is one the DS could have left and fits
+    /// this session. Leaves it ready to install ([`Machine::settle`]).
+    fn check_state(&self, machine: &mut Machine) -> Result<(), StateError> {
+        machine.settle()?;
         if machine.hw.gba_slot.is_occupied() == self.machine.hw.gba_slot.is_occupied() {
             Ok(())
         } else {
@@ -386,13 +388,12 @@ impl Core for Nds {
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
-        bytes::append(&self.machine, out);
+        payload::append(&self.machine, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let machine: Machine = postcard::from_bytes(state)
-            .map_err(|_| StateError::Malformed("not a Nintendo DS state"))?;
-        self.check_state(&machine)?;
+        let mut machine: Machine = payload::load(state, "not a Nintendo DS state")?;
+        self.check_state(&mut machine)?;
         self.install(machine);
         Ok(())
     }
@@ -450,6 +451,8 @@ impl Core for Nds {
 
 #[cfg(test)]
 mod tests {
+    use emu_state::mutation;
+
     use super::*;
 
     /// A cartridge whose ARM9 and ARM7 programs each store a value in main
@@ -482,6 +485,305 @@ mod tests {
             put(0x300 + index * 4, word);
         }
         rom
+    }
+
+    /// A cartridge whose two programs each start a BIOS decompression
+    /// that reads through callbacks, Huffman on the ARM9 and LZ77 on the
+    /// ARM7, and never return from the callback that reads a byte: the
+    /// calls wait, part-way, in every state.
+    fn rom_waiting_in_the_bios() -> Vec<u8> {
+        let mut rom = vec![0; 0x400];
+        let mut put = |offset: usize, value: u32| {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        // SWI 13h with a header of 8-bit symbols, SWI 12h with an LZ77 one.
+        for (header, at, base, swi, data_header) in [
+            (0x20, 0x200, 0x0200_4000u32, 0xEF13_0000u32, 0xE3A0_0F4Au32),
+            (0x30, 0x300, 0x0238_0000, 0xEF12_0000, 0xE3A0_0E11),
+        ] {
+            put(header, at as u32);
+            put(header + 4, base);
+            put(header + 8, base);
+            put(header + 12, 0x3C);
+            let program = [
+                0xE28F_3010, // ADD R3, PC, #16  (the callbacks below)
+                0xE3A0_0000, // MOV R0, #0
+                0xE3A0_1402, // MOV R1, #0x02000000
+                0xE3A0_2402, // MOV R2, #0x02000000
+                swi,         // SWI 12h or 13h
+                0xEAFF_FFFE, // B .
+                base + 0x30, // Open
+                0,           // Close: none
+                base + 0x38, // Get_8bit
+                0,           // Get_16bit: never called
+                base + 0x38, // Get_32bit
+                0,
+                data_header, // Open: MOV R0, #header
+                0xE12F_FF1E, //       BX LR
+                0xEAFF_FFFE, // Get_8bit: B .
+            ];
+            for (index, word) in program.into_iter().enumerate() {
+                put(at + index * 4, word);
+            }
+        }
+        rom
+    }
+
+    /// Puts every part of the machine that a state holds to use, through
+    /// the registers a game would write: polygons drawn and more waiting
+    /// behind a buffer swap, half a triangle strip, sound channels
+    /// playing, words in both IPC FIFOs and timers counting.
+    fn keep_busy(nds: &mut Nds) {
+        let quad = |hw: &mut Hardware, kind: u32, corners: &[(i32, i32)]| {
+            hw.arm9_write_32(0x0400_0500, kind); // BEGIN_VTXS
+            for &(x, y) in corners {
+                // VTX_16: X and Y, then Z.
+                hw.arm9_write_32(0x0400_048C, (x as u32 & 0xFFFF) | (y as u32) << 16);
+                hw.arm9_write_32(0x0400_048C, 0);
+            }
+        };
+        let hw = &mut nds.machine.hw;
+        hw.arm9_write_16(0x0400_0304, 0x820F); // POWCNT1: everything on
+        hw.arm9_write_32(0x0400_0000, 0x0001_0108); // DISPCNT: BG0 as 3D
+        hw.arm9_write_8(0x0400_0240, 0x83); // VRAMCNT_A: textures
+        hw.arm9_write_32(0x0400_0454, 0); // MTX_IDENTITY
+        hw.arm9_write_32(0x0400_0580, 0xBFFF_0000); // VIEWPORT: the screen
+        hw.arm9_write_32(0x0400_04A4, 31 << 16 | 0xC0); // POLYGON_ATTR
+        hw.arm9_write_32(0x0400_0480, 0x7FFF); // COLOR
+        quad(
+            hw,
+            1,
+            &[
+                (-0x800, 0x800),
+                (-0x800, -0x800),
+                (0x800, -0x800),
+                (0x800, 0x800),
+            ],
+        );
+        quad(hw, 0, &[(0, 0x400), (-0x400, -0x400), (0x400, -0x400)]);
+        hw.arm9_write_32(0x0400_0540, 0); // SWAP_BUFFERS
+        // After the swap, which waits for VBlank: these stay in the FIFO.
+        quad(
+            hw,
+            2,
+            &[(0, 0), (0x200, 0), (0, 0x200), (0x200, 0x200), (0x400, 0)],
+        );
+        // Timers 0 and 3 on each CPU.
+        for timer in [0x0400_0100, 0x0400_010C] {
+            hw.arm9_write_32(timer, 0x00C0_F000);
+            hw.arm7_write_32(timer, 0x00C1_FF00);
+        }
+        // The wifi: power, its microsecond clock counting, the radio
+        // awake and listening, and a beacon timer.
+        hw.arm7_write_16(0x0400_0304, 0x0003); // POWCNT2: speakers, wifi
+        let wifi = |hw: &mut Hardware, register: u32, value: u16| {
+            hw.arm7_write_16(0x0480_8000 + register, value);
+        };
+        wifi(hw, 0x036, 0); // W_POWER_US: on
+        wifi(hw, 0x006, 2); // W_MODE_WEP
+        wifi(hw, 0x004, 1); // W_MODE_RST: wake
+        wifi(hw, 0x050, 0x4C00); // W_RXBUF_BEGIN
+        wifi(hw, 0x052, 0x5F60); // W_RXBUF_END
+        wifi(hw, 0x030, 0x8001); // W_RXCNT: receive
+        wifi(hw, 0x08C, 100); // W_BEACONINT
+        wifi(hw, 0x0EA, 1); // W_US_COMPARECNT
+        wifi(hw, 0x0E8, 1); // W_US_COUNTCNT: count
+        wifi(hw, 0x012, 0xFFFF); // W_IE
+        // IPC: both FIFOs on, three words each way.
+        hw.arm9_write_16(0x0400_0184, 0x8000);
+        hw.arm7_write_16(0x0400_0184, 0x8000);
+        for word in [0x1234_5678, 0x9ABC_DEF0, 3] {
+            hw.arm9_write_32(0x0400_0188, word);
+            hw.arm7_write_32(0x0400_0188, word);
+        }
+        // Sound: an ADPCM loop on channel 0, a square wave on 8, noise
+        // on 14, and a capture.
+        hw.arm7_write_16(0x0400_0500, 0x807F); // SOUNDCNT: master on
+        hw.arm7_write_32(0x0400_0404, 0x0200_1000); // SOUND0SAD
+        hw.arm7_write_16(0x0400_0408, 0xFE00); // SOUND0TMR
+        hw.arm7_write_32(0x0400_040C, 0x40); // SOUND0LEN
+        hw.arm7_write_32(0x0400_0400, 0xC840_007F); // SOUND0CNT: ADPCM, loop
+        hw.arm7_write_16(0x0400_0488, 0xFC00);
+        hw.arm7_write_32(0x0400_0480, 0xE340_0040); // SOUND8CNT: PSG
+        hw.arm7_write_16(0x0400_04E8, 0xFC00);
+        hw.arm7_write_32(0x0400_04E0, 0xE040_0040); // SOUND14CNT: noise
+        hw.arm7_write_32(0x0400_0510, 0x0200_2000); // SNDCAP0DAD
+        hw.arm7_write_16(0x0400_0514, 0x20); // SNDCAP0LEN
+        hw.arm7_write_8(0x0400_0508, 0x80); // SNDCAP0CNT: start
+    }
+
+    /// Loads into a DS playing `rom` the wrong states made from its own
+    /// after `frames` frames ([`mutation::try_each`]), at render scale
+    /// `scale`, and runs each it takes: a frame, the memory a debugger
+    /// reads, a save, a reset and a frame more. `busy` first puts the
+    /// whole machine to use ([`keep_busy`]).
+    fn try_wrong_states(
+        rom: &[u8],
+        (frames, busy, scale): (usize, bool, u32),
+        every: usize,
+    ) -> mutation::Outcome {
+        let mut nds = Nds::new(&Media::new(rom)).expect("valid header");
+        nds.set_render_scale(scale);
+        let mut audio = Vec::new();
+        for frame in 0..frames {
+            // Two frames before the end, so that a swap has drawn.
+            if busy && frame + 2 == frames {
+                keep_busy(&mut nds);
+            }
+            nds.run_frame(&[Input::default()], &mut audio);
+            audio.clear();
+        }
+        let mut good = Vec::new();
+        nds.save_state(&mut good);
+        nds.load_state(&good).expect("its own state loads");
+        let machine: Machine = payload::load(&good, "its own state").expect("reads");
+        if busy {
+            let list = &machine.hw.gpu3d;
+            assert!(list.polygons_drawn() >= 2, "polygons are in the state");
+            assert!(machine.hw.wifi.powered(), "the wifi is on in the state");
+        }
+        if rom == rom_waiting_in_the_bios() {
+            assert_eq!(machine.calls_waiting(), [1, 1], "BIOS calls wait");
+        }
+        mutation::try_each(&machine, every, |wrong| {
+            if nds.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            nds.run_frame(&[Input::default()], &mut audio);
+            for address in (0..0x1000_0000u32).step_by(0x7_7771) {
+                let _ = nds.peek(0, address);
+            }
+            let _ = nds.memory(MemoryRegion::MainRam);
+            let _ = nds.memory(MemoryRegion::VideoRam);
+            let _ = (nds.debug_state(), nds.debug_video(), nds.debug_wifi());
+            let mut saved = Vec::new();
+            nds.save_state(&mut saved);
+            let mut backup = Vec::new();
+            nds.save_backup(0, &mut backup);
+            nds.reset();
+            nds.run_frame(&[Input::default()], &mut audio);
+        })
+    }
+
+    /// A state with bytes after it is not that state: a linked pair's
+    /// begins with one console's, and used to load into a console on its
+    /// own, dropping the second player.
+    #[test]
+    fn a_state_with_bytes_left_over_is_refused() {
+        let rom = rom();
+        let media = Media::new(&rom);
+        let mut one = Nds::new(&media).expect("valid rom");
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let (mut alone, mut together) = (Vec::new(), Vec::new());
+        one.save_state(&mut alone);
+        pair.save_state(&mut together);
+        assert!(one.load_state(&alone).is_ok() && pair.load_state(&together).is_ok());
+        // As they are after a load, which counts as a write to the save.
+        let (mut before, mut before_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut before);
+        pair.save_state(&mut before_pair);
+        let refused =
+            |result: Result<(), StateError>| matches!(result, Err(StateError::Malformed(_)));
+        assert!(refused(one.load_state(&together)), "a pair's into one");
+        assert!(refused(pair.load_state(&alone)), "one's into a pair");
+        for state in [&mut alone, &mut together] {
+            state.push(0);
+        }
+        assert!(refused(one.load_state(&alone)), "one more byte");
+        assert!(refused(pair.load_state(&together)), "one more byte");
+        // A refused state changes nothing.
+        let (mut after, mut after_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut after);
+        pair.save_state(&mut after_pair);
+        assert!(after == before, "the console is as it was");
+        assert!(after_pair == before_pair, "the pair is as it was");
+    }
+
+    /// As [`try_wrong_states`], for two DSes playing `rom` in wireless range:
+    /// the wrong states are made from the pair's own, and each one the
+    /// pair takes runs a frame, saves, resets and runs a frame more.
+    fn try_wrong_pair_states(rom: &[u8], frames: usize, every: usize) -> mutation::Outcome {
+        let media = Media::new(rom);
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let inputs = [Input::default(); 2];
+        let mut audio = Vec::new();
+        for _ in 0..frames {
+            pair.run_frame(&inputs, &mut audio);
+            audio.clear();
+        }
+        let mut good = Vec::new();
+        pair.save_state(&mut good);
+        pair.load_state(&good).expect("its own state loads");
+        let machines: (Machine, Machine) = payload::load(&good, "its own state").expect("reads");
+        mutation::try_each(&machines, every, |wrong| {
+            if pair.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            pair.run_frame(&inputs, &mut audio);
+            let mut saved = Vec::new();
+            pair.save_state(&mut saved);
+            pair.reset();
+            pair.run_frame(&inputs, &mut audio);
+        })
+    }
+
+    /// A state that is wrong in one place is refused, or loads and runs:
+    /// it never panics or hangs the core. This tries a sample of the
+    /// places; `every_wrong_state_is_refused_or_runs` tries them all.
+    #[test]
+    fn a_wrong_state_is_refused_or_runs() {
+        let outcome = try_wrong_states(&rom_waiting_in_the_bios(), (4, true, 1), 79);
+        assert!(outcome.tried > 100, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+        let outcome = try_wrong_pair_states(&rom(), 3, 401);
+        assert!(outcome.tried > 10, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+    }
+
+    /// Every place in the states of a busy machine, at the native scale
+    /// and enlarged, and of the test ROMs, if they are there
+    /// (`scripts/fetch-test-roms.sh`), each on a thread of its own.
+    /// Several minutes.
+    #[test]
+    #[ignore = "minutes: every byte of several states' structure"]
+    fn every_wrong_state_is_refused_or_runs() {
+        let waiting = rom_waiting_in_the_bios();
+        let plain = rom();
+        let mut machines: Vec<(String, Box<dyn FnOnce() -> mutation::Outcome + Send + '_>)> = vec![
+            (
+                "busy".to_owned(),
+                Box::new(|| try_wrong_states(&waiting, (4, true, 1), 1)),
+            ),
+            (
+                "busy at 2x".to_owned(),
+                Box::new(|| try_wrong_states(&waiting, (4, true, 2), 3)),
+            ),
+            (
+                "idle".to_owned(),
+                Box::new(|| try_wrong_states(&plain, (3, false, 1), 2)),
+            ),
+        ];
+        machines.push((
+            "a linked pair".to_owned(),
+            Box::new(|| try_wrong_pair_states(&plain, 3, 3)),
+        ));
+        let roms = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-roms");
+        for (name, frames) in [
+            ("rockwrestler/rockwrestler.nds", 300),
+            ("armwrestler-ds/armwrestler.nds", 200),
+        ] {
+            let Ok(rom) = std::fs::read(roms.join(name)) else {
+                eprintln!("skipping {name}: run scripts/fetch-test-roms.sh");
+                continue;
+            };
+            machines.push((
+                name.to_owned(),
+                Box::new(move || try_wrong_states(&rom, (frames, false, 1), 2)),
+            ));
+        }
+        mutation::sweep(machines).assert_no_panics();
     }
 
     /// A halfword through [`Core::peek`].

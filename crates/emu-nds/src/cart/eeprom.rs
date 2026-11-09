@@ -10,6 +10,7 @@
 //! no pages, and the two cannot be told apart by save size, so writes here
 //! run on linearly; a game written for EEPROM never crosses a page.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 const WRITE_ENABLE: u8 = 0x06;
@@ -32,7 +33,7 @@ const IDLE: u8 = 0xFF;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Eeprom {
     /// A power-of-two size, so addresses wrap with a mask.
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::bytes")]
     memory: Vec<u8>,
     address_bytes: u32,
     write_enabled: bool,
@@ -69,6 +70,12 @@ impl Eeprom {
 
     pub(crate) fn memory(&self) -> &[u8] {
         &self.memory
+    }
+
+    /// Whether this chip, read from a save state, has memory of a size
+    /// its addresses can wrap in.
+    pub(crate) fn in_range(&self) -> bool {
+        self.memory.len().is_power_of_two()
     }
 
     /// Copies a `.sav` file's bytes in.

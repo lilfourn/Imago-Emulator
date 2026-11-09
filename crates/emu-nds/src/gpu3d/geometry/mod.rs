@@ -15,7 +15,7 @@ use self::matrix::{Matrices, Matrix};
 use super::color;
 use super::polygon::{
     MAX_POLYGON_VERTICES, MAX_POLYGONS, MAX_VERTEX_RAM, Polygon, PolygonAttr, PolygonList,
-    ScreenVertex, TextureParam,
+    SCREEN_LIMIT, ScreenVertex, TextureParam,
 };
 
 /// Sign-extends the three 10-bit fields of NORMAL, LIGHT_VECTOR, VEC_TEST,
@@ -44,6 +44,16 @@ enum Primitive {
     Quads,
     TriangleStrip,
     QuadStrip,
+}
+
+impl Primitive {
+    /// How many vertices complete a polygon.
+    const fn vertices(self) -> usize {
+        match self {
+            Self::Triangles | Self::TriangleStrip => 3,
+            Self::Quads | Self::QuadStrip => 4,
+        }
+    }
 }
 
 /// VIEWPORT, in hardware coordinates (Y counts up from the bottom).
@@ -339,12 +349,16 @@ impl Geometry {
         self.assemble();
     }
 
+    /// Whether this engine, read from a save state, is one that could
+    /// have been left: fewer vertices pending than complete a polygon,
+    /// and a polygon list the engine could have stored.
+    pub(crate) fn in_range(&self) -> bool {
+        self.pending_len < self.primitive.vertices() && self.list.in_range()
+    }
+
     /// Emits a polygon once enough vertices are pending.
     fn assemble(&mut self) {
-        let complete = match self.primitive {
-            Primitive::Triangles | Primitive::TriangleStrip => 3,
-            Primitive::Quads | Primitive::QuadStrip => 4,
-        };
+        let complete = self.primitive.vertices();
         if self.pending_len != complete {
             return;
         }
@@ -467,11 +481,12 @@ impl Geometry {
         } else {
             (viewport.x1, viewport.y1, 0, None)
         };
+        const LIMIT: i64 = SCREEN_LIMIT as i64;
         let fine_limit = 0x400 << 8;
         ScreenVertex {
-            x: screen_x.clamp(-0x400, 0x400) as i32,
+            x: screen_x.clamp(-LIMIT, LIMIT) as i32,
             // Hardware Y counts up from the bottom; rows count down.
-            y: (192 - screen_y).clamp(-0x400, 0x400) as i32,
+            y: (192 - screen_y).clamp(-LIMIT, LIMIT) as i32,
             depth: depth.clamp(0, 0xFF_FFFF) as u32,
             w: vertex.position[3],
             color: vertex.color.map(|c| c.clamp(0, 63) as u8),

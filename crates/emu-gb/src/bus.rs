@@ -6,6 +6,8 @@
 //! time, so each CPU M-cycle advances them by two clock cycles instead of
 //! four.
 
+use emu_core::StateError;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::apu::Apu;
@@ -18,6 +20,10 @@ use crate::ppu::Ppu;
 use crate::serial::Serial;
 use crate::timer::Timer;
 
+/// Where a state's clock must stop short of: the frame loop counts on it
+/// never wrapping, which from here takes thirty thousand years.
+const CLOCK_END: u64 = 1 << 62;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Bus {
     model: Model,
@@ -28,9 +34,12 @@ pub(crate) struct Bus {
     boot_rom: Option<Box<[u8]>>,
     boot_rom_mapped: bool,
     /// Eight 4 KiB banks; DMG uses the first two.
+    #[serde(with = "payload::Exact::<0x8000>")]
     wram: Box<[u8]>,
     /// SVBK: the bank at 0xD000–0xDFFF, 1 to 7.
+    #[serde(with = "payload::Below::<8>")]
     wram_bank: u8,
+    #[serde(with = "payload::Exact::<0x7F>")]
     hram: Box<[u8]>,
     pub(crate) timer: Timer,
     pub(crate) ppu: Ppu,
@@ -125,6 +134,35 @@ impl Bus {
     pub(crate) fn take_media_from(&mut self, other: &mut Self) {
         self.cartridge.take_rom_from(&mut other.cartridge);
         self.boot_rom = other.boot_rom.take();
+    }
+
+    /// Checks that this bus, read from a save state, can take the place
+    /// of `running`: beyond what each field checks as it is read, that
+    /// the sound registers and the cartridge hold what they can, that the
+    /// clock has thousands of years left to count, and that the boot ROM,
+    /// which the state leaves to the session, is there if the state has
+    /// it mapped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Malformed`] saying which of those failed.
+    pub(crate) fn fits(&self, running: &Self) -> Result<(), StateError> {
+        payload::check(
+            self.apu.in_range(),
+            "the state's sound registers hold values they cannot",
+        )?;
+        payload::check(
+            self.cartridge.in_range(),
+            "the state's cartridge has less RAM than its kind has",
+        )?;
+        payload::check(
+            self.cycles < CLOCK_END,
+            "the state's clock has all but run out",
+        )?;
+        payload::check(
+            !self.boot_rom_mapped || running.boot_rom.is_some(),
+            "the state is running a boot ROM, and there is none",
+        )
     }
 
     /// Real-time clock cycles since power-on.

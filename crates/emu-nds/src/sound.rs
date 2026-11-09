@@ -18,6 +18,7 @@
 //! at once rather than through a 16-byte FIFO.
 
 use emu_core::StereoSample;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// Memory as the sound unit sees it, the ARM7's view: channels read
@@ -64,16 +65,23 @@ struct Channel {
     source: u32,
     timer: u16,
     loop_start: u16,
+    /// SOUNDxLEN's 22 bits.
+    #[serde(with = "payload::Below::<0x40_0000>")]
     length: u32,
-    /// Timer ticks into the current sample.
+    /// Timer ticks into the current sample: less than a timer's longest
+    /// period and a sample's ticks.
+    #[serde(with = "payload::Below::<0x2_0000>")]
     ticks: u32,
-    /// Samples played since the channel started (or looped).
+    /// Samples played since the channel started (or looped). A PSG
+    /// channel's goes on counting for as long as it plays.
     position: u32,
     /// The sample being output.
     current: i16,
     /// ADPCM decoder state, and its copy at the loop start.
     adpcm_value: i16,
+    #[serde(with = "payload::Below::<89>")]
     adpcm_index: u8,
+    /// The value and the index, which is below 89 too ([`Sound::in_range`]).
     adpcm_loop: Option<(i16, u8)>,
     /// The noise generator's shift register.
     lfsr: u16,
@@ -158,13 +166,16 @@ impl Channel {
         }
         let address = self.source & 0x07FF_FFFC;
         self.current = match self.format() {
-            Format::Pcm8 => i16::from(memory.read_8(address + self.position) as i8) << 8,
+            // The sums wrap: a save state may hold any position.
+            Format::Pcm8 => {
+                i16::from(memory.read_8(address.wrapping_add(self.position)) as i8) << 8
+            }
             Format::Pcm16 => {
-                let at = address + self.position * 2;
-                i16::from_le_bytes([memory.read_8(at), memory.read_8(at + 1)])
+                let at = address.wrapping_add(self.position.wrapping_mul(2));
+                i16::from_le_bytes([memory.read_8(at), memory.read_8(at.wrapping_add(1))])
             }
             Format::Adpcm => {
-                let byte = memory.read_8(address + self.position / 2);
+                let byte = memory.read_8(address.wrapping_add(self.position / 2));
                 let nibble = if self.position.is_multiple_of(2) {
                     byte & 0xF
                 } else {
@@ -269,9 +280,12 @@ struct Capture {
     destination: u32,
     /// The buffer's length in words; 0 acts as 1.
     length: u16,
-    /// Timer ticks into the current sample.
+    /// Timer ticks into the current sample, as a channel's.
+    #[serde(with = "payload::Below::<0x2_0000>")]
     ticks: u32,
-    /// Bytes written since the capture started (or looped).
+    /// Bytes written since the capture started (or looped): within the
+    /// longest buffer.
+    #[serde(with = "payload::Below::<0x8_0000>")]
     position: u32,
 }
 
@@ -314,7 +328,7 @@ impl Capture {
     }
 
     fn record(&mut self, input: i32, memory: &mut impl Memory) {
-        let address = (self.destination + self.position) & 0x07FF_FFFF;
+        let address = self.destination.wrapping_add(self.position) & 0x07FF_FFFF;
         // Bit 3: 8-bit samples, else 16-bit.
         if self.control & 8 != 0 {
             memory.write_8(address, strip_fraction(input, 16) as u8);
@@ -322,7 +336,7 @@ impl Capture {
         } else {
             let [low, high] = (strip_fraction(input, 8) as i16).to_le_bytes();
             memory.write_8(address, low);
-            memory.write_8(address + 1, high);
+            memory.write_8(address.wrapping_add(1), high);
             self.position += 2;
         }
         if self.position >= u32::from(self.length.max(1)) * 4 {
@@ -371,6 +385,14 @@ impl Default for Sound {
 }
 
 impl Sound {
+    /// Whether the channels, read from a save state, have ADPCM steps
+    /// within the table for their loops to go back to.
+    pub(crate) fn in_range(&self) -> bool {
+        self.channels
+            .iter()
+            .all(|channel| channel.adpcm_loop.is_none_or(|(_, index)| index <= 88))
+    }
+
     /// Reads the 32-bit register at `offset` from 0x04000400.
     pub(crate) fn read(&self, offset: u32) -> u32 {
         match offset {

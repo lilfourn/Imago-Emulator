@@ -53,6 +53,13 @@ pub struct Transmission {
 }
 
 impl Transmission {
+    /// Whether this frame, read from a save state, has its TX header and
+    /// no more than the longest frame a header can give, and started at
+    /// a time the clock can reach.
+    pub(super) fn in_range(&self) -> bool {
+        (HEADER..=HEADER + 0x3FFF).contains(&self.bytes.len()) && self.start < super::TIME_END
+    }
+
     /// Microseconds each byte takes at the frame's rate.
     pub(super) fn micros_per_byte(&self) -> u64 {
         micros_per_byte(self.bytes[8])

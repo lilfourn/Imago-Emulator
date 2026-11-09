@@ -97,6 +97,14 @@ pub(super) struct Tx {
     pub(super) phase_end: u64,
 }
 
+impl Tx {
+    /// Whether this, read from a save state, is a frame the registers
+    /// could have named: a header in RAM and a 14-bit length.
+    pub(super) fn in_range(&self) -> bool {
+        self.address < RAM_SIZE && self.length <= 0x3FFF && self.phase_end < super::TIME_END
+    }
+}
+
 impl Wifi {
     /// Microseconds of preamble at `rate`: short (96) only at 2 Mbit/s and
     /// if W_PREAMBLE bit 2 asks.

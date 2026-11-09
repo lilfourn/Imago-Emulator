@@ -9,6 +9,7 @@
 
 use emu_core::StereoSample;
 use emu_psg::{Psg, Variant};
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// Output sample rate in Hz.
@@ -20,6 +21,7 @@ const CYCLES_PER_FRAME_STEP: u64 = 16_777_216 / 512;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Fifo {
+    #[serde(with = "payload::AtMost::<32>")]
     samples: std::collections::VecDeque<i8>,
     /// The sample being played.
     current: i8,
@@ -41,6 +43,7 @@ pub(crate) struct Apu {
     control: u16,
     bias: u16,
     /// Cycles into the current frame-sequencer step.
+    #[serde(with = "payload::Below::<{ CYCLES_PER_FRAME_STEP }>")]
     frame_step_cycles: u64,
     /// Samples produced but not yet collected. Not machine state.
     #[serde(skip)]
@@ -86,6 +89,12 @@ impl Apu {
             frame_step_cycles: 0,
             samples: Vec::new(),
         }
+    }
+
+    /// Whether the sound generator, read from a save state, holds only
+    /// values its registers can ([`Psg::in_range`]).
+    pub(crate) fn in_range(&self) -> bool {
+        self.psg.in_range()
     }
 
     /// Moves the samples produced so far into `out`.

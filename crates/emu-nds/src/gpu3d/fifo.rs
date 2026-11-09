@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// Entries in the FIFO proper.
@@ -82,12 +83,14 @@ pub(crate) struct Entry {
 /// The FIFO and PIPE, as one queue.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Fifo {
+    #[serde(with = "payload::AtMost::<OVERFLOW_LIMIT>")]
     entries: VecDeque<Entry>,
     /// Packed command bytes from GXFIFO still to unpack, next in the low
     /// byte.
     packed: u32,
     /// Parameters GXFIFO still expects for the packed command in the low
     /// byte of `packed`.
+    #[serde(with = "payload::Below::<33>")]
     params_left: usize,
 }
 
@@ -167,6 +170,7 @@ impl Fifo {
 pub(crate) struct Assembler {
     command: u8,
     params: [u32; 32],
+    #[serde(with = "payload::Below::<32>")]
     len: usize,
 }
 

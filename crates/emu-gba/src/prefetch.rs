@@ -47,6 +47,20 @@ pub(crate) struct Prefetch {
 const CAPACITY_BYTES: u32 = 16;
 
 impl Prefetch {
+    /// Whether this, read from a save state, is a unit as
+    /// [`Prefetch::start`] and its running leave it: opcodes of two or
+    /// four bytes, no more than fill the buffer, and reads that take a
+    /// cycle or more, the longest wait state 16.
+    pub(crate) fn in_range(&self) -> bool {
+        // As it is before the first code fetch from the cartridge.
+        let unused = !self.active && !self.fetching && self.width == 0;
+        let used = matches!(self.width, 2 | 4)
+            && self.count * self.width <= CAPACITY_BYTES
+            && (1..=64).contains(&self.duty)
+            && (1..=self.duty).contains(&self.countdown);
+        unused || used
+    }
+
     /// The address of the opcode after the buffered ones.
     fn next(&self) -> u32 {
         self.head.wrapping_add(self.count * self.width)

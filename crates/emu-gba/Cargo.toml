@@ -12,6 +12,7 @@ emu-core.workspace = true
 emu-gba-cart.workspace = true
 emu-psg.workspace = true
 emu-sched.workspace = true
+emu-state.workspace = true
 postcard.workspace = true
 serde.workspace = true
 

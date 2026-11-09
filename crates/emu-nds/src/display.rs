@@ -69,13 +69,16 @@ impl Default for ScaledScreens {
 
 impl ScaledScreens {
     /// Screens `scale` times larger showing `a` and `b`, two native
-    /// screens, enlarged.
+    /// screens, enlarged. They are a screen's size times the scale
+    /// squared whatever length `a` and `b` are; lines those lack stay
+    /// black.
     fn enlarged(scale: usize, a: &[u32], b: &[u32]) -> Self {
         if scale == 1 {
             return Self::default();
         }
+        let lines = usize::from(VISIBLE_LINES);
         let enlarge = |native: &[u32]| {
-            let mut out = vec![0; native.len() * scale * scale].into_boxed_slice();
+            let mut out = vec![0; WIDTH * lines * scale * scale].into_boxed_slice();
             let line_size = WIDTH * scale * scale;
             for (line, out) in native
                 .as_chunks()
@@ -87,7 +90,6 @@ impl ScaledScreens {
             }
             out
         };
-        let lines = usize::from(VISIBLE_LINES);
         Self {
             scale,
             a: enlarge(a),

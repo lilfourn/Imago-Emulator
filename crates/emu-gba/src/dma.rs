@@ -6,6 +6,7 @@
 //! to capture) and runs when the CPU next needs the bus, which waits; a
 //! higher-priority channel that starts meanwhile interrupts it.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// When an enabled channel starts.
@@ -59,6 +60,7 @@ pub(crate) struct Dma {
     channels: [Channel; 4],
     /// Channels that have started and wait for the bus, bit `n` for
     /// channel `n`. The bus checks this before every CPU access.
+    #[serde(with = "payload::Below::<16>")]
     pending: u8,
 }
 
@@ -77,6 +79,12 @@ impl Channel {
 
     /// Units to move, from the count register: zero means the maximum,
     /// 0x4000 (0x10000 for channel 3).
+    /// Whether this, read from a save state, has no more units to move
+    /// than the longest transfer, channel 3's 0x10000.
+    fn in_range(&self) -> bool {
+        self.current_count <= 0x1_0000 && self.current_total <= 0x1_0000
+    }
+
     fn count_for(&self, index: usize) -> u32 {
         let max = if index == 3 { 0x1_0000 } else { 0x4000 };
         match u32::from(self.count) & (max - 1) {
@@ -113,6 +121,12 @@ impl Channel {
 }
 
 impl Dma {
+    /// Whether the channels, read from a save state, have no more units
+    /// to move than a transfer can.
+    pub(crate) fn in_range(&self) -> bool {
+        self.channels.iter().all(Channel::in_range)
+    }
+
     /// Writes a register at `offset` from 0x040000B0. Returns the channel
     /// the write enabled to start at once, which the bus starts after
     /// [`START_DELAY`] with [`Dma::start`].

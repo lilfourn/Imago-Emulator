@@ -146,6 +146,10 @@ impl TextureParam {
     }
 }
 
+/// The furthest from the screen's corner, in pixels either way, that the
+/// viewport transform leaves a vertex.
+pub(crate) const SCREEN_LIMIT: i32 = 0x400;
+
 /// A vertex after clipping and the viewport transform.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ScreenVertex {
@@ -215,6 +219,27 @@ pub(crate) struct PolygonList {
 }
 
 impl PolygonList {
+    /// Whether this list, read from a save state, is one the geometry
+    /// engine could have stored: no more polygons and vertices than
+    /// their RAM holds, every polygon's vertices in the list, and every
+    /// vertex within the limits the engine clamps it to, which the
+    /// rasterizer's sums count on.
+    pub(crate) fn in_range(&self) -> bool {
+        self.polygons.len() <= MAX_POLYGONS
+            && self.vertex_ram <= MAX_VERTEX_RAM
+            && self.vertices.len() <= MAX_POLYGONS * MAX_POLYGON_VERTICES
+            && self.polygons.iter().all(|polygon| {
+                usize::from(polygon.len) <= MAX_POLYGON_VERTICES
+                    && polygon.first as usize + usize::from(polygon.len) <= self.vertices.len()
+            })
+            && self.vertices.iter().all(|vertex| {
+                vertex.x.unsigned_abs() <= SCREEN_LIMIT.unsigned_abs()
+                    && vertex.y.unsigned_abs() <= SCREEN_LIMIT.unsigned_abs()
+                    && vertex.depth <= 0xFF_FFFF
+                    && vertex.color.iter().all(|&channel| channel <= 63)
+            })
+    }
+
     /// The vertices of `polygon`, in order around its edge.
     pub(crate) fn vertices_of(&self, polygon: &Polygon) -> &[ScreenVertex] {
         let first = polygon.first as usize;

@@ -6,6 +6,7 @@
 //! always (0, 0, -1), so each light's half vector is fixed when its
 //! direction is set.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use super::matrix::ONE;
@@ -33,6 +34,7 @@ pub(crate) struct Lighting {
     emission: [u32; 3],
     shininess_enabled: bool,
     /// 128 entries, 8 fractional bits each.
+    #[serde(with = "payload::Exact::<128>")]
     shininess: Vec<u8>,
 }
 

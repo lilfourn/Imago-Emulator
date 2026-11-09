@@ -9,6 +9,8 @@
 //! ones would do nothing different.
 
 use emu_arm::{Bus, Cpu, Mode, Model, Processor, Registers, cp15, psr};
+use emu_core::StateError;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::bios::{self, Call, Decompression, Effects, Next};
@@ -20,6 +22,11 @@ use crate::dma::Timing;
 use crate::hardware::{CpuIo, Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
+
+/// The most emulated BIOS calls a state may have waiting on a game's
+/// callback, per CPU. A game has one: a callback would have to call the
+/// BIOS's decompression itself to add another.
+const SUSPENDED_MOST: usize = 16;
 
 /// The longest slice, in bus cycles.
 const SLICE_CYCLES: u64 = 64;
@@ -157,6 +164,36 @@ impl Machine {
             system_calls: [[0; 0x20]; 2],
             slice_target: None,
         }
+    }
+
+    /// Makes this machine, read from a save state, ready to use
+    /// ([`Hardware::settle`]), checking too that no CPU waits on more
+    /// decompression callbacks than a game nests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Malformed`] saying which part is wrong.
+    pub(crate) fn settle(&mut self) -> Result<(), StateError> {
+        payload::check(
+            self.suspended
+                .iter()
+                .all(|calls| calls.len() <= SUSPENDED_MOST),
+            "the state has more BIOS calls waiting than a game nests",
+        )?;
+        payload::check(
+            self.suspended
+                .iter()
+                .flatten()
+                .all(|call| call.decompression.in_range()),
+            "the state has a BIOS decompression part-way that it cannot be",
+        )?;
+        self.hw.settle()
+    }
+
+    /// How many emulated BIOS calls each CPU has waiting on a callback.
+    #[cfg(test)]
+    pub(crate) fn calls_waiting(&self) -> [usize; 2] {
+        [self.suspended[0].len(), self.suspended[1].len()]
     }
 
     /// Bus cycles since power-on, as the scheduler counts them.

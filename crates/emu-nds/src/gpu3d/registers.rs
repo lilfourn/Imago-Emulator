@@ -5,6 +5,7 @@
 //! They are write-only bytes to the CPU; [`RenderRegisters::config`]
 //! decodes them once per frame for the renderer.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 const FIRST: u32 = 0x330;
@@ -18,6 +19,7 @@ pub(crate) struct RenderRegisters {
     /// DISP3DCNT without its status bits.
     control: u16,
     /// 0x330 to 0x3BF.
+    #[serde(with = "payload::Exact::<{ (END - FIRST) as usize }>")]
     bytes: Box<[u8]>,
 }
 
