@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use sha2::{Digest, Sha256};
+use emu_os::install::{Fetch, Install, Pinned};
 use zip::ZipArchive;
 
 use crate::archive;
@@ -131,10 +131,6 @@ const JAVA: &str = if cfg!(windows) {
 /// Linux: the zips keep no permissions. Windows runs programs by their
 /// name.
 const EXECUTABLES: [&str; 3] = ["java/bin/java", "java/bin/keytool", "java/lib/jspawnhelper"];
-/// The file in the data folder an install holds locked.
-const LOCK_FILE: &str = "install.lock";
-/// How the temporary folders installs work in start.
-const TEMP_PREFIX: &str = ".install-";
 /// How long the download may take in all, in seconds.
 const DOWNLOAD_SECONDS: u32 = 1200;
 /// The most the download may be: over twice the biggest, Linux's 51 MB.
@@ -188,44 +184,42 @@ pub fn ensure(data: &Path) -> Result<Randomizer, String> {
     }
 }
 
-/// Fetches the file at a URL into a path, or says why it could not.
-type Fetch<'f> = &'f dyn Fn(&str, &Path) -> Result<(), String>;
-
 /// Installs `pin` into `data`, getting it with `fetch`, once no other
 /// install is under way. The download is checked, unpacked into a
 /// temporary folder and renamed into place, so the randomizer's folder is
-/// always whole.
+/// always whole: all as [`emu_os::install`] does it, for the 3DS core and
+/// mkxp-z too.
 fn install(data: &Path, pin: Download<'_>, fetch: Fetch<'_>) -> Result<Randomizer, String> {
     let failed = |error: io::Error| format!("Cannot install the randomizer: {error}");
-    fs::create_dir_all(data).map_err(failed)?;
-    let _lock = lock(data).map_err(failed)?;
+    let install = lock(data).map_err(failed)?;
     // Another install may have finished while this one waited.
     if let Some(randomizer) = installed(data) {
         return Ok(randomizer);
     }
-    clear_unfinished(data);
-    let temp = data.join(format!("{TEMP_PREFIX}{}", std::process::id()));
-    fs::create_dir(&temp).map_err(failed)?;
-    let result = unpack_download(&temp, pin, fetch).and_then(|unpacked| {
-        place(&unpacked, &data.join(FOLDER)).map_err(failed)?;
-        installed(data).ok_or_else(|| "The randomizer did not install whole".to_owned())
-    });
-    // What is left behind is cleared by the next install.
-    fs::remove_dir_all(&temp).ok();
-    result
+    let temp = install.temp().map_err(failed)?;
+    let unpacked = unpack_download(temp.path(), pin, fetch)?;
+    emu_os::install::place(&unpacked, &data.join(FOLDER)).map_err(failed)?;
+    installed(data).ok_or_else(|| "The randomizer did not install whole".to_owned())
 }
 
 /// Downloads `pin` into `temp`, checks it and unpacks it there, with its
-/// programs executable. Returns the unpacked folder.
+/// programs executable. Returns the unpacked folder. Nothing is unpacked
+/// from a download that does not have the pinned SHA-256: it is deleted.
 fn unpack_download(temp: &Path, pin: Download<'_>, fetch: Fetch<'_>) -> Result<PathBuf, String> {
     let zip = temp.join("randomizer.zip");
-    fetch(pin.url, &zip).map_err(|why| format!("Cannot download the randomizer: {why}"))?;
-    let found = sha256(&zip).map_err(|error| format!("Cannot read the download: {error}"))?;
-    if found != pin.sha256 {
-        return Err(format!(
-            "The randomizer's download is not the file expected (its SHA-256 is {found})"
-        ));
-    }
+    let pinned = Pinned {
+        url: pin.url,
+        sha256: pin.sha256,
+        // Only about how big it is is written here; the digest is the check.
+        size: None,
+    };
+    pinned.download(&zip, fetch).map_err(|error| match error {
+        emu_os::install::Error::Download(why) => format!("Cannot download the randomizer: {why}"),
+        emu_os::install::Error::NotPinned(differs) => {
+            format!("The randomizer's download is not the file expected ({differs})")
+        }
+        emu_os::install::Error::Io(error) => format!("Cannot read the download: {error}"),
+    })?;
     let unpacked = temp.join(FOLDER);
     unzip(&zip, &unpacked).map_err(|why| format!("Cannot unpack the randomizer: {why}"))?;
     for needed in [JAR, JAVA] {
@@ -283,36 +277,11 @@ fn make_executable(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Takes the lock on installing into `data`, waiting for any other
-/// install to finish first. It is held until the file is dropped.
-fn lock(data: &Path) -> io::Result<File> {
-    let file = File::create(data.join(LOCK_FILE))?;
-    file.lock()?;
-    Ok(file)
-}
-
-/// Removes the temporary folders of installs that never finished. Only
-/// called holding the lock, so none of them is in use.
-fn clear_unfinished(data: &Path) {
-    let Ok(entries) = fs::read_dir(data) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
-            fs::remove_dir_all(entry.path()).ok();
-        }
-    }
-}
-
-/// Moves the folder `prepared` to `target`, replacing whatever an earlier,
-/// broken install left there.
-fn place(prepared: &Path, target: &Path) -> io::Result<()> {
-    match fs::remove_dir_all(target) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    // A virus scanner may still have the programs just unpacked open.
-    crate::persist::rename(prepared, target)
+/// Takes the lock on installing into `data`, which is made if it is not
+/// there, waiting for any other install to finish first. It is held until
+/// the install is dropped.
+fn lock(data: &Path) -> io::Result<Install> {
+    Install::begin(data)
 }
 
 /// Downloads `url` into the file `to` with curl, as [`emu_os::fetch`] does
@@ -327,13 +296,6 @@ fn curl(url: &str, to: &Path) -> Result<(), String> {
         patient: true,
     };
     download.to_file(to).map_err(|error| error.to_string())
-}
-
-/// The SHA-256 of the file at `path`, in lowercase hex.
-fn sha256(path: &Path) -> io::Result<String> {
-    let mut hasher = Sha256::new();
-    io::copy(&mut File::open(path)?, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Why the program that gave `output` failed: the last line it printed as
@@ -729,6 +691,7 @@ fn file_title(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emu_os::install::{TEMP_PREFIX, sha256};
     use std::thread;
 
     /// A fresh, empty folder for `test`.
@@ -1028,6 +991,29 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX))
             .count();
         assert_eq!(leftovers, 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_install_lock_is_opened_as_it_is_not_emptied() {
+        let dir = temp_dir("install-lock");
+        let zip = fvx_zip(&dir);
+        let sha = sha256(&zip).expect("sha");
+        let url = zip.to_string_lossy();
+        let pin = Download {
+            url: &url,
+            sha256: &sha,
+            megabytes: 1,
+        };
+        let data = dir.join("Randomizer");
+        // Windows may refuse to empty a file another process holds locked,
+        // so an install must not: what is in the file shows whether it did.
+        write(&data.join("install.lock"), b"held by another install");
+        install(&data, pin, &copy).expect("install");
+        assert_eq!(
+            fs::read(data.join("install.lock")).expect("lock"),
+            b"held by another install"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

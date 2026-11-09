@@ -117,8 +117,7 @@ impl Player {
         let dir = work_dir.join(&id);
         fs::create_dir_all(&dir).map_err(Error::io(format!("making {}", dir.display())))?;
         let lock_path = dir.join("player.lock");
-        let lock = File::create(&lock_path)
-            .and_then(|lock| lock.lock().map(|()| lock))
+        let lock = emu_os::lock::lock(&lock_path)
             .map_err(Error::io(format!("locking {}", lock_path.display())))?;
         let bridge = work_dir.join("bridge.rb");
         write_if_changed(&bridge, BRIDGE)
@@ -707,6 +706,26 @@ mod tests {
         drop(first);
         assert_eq!(second.recv_timeout(Duration::from_secs(10)), Ok(true));
         waiting.join().expect("thread").expect("sent");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_game_s_player_lock_is_opened_as_it_is_not_emptied() {
+        let dir = crate::tests::temp_dir("player-lock");
+        let game = fake_game(&dir);
+        let work = dir.join("work");
+        let id = format!(
+            "{:08X}",
+            crc32fast::hash(game.as_os_str().as_encoded_bytes())
+        );
+        let lock = work.join(&id).join("player.lock");
+        fs::create_dir_all(work.join(&id)).expect("the game's folder");
+        // Windows may refuse to empty a file another process holds locked,
+        // so a player must not: what is in the file shows whether it did.
+        fs::write(&lock, b"held by another player").expect("lock");
+        let player = Player::prepare(&game, &work).expect("player");
+        assert_eq!(fs::read(&lock).expect("lock"), b"held by another player");
+        drop(player);
         fs::remove_dir_all(&dir).ok();
     }
 
