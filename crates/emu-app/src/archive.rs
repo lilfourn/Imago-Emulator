@@ -15,8 +15,8 @@
 //! Nothing unpacks without a limit. The app stops reading a game past the
 //! most a cartridge of its system holds. A program that unpacks an
 //! archive writes all of it, wanted or not, so it is stopped once it has
-//! written more than the archive lists allows, or than any game is (see
-//! [`unpack_with`]).
+//! written more than what the archive lists allows (see [`unpack_with`]);
+//! each game it unpacked is then held to its cartridge's size, as any is.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -41,10 +41,14 @@ pub const MAX_ROM: u64 = 512 << 20;
 /// The most a 3DS game unpacks to: a 3DS cartridge holds at most 4 GiB.
 pub const MAX_3DS_GAME: u64 = 4 << 30;
 
-/// The most a program that unpacks a whole archive may write: the biggest
-/// game twice over, as a 3DS game's archive often holds it as a `.3dsx`
-/// and as a `.cia`.
-const MAX_UNPACKED: u64 = 2 * MAX_3DS_GAME;
+/// The most a program that unpacks a whole archive may write, whatever
+/// the archive lists: eight of the biggest games. An archive may hold
+/// several, or one twice, as a `.3ds` and as a `.cia`.
+const MAX_UNPACKED: u64 = 32 << 30;
+
+/// The most it may write unpacking an archive that cannot be listed: the
+/// biggest game twice over.
+const MAX_UNLISTED: u64 = 2 * MAX_3DS_GAME;
 
 /// How much more than twice what an archive lists a program may write
 /// unpacking it: a listing can leave small things out.
@@ -681,10 +685,11 @@ fn unpack_with_programs(
 /// out of the size of what the archive lists. On macOS `unpacker` is the
 /// system's own `/usr/bin/tar`, libarchive's `bsdtar`, which reads both.
 ///
-/// The program unpacks the whole archive, so it is held to a size
-/// ([`unpacked_cap`]): one that lists more than any game is not started,
-/// and one that writes more than what it lists allows is stopped, and what
-/// it wrote removed.
+/// The program unpacks the whole archive, so it is held to a size as it
+/// runs ([`unpacked_cap`]): one that writes more than what the archive
+/// lists allows is stopped, and what it wrote removed. What an archive
+/// lists is never a reason not to start: it may hold several games, each
+/// of which is held to its own cartridge's size once unpacked.
 fn unpack_with(
     unpacker: &Unpacker,
     archive: &Path,
@@ -694,14 +699,6 @@ fn unpack_with(
 ) -> io::Result<Vec<PathBuf>> {
     let listed = unpacker.listed_size(archive);
     let most = unpacked_cap(listed);
-    let too_much = || {
-        too_big(Path::new(
-            archive.file_name().unwrap_or(archive.as_os_str()),
-        ))
-    };
-    if listed > most {
-        return Err(too_much());
-    }
     let work = WorkFolder::new("unpack")?;
     let scratch = work.path();
     progress.start(listed);
@@ -730,7 +727,7 @@ fn unpack_with(
                 let written = folder_size(scratch);
                 if written > most {
                     // Returning stops the program, then removes the folder.
-                    return Err(too_much());
+                    return Err(unpacked_too_much(listed));
                 }
                 progress.set(written);
                 thread::sleep(MEASURE_EVERY);
@@ -744,7 +741,7 @@ fn unpack_with(
     // One that wrote too much between two measurings, and ended.
     let written = folder_size(scratch);
     if written > most {
-        return Err(too_much());
+        return Err(unpacked_too_much(listed));
     }
     progress.set(written);
     let mut files = Vec::new();
@@ -776,15 +773,33 @@ fn unpack_with(
 /// The most a program may write unpacking an archive that lists `listed`
 /// bytes of files, or 0 if it could not be listed: twice what it lists and
 /// [`UNLISTED`] more, as a listing is no promise, and never more than
-/// [`MAX_UNPACKED`], which holds one that lists nothing too.
+/// [`MAX_UNPACKED`]; or [`MAX_UNLISTED`] for one that lists nothing.
 fn unpacked_cap(listed: u64) -> u64 {
     match listed {
-        0 => MAX_UNPACKED,
+        0 => MAX_UNLISTED,
         listed => listed
             .saturating_mul(2)
             .saturating_add(UNLISTED)
             .min(MAX_UNPACKED),
     }
+}
+
+/// Why the program unpacking an archive that lists `listed` bytes was
+/// stopped, said of the archive: it was writing more than
+/// [`unpacked_cap`] lets it. No other program is tried after it
+/// ([`io::ErrorKind::FileTooLarge`]): it would write as much again.
+fn unpacked_too_much(listed: u64) -> io::Error {
+    let said = if listed == 0 {
+        format!(
+            "it unpacks to more than {} GB, and does not list what it holds",
+            MAX_UNLISTED >> 30
+        )
+    } else if unpacked_cap(listed) == MAX_UNPACKED {
+        format!("it unpacks to more than {} GB", MAX_UNPACKED >> 30)
+    } else {
+        "it unpacks to more than twice what it lists".to_owned()
+    };
+    io::Error::new(io::ErrorKind::FileTooLarge, said)
 }
 
 /// The size of the files `tar -tv` lists in `listed`. Each file's line
@@ -1299,21 +1314,12 @@ mod tests {
             let tar = fake_tar(&dir, 5, 24);
             let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
             let error = unpacked.expect_err("too big");
-            assert_eq!(error.to_string(), "Bomb.rar is too big to be a game");
+            assert_eq!(
+                error.to_string(),
+                "it unpacks to more than twice what it lists"
+            );
             assert!(!games.exists(), "nothing of it is kept");
             assert_eq!(work_folders(), 0, "what it wrote is removed");
-            // One that lists more than any game is not even started.
-            let tar = fake_tar(&dir, 9 << 30, 1);
-            fs::remove_file(dir.join("asked-to-unpack")).expect("the first was asked");
-            let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
-            let error = unpacked.expect_err("too big");
-            assert_eq!(error.to_string(), "Bomb.rar is too big to be a game");
-            assert!(!dir.join("asked-to-unpack").exists(), "never started");
-            assert_eq!(unpacked_cap(0), 8 << 30, "unlisted: any game, twice");
-            assert_eq!(unpacked_cap(5), 10 + (16 << 20));
-            assert_eq!(unpacked_cap(3 << 30), (6 << 30) + (16 << 20));
-            assert_eq!(unpacked_cap(5 << 30), 8 << 30);
-            assert_eq!(unpacked_cap(u64::MAX), 8 << 30);
             // What it lists, it may unpack.
             let tar = fake_tar(&dir, 3 << 20, 3);
             let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
@@ -1325,6 +1331,54 @@ mod tests {
             assert_eq!(work_folders(), 0);
             fs::remove_dir_all(&dir).ok();
         }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for an unpacking program is a shell script"
+    )]
+    fn an_archive_of_several_big_games_is_unpacked_whatever_it_lists() {
+        #[cfg(unix)]
+        {
+            let _scratch = scratch_lock();
+            let dir = temp_dir("unpack-several");
+            let (games, patches) = (dir.join("Games"), dir.join("Patches"));
+            let archive = dir.join("Three games.rar");
+            fs::write(&archive, b"whatever the program makes of it").expect("written");
+            // It lists 9 GiB, as three 3 GiB 3DS games are, or a 4 GiB one
+            // as both a `.3ds` and a `.cia`. Each game is held to its own
+            // cartridge's size once unpacked; what the archive lists in all
+            // is no reason not to start. (The stand-in writes one MiB.)
+            let tar = fake_tar(&dir, 9 << 30, 1);
+            let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
+            assert_eq!(unpacked.expect("unpacks"), [games.join("Game.gb")]);
+            assert!(dir.join("asked-to-unpack").exists(), "the program ran");
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_program_may_write_twice_what_its_archive_lists_and_no_more_than_32_gib() {
+        assert_eq!(unpacked_cap(5), 10 + (16 << 20));
+        assert_eq!(unpacked_cap(3 << 30), (6 << 30) + (16 << 20));
+        assert_eq!(unpacked_cap(9 << 30), (18 << 30) + (16 << 20));
+        assert_eq!(unpacked_cap(20 << 30), 32 << 30);
+        assert_eq!(unpacked_cap(u64::MAX), 32 << 30);
+        assert_eq!(unpacked_cap(0), 8 << 30, "one that cannot be listed");
+        // Said of the archive, as it is the archive that is too much.
+        let said = |listed: u64| unpacked_too_much(listed).to_string();
+        assert_eq!(said(5), "it unpacks to more than twice what it lists");
+        assert_eq!(said(20 << 30), "it unpacks to more than 32 GB");
+        assert_eq!(
+            said(0),
+            "it unpacks to more than 8 GB, and does not list what it holds"
+        );
+        assert_eq!(
+            unpacked_too_much(5).kind(),
+            io::ErrorKind::FileTooLarge,
+            "no other program is tried after it"
+        );
     }
 
     #[test]
