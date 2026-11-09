@@ -48,7 +48,7 @@ use crate::probe;
 use crate::randomizer;
 use crate::rom_info::{self, Platform};
 use crate::romhack::{self, MakeError};
-use crate::slots::STATE_SLOTS;
+use crate::slots::{LAST_FILE_SLOT, STATE_SLOTS};
 use crate::store_view::{StoreEvent, StoreView, platform_name, pulse};
 use crate::ui::{self, Section};
 
@@ -190,6 +190,8 @@ struct Facts {
     saved: Option<SystemTime>,
     /// How many of its save-state slots hold a state.
     states: usize,
+    /// How many of the slots only a script saves to hold a state.
+    script_states: usize,
     /// Whether the randomizer can make a randomized copy of it.
     randomizable: bool,
 }
@@ -1806,10 +1808,7 @@ impl LibraryView {
         if game.platform != Platform::RpgMaker {
             lines.push((
                 "Save states",
-                read(|facts| match facts.states {
-                    0 => "None".to_owned(),
-                    states => format!("{states} of {STATE_SLOTS}"),
-                }),
+                read(|facts| states_line(facts.states, facts.script_states)),
                 TEXT,
             ));
         }
@@ -2549,6 +2548,18 @@ fn thumbnail(game: &Game, pictures: &Pictures, side: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// How many save states a game has, for its menu: `states` in the slots
+/// the player chooses, and `script_states` in those only a script saves
+/// to.
+fn states_line(states: usize, script_states: usize) -> String {
+    match (states, script_states) {
+        (0, 0) => "None".to_owned(),
+        (states, 0) => format!("{states} of {STATE_SLOTS}"),
+        (0, scripts) => format!("{scripts} from scripts"),
+        (states, scripts) => format!("{states} of {STATE_SLOTS}, and {scripts} from scripts"),
+    }
+}
+
 /// What to tell the player of the games in `library` that its file cannot
 /// hold, which `told` does not have yet: each is said once, and `told`
 /// then has it.
@@ -2588,14 +2599,17 @@ fn read_facts(game: &Game) -> Facts {
     let saved = fs::metadata(files.backup())
         .and_then(|metadata| metadata.modified())
         .ok();
-    let states = (1..=STATE_SLOTS)
-        .filter(|&slot| files.state(slot, false).is_file())
-        .count();
+    let held = |slots: std::ops::RangeInclusive<u8>| {
+        slots
+            .filter(|&slot| files.state(slot, false).is_file())
+            .count()
+    };
     Facts {
         found: true,
         size,
         saved,
-        states,
+        states: held(1..=STATE_SLOTS),
+        script_states: held(STATE_SLOTS + 1..=LAST_FILE_SLOT),
         randomizable: randomizer::generation(&game.path).is_some(),
     }
 }
@@ -2858,6 +2872,16 @@ mod tests {
         assert!(facts.saved.is_some());
         assert_eq!(facts.states, 2);
         assert!(!facts.randomizable, "not a Pokémon game");
+        // States a script saved, in slots past the player's, count apart.
+        assert_eq!(facts.script_states, 0);
+        fs::write(dir.join("Golden Sun.ss5"), [0; 8]).expect("state");
+        fs::write(dir.join("Golden Sun.ss9"), [0; 8]).expect("state");
+        let facts = read_facts(&game);
+        assert_eq!((facts.states, facts.script_states), (2, 2));
+        assert_eq!(states_line(0, 0), "None");
+        assert_eq!(states_line(2, 0), "2 of 4");
+        assert_eq!(states_line(2, 2), "2 of 4, and 2 from scripts");
+        assert_eq!(states_line(0, 1), "1 from scripts");
 
         // FireRed's game code says the randomizer knows it.
         let mut fire_red = vec![0; 2048];

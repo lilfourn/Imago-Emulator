@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use emu_core::System;
 
-use crate::slots::STATE_SLOTS;
+use crate::slots::LAST_FILE_SLOT;
 
 /// Where one game's own files go: its battery save, cheats and bindings,
 /// and the session's save states if it is the first player's.
@@ -114,10 +114,11 @@ impl GameFiles {
 
     /// Whether any of these files is there, or a battery save set aside
     /// by Start Over: a game started over keeps its names, rather than
-    /// falling back to an older plain-named save.
+    /// falling back to an older plain-named save. A state in any slot
+    /// counts, those only a script saves to as well.
     fn any_exist(&self) -> bool {
         let states =
-            (0..=STATE_SLOTS).flat_map(|slot| [self.state(slot, false), self.state(slot, true)]);
+            (0..=LAST_FILE_SLOT).flat_map(|slot| [self.state(slot, false), self.state(slot, true)]);
         [
             self.backup(),
             self.named("sav.bak"),
@@ -796,6 +797,26 @@ mod tests {
             GameFiles::of(&other).state(0, false),
             dir.join("Other.gb.ss0")
         );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_state_only_a_script_saved_keeps_the_names_too() {
+        let dir = temp_dir("persist-script-slots");
+        // Scripts may use slots 1 to 9; the app's own keys reach 1 to 4.
+        for (rom, state) in [
+            ("Nine.gb", "Nine.gb.ss9"),
+            ("Five.gb", "Five.gb.ss5"),
+            ("Linked.gb", "Linked.gb.ls7"),
+        ] {
+            let rom = dir.join(rom);
+            fs::write(&rom, b"rom").expect("write");
+            assert_eq!(GameFiles::of(&rom).backup(), rom.with_extension("sav"));
+            fs::write(dir.join(state), b"state").expect("write");
+            let mut full = rom.clone().into_os_string();
+            full.push(".sav");
+            assert_eq!(GameFiles::of(&rom).backup(), PathBuf::from(full), "{state}");
+        }
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

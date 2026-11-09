@@ -4,8 +4,14 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-/// Save-state slots, numbered from 1.
+/// Save-state slots the player can choose, numbered from 1.
 pub const STATE_SLOTS: u8 = 4;
+
+/// The last slot a state file can be in. A Lua script may save and load
+/// slots 1 to 9 (`emu.save_state`, see `emu-script`), so `.ss5` to `.ss9`
+/// are a game's files too, though only a script reaches them: what counts
+/// or looks for a game's states goes up to here.
+pub const LAST_FILE_SLOT: u8 = 9;
 
 /// A slot's screenshot and when it was saved.
 #[derive(Debug, Clone, PartialEq, Eq)]
