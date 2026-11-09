@@ -438,8 +438,8 @@ enum Upscaler {
     Starting,
     Ready(Gpu),
     /// It would not start, or failed: screens stay on the CPU path, with
-    /// Scale2x and Scale3x standing in for Pixel Art. Holds why until the
-    /// player has been told.
+    /// Scale2x and Scale3x standing in for Rounded Pixels. Holds why
+    /// until the player has been told.
     Off(Option<GpuError>),
 }
 
@@ -1933,7 +1933,6 @@ impl EmulatorView {
         .detach();
     }
 
-    /// Pauses the game and opens the game menu over it.
     /// What Guide is told about the game the keyboard plays.
     fn guide_game(&self, cx: &App) -> Option<GuideGame> {
         let session = self.session.as_ref()?;
@@ -2121,6 +2120,7 @@ impl EmulatorView {
         ))
     }
 
+    /// Pauses the game and opens the game menu over it.
     fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
@@ -4198,9 +4198,6 @@ fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
     }
 }
 
-/// How many consoles a session shows side by side, each laid out on its
-/// own: one, or each player's for linked systems with several screens
-/// each (two DSes). Single-screen consoles share one layout instead.
 /// The 3D resolution to draw `info`'s game at: the one chosen, or for
 /// Match Display, as large as `placements` show its screens on a display
 /// of `scale_factor` device pixels to a logical one. Systems without 3D
@@ -4228,6 +4225,9 @@ fn render_scale(
     }
 }
 
+/// How many consoles a session shows side by side, each laid out on its
+/// own: one, or each player's for linked systems with several screens
+/// each (two DSes). Single-screen consoles share one layout instead.
 fn consoles(info: &CoreInfo) -> usize {
     let players = info.players.max(1);
     if info.screens.len() > players {

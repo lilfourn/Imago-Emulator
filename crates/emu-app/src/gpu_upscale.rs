@@ -165,7 +165,7 @@ mod imp {
     }
 
     impl Key {
-        /// Whether this is Pixel Art beside larger 3D.
+        /// Whether this is Rounded Pixels beside larger 3D.
         fn beside_3d(self) -> bool {
             self.method == Method::Rounded && self.cell > 1
         }
@@ -186,7 +186,7 @@ mod imp {
         /// The upscaled frame copied where the CPU can read it.
         readback: Retained<ProtocolObject<dyn MTLBuffer>>,
         /// MetalFX's scaler: for [`Method::Smooth`], and for the 3D beside
-        /// Pixel Art when the output is larger than the frame.
+        /// Rounded Pixels when the output is larger than the frame.
         scaler: Option<Retained<ProtocolObject<dyn MTLFXSpatialScaler>>>,
         /// Beside larger 3D: the console pixels, alpha 0 where 3D added
         /// detail (`split_cells`), then alpha 0 near it (`near_3d`).
@@ -309,7 +309,7 @@ mod imp {
         /// command buffer that [`Gpu::finish`] waits for: the wait, not the
         /// work, is most of an upscale's time, so a frame's screens share
         /// it. A frame drawn with 3D `cell` times larger than the console's
-        /// pixels gets Pixel Art only where 3D added no detail
+        /// pixels gets Rounded Pixels only where 3D added no detail
         /// (`beside_3d.metal`). Returns false, sending nothing, while an
         /// earlier batch is still on the GPU.
         ///
