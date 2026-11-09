@@ -95,13 +95,10 @@ pub fn shrink(frame: &Frame, size: ScreenSize) -> Cow<'_, Frame> {
 /// sampling.
 pub fn upscale_bgra(frame: &Frame, factor: usize) -> Vec<u8> {
     if factor <= 1 {
-        // Filtered and upscaled-3D frames come already large; a plain
-        // conversion compiles to a fast copy.
-        return frame
-            .pixels()
-            .iter()
-            .flat_map(|pixel| pixel.to_le_bytes())
-            .collect();
+        // Filtered and upscaled-3D frames come already large: one copy.
+        // Collecting each pixel's bytes instead grew the buffer as it went,
+        // several times over for a 3DS screen at 4× (6 MB).
+        return pixel_bytes(frame.pixels());
     }
     let size = frame.size();
     let row_bytes = usize::from(size.width) * factor * 4;
@@ -119,6 +116,17 @@ pub fn upscale_bgra(frame: &Frame, factor: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+/// `pixels` as BGRA bytes, each `0xAARRGGBB` pixel's little-endian bytes,
+/// into a buffer made once at its full size: a loop the compiler turns
+/// into wide copies.
+pub fn pixel_bytes(pixels: &[u32]) -> Vec<u8> {
+    let mut bytes = vec![0; pixels.len() * 4];
+    for (out, pixel) in bytes.chunks_exact_mut(4).zip(pixels) {
+        out.copy_from_slice(&pixel.to_le_bytes());
+    }
+    bytes
 }
 
 /// A GPUI image of `frame` enlarged `factor` times.

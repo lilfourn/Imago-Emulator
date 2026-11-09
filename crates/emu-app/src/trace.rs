@@ -8,7 +8,8 @@
 //! - main: `send <buttons>` as a key's buttons go to the emulation thread;
 //!   `take <frame>` as the window takes a new frame to draw, and `drawn
 //!   <frame> <µs>` once its images are made, with the time that took;
-//!   `render` for each redraw, new frames or not.
+//!   `render` for each redraw, new frames or not; `scale <n>` as the 3D
+//!   resolution sent to the core changes.
 //! - emulation: `run <frame> <buttons> <µs>` for each frame run, numbered
 //!   as it is published, with the buttons it ran with and how long it
 //!   took; `busy <µs>` for all the work of one turn of the loop; `late

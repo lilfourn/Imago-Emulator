@@ -34,7 +34,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-gba` | Game Boy Advance: memory map, wait states and the Game Pak prefetch buffer, PPU, APU with DMA FIFOs, DMA, timers, the interrupt controller, HLE BIOS, the cartridge (`emu-gba-cart`), serial port, and the linked pair. Event-driven by `emu-sched`. |
 | `emu-nds` | Nintendo DS: two CPUs in lockstep slices over shared hardware (`hardware.rs`), each with its own memory and I/O map; VRAM banking, both 2D engines, the 3D engine, sound, DMA, timers, IPC, the maths unit, the game card, the GBA slot, SPI devices, RTC, display capture, direct boot and an HLE BIOS for both CPUs; the Wi-Fi chip (`wifi/`), and two consoles in wireless range as one linked core ([decision 0007](decisions/0007-ds-local-wireless.md)). |
 | `emu-mkxp` | RPG Maker games, such as Pokémon Essentials fan games, which mkxp-z plays. Runs the game's own Mac player app, made hidden, in a process of its own, and talks to a bridge script in it over a Unix socket: frames and buttons a step at a time, and save states that are the game's own saves. Captures its sound through OpenAL Soft's WAV writer and a FIFO, and hands it on as it comes. The player takes the app's scheduling role, so macOS's Game Mode does not throttle it ([decision 0008](decisions/0008-rpg-maker-games.md)). |
-| `emu-3ds` | Nintendo 3DS games on Azahar's libretro core, which it downloads at first use with MoltenVK, at pinned versions checked against pinned digests (`install.rs`). Runs the core in a helper process, the app's own executable started with `--3ds-helper` (`host.rs`): it gives the core a Vulkan device through MoltenVK and reads each frame back (`vulkan.rs`), cuts the picture into the two screens and answers the app a frame at a time over its stdin and stdout (`link.rs`). Reads game files' headers for titles, encryption and extdata IDs (`header.rs`), and writes out the executable an unencrypted installable title (`.cia`) holds, which the core opens in its place (`cia.rs`). The helper takes the app's scheduling role, as the RPG Maker player does ([decision 0011](decisions/0011-3ds-games.md)). |
+| `emu-3ds` | Nintendo 3DS games on Azahar's libretro core, which it downloads at first use with MoltenVK, at pinned versions checked against pinned digests (`install.rs`). Runs the core in a helper process, the app's own executable started with `--3ds-helper` (`host.rs`): it gives the core a Vulkan device through MoltenVK and reads each frame back (`vulkan.rs`), cuts the picture into the two screens and answers the app a frame at a time over its stdin and stdout (`link.rs`), leaving the screens' pixels on Unix in memory the two share (`shared_pixels.rs`): at 4× a frame is 11 MB, which through the pipe cost 2 ms a frame. Reads game files' headers for titles, encryption and extdata IDs (`header.rs`), and writes out the executable an unencrypted installable title (`.cia`) holds, which the core opens in its place (`cia.rs`). The helper takes the app's scheduling role, as the RPG Maker player does ([decision 0011](decisions/0011-3ds-games.md)). |
 | `emu-cores` | Maps a ROM to its system and constructs the core. The only crate that knows every system. |
 | `emu-cheats` | Reads cheat lists, one module per cheat device (Action Replay DS, GameShark Advance, Pro Action Replay v3, CodeBreaker, GameShark, Game Genie, raw patches), and applies them through a small `Memory` trait: `peek`, `poke`, `poke_bank` for Game Boy banks and `poke_io_16` for GBA registers. ROM patches don't run; `rom_patches` hands them back as `emu_core::RomPatch`es. Knows code formats, not cores. |
 | `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
@@ -328,14 +328,20 @@ or shader hook. Each screen is placed on whole device pixels
    Smooth is MetalFX's spatial scaler, Auto's fit for the 3DS. Rounded
    Pixels is OmniScale, which reshapes pixel art, for those who choose it.
    Smooth and Rounded Pixels only enlarge; where they would not, Sharp
-   Pixels draws the frame. All the screens of a frame together stay
+   Pixels draws the frame. Smooth shows a frame within a tenth of its
+   shown size as it is, without the GPU (`picture::shown_as_drawn`), as
+   the 3DS at 4× is on the MacBook Pro. All the screens of a frame together stay
    within 6 million pixels (`picture::MAX_UPSCALED_PIXELS`); past that
    they are drawn smaller and GPUI's linear filter enlarges the rest. On
    this M5 Max that took 1.1–1.4 ms a frame for a GB screen or two DS
    screens of about 1.5 million pixels in all. The GPU starts on a
    background thread at launch, as compiling the shader takes about
    130 ms; until then, and on a Mac without Metal, screens take the CPU
-   path;
+   path. A draw waits at most 4 ms for the GPU (`view::UPSCALE_WAIT`):
+   with other apps busy on it, one batch in a hundred took 14–30 ms. A
+   batch that takes longer stays on the GPU, the images shown stay, and
+   the view draws again once it is done, sending the newest frame then,
+   so frames wait rather than queue;
 4. otherwise the CPU filters ([decision 0005](decisions/0005-video-filters-on-the-cpu.md),
    `filter.rs`). LCD grid and scanlines take over the integer pre-scale
    and darken part of each console pixel's square of device pixels.
@@ -376,10 +382,17 @@ draws DS and 3DS 3D about as large as the screens are shown: for each
 screen, its device pixels over its console pixels, rounded up unless a
 quarter or less above a whole number, at most 2× for the DS and 4× for
 the 3DS (`picture::match_display_cap`). It keeps the speed
-asked for first (`picture::keep_speed`): every second the view compares
+asked for first (`picture::SpeedKeeper`): every second the view compares
 the frames run with the speed asked for, and if the game fell behind by
-more than 5% while running, it draws 3D a step smaller, never stepping
-back up until the speed asked for or the screens change. In Pokémon
+more than 5% two seconds in a row while running, it draws 3D a step
+smaller, unless fast-forward is so far ahead (under 1/1.6 of the speed
+reached) that drawing smaller could not catch up, as for a 3DS game at
+3×: there it keeps the picture. The second after a scale change is not
+measured, as the 3DS's core rebuilds what it draws into. After ten seconds of keeping up it tries a step larger again,
+up to the scale that matches the screens; a try the game cannot keep
+goes back at its first slow second and doubles the wait for the next,
+up to about five minutes, so a Mac busy for good settles on a scale.
+A change of speed or screens starts it afresh. In Pokémon
 Platinum's overworld the core took 3.75 ms a frame with 3D at 1×, 5.2 ms
 at 2× and 7.35 ms at 4× (headless), against 5.6 ms a frame at 3×
 fast-forward; with the check, 3× fast-forward ran at 172 frames a second
@@ -391,7 +404,11 @@ four to five cores busy and made video in other apps stutter. The DS's
 cap is 2× for that reason; its textures are pixel art, so 4× barely
 changes the picture, and 3×–8× stay a menu choice. The 3DS draws on the
 GPU and keeps 4×. The workers are half the processors
-(`gpu3d::render::workers`), so a frame never takes every core at once.
+(`gpu3d::render::workers`), so a frame never takes every core at once,
+and take the scheduling class of the thread running the core
+(`emu_os::ThreadClass`): a thread macOS starts runs at the default class
+whatever starts it, behind other apps' work, while the emulation thread
+waits for its bands at the window's class.
 The view sends the core a new render scale only when the scale changes.
 
 DS 3D upscaling is the core's job, as that decision planned. At a render

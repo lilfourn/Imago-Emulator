@@ -8,9 +8,12 @@
 //! M5 Max, more the larger the output ([research]).
 //!
 //! objc2's Metal calls are `unsafe`, so this module is the app's exception
-//! for them, as `emu-3ds` is for Vulkan. Every frame waits for its own
-//! command buffer, so the CPU never touches a texture or buffer the GPU is
-//! using.
+//! for them, as `emu-3ds` is for Vulkan. One batch of screens is on the
+//! GPU at a time ([`Gpu::submit`]), and the next is not uploaded until it
+//! has finished ([`Gpu::finish`]), so the CPU never touches a texture or
+//! buffer the GPU is using. The caller waits for a batch as long as it
+//! likes: with other apps busy on the GPU, a batch that usually takes a
+//! millisecond took up to 30, which the window should not wait out.
 //!
 //! [decision 0013]: ../../../docs/decisions/0013-upscaling-on-the-gpu.md
 //! [research]: ../../../docs/research/upscaling.md#what-was-tested
@@ -80,6 +83,7 @@ pub type Bgra = Vec<u8>;
 mod imp {
     use std::ffi::c_void;
     use std::ptr::NonNull;
+    use std::time::{Duration, Instant};
 
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
@@ -137,6 +141,15 @@ mod imp {
         device: GpuDevice,
         /// Recently used sizes, the most recent last.
         jobs: Vec<Job>,
+        /// The batch on the GPU, until [`Gpu::finish`] takes it.
+        in_flight: Option<InFlight>,
+    }
+
+    /// A batch of screens on the GPU: its commands, and its jobs' keys, in
+    /// the order the screens were asked for.
+    struct InFlight {
+        commands: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        keys: Vec<Key>,
     }
 
     /// One size of upscale: which of a frame's screens, how, the frame's
@@ -234,6 +247,7 @@ mod imp {
             Self {
                 device,
                 jobs: Vec::new(),
+                in_flight: None,
             }
         }
 
@@ -263,12 +277,41 @@ mod imp {
             Ok(images.remove(0))
         }
 
-        /// Each request's screen enlarged, as BGRA bytes, in order. They go
-        /// to the GPU in one command buffer, waited for once: the wait, not
-        /// the work, is most of an upscale's time, so a frame's screens
-        /// share it. A frame drawn with 3D `cell` times larger than the
-        /// console's pixels gets Pixel Art only where 3D added no detail
-        /// (`beside_3d.metal`).
+        /// Each request's screen enlarged, as BGRA bytes, in order:
+        /// [`Gpu::submit`], then [`Gpu::finish`] waiting as long as it takes.
+        ///
+        /// # Errors
+        ///
+        /// As [`Gpu::submit`] and [`Gpu::finish`].
+        #[cfg(test)]
+        pub fn upscale_all(&mut self, requests: &[Request<'_>]) -> Result<Vec<Bgra>, GpuError> {
+            assert!(self.submit(requests)?, "nothing else is on the GPU");
+            self.finish(None).expect("a batch was submitted")
+        }
+
+        /// Whether a batch is on the GPU, not yet taken by [`Gpu::finish`].
+        pub fn busy(&self) -> bool {
+            self.in_flight.is_some()
+        }
+
+        /// Whether the batch on the GPU has finished, for [`Gpu::finish`] to
+        /// take without waiting; false with none.
+        pub fn finished(&self) -> bool {
+            self.in_flight.as_ref().is_some_and(|in_flight| {
+                matches!(
+                    in_flight.commands.status(),
+                    MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
+                )
+            })
+        }
+
+        /// Sends each request's screen to the GPU to be enlarged, in one
+        /// command buffer that [`Gpu::finish`] waits for: the wait, not the
+        /// work, is most of an upscale's time, so a frame's screens share
+        /// it. A frame drawn with 3D `cell` times larger than the console's
+        /// pixels gets Pixel Art only where 3D added no detail
+        /// (`beside_3d.metal`). Returns false, sending nothing, while an
+        /// earlier batch is still on the GPU.
         ///
         /// # Errors
         ///
@@ -276,7 +319,10 @@ mod imp {
         /// [`GpuError::NoMetalFx`] for [`Method::Smooth`] on a GPU without
         /// MetalFX, and [`GpuError::Setup`] or [`GpuError::Failed`] if Metal
         /// fails.
-        pub fn upscale_all(&mut self, requests: &[Request<'_>]) -> Result<Vec<Bgra>, GpuError> {
+        pub fn submit(&mut self, requests: &[Request<'_>]) -> Result<bool, GpuError> {
+            if self.in_flight.is_some() {
+                return Ok(false);
+            }
             let mut keys = Vec::with_capacity(requests.len());
             for (slot, request) in requests.iter().enumerate() {
                 let (width, height) = (request.width, request.height);
@@ -320,7 +366,7 @@ mod imp {
                 // BGRA in memory, which is the texture's format and the region
                 // given, one row of `width * 4` bytes after another. The
                 // texture is in shared memory, and no command buffer is using
-                // it: each `upscale_all` waits for its own before returning.
+                // it: a batch is submitted only once the last has finished.
                 unsafe {
                     job.input.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
                         MTLRegion {
@@ -343,23 +389,63 @@ mod imp {
                 self.encode(&commands, job)?;
             }
             commands.commit();
-            commands.waitUntilCompleted();
+            self.in_flight = Some(InFlight { commands, keys });
+            Ok(true)
+        }
+
+        /// The submitted batch's screens, as BGRA bytes in the order asked
+        /// for, once the GPU has finished them: waiting up to `wait` for
+        /// that, or with `None` as long as it takes. `None` if nothing was
+        /// submitted, or it is not finished in time; it stays on the GPU
+        /// for a later call to take.
+        ///
+        /// # Errors
+        ///
+        /// [`GpuError::Failed`] if the GPU reported an error running it.
+        pub fn finish(&mut self, wait: Option<Duration>) -> Option<Result<Vec<Bgra>, GpuError>> {
+            let in_flight = self.in_flight.as_ref()?;
+            let done = |commands: &ProtocolObject<dyn MTLCommandBuffer>| {
+                matches!(
+                    commands.status(),
+                    MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
+                )
+            };
+            match wait {
+                None => in_flight.commands.waitUntilCompleted(),
+                Some(wait) => {
+                    let deadline = Instant::now() + wait;
+                    while !done(&in_flight.commands) {
+                        if Instant::now() >= deadline {
+                            return None;
+                        }
+                        // A tenth of a millisecond's nap: Metal's own wait
+                        // has no time limit.
+                        std::thread::sleep(Duration::from_micros(100));
+                    }
+                }
+            }
+            let InFlight { commands, keys } = self.in_flight.take()?;
             if commands.status() != MTLCommandBufferStatus::Completed {
                 let why = commands.error().map_or_else(
                     || "unknown error".to_owned(),
                     |error| error.localizedDescription().to_string(),
                 );
-                return Err(GpuError::Failed(why));
+                return Some(Err(GpuError::Failed(why)));
             }
-            Ok(jobs
+            Some(Ok(keys
                 .iter()
-                .map(|job| {
+                .map(|key| {
+                    let job = self
+                        .jobs
+                        .iter()
+                        .find(|job| job.key == *key)
+                        .expect("no job goes while its batch is on the GPU");
                     let output = to_size(job.key.output);
                     let length = output.width * output.height * 4;
                     // SAFETY: `readback` is a shared buffer of `length` bytes,
                     // which the finished command buffer wrote; nothing writes
-                    // it until the next `upscale_all`, and the slice is copied
-                    // out at once.
+                    // it until the next batch is submitted, and the slice is
+                    // copied out at once.
                     let bytes = unsafe {
                         std::slice::from_raw_parts(
                             job.readback.contents().as_ptr().cast::<u8>(),
@@ -368,7 +454,7 @@ mod imp {
                     };
                     bytes.to_vec()
                 })
-                .collect())
+                .collect()))
         }
 
         /// Encodes `job`'s passes into `commands`: its upscale, then the copy
@@ -693,14 +779,34 @@ mod imp {
         }
 
         /// Never called: there is no device to make a [`Gpu`] on.
-        pub fn upscale_all(&mut self, _requests: &[Request<'_>]) -> Result<Vec<Bgra>, GpuError> {
+        pub fn submit(&mut self, _requests: &[Request<'_>]) -> Result<bool, GpuError> {
             Err(GpuError::NoDevice)
+        }
+
+        /// Never called, as [`Gpu::submit`].
+        pub fn finish(
+            &mut self,
+            _wait: Option<std::time::Duration>,
+        ) -> Option<Result<Vec<Bgra>, GpuError>> {
+            None
+        }
+
+        /// Never busy.
+        pub fn busy(&self) -> bool {
+            false
+        }
+
+        /// Never finished, as never busy.
+        pub fn finished(&self) -> bool {
+            false
         }
     }
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use emu_core::{ScreenSize, rgb};
 
@@ -717,6 +823,45 @@ mod tests {
     fn pixel(bytes: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
         let at = ((y * width + x) * 4) as usize;
         bytes[at..at + 4].try_into().expect("four bytes")
+    }
+
+    #[test]
+    fn one_batch_is_on_the_gpu_at_a_time() {
+        let Some(mut gpu) = gpu() else { return };
+        let mut frame = Frame::new(ScreenSize::new(16, 12));
+        frame.pixels_mut().fill(rgb(10, 20, 30));
+        let request = Request {
+            frame: &frame,
+            method: Method::Sharp,
+            cell: 1,
+            width: 64,
+            height: 48,
+        };
+        assert!(!gpu.busy());
+        assert!(gpu.finish(Some(Duration::ZERO)).is_none(), "nothing sent");
+        assert!(gpu.submit(&[request]).unwrap());
+        assert!(gpu.busy());
+        // A second batch waits for the first to be taken.
+        assert!(!gpu.submit(&[request]).unwrap());
+        let bytes = gpu.finish(None).expect("sent").expect("upscaled");
+        assert_eq!(bytes[0].len(), 64 * 48 * 4);
+        assert_eq!(&bytes[0][..4], &[30, 20, 10, 255]);
+        assert!(!gpu.busy() && !gpu.finished());
+        // Taken with a time limit: finished within a second, or still on
+        // the GPU for the next try.
+        assert!(gpu.submit(&[request]).unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let taken = loop {
+            if let Some(taken) = gpu.finish(Some(Duration::from_millis(1))) {
+                break taken;
+            }
+            assert!(gpu.busy(), "a batch not taken stays on the GPU");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the GPU never finished"
+            );
+        };
+        assert_eq!(taken.expect("upscaled")[0].len(), 64 * 48 * 4);
     }
 
     #[test]

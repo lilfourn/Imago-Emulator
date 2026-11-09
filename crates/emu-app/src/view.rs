@@ -53,7 +53,7 @@ use crate::filter::Filter;
 use crate::fonts;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
 use crate::gamepad::{self, PadEvent};
-use crate::gpu_upscale::{Gpu, GpuDevice, GpuError, Method, Request};
+use crate::gpu_upscale::{Bgra, Gpu, GpuDevice, GpuError, Method, Request};
 use crate::guide::{self, GuideEvent, GuideGame, GuidePanel};
 use crate::key_guide;
 use crate::key_routes::{KeyRoutes, Route};
@@ -150,6 +150,9 @@ pub struct EmulatorView {
     picture: Picture,
     /// The GPU half of the upscaler, started when a picture first needs it.
     upscaler: Upscaler,
+    /// Draws again once the upscaler finishes screens it took too long
+    /// over to wait for.
+    upscale_wake: Option<Task<()>>,
     /// What fills the window around the screens.
     backdrop: Backdrop,
     /// Whether the speed readout shows in the window's corner.
@@ -281,14 +284,19 @@ struct Session {
     correction: Option<Correction>,
     /// Whether the emulation thread is recording a movie.
     recording: bool,
-    /// Per placement: the image drawn there and what it shows.
+    /// Per placement: the image drawn there and what it shows. An image
+    /// stays until the next is drawn, which the upscaler may finish a
+    /// frame or so later.
     images: Vec<Option<(ImageKey, Arc<RenderImage>)>>,
+    /// The screens on the upscaler's GPU, in the order sent.
+    upscaling: Vec<Upscaling>,
     /// The 3D resolution last sent to the core.
     render_scale: u32,
     /// Match Display's check that the game keeps its speed: the most it
     /// may draw 3D at now, what it was set for (the scale matching the
-    /// screens and the speed asked for; a change starts it again at the
-    /// cap), and when the speed was last measured, with the frames run then.
+    /// screens and the speed asked for; a change starts it again at that
+    /// scale), and when the speed was last measured, with the frames run
+    /// then.
     keeping: Keeping,
     /// The ambient backdrop, while it is shown.
     ambient: Option<Glow>,
@@ -305,8 +313,8 @@ struct Session {
     _audio: Option<AudioOutput>,
 }
 
-/// What an image shows: a screen, turned, in a look, for a place on the
-/// window so many device pixels across.
+/// What an image shows: a screen of a frame, turned, in a look, for a
+/// place on the window so many device pixels across.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ImageKey {
     screen: usize,
@@ -314,23 +322,62 @@ struct ImageKey {
     look: Look,
     /// The placement's size in device pixels.
     target: (u32, u32),
+    /// The frames' sequence number ([`Session::sequence`]).
+    sequence: u64,
+}
+
+impl ImageKey {
+    /// A key no placement wants, for an image shown only until one drawn
+    /// as now replaces it.
+    fn stale(self) -> Self {
+        Self {
+            target: (0, 0),
+            ..self
+        }
+    }
+
+    /// Whether an image for `self` may stand in for one for `wanted`
+    /// until that is drawn: the same screen, look and size, from a frame
+    /// no older than `shown`'s, the image there now, if any.
+    fn stands_in(self, wanted: Self, shown: Option<Self>) -> bool {
+        let same = |key: Self| {
+            Self {
+                sequence: wanted.sequence,
+                ..key
+            } == wanted
+        };
+        same(self) && shown.is_none_or(|shown| !same(shown) || shown.sequence < self.sequence)
+    }
+}
+
+/// A screen sent to the upscaler: where it goes, what it shows, and its
+/// size in device pixels.
+#[derive(Debug, Clone, Copy)]
+struct Upscaling {
+    index: usize,
+    key: ImageKey,
+    size: (u32, u32),
 }
 
 /// Match Display's check that the game keeps the speed asked for
-/// ([`picture::keep_speed`]).
+/// ([`picture::SpeedKeeper`]).
 struct Keeping {
-    ceiling: u32,
+    keeper: picture::SpeedKeeper,
     set_for: Option<(u32, Speed)>,
     measured: Option<(Instant, u64)>,
+    /// The scale just changed: the first second after is not measured, as
+    /// the 3DS's core rebuilds what it draws into, a hitch of its own.
+    settling: bool,
 }
 
 impl Keeping {
-    /// Starting from `cap`, the system's [`picture::match_display_cap`].
-    fn new(cap: u32) -> Self {
+    /// Starting from `most`, the scale that matches the screens.
+    fn new(most: u32) -> Self {
         Self {
-            ceiling: cap,
+            keeper: picture::SpeedKeeper::new(most),
             set_for: None,
             measured: None,
+            settling: false,
         }
     }
 }
@@ -342,7 +389,7 @@ impl Session {
     fn keep_speed(&mut self, matched: u32, speed: Speed) -> u32 {
         let keeping = &mut self.keeping;
         if keeping.set_for != Some((matched, speed)) {
-            *keeping = Keeping::new(picture::match_display_cap(self.info.system));
+            *keeping = Keeping::new(matched);
             keeping.set_for = Some((matched, speed));
         }
         let now = Instant::now();
@@ -357,14 +404,15 @@ impl Session {
                     Speed::Unlimited => None,
                     Speed::Times(rate) => Some(normal * rate.get()),
                 };
-                keeping.ceiling =
-                    picture::keep_speed(keeping.ceiling, self.render_scale, ran, wanted, normal);
+                if !std::mem::take(&mut keeping.settling) {
+                    keeping.keeper.check(self.render_scale, ran, wanted, normal);
+                }
                 keeping.measured = Some((now, frames));
             }
             Some(_) => {}
             None => keeping.measured = Some((now, frames)),
         }
-        matched.min(keeping.ceiling)
+        matched.min(keeping.keeper.ceiling())
     }
 }
 
@@ -381,37 +429,70 @@ enum Upscaler {
     Off(Option<GpuError>),
 }
 
+/// What became of screens sent to the upscaler.
+enum Sent {
+    /// They are on the GPU.
+    Yes,
+    /// The GPU is starting or off: the CPU draws them.
+    Unavailable,
+    /// The last batch is still on the GPU: the screens shown stay until it
+    /// is taken, and these are sent with the next frame.
+    Busy,
+}
+
+/// How long a draw waits for the upscaler before showing what it showed
+/// last and taking the new screens once they are done. On an M5 Max a
+/// frame's screens usually take 0.5–2.5 ms; with other apps busy on the
+/// GPU, one in a hundred took 14–30 ms, and waiting that out made the
+/// window miss refreshes.
+const UPSCALE_WAIT: Duration = Duration::from_millis(4);
+
 impl Upscaler {
-    /// An image of each request's screen, upscaled together, or `None`
-    /// while the GPU is starting or once it is off.
+    /// Sends `requests` to the GPU, to be taken with [`Upscaler::take`].
     ///
     /// # Errors
     ///
     /// The [`GpuError`] that turned it off, once.
-    fn images(
-        &mut self,
-        requests: &[Request<'_>],
-    ) -> Result<Option<Vec<Arc<RenderImage>>>, GpuError> {
+    fn send(&mut self, requests: &[Request<'_>]) -> Result<Sent, GpuError> {
         match self {
-            Self::Ready(_) if requests.is_empty() => Ok(Some(Vec::new())),
-            Self::Ready(gpu) => match gpu.upscale_all(requests) {
-                Ok(images) => Ok(Some(
-                    requests
-                        .iter()
-                        .zip(images)
-                        .map(|(request, bgra)| {
-                            video::bgra_image(request.width, request.height, bgra)
-                        })
-                        .collect(),
-                )),
+            Self::Ready(gpu) => match gpu.submit(requests) {
+                Ok(true) => Ok(Sent::Yes),
+                Ok(false) => Ok(Sent::Busy),
                 Err(error) => {
                     *self = Self::Off(None);
                     Err(error)
                 }
             },
-            Self::Off(untold) => untold.take().map_or(Ok(None), Err),
-            Self::Idle | Self::Starting => Ok(None),
+            Self::Off(untold) => untold.take().map_or(Ok(Sent::Unavailable), Err),
+            Self::Idle | Self::Starting => Ok(Sent::Unavailable),
         }
+    }
+
+    /// The batch on the GPU's screens, as BGRA bytes in the order sent, if
+    /// it finishes within `wait`.
+    ///
+    /// # Errors
+    ///
+    /// The [`GpuError`] that turned it off.
+    fn take(&mut self, wait: Duration) -> Option<Result<Vec<Bgra>, GpuError>> {
+        let Self::Ready(gpu) = self else {
+            return None;
+        };
+        let taken = gpu.finish(Some(wait))?;
+        if taken.is_err() {
+            *self = Self::Off(None);
+        }
+        Some(taken)
+    }
+
+    /// Whether a batch is on the GPU.
+    fn busy(&self) -> bool {
+        matches!(self, Self::Ready(gpu) if gpu.busy())
+    }
+
+    /// Whether the batch on the GPU is done, to take without waiting.
+    fn finished(&self) -> bool {
+        matches!(self, Self::Ready(gpu) if gpu.finished())
     }
 
     fn is_off(&self) -> bool {
@@ -567,6 +648,7 @@ impl EmulatorView {
             color_correction: true,
             picture: Picture::default(),
             upscaler: Upscaler::Idle,
+            upscale_wake: None,
             backdrop: Backdrop::default(),
             show_fps: false,
             speed_readout: None,
@@ -860,8 +942,9 @@ impl EmulatorView {
             correction: Correction::for_system(info.system),
             recording: false,
             images: Vec::new(),
+            upscaling: Vec::new(),
             render_scale,
-            keeping: Keeping::new(picture::match_display_cap(info.system)),
+            keeping: Keeping::new(render_scale),
             ambient: None,
             display: None,
             taken_at: None,
@@ -2820,11 +2903,15 @@ impl EmulatorView {
     }
 
     /// Rebuilds every screen's image at the next render, after a change
-    /// in how frames become images.
+    /// in how frames become images. The images shown stay until the new
+    /// ones replace them, which on a busy GPU can take a frame or two;
+    /// a batch already on the GPU was made the old way, so it is dropped.
     fn rebuild_images(&mut self) {
         if let Some(session) = &mut self.session {
-            let images = session.images.iter_mut().filter_map(Option::take);
-            self.stale_images.extend(images.map(|(_, image)| image));
+            for (key, _) in session.images.iter_mut().flatten() {
+                *key = key.stale();
+            }
+            session.upscaling.clear();
             self.stale_images
                 .extend(session.ambient.take().map(|glow| glow.image));
         }
@@ -2941,18 +3028,53 @@ impl Session {
             .collect()
     }
 
-    /// Takes the emulation thread's latest frames, if they are new,
-    /// retiring every screen image drawn from the last ones. The ambient
-    /// backdrop fades over to them instead.
-    fn take_frames(&mut self, window: &mut Window) {
+    /// Takes the emulation thread's latest frames, if they are new. The
+    /// screen images drawn from the last ones stay until images of these
+    /// replace them ([`Session::refresh_images`]), and the ambient
+    /// backdrop fades over to them.
+    fn take_frames(&mut self) {
         let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) else {
             return;
         };
         self.sequence = sequence;
         self.taken_at = Some(Instant::now());
-        for (_, image) in self.images.iter_mut().filter_map(Option::take) {
-            window.drop_image(image).ok();
+    }
+
+    /// Puts the upscaler's finished screens, `taken`, where they were
+    /// sent for, wherever each still stands in for what `wanted` there
+    /// ([`ImageKey::stands_in`]). Returns the GPU's error if it failed.
+    fn place_upscaled(
+        &mut self,
+        taken: Option<Result<Vec<Bgra>, GpuError>>,
+        wanted: &[Option<ImageKey>],
+        window: &mut Window,
+    ) -> Option<GpuError> {
+        let images = match taken? {
+            Ok(images) => images,
+            Err(error) => {
+                self.upscaling.clear();
+                return Some(error);
+            }
+        };
+        // A batch sent for another game, or before the screens were
+        // rebuilt, has nothing here to stand in for.
+        for (sent, bgra) in std::mem::take(&mut self.upscaling).into_iter().zip(images) {
+            let Some(Some(wanted)) = wanted.get(sent.index) else {
+                continue;
+            };
+            let slot = &mut self.images[sent.index];
+            if !sent
+                .key
+                .stands_in(*wanted, slot.as_ref().map(|(key, _)| *key))
+            {
+                continue;
+            }
+            let image = video::bgra_image(sent.size.0, sent.size.1, bgra);
+            if let Some((_, old)) = slot.replace((sent.key, image)) {
+                window.drop_image(old).ok();
+            }
         }
+        None
     }
 
     /// Brings the images up to date with how each placement draws its
@@ -2960,8 +3082,13 @@ impl Session {
     /// the GPU to the placement's exact size in device pixels, or filtered
     /// and enlarged by a whole factor on the CPU.
     ///
+    /// The GPU is waited for up to [`UPSCALE_WAIT`]. A batch that takes
+    /// longer stays on it, the images shown stay, and a later draw puts
+    /// it in place; meanwhile newer frames wait rather than queue.
+    ///
     /// Returns the GPU's error the moment it fails, after which screens
-    /// stay on the CPU.
+    /// stay on the CPU, and whether a batch is still on the GPU, for the
+    /// view to draw again when it is done.
     fn refresh_images(
         &mut self,
         placements: &[Placement],
@@ -2970,7 +3097,7 @@ impl Session {
         picture: Picture,
         upscaler: &mut Upscaler,
         window: &mut Window,
-    ) -> Option<GpuError> {
+    ) -> (Option<GpuError>, bool) {
         // One image per placement, so the layout decides how many.
         if self.images.len() > placements.len() {
             for (_, image) in self.images.drain(placements.len()..).flatten() {
@@ -2978,7 +3105,6 @@ impl Session {
             }
         }
         self.images.resize(placements.len(), None);
-        let correction = self.correction.as_ref().filter(|_| color_correction);
         let look = picture.look(self.info.system);
         let targets: Vec<(u32, u32)> = placements
             .iter()
@@ -2987,30 +3113,33 @@ impl Session {
             })
             .collect();
         let drawn = picture::within_budget(&targets, picture::MAX_UPSCALED_PIXELS);
+        // What each placement should show now.
+        let wanted: Vec<Option<ImageKey>> = placements
+            .iter()
+            .zip(&targets)
+            .map(|(placement, &target)| {
+                self.frames.get(placement.screen).map(|_| ImageKey {
+                    screen: placement.screen,
+                    rotation: placement.rotation,
+                    look,
+                    target,
+                    sequence: self.sequence,
+                })
+            })
+            .collect();
+        // An earlier batch the GPU has finished meanwhile.
+        let mut failed = self.place_upscaled(upscaler.take(Duration::ZERO), &wanted, window);
+        let correction = self.correction.as_ref().filter(|_| color_correction);
 
         // The screens to draw again, each frame colour corrected and turned.
         let mut redraws = Vec::new();
-        for (index, ((slot, placement), &target)) in self
-            .images
-            .iter_mut()
-            .zip(placements)
-            .zip(&targets)
-            .enumerate()
-        {
-            let Some(frame) = self.frames.get(placement.screen) else {
+        for (index, (slot, placement)) in self.images.iter().zip(placements).enumerate() {
+            let (Some(frame), Some(key)) = (self.frames.get(placement.screen), wanted[index])
+            else {
                 continue;
-            };
-            let key = ImageKey {
-                screen: placement.screen,
-                rotation: placement.rotation,
-                look,
-                target,
             };
             if slot.as_ref().is_some_and(|(built, _)| *built == key) {
                 continue;
-            }
-            if let Some((_, stale)) = slot.take() {
-                window.drop_image(stale).ok();
             }
             // Frames drawn at a higher 3D resolution have several pixels
             // to each console pixel.
@@ -3028,7 +3157,8 @@ impl Session {
 
         // Drawn together on the GPU, each at its exact size. Sharp Pixels
         // draws any frame at any size. Smooth and Rounded Pixels only
-        // enlarge: Smooth the frame itself, Rounded the console's pixels,
+        // enlarge: Smooth the frame itself, unless it is about as large
+        // already, when it is shown as it is; Rounded the console's pixels,
         // which on a frame with larger 3D it works on beside the 3D; where
         // they would not enlarge, Sharp Pixels draws the frame instead.
         let requests: Vec<(usize, Request<'_>)> = redraws
@@ -3044,6 +3174,12 @@ impl Session {
                 let enlarges = |(across, down): (u16, u16)| {
                     width > u32::from(across) && height > u32::from(down)
                 };
+                if method == Method::Smooth
+                    && picture::shown_as_drawn((shown.width, shown.height), (width, height))
+                {
+                    // Shown as it is, without a trip to the GPU.
+                    return None;
+                }
                 let method = match method {
                     Method::Rounded if !enlarges((shown.width / cell, shown.height / cell)) => {
                         Method::Sharp
@@ -3064,32 +3200,63 @@ impl Session {
             })
             .collect();
         let gpu_requests: Vec<Request<'_>> = requests.iter().map(|(_, request)| *request).collect();
-        let mut failed = None;
-        let mut upscaled: Vec<Option<Arc<RenderImage>>> = vec![None; redraws.len()];
-        match upscaler.images(&gpu_requests) {
-            Ok(Some(images)) => {
-                for ((at, _), image) in requests.iter().zip(images) {
-                    upscaled[*at] = Some(image);
+        // Whether each redraw is the GPU's: sent, or waiting for the batch
+        // before it.
+        let mut on_gpu = vec![false; redraws.len()];
+        let mut sent = false;
+        if !gpu_requests.is_empty() {
+            match upscaler.send(&gpu_requests) {
+                Ok(Sent::Yes) => {
+                    sent = true;
+                    self.upscaling = requests
+                        .iter()
+                        .map(|(at, request)| Upscaling {
+                            index: redraws[*at].0,
+                            key: redraws[*at].1,
+                            size: (request.width, request.height),
+                        })
+                        .collect();
+                    for (at, _) in &requests {
+                        on_gpu[*at] = true;
+                    }
                 }
+                Ok(Sent::Busy) => {
+                    for (at, _) in &requests {
+                        on_gpu[*at] = true;
+                    }
+                }
+                Ok(Sent::Unavailable) => {}
+                Err(error) => failed = Some(error),
             }
-            Ok(None) => {}
-            Err(error) => failed = Some(error),
         }
 
         // The rest on the CPU: filtered, then enlarged by a whole factor.
-        for ((index, key, frame, cell), upscaled) in redraws.into_iter().zip(upscaled) {
-            let image = upscaled.unwrap_or_else(|| {
-                let width = frame.size().width;
-                let factor =
-                    video::prescale_factor(width, placements[index].rect.width, scale_factor);
-                let filter = cpu_filter(key.look, factor, upscaler.is_off());
-                let (filtered, factor) =
-                    filter.apply(&frame, factor, usize::from(cell), key.rotation);
-                video::render_image(&filtered, factor)
-            });
-            self.images[index] = Some((key, image));
+        // A place the GPU is drawing for that shows nothing yet, as one the
+        // layout just added, gets the CPU's picture meanwhile, under a key
+        // the GPU's replaces.
+        for ((index, key, frame, cell), on_gpu) in redraws.into_iter().zip(on_gpu) {
+            if on_gpu && self.images[index].is_some() {
+                continue;
+            }
+            let width = frame.size().width;
+            let factor = video::prescale_factor(width, placements[index].rect.width, scale_factor);
+            let filter = cpu_filter(key.look, factor, upscaler.is_off());
+            let (filtered, factor) = filter.apply(&frame, factor, usize::from(cell), key.rotation);
+            let image = video::render_image(&filtered, factor);
+            let key = if on_gpu { key.stale() } else { key };
+            if let Some((_, old)) = self.images[index].replace((key, image)) {
+                window.drop_image(old).ok();
+            }
         }
-        failed
+
+        // The batch just sent, if the GPU finishes it soon enough. A batch
+        // from before is not waited for: once it is done, the view draws
+        // again and sends these screens then.
+        if sent {
+            let taken = upscaler.take(UPSCALE_WAIT);
+            failed = failed.or(self.place_upscaled(taken, &wanted, window));
+        }
+        (failed, upscaler.busy())
     }
 
     /// Brings the ambient backdrop up to date with the screens as
@@ -3419,10 +3586,13 @@ impl Render for EmulatorView {
                 scale = session.keep_speed(scale, self.speeds.speed(self.sent.pace));
             }
             if scale != session.render_scale {
+                trace::event("scale", &[u64::from(scale)]);
                 session.render_scale = scale;
                 session.emulator.send(Command::SetRenderScale(scale));
-                // Measure the speed afresh at the new scale.
+                // Measure the speed afresh at the new scale, once it has
+                // settled.
                 session.keeping.measured = None;
+                session.keeping.settling = true;
             }
             // Frames keep in step with the refreshes of the display the
             // window is on.
@@ -3434,11 +3604,12 @@ impl Render for EmulatorView {
             }
             let refreshing = Instant::now();
             let seen = session.sequence;
-            session.take_frames(window);
+            session.take_frames();
             if session.sequence != seen {
                 trace::event("take", &[session.sequence]);
             }
-            upscaler_failed = session.refresh_images(
+            let upscaling;
+            (upscaler_failed, upscaling) = session.refresh_images(
                 &self.placements,
                 scale_factor,
                 self.color_correction,
@@ -3446,6 +3617,30 @@ impl Render for EmulatorView {
                 &mut self.upscaler,
                 window,
             );
+            if upscaling && self.upscale_wake.is_none() {
+                self.upscale_wake = Some(cx.spawn(async move |this, cx| {
+                    // Draws again once the GPU has finished the screens it
+                    // has, checking every millisecond.
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1))
+                            .await;
+                        let done = this
+                            .update(cx, |view, cx| {
+                                let done = !view.upscaler.busy() || view.upscaler.finished();
+                                if done {
+                                    view.upscale_wake = None;
+                                    cx.notify();
+                                }
+                                done
+                            })
+                            .unwrap_or(true);
+                        if done {
+                            break;
+                        }
+                    }
+                }));
+            }
             if session.sequence != seen {
                 let made = trace::micros(refreshing.elapsed());
                 trace::event("drawn", &[session.sequence, made]);
@@ -4235,6 +4430,33 @@ mod tests {
     use emu_guide::game::{Kind, Platform};
 
     const DS: [ScreenSize; 2] = [ScreenSize::new(256, 192), ScreenSize::new(256, 192)];
+
+    #[test]
+    fn an_older_frame_stands_in_until_the_new_one_is_drawn() {
+        let key = |sequence, target| ImageKey {
+            screen: 0,
+            rotation: Rotation::Upright,
+            look: Look::Upscaled(Method::Sharp),
+            target,
+            sequence,
+        };
+        let wanted = key(10, (1309, 982));
+        // The GPU finished frame 9 while frame 10 came: it replaces frame
+        // 8, or an empty place, but not frame 10 or a newer 9.
+        assert!(key(9, (1309, 982)).stands_in(wanted, Some(key(8, (1309, 982)))));
+        assert!(key(9, (1309, 982)).stands_in(wanted, None));
+        assert!(!key(9, (1309, 982)).stands_in(wanted, Some(key(10, (1309, 982)))));
+        assert!(!key(9, (1309, 982)).stands_in(wanted, Some(key(9, (1309, 982)))));
+        // Drawn for another size, look or screen: it never stands in, but
+        // replaces whatever of those is shown.
+        assert!(!key(10, (800, 600)).stands_in(wanted, None));
+        let smooth = ImageKey {
+            look: Look::Upscaled(Method::Smooth),
+            ..wanted
+        };
+        assert!(!smooth.stands_in(wanted, None));
+        assert!(key(9, (1309, 982)).stands_in(wanted, Some(key(12, (800, 600)))));
+    }
 
     #[test]
     fn guide_sits_in_a_wide_margin_and_makes_room_in_a_narrow_one() {
