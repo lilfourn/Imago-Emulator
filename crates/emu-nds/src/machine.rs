@@ -316,7 +316,7 @@ impl Machine {
             let trap = Trap::read(
                 &self.arm9,
                 Side::Arm9,
-                dtcm + 0x3FF8,
+                dtcm.wrapping_add(0x3FF8),
                 self.vblank_wait_swi[0],
             );
             let effects = {

@@ -7,6 +7,17 @@
 //! reach that code:
 //! the machine intercepts the CPU as it enters the SWI vector and runs the
 //! function here in Rust instead.
+//!
+//! A call runs to its end in one step of the emulation thread, where the
+//! real BIOS spends CPU time with interrupts still served. So no function
+//! here loops on a number the game supplies without a bound, and each
+//! bound is one the real function has: CpuSet's 21-bit count, BitUnPack's
+//! 16-bit length, a decompressor's 24-bit length (each turn of its loop
+//! produces at least a byte). The two without one of their own stop at a
+//! limit set here: the affine functions' count at [`AFFINE_SETS_MAX`],
+//! and Huffman's bitstream at a word for each byte it unpacks to (see
+//! [`huffman`]). Addresses wrap around the 32-bit bus, as the CPU's own
+//! do.
 
 use std::f64::consts::PI;
 
@@ -533,49 +544,68 @@ fn read_i16(bus: &mut Bus, address: u32) -> f64 {
     f64::from(bus.read_16(address, Access::NONSEQUENTIAL) as i16)
 }
 
+/// The most sets BgAffineSet and ObjAffineSet build in one call: more than
+/// all the memory a GBA can write holds, a set being 16 bytes or 8 and
+/// the largest memory, EWRAM, 256 KiB. The real BIOS has no limit but its
+/// 31-bit count, which is hours of CPU time.
+const AFFINE_SETS_MAX: u32 = 0x1_0000;
+
+/// How many sets an affine function builds for the count in R2. The real
+/// BIOS counts R2 down as a signed number and stops once it is below
+/// zero, so a count with bit 31 set builds nothing.
+fn affine_sets(count: u32) -> u32 {
+    if count > i32::MAX as u32 {
+        0
+    } else {
+        count.min(AFFINE_SETS_MAX)
+    }
+}
+
 /// BgAffineSet: builds background rotation/scaling parameters.
 fn bg_affine_set(bus: &mut Bus, mut source: u32, mut destination: u32, count: u32) {
-    for _ in 0..count {
+    for _ in 0..affine_sets(count) {
+        let at = |offset: u32| source.wrapping_add(offset);
         let origin_x = f64::from(bus.read_32(source, Access::NONSEQUENTIAL) as i32) / 256.0;
-        let origin_y = f64::from(bus.read_32(source + 4, Access::NONSEQUENTIAL) as i32) / 256.0;
-        let center_x = read_i16(bus, source + 8);
-        let center_y = read_i16(bus, source + 10);
-        let scale_x = read_i16(bus, source + 12) / 256.0;
-        let scale_y = read_i16(bus, source + 14) / 256.0;
-        let angle = f64::from(bus.read_16(source + 16, Access::NONSEQUENTIAL) >> 8) / 128.0 * PI;
+        let origin_y = f64::from(bus.read_32(at(4), Access::NONSEQUENTIAL) as i32) / 256.0;
+        let center_x = read_i16(bus, at(8));
+        let center_y = read_i16(bus, at(10));
+        let scale_x = read_i16(bus, at(12)) / 256.0;
+        let scale_y = read_i16(bus, at(14)) / 256.0;
+        let angle = f64::from(bus.read_16(at(16), Access::NONSEQUENTIAL) >> 8) / 128.0 * PI;
         let (sin, cos) = angle.sin_cos();
         let (pa, pb, pc, pd) = (cos * scale_x, -sin * scale_x, sin * scale_y, cos * scale_y);
         let x = origin_x - (pa * center_x + pb * center_y);
         let y = origin_y - (pc * center_x + pd * center_y);
         for (offset, value) in [(0, pa), (2, pb), (4, pc), (6, pd)] {
             bus.write_16(
-                destination + offset,
+                destination.wrapping_add(offset),
                 (value * 256.0) as i16 as u16,
                 Access::NONSEQUENTIAL,
             );
         }
         bus.write_32(
-            destination + 8,
+            destination.wrapping_add(8),
             (x * 256.0) as i32 as u32,
             Access::NONSEQUENTIAL,
         );
         bus.write_32(
-            destination + 12,
+            destination.wrapping_add(12),
             (y * 256.0) as i32 as u32,
             Access::NONSEQUENTIAL,
         );
-        source += 20;
-        destination += 16;
+        source = source.wrapping_add(20);
+        destination = destination.wrapping_add(16);
     }
 }
 
 /// ObjAffineSet: builds object rotation/scaling parameters, writing each
 /// of the four values `stride` bytes apart.
 fn obj_affine_set(bus: &mut Bus, mut source: u32, mut destination: u32, count: u32, stride: u32) {
-    for _ in 0..count {
+    for _ in 0..affine_sets(count) {
         let scale_x = read_i16(bus, source) / 256.0;
-        let scale_y = read_i16(bus, source + 2) / 256.0;
-        let angle = f64::from(bus.read_16(source + 4, Access::NONSEQUENTIAL) >> 8) / 128.0 * PI;
+        let scale_y = read_i16(bus, source.wrapping_add(2)) / 256.0;
+        let angle =
+            f64::from(bus.read_16(source.wrapping_add(4), Access::NONSEQUENTIAL) >> 8) / 128.0 * PI;
         let (sin, cos) = angle.sin_cos();
         for value in [cos * scale_x, -sin * scale_x, sin * scale_y, cos * scale_y] {
             bus.write_16(
@@ -585,7 +615,7 @@ fn obj_affine_set(bus: &mut Bus, mut source: u32, mut destination: u32, count: u
             );
             destination = destination.wrapping_add(stride);
         }
-        source += 8;
+        source = source.wrapping_add(8);
     }
 }
 
@@ -593,9 +623,9 @@ fn obj_affine_set(bus: &mut Bus, mut source: u32, mut destination: u32, count: u
 /// values.
 fn bit_unpack(bus: &mut Bus, mut source: u32, mut destination: u32, info: u32) {
     let length = u32::from(bus.read_16(info, Access::NONSEQUENTIAL));
-    let source_width = u32::from(bus.read_8(info + 2, Access::NONSEQUENTIAL));
-    let destination_width = u32::from(bus.read_8(info + 3, Access::NONSEQUENTIAL));
-    let offset_field = bus.read_32(info + 4, Access::NONSEQUENTIAL);
+    let source_width = u32::from(bus.read_8(info.wrapping_add(2), Access::NONSEQUENTIAL));
+    let destination_width = u32::from(bus.read_8(info.wrapping_add(3), Access::NONSEQUENTIAL));
+    let offset_field = bus.read_32(info.wrapping_add(4), Access::NONSEQUENTIAL);
     let offset = offset_field & 0x7FFF_FFFF;
     let offset_zero = offset_field >> 31 != 0;
     if !matches!(source_width, 1 | 2 | 4 | 8)
@@ -607,7 +637,7 @@ fn bit_unpack(bus: &mut Bus, mut source: u32, mut destination: u32, info: u32) {
     let mut out_bits = 0;
     for _ in 0..length {
         let byte = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-        source += 1;
+        source = source.wrapping_add(1);
         for shift in (0..8).step_by(source_width as usize) {
             let mut value = (byte >> shift) & ((1 << source_width) - 1);
             if value != 0 || offset_zero {
@@ -617,7 +647,7 @@ fn bit_unpack(bus: &mut Bus, mut source: u32, mut destination: u32, info: u32) {
             out_bits += destination_width;
             if out_bits >= 32 {
                 bus.write_32(destination, out, Access::NONSEQUENTIAL);
-                destination += 4;
+                destination = destination.wrapping_add(4);
                 out = 0;
                 out_bits = 0;
             }
@@ -637,7 +667,7 @@ impl Output {
     fn push(&mut self, bus: &mut Bus, byte: u8) {
         if !self.halfwords {
             bus.write_8(self.destination, byte, Access::NONSEQUENTIAL);
-            self.destination += 1;
+            self.destination = self.destination.wrapping_add(1);
             return;
         }
         match self.pending.take() {
@@ -648,14 +678,16 @@ impl Output {
                     u16::from_le_bytes([low, byte]),
                     Access::NONSEQUENTIAL,
                 );
-                self.destination += 2;
+                self.destination = self.destination.wrapping_add(2);
             }
         }
     }
 
     /// The byte written `distance` bytes back, for LZ77 back-references.
     fn earlier(&self, bus: &mut Bus, distance: u32) -> u8 {
-        let written = self.destination + u32::from(self.pending.is_some());
+        let written = self
+            .destination
+            .wrapping_add(u32::from(self.pending.is_some()));
         let address = written.wrapping_sub(distance);
         if self.halfwords && self.pending.is_some() && distance == 1 {
             return self.pending.unwrap_or(0);
@@ -668,7 +700,7 @@ impl Output {
 fn lz77(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
     let header = bus.read_32(source, Access::NONSEQUENTIAL);
     let mut remaining = header >> 8;
-    source += 4;
+    source = source.wrapping_add(4);
     let mut out = Output {
         destination,
         halfwords,
@@ -676,20 +708,20 @@ fn lz77(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
     };
     while remaining > 0 {
         let flags = bus.read_8(source, Access::NONSEQUENTIAL);
-        source += 1;
+        source = source.wrapping_add(1);
         for bit in (0..8).rev() {
             if remaining == 0 {
                 break;
             }
             if flags & (1 << bit) == 0 {
                 let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source += 1;
+                source = source.wrapping_add(1);
                 out.push(bus, byte);
                 remaining -= 1;
             } else {
                 let high = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-                let low = u32::from(bus.read_8(source + 1, Access::NONSEQUENTIAL));
-                source += 2;
+                let low = u32::from(bus.read_8(source.wrapping_add(1), Access::NONSEQUENTIAL));
+                source = source.wrapping_add(2);
                 let length = (high >> 4) + 3;
                 let distance = ((high & 0xF) << 8 | low) + 1;
                 for _ in 0..length.min(remaining) {
@@ -706,7 +738,7 @@ fn lz77(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
 fn run_length(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
     let header = bus.read_32(source, Access::NONSEQUENTIAL);
     let mut remaining = header >> 8;
-    source += 4;
+    source = source.wrapping_add(4);
     let mut out = Output {
         destination,
         halfwords,
@@ -714,17 +746,17 @@ fn run_length(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool)
     };
     while remaining > 0 {
         let flag = bus.read_8(source, Access::NONSEQUENTIAL);
-        source += 1;
+        source = source.wrapping_add(1);
         if flag & 0x80 == 0 {
             for _ in 0..(u32::from(flag & 0x7F) + 1).min(remaining) {
                 let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source += 1;
+                source = source.wrapping_add(1);
                 out.push(bus, byte);
                 remaining -= 1;
             }
         } else {
             let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-            source += 1;
+            source = source.wrapping_add(1);
             for _ in 0..(u32::from(flag & 0x7F) + 3).min(remaining) {
                 out.push(bus, byte);
                 remaining -= 1;
@@ -733,25 +765,51 @@ fn run_length(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool)
     }
 }
 
-/// HuffUnComp: GBATEK's Huffman format with 4- or 8-bit symbols.
+/// Bitstream words HuffUnComp follows beyond one for each byte it has to
+/// write: room for the longest codes a tree can hold (256 bits) in data
+/// of a few bytes.
+const HUFFMAN_SLACK_WORDS: u32 = 64;
+
+/// HuffUnComp: GBATEK's Huffman format with 4- or 8-bit symbols, the two
+/// sizes that fill the 32-bit words it writes; data that names another
+/// size is left alone.
+///
+/// A node's children lie after it, so a walk only moves on through the
+/// tree. One that leaves the tree (the size byte says where it ends) can
+/// reach no symbol the data holds, and ends the call.
+///
+/// The bitstream followed is at most a word for each byte to write, and
+/// [`HUFFMAN_SLACK_WORDS`] more. That is four times what the bytes take
+/// unpacked, and a Huffman code is at worst as long as fixed-width
+/// symbols; without it, a stream of a tree's longest codes for the
+/// longest length would keep one call going for minutes.
 fn huffman(bus: &mut Bus, mut source: u32, mut destination: u32) {
     let header = bus.read_32(source, Access::NONSEQUENTIAL);
     let symbol_bits = header & 0xF;
+    if !matches!(symbol_bits, 4 | 8) {
+        return;
+    }
     let mut remaining = header >> 8;
-    let tree_size = u32::from(bus.read_8(source + 4, Access::NONSEQUENTIAL));
-    let tree = source + 5;
-    let root = tree;
-    source = tree + tree_size * 2 + 1;
+    let tree_size = u32::from(bus.read_8(source.wrapping_add(4), Access::NONSEQUENTIAL));
+    let root = source.wrapping_add(5);
+    // The nodes' bytes, from the root to the bitstream.
+    let tree_length = tree_size * 2 + 1;
+    source = root.wrapping_add(tree_length);
     let mut node = root;
     let mut node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
     let mut out = 0u32;
     let mut out_bits = 0;
-    while remaining > 0 {
+    let mut words = remaining + HUFFMAN_SLACK_WORDS;
+    while remaining > 0 && words > 0 {
+        words -= 1;
         let bits = bus.read_32(source, Access::NONSEQUENTIAL);
-        source += 4;
+        source = source.wrapping_add(4);
         for bit in (0..32).rev() {
             let right = bits & (1 << bit) != 0;
-            let next = (node & !1) + (node_value & 0x3F) * 2 + 2 + u32::from(right);
+            let next = (node & !1).wrapping_add((node_value & 0x3F) * 2 + 2 + u32::from(right));
+            if next.wrapping_sub(root) >= tree_length {
+                return;
+            }
             let terminal = node_value & if right { 0x40 } else { 0x80 } != 0;
             node = next;
             node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
@@ -760,9 +818,9 @@ fn huffman(bus: &mut Bus, mut source: u32, mut destination: u32) {
                 out_bits += symbol_bits;
                 node = root;
                 node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
-                if out_bits == 32 {
+                if out_bits >= 32 {
                     bus.write_32(destination, out, Access::NONSEQUENTIAL);
-                    destination += 4;
+                    destination = destination.wrapping_add(4);
                     out = 0;
                     out_bits = 0;
                     remaining = remaining.saturating_sub(4);
@@ -785,14 +843,14 @@ fn diff_unfilter(
 ) {
     let header = bus.read_32(source, Access::NONSEQUENTIAL);
     let mut remaining = header >> 8;
-    source += 4;
+    source = source.wrapping_add(4);
     if sixteen {
         let mut sum = 0u16;
         while remaining >= 2 {
             sum = sum.wrapping_add(bus.read_16(source, Access::NONSEQUENTIAL));
             bus.write_16(destination, sum, Access::NONSEQUENTIAL);
-            source += 2;
-            destination += 2;
+            source = source.wrapping_add(2);
+            destination = destination.wrapping_add(2);
             remaining -= 2;
         }
         return;
@@ -806,14 +864,14 @@ fn diff_unfilter(
     while remaining > 0 {
         sum = sum.wrapping_add(bus.read_8(source, Access::NONSEQUENTIAL));
         out.push(bus, sum);
-        source += 1;
+        source = source.wrapping_add(1);
         remaining -= 1;
     }
 }
 
 /// MidiKey2Freq: the sample rate that plays a wave at a MIDI key.
 fn midi_key_to_frequency(bus: &mut Bus, wave: u32, key: u8, fine: u8) -> u32 {
-    let base = f64::from(bus.read_32(wave + 4, Access::NONSEQUENTIAL));
+    let base = f64::from(bus.read_32(wave.wrapping_add(4), Access::NONSEQUENTIAL));
     let exponent = (180.0 - f64::from(key) - f64::from(fine) / 256.0) / 12.0;
     (base / 2f64.powf(exponent)) as u32
 }
@@ -903,6 +961,167 @@ mod tests {
         assert_eq!(call(0xFFFF_0001, 0xFFFF_0000), (0xA001, Some(0xFFFF_C002)));
         assert_eq!(call(0xFFFF_8000, 0x1_0000), (0x52E4, Some(0xFFFF_F000)));
         assert_eq!(call(0x4000, 0), (0, None));
+    }
+
+    /// A Huffman stream at `source` in EWRAM for `length` bytes of
+    /// `symbol_bits`-bit symbols, with the codes 1 = "0", 2 = "10" and
+    /// 3 = "11": the header, the size byte (8 bytes / 2 − 1), the root
+    /// with symbol 1 as child 0 and a node as child 1, that node's two
+    /// symbols, padding to a word, then `bits`.
+    fn put_huffman(bus: &mut Bus, source: u32, symbol_bits: u32, length: u32, bits: u32) {
+        let header = length << 8 | 0x20 | symbol_bits;
+        bus.write_32(source, header, Access::NONSEQUENTIAL);
+        for (offset, byte) in [0x03, 0x80, 0x01, 0xC0, 0x02, 0x03, 0, 0]
+            .into_iter()
+            .enumerate()
+        {
+            bus.write_8(source + 4 + offset as u32, byte, Access::NONSEQUENTIAL);
+        }
+        bus.write_32(source + 12, bits, Access::NONSEQUENTIAL);
+    }
+
+    /// 1, 2, 3, 1, 2, 3, ...: "0 10 11 0 10 11 ...".
+    const HUFFMAN_BITS: u32 = 0b0101_1010_1101_0110_1011_0101_1010_1101;
+
+    #[test]
+    fn huffman_decodes_four_and_eight_bit_symbols() {
+        // Four-bit symbols pack two to a byte, the first in the low nibble.
+        for (symbol_bits, expected) in [(8, 0x0103_0201), (4, 0x2132_1321)] {
+            let mut bus = ram_bus();
+            put_huffman(&mut bus, 0x0200_0000, symbol_bits, 4, HUFFMAN_BITS);
+            huffman(&mut bus, 0x0200_0000, 0x0200_0100);
+            assert_eq!(
+                bus.read_32(0x0200_0100, Access::NONSEQUENTIAL),
+                expected,
+                "{symbol_bits}-bit symbols"
+            );
+            assert_eq!(bus.read_32(0x0200_0104, Access::NONSEQUENTIAL), 0);
+        }
+    }
+
+    /// Symbols of another size never fill a word exactly, so the function
+    /// used to wait for ever for its count of bits to equal 32.
+    #[test]
+    fn huffman_leaves_other_symbol_sizes_alone() {
+        for symbol_bits in [0, 1, 2, 3, 5, 6, 7, 9, 15] {
+            let mut bus = ram_bus();
+            put_huffman(&mut bus, 0x0200_0000, symbol_bits, 0xFF_FFFF, HUFFMAN_BITS);
+            huffman(&mut bus, 0x0200_0000, 0x0200_0100);
+            assert_eq!(bus.read_32(0x0200_0100, Access::NONSEQUENTIAL), 0);
+        }
+    }
+
+    /// A tree none of whose nodes marks a child as a symbol: the walk
+    /// runs off its end, where it used to go on through all of memory.
+    #[test]
+    fn huffman_stops_when_a_walk_leaves_the_tree() {
+        let mut bus = ram_bus();
+        put_huffman(&mut bus, 0x0200_0000, 8, 0xFF_FFFF, HUFFMAN_BITS);
+        for offset in 5..12 {
+            bus.write_8(0x0200_0000 + offset, 0, Access::NONSEQUENTIAL);
+        }
+        let before = bus.cycles();
+        huffman(&mut bus, 0x0200_0000, 0x0200_0100);
+        assert_eq!(bus.read_32(0x0200_0100, Access::NONSEQUENTIAL), 0);
+        // Three nodes fit in the tree, so the walk is over in a few reads.
+        assert!(bus.cycles() - before < 100);
+    }
+
+    /// A stream of the longest code a deep tree holds, for the longest
+    /// length there is: the call ends once it has followed a word for
+    /// each byte it was to write, where it used to follow two hundred
+    /// times as many.
+    #[test]
+    fn huffman_follows_a_bitstream_no_longer_than_its_data_allows() {
+        let mut bus = ram_bus();
+        let source = 0x0200_0000;
+        let length = 0x400;
+        // A full tree: a chain of 255 nodes, each the 1 child of the one
+        // before, the last with two symbols.
+        bus.write_32(source, length << 8 | 0x28, Access::NONSEQUENTIAL);
+        bus.write_8(source + 4, 0xFF, Access::NONSEQUENTIAL);
+        bus.write_8(source + 4 + 509, 0xC0, Access::NONSEQUENTIAL);
+        bus.write_8(source + 4 + 511, 0x5A, Access::NONSEQUENTIAL);
+        for word in 0..0x1000 {
+            bus.write_32(source + 516 + word * 4, 0xFFFF_FFFF, Access::NONSEQUENTIAL);
+        }
+        huffman(&mut bus, source, 0x0300_0000);
+        // 255 bits a symbol, four symbols a word written.
+        let words = (length + HUFFMAN_SLACK_WORDS) * 32 / (255 * 4);
+        assert!(words < length / 4, "the stream runs out before the length");
+        let written =
+            |bus: &mut Bus, word: u32| bus.read_32(0x0300_0000 + word * 4, Access::NONSEQUENTIAL);
+        assert_eq!(written(&mut bus, words - 1), 0x5A5A_5A5A);
+        assert_eq!(written(&mut bus, words), 0);
+    }
+
+    /// The call a game makes, through the machine: data whose header
+    /// names 5-bit symbols, which never returned.
+    #[test]
+    fn a_huffman_call_with_an_odd_symbol_size_returns() {
+        let gba = run_to_first_swi(&[
+            0xE28F_0008, // ADD R0, PC, #8  (the data below)
+            0xE3A0_1402, // MOV R1, #0x02000000
+            0xEF13_0000, // SWI 0x13  (HuffUnComp)
+            0xEAFF_FFFE, // B .
+            0x00FF_FF25, // header: Huffman, 5-bit symbols, 65,535 bytes
+            0x0101_C001, // tree: size 1, the root, its two symbols
+            0xFFFF_FFFF, // bitstream
+        ]);
+        assert_eq!(gba.cpu().mode(), Mode::System, "back in the game");
+    }
+
+    #[test]
+    fn affine_functions_count_as_the_bios_does_and_stop_at_the_limit() {
+        assert_eq!(affine_sets(0), 0);
+        assert_eq!(affine_sets(32), 32);
+        assert_eq!(affine_sets(0x7FFF_FFFF), AFFINE_SETS_MAX);
+        assert_eq!(affine_sets(0x8000_0000), 0);
+        assert_eq!(affine_sets(0xFFFF_FFFF), 0);
+
+        // Scale 1, no rotation.
+        let mut bus = ram_bus();
+        bus.write_16(0x0200_0000, 0x100, Access::NONSEQUENTIAL);
+        bus.write_16(0x0200_0002, 0x100, Access::NONSEQUENTIAL);
+        obj_affine_set(&mut bus, 0x0200_0000, 0x0300_0000, 1, 2);
+        assert_eq!(bus.read_32(0x0300_0000, Access::NONSEQUENTIAL), 0x0000_0100);
+        assert_eq!(bus.read_32(0x0300_0004, Access::NONSEQUENTIAL), 0x0100_0000);
+
+        // A negative count builds nothing; the largest ends. Both used to
+        // run for billions of sets.
+        let mut bus = ram_bus();
+        bg_affine_set(&mut bus, 0x0200_0000, 0x0300_0000, 0xFFFF_FFFF);
+        obj_affine_set(&mut bus, 0x0200_0000, 0x0300_0000, 0x8000_0000, 2);
+        assert_eq!(bus.read_32(0x0300_0000, Access::NONSEQUENTIAL), 0);
+        let before = bus.cycles();
+        obj_affine_set(&mut bus, 0x0200_0000, 0x0300_0000, 0x7FFF_FFFF, 2);
+        bg_affine_set(&mut bus, 0x0200_0000, 0x0300_0000, 0x7FFF_FFFF);
+        assert!(bus.cycles() - before < u64::from(AFFINE_SETS_MAX) * 2 * 64);
+    }
+
+    /// Addresses run off the top of the bus and come round to its start,
+    /// where they used to overflow.
+    #[test]
+    fn addresses_wrap_at_the_top_of_the_bus() {
+        let mut bus = ram_bus();
+        // Run-length data for five bytes: "z" five times.
+        bus.write_32(0x0200_0000, 0x0000_0530, Access::NONSEQUENTIAL);
+        bus.write_16(0x0200_0004, 0x7A82, Access::NONSEQUENTIAL);
+        run_length(&mut bus, 0x0200_0000, 0xFFFF_FFFE, false);
+        run_length(&mut bus, 0x0200_0000, 0xFFFF_FFFE, true);
+        // LZ77 data for five bytes: "a", then four from distance 1.
+        bus.write_32(0x0200_0010, 0x0000_0510, Access::NONSEQUENTIAL);
+        bus.write_32(0x0200_0014, 0x0010_6140, Access::NONSEQUENTIAL);
+        lz77(&mut bus, 0x0200_0010, 0xFFFF_FFFE, false);
+        lz77(&mut bus, 0x0200_0010, 0xFFFF_FFFE, true);
+        diff_unfilter(&mut bus, 0x0200_0000, 0xFFFF_FFFE, false, false);
+        diff_unfilter(&mut bus, 0x0200_0000, 0xFFFF_FFFE, true, true);
+        // The sources and the structures the functions read.
+        bg_affine_set(&mut bus, 0xFFFF_FFF0, 0xFFFF_FFF8, 2);
+        obj_affine_set(&mut bus, 0xFFFF_FFFC, 0xFFFF_FFFC, 2, 2);
+        bit_unpack(&mut bus, 0xFFFF_FFFF, 0xFFFF_FFFC, 0xFFFF_FFFC);
+        huffman(&mut bus, 0xFFFF_FFFC, 0xFFFF_FFFC);
+        midi_key_to_frequency(&mut bus, 0xFFFF_FFFC, 60, 0);
     }
 
     /// Boots a cartridge running `program` (ARM words from 0x08000000) and

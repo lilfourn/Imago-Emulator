@@ -15,6 +15,16 @@
 //! game's callbacks (`callback.rs`): those return a game function for the
 //! machine to run, and resume when it returns to [`ARM9_CALLBACK_RETURN`]
 //! or [`ARM7_CALLBACK_RETURN`].
+//!
+//! A call runs to its end in one step of the emulation thread, where the
+//! real BIOS spends CPU time with interrupts still served. So no function
+//! here loops on a number the game supplies without a bound, and each
+//! bound is one the real function has: CpuSet's 21-bit count, BitUnPack's
+//! 16-bit length, a decompressor's 24-bit length (each unit it is fed
+//! leads to at least a byte). GetCRC16, whose length is a whole register,
+//! stops at [`CRC16_LENGTH_MAX`]. The ReadByCallback functions do a
+//! unit's work between two of the game's own calls. Addresses wrap around
+//! the 32-bit bus, as the CPU's own do.
 
 mod callback;
 mod decompress;
@@ -285,12 +295,17 @@ fn divide(numerator: i32, denominator: i32) -> [(usize, u32); 3] {
     ]
 }
 
-/// GetCRC16 over `length` bytes (whole halfwords) at `address`. R3 gets the
-/// last halfword read.
+/// The most bytes one GetCRC16 call sums: 32 MiB, the largest stretch of
+/// memory a DS has to sum, a GBA cartridge's ROM. The real BIOS has no
+/// limit but its 32-bit length, which is minutes of CPU time.
+const CRC16_LENGTH_MAX: u32 = 0x200_0000;
+
+/// GetCRC16 over `length` bytes (whole halfwords, [`CRC16_LENGTH_MAX`] at
+/// most) at `address`. R3 gets the last halfword read.
 fn crc16_call<B: Bus>(bus: &mut B, initial: u16, address: u32, length: u32) -> [(usize, u32); 2] {
     let mut crc = initial;
     let mut last = 0;
-    for offset in (0..length & !1).step_by(2) {
+    for offset in (0..length.min(CRC16_LENGTH_MAX) & !1).step_by(2) {
         last = bus.read_16(address.wrapping_add(offset), Access::SEQUENTIAL);
         crc = crc16(crc, &last.to_le_bytes());
     }
@@ -354,9 +369,9 @@ fn cpu_fast_set<B: Bus>(bus: &mut B, source: u32, destination: u32, control: u32
 /// values.
 fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, info: u32) {
     let length = u32::from(bus.read_16(info, Access::NONSEQUENTIAL));
-    let source_width = u32::from(bus.read_8(info + 2, Access::NONSEQUENTIAL));
-    let destination_width = u32::from(bus.read_8(info + 3, Access::NONSEQUENTIAL));
-    let offset_field = bus.read_32(info + 4, Access::NONSEQUENTIAL);
+    let source_width = u32::from(bus.read_8(info.wrapping_add(2), Access::NONSEQUENTIAL));
+    let destination_width = u32::from(bus.read_8(info.wrapping_add(3), Access::NONSEQUENTIAL));
+    let offset_field = bus.read_32(info.wrapping_add(4), Access::NONSEQUENTIAL);
     let offset = offset_field & 0x7FFF_FFFF;
     let offset_zero = offset_field >> 31 != 0;
     if !matches!(source_width, 1 | 2 | 4 | 8)
@@ -368,7 +383,7 @@ fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, info: 
     let mut out_bits = 0;
     for _ in 0..length {
         let byte = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-        source += 1;
+        source = source.wrapping_add(1);
         for shift in (0..8).step_by(source_width as usize) {
             let mut value = (byte >> shift) & ((1 << source_width) - 1);
             if value != 0 || offset_zero {
@@ -378,7 +393,7 @@ fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, info: 
             out_bits += destination_width;
             if out_bits >= 32 {
                 bus.write_32(destination, out, Access::NONSEQUENTIAL);
-                destination += 4;
+                destination = destination.wrapping_add(4);
                 out = 0;
                 out_bits = 0;
             }
@@ -390,14 +405,14 @@ fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, info: 
 fn diff_unfilter<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, sixteen: bool) {
     let header = bus.read_32(source, Access::NONSEQUENTIAL);
     let mut remaining = header >> 8;
-    source += 4;
+    source = source.wrapping_add(4);
     if sixteen {
         let mut sum = 0u16;
         while remaining >= 2 {
             sum = sum.wrapping_add(bus.read_16(source, Access::NONSEQUENTIAL));
             bus.write_16(destination, sum, Access::NONSEQUENTIAL);
-            source += 2;
-            destination += 2;
+            source = source.wrapping_add(2);
+            destination = destination.wrapping_add(2);
             remaining -= 2;
         }
         return;
@@ -406,8 +421,8 @@ fn diff_unfilter<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, six
     while remaining > 0 {
         sum = sum.wrapping_add(bus.read_8(source, Access::NONSEQUENTIAL));
         bus.write_8(destination, sum, Access::NONSEQUENTIAL);
-        source += 1;
-        destination += 1;
+        source = source.wrapping_add(1);
+        destination = destination.wrapping_add(1);
         remaining -= 1;
     }
 }
@@ -501,6 +516,95 @@ mod tests {
             effects.registers,
             [(0, u32::from(crc16(0, b"12345678"))), (3, 0x3837)]
         );
+    }
+
+    /// A bus that counts its reads and holds nothing, for calls that
+    /// would read more than a test's RAM.
+    #[derive(Default)]
+    struct Counting {
+        reads: u64,
+    }
+
+    impl Bus for Counting {
+        fn read_32(&mut self, _: u32, _: Access) -> u32 {
+            self.reads += 1;
+            0
+        }
+        fn read_16(&mut self, _: u32, _: Access) -> u16 {
+            self.reads += 1;
+            0
+        }
+        fn read_8(&mut self, _: u32, _: Access) -> u8 {
+            self.reads += 1;
+            0
+        }
+        fn write_32(&mut self, _: u32, _: u32, _: Access) {}
+        fn write_16(&mut self, _: u32, _: u16, _: Access) {}
+        fn write_8(&mut self, _: u32, _: u8, _: Access) {}
+        fn idle(&mut self) {}
+    }
+
+    /// A length of 4 GiB used to read two billion halfwords in one step.
+    #[test]
+    fn get_crc16_stops_at_the_longest_memory_there_is() {
+        let mut bus = Counting::default();
+        run(
+            0x0E,
+            &call(Side::Arm9, [0, 0x0200_0000, 0xFFFF_FFFF, 0]),
+            &mut bus,
+        );
+        // The SWI's own number is not read here: `run` is given it.
+        assert_eq!(bus.reads, u64::from(CRC16_LENGTH_MAX / 2));
+        let mut bus = Counting::default();
+        run(
+            0x0E,
+            &call(Side::Arm7, [0, 0x0200_0000, 0x1000, 0]),
+            &mut bus,
+        );
+        assert_eq!(bus.reads, 0x800, "a length within the limit is read whole");
+    }
+
+    /// Addresses run off the top of the bus and come round to its start,
+    /// where they used to overflow. The test's RAM repeats every 64 KiB,
+    /// so the top of the bus is the top of the RAM.
+    #[test]
+    fn addresses_wrap_at_the_top_of_the_bus() {
+        // BitUnPack: its structure in the last word (two bytes, 4 bits to
+        // 8) with the offset in the first; the two bytes of pixels start
+        // at the last byte; the result goes over the structure.
+        let mut ram = Ram::new();
+        ram.0[0xFFFC..].copy_from_slice(&[2, 0, 4, 8]);
+        run(
+            0x10,
+            &call(Side::Arm9, [0xFFFF_FFFF, 0xFFFF_FFFC, 0xFFFF_FFFC, 0]),
+            &mut ram,
+        );
+        // The pixels 8 and 0 of the byte 0x08, then 0 and 0.
+        assert_eq!(&ram.0[0xFFFC..], &[8, 0, 0, 0]);
+
+        // Diff8bitUnFilter: the header in the last word, three bytes of 1
+        // from the start, summed into the last two bytes and the first.
+        let mut ram = Ram::new();
+        ram.0[0xFFFC..].copy_from_slice(&[0x81, 3, 0, 0]);
+        ram.0[..3].copy_from_slice(&[1, 1, 1]);
+        run(
+            0x16,
+            &call(Side::Arm9, [0xFFFF_FFFC, 0xFFFF_FFFE, 0, 0]),
+            &mut ram,
+        );
+        assert_eq!((ram.0[0xFFFE], ram.0[0xFFFF], ram.0[0]), (1, 2, 3));
+
+        // Diff16bitUnFilter: two halfwords of 1, summed into the last
+        // halfword and the first.
+        let mut ram = Ram::new();
+        ram.0[0xFFFC..].copy_from_slice(&[0x82, 4, 0, 0]);
+        ram.0[..4].copy_from_slice(&[1, 0, 1, 0]);
+        run(
+            0x18,
+            &call(Side::Arm9, [0xFFFF_FFFC, 0xFFFF_FFFE, 0, 0]),
+            &mut ram,
+        );
+        assert_eq!((ram.0[0xFFFE], ram.0[0]), (1, 2));
     }
 
     #[test]
