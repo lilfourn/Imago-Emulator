@@ -43,7 +43,7 @@ use std::io::Write as _;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -76,6 +76,10 @@ use saves::{PickUp, Saves};
 
 /// How often dirty battery saves are written to disk.
 const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often a paused game asks how a battery save being written went,
+/// to tell the player without waiting for the game to play on.
+const WRITTEN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Memory for rewind history: about a minute of Game Boy play.
 const REWIND_BUDGET_BYTES: usize = 64 << 20;
@@ -823,7 +827,16 @@ impl Runner {
                 let next = if waiting {
                     // The timed flush waits too, so flush before.
                     self.flush_backup();
-                    commands.recv().map_err(|_| TryRecvError::Disconnected)
+                    if self.saves.writing() {
+                        match commands.recv_timeout(WRITTEN_CHECK_INTERVAL) {
+                            Ok(command) => Ok(command),
+                            // Round again, to hear how the write went.
+                            Err(RecvTimeoutError::Timeout) => continue,
+                            Err(RecvTimeoutError::Disconnected) => Err(TryRecvError::Disconnected),
+                        }
+                    } else {
+                        commands.recv().map_err(|_| TryRecvError::Disconnected)
+                    }
                 } else {
                     commands.try_recv()
                 };
@@ -852,6 +865,8 @@ impl Runner {
                 if self.rewind.pop_with(|previous| {
                     core.load_state(previous).ok();
                 }) {
+                    // The save went back too (see `saves.rs`).
+                    self.saves.rewound();
                     self.clear_latches();
                     self.publish();
                     self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
@@ -1031,7 +1046,11 @@ impl Runner {
                 if on && !can {
                     self.notice(NO_REWIND);
                 }
-                self.rewinding = on && can;
+                let rewinding = on && can;
+                if rewinding && !self.rewinding {
+                    self.saves.rewind_began();
+                }
+                self.rewinding = rewinding;
             }
             Command::TogglePause => {
                 self.paused = !self.paused;

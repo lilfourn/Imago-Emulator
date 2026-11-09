@@ -1677,6 +1677,67 @@ fn pausing_writes_the_battery_save() {
     fs::remove_dir_all(&dir).expect("clean up");
 }
 
+#[test]
+fn rewinding_past_a_save_made_in_the_game_keeps_that_save() {
+    let dir = empty_dir("rewind-save");
+    let save = dir.join("game.sav");
+    let (emulator, events) = start_cart(&dir, 0, 0, None);
+    // Some play to rewind through, then a save in the game.
+    thread::sleep(Duration::from_millis(100));
+    poke(&emulator, 0, 5);
+    emulator.send(Command::TogglePause);
+    wait_for_notice(&events, "Paused");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read(&save).ok() != Some(vec![5]) {
+        assert!(Instant::now() < deadline, "the save was not written");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!dir.join("game.sav.bak").exists());
+    emulator.send(Command::TogglePause);
+
+    // Back to before it.
+    emulator.send(Command::SetRewind(true));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while cart_bytes(&emulator).0 != 0 {
+        assert!(Instant::now() < deadline, "never rewound past the save");
+        thread::sleep(Duration::from_millis(1));
+    }
+    emulator.send(Command::SetRewind(false));
+    let said = wait_for_notice(&events, "Your save from before you went back");
+    assert!(said.ends_with("is kept as game.sav.bak"), "{said}");
+    drop(emulator);
+    assert_eq!(fs::read(&save).expect("as the game has it"), [0]);
+    assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), [5]);
+    assert!(!dir.join("game.sav.bak2").exists());
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
+fn loading_a_state_never_loses_the_save_on_disk() {
+    let dir = empty_dir("load-state-save");
+    let save = dir.join("game.sav");
+    let (emulator, events) = start_cart(&dir, 0, 0, None);
+    poke(&emulator, 0, 2);
+    emulator.send(Command::SaveState(1));
+    wait_for_notice(&events, "Saved state 1");
+    poke(&emulator, 0, 20);
+    emulator.send(Command::TogglePause);
+    wait_for_notice(&events, "Paused");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read(&save).ok() != Some(vec![20]) {
+        assert!(Instant::now() < deadline, "the save was not written");
+        thread::sleep(Duration::from_millis(1));
+    }
+    emulator.send(Command::LoadState(1));
+    wait_for_notice(&events, "Loaded state 1");
+    let said = wait_for_notice(&events, "Your save from before you went back");
+    assert!(said.ends_with("is kept as game.sav.bak"), "{said}");
+    drop(emulator);
+    assert_eq!(fs::read(&save).expect("the state's"), [2]);
+    assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), [20]);
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
 /// Waits for the emulation thread to say it stopped, returning what
 /// it said.
 fn wait_for_stopped(events: &async_channel::Receiver<Event>) -> String {

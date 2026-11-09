@@ -220,6 +220,23 @@ pub fn set_aside(path: &Path) -> io::Result<Option<PathBuf>> {
     Err(io::Error::other("every backup name is taken"))
 }
 
+/// Sets the file at `path` aside, as [`set_aside`] does, unless it holds
+/// exactly `bytes` or is not there: for a file about to be replaced with
+/// `bytes` whose old contents nothing else keeps. Returns where it went, if
+/// it was set aside.
+///
+/// # Errors
+///
+/// Returns the error if the file cannot be read or renamed.
+pub fn set_aside_unless_same(path: &Path, bytes: &[u8]) -> io::Result<Option<PathBuf>> {
+    match fs::read(path) {
+        Ok(there) if there == bytes => Ok(None),
+        Ok(_) => set_aside(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Creates a new, empty file next to `rom` for a screenshot or recording
 /// taken at `stamp` (such as `2026-10-07 at 18.58.12`), and returns its
 /// path and the file: `game <stamp>.<extension>`, or `game <stamp>
@@ -566,6 +583,24 @@ mod tests {
         }
         assert_eq!(fs::read(dir.join("game.sav.bak")).expect("first"), [1]);
         assert_eq!(fs::read(dir.join("game.sav.bak2")).expect("second"), [2]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_file_about_to_be_replaced_is_set_aside_only_if_it_differs() {
+        let dir = temp_dir("set-aside-unless");
+        let save = dir.join("game.sav");
+        assert_eq!(set_aside_unless_same(&save, b"new").expect("none"), None);
+        fs::write(&save, b"new").expect("write");
+        assert_eq!(set_aside_unless_same(&save, b"new").expect("same"), None);
+        assert_eq!(fs::read(&save).expect("left"), b"new");
+        fs::write(&save, b"old").expect("write");
+        assert_eq!(
+            set_aside_unless_same(&save, b"new").expect("differs"),
+            Some(dir.join("game.sav.bak"))
+        );
+        assert!(!save.exists());
+        assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), b"old");
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

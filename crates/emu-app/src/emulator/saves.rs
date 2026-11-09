@@ -6,6 +6,14 @@
 //! thread of their own (see `save_writer.rs`). What there is to tell the
 //! player, such as a save that could not be written, is kept until
 //! [`Saves::take_said`] is asked for it.
+//!
+//! Going back to an earlier moment, by loading a state or rewinding, takes
+//! the game's save memory back too, and the cores count that as a save
+//! written. So that the file on disk, which may hold hours more, is not
+//! lost to it, the first write after each jump back sets the file aside if
+//! it holds anything else (`game.sav.bak`, never replacing an earlier one),
+//! and the player is told where it is. A jump back that leaves the save as
+//! it is on disk sets nothing aside.
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,7 +23,7 @@ use emu_core::Core;
 
 use super::{Loaded, OwnSaves};
 use crate::capture;
-use crate::persist::{self, GameFiles};
+use crate::persist::{self, GameFiles, file_name};
 use crate::save_writer::SaveWriter;
 use crate::video;
 
@@ -54,8 +62,17 @@ pub(super) struct Saves {
     flushed_generations: Vec<Option<u64>>,
     /// Per cartridge: its battery save file.
     backup_paths: Vec<PathBuf>,
+    /// How many times the game has gone back to an earlier moment: once
+    /// for each state loaded, and once for each stretch of rewinding.
+    jumps: u64,
+    /// Per cartridge: the jump back its save has not been handed to
+    /// `writer` since, if there is one. That write sets the file on disk
+    /// aside first if it holds another save.
+    went_back: Vec<Option<u64>>,
     /// Writes the battery saves to disk.
     writer: SaveWriter,
+    /// How many writes handed to `writer` have not been heard of since.
+    unheard: usize,
     /// What there is to tell the player, oldest first, until it is taken.
     said: Vec<String>,
 }
@@ -71,7 +88,10 @@ impl Saves {
             own_saves: loaded.own_saves.clone(),
             flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
             backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
+            jumps: 0,
+            went_back: vec![None; loaded.rom_paths.len()],
             writer: SaveWriter::start(),
+            unheard: 0,
             said: Vec::new(),
         }
     }
@@ -79,6 +99,12 @@ impl Saves {
     /// What there is to tell the player since last asked, oldest first.
     pub(super) fn take_said(&mut self) -> Vec<String> {
         std::mem::take(&mut self.said)
+    }
+
+    /// Whether a battery save handed to the writer has not been heard of
+    /// since: [`Saves::flush`] will have how it went, once it is written.
+    pub(super) fn writing(&self) -> bool {
+        self.unheard > 0
     }
 
     /// The session's save state file in `slot`.
@@ -121,7 +147,20 @@ impl Saves {
         .with_context(|| format!("cannot write {}", path.display()))
     }
 
-    /// Restores `core` from the state in `slot`'s file.
+    /// Notes that rewinding has begun: every step back until it next
+    /// begins is part of one jump back (see [`Saves::rewound`]).
+    pub(super) fn rewind_began(&mut self) {
+        self.jumps += 1;
+    }
+
+    /// Notes that the game has just stepped back through rewind, so the
+    /// next write of each battery save follows a jump back.
+    pub(super) fn rewound(&mut self) {
+        self.went_back.fill(Some(self.jumps));
+    }
+
+    /// Restores `core` from the state in `slot`'s file. The next write of
+    /// each battery save follows a jump back.
     pub(super) fn load_state(&mut self, core: &mut dyn Core, slot: u8) -> anyhow::Result<()> {
         let path = self.state_path(slot);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -144,7 +183,10 @@ impl Saves {
             header.state_version,
             info.state_version,
         );
-        Ok(core.load_state(payload)?)
+        core.load_state(payload)?;
+        self.jumps += 1;
+        self.went_back.fill(Some(self.jumps));
+        Ok(())
     }
 
     /// Writes the battery saves and waits for them, then saves a state to
@@ -221,6 +263,7 @@ impl Saves {
                 let undone = core.load_state(&undo);
                 // The battery saves are back as on disk: nothing to write.
                 self.flushed_generations = generations(core, self.backup_paths.len());
+                self.went_back.fill(None);
                 undone.context("cannot undo loading it")?;
                 Ok(PickUp::SavesChanged)
             }
@@ -248,20 +291,31 @@ impl Saves {
     }
 
     /// Hands each cartridge's battery save that changed since the last
-    /// flush to the writer, and retries any whose write failed.
+    /// flush to the writer, and retries any whose write failed. A save
+    /// handed over for the first time since the game went back to an
+    /// earlier moment is handed over as such, whether the core counted a
+    /// write or not, so the file it replaces is set aside if it differs.
     pub(super) fn flush(&mut self, core: &dyn Core) {
         self.take_written();
         for cartridge in 0..self.flushed_generations.len() {
             let Some(generation) = core.backup_generation(cartridge) else {
                 continue;
             };
-            if self.flushed_generations[cartridge] == Some(generation) {
+            let jump = self.went_back[cartridge].take();
+            if jump.is_none() && self.flushed_generations[cartridge] == Some(generation) {
                 continue;
             }
             let mut backup = Vec::new();
             core.save_backup(cartridge, &mut backup);
             let path = self.backup_paths[cartridge].clone();
-            self.writer.write(cartridge, generation, path, backup);
+            match jump {
+                Some(jump) => {
+                    self.writer
+                        .write_after_jump(cartridge, generation, path, backup, jump);
+                }
+                None => self.writer.write(cartridge, generation, path, backup),
+            }
+            self.unheard += 1;
             self.flushed_generations[cartridge] = Some(generation);
         }
     }
@@ -281,11 +335,19 @@ impl Saves {
         })
     }
 
-    /// Notes the battery save writes finished since last asked: a failed
-    /// one is said, and written again at the next flush unless a newer
-    /// one is on its way.
+    /// Notes the battery save writes finished since last asked: a save
+    /// set aside is said, once, with where it is; a failed write is said,
+    /// and written again at the next flush unless a newer one is on its
+    /// way.
     fn take_written(&mut self) {
         for written in self.writer.finished() {
+            self.unheard = self.unheard.saturating_sub(1);
+            if let Some(kept) = &written.kept {
+                self.said.push(format!(
+                    "Your save from before you went back is kept as {}",
+                    file_name(kept)
+                ));
+            }
             let Err(error) = written.result else {
                 continue;
             };
@@ -473,6 +535,140 @@ mod tests {
             format!("{empty:#}").starts_with("cannot read "),
             "{empty:#}"
         );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The files in `dir` whose names start with `game.sav`, with what
+    /// they hold.
+    fn saves_in(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| file_name(path).starts_with("game.sav"))
+            .map(|path| (file_name(&path), fs::read(&path).expect("read")))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// `files` as [`saves_in`] gives them.
+    fn held(files: &[(&str, u8)]) -> Vec<(String, Vec<u8>)> {
+        let files = files.iter();
+        files
+            .map(|(name, byte)| ((*name).to_owned(), vec![*byte]))
+            .collect()
+    }
+
+    const KEPT: &str = "Your save from before you went back is kept as ";
+
+    #[test]
+    fn loading_a_state_over_a_newer_save_sets_that_save_aside() {
+        let dir = empty_dir("load-newer");
+        let (mut core, mut saves) = game(&dir, 0);
+        // Hour 2: saved in the game, and a state saved.
+        core.poke(0, 0, 2);
+        saves.save_state(&*core, 1).expect("saved");
+        // Hour 20: saved in the game again.
+        core.poke(0, 0, 20);
+        assert!(saves.write_all(&*core));
+        assert_eq!(saves_in(&dir), held(&[("game.sav", 20)]));
+
+        // The state takes the game, and its save, back to hour 2.
+        saves.load_state(&mut *core, 1).expect("loaded");
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[("game.sav", 2), ("game.sav.bak", 20)])
+        );
+        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.bak")]);
+
+        // The same slot again changes nothing, so nothing more is kept.
+        saves.load_state(&mut *core, 1).expect("loaded");
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[("game.sav", 2), ("game.sav.bak", 20)])
+        );
+        assert!(saves.take_said().is_empty());
+
+        // Saving in the game from there is the game's own doing.
+        core.poke(0, 0, 3);
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[("game.sav", 3), ("game.sav.bak", 20)])
+        );
+        // Loading over that save keeps it too, beside the first.
+        saves.load_state(&mut *core, 1).expect("loaded");
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[("game.sav", 2), ("game.sav.bak", 20), ("game.sav.bak2", 3)])
+        );
+        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.bak2")]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn loading_a_state_with_the_save_on_disk_sets_nothing_aside() {
+        let dir = empty_dir("load-same");
+        let (mut core, mut saves) = game(&dir, 0);
+        core.poke(0, 0, 2);
+        core.poke(0, 1, 5);
+        saves.save_state(&*core, 1).expect("saved");
+        // Played on without saving in the game.
+        core.poke(0, 1, 9);
+        assert!(saves.write_all(&*core));
+        saves.load_state(&mut *core, 1).expect("loaded");
+        assert_eq!(bytes(&*core), (2, 5));
+        assert!(saves.write_all(&*core));
+        assert_eq!(saves_in(&dir), held(&[("game.sav", 2)]));
+        // Nor does the save the game next makes of its own accord.
+        core.poke(0, 0, 3);
+        assert!(saves.write_all(&*core));
+        assert_eq!(saves_in(&dir), held(&[("game.sav", 3)]));
+        assert!(saves.take_said().is_empty());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn rewinding_past_a_save_sets_it_aside_once_for_the_whole_rewind() {
+        let dir = empty_dir("rewind");
+        let (mut core, mut saves) = game(&dir, 0);
+        // Three moments rewind will step back through.
+        let mut moments = Vec::new();
+        for save in [1, 2, 3] {
+            core.poke(0, 0, save);
+            let mut state = Vec::new();
+            core.save_state(&mut state);
+            moments.push(state);
+        }
+        assert!(saves.write_all(&*core));
+        assert_eq!(saves_in(&dir), held(&[("game.sav", 3)]));
+
+        // Held down past the save at 3, the saves written a second apart.
+        saves.rewind_began();
+        for (moment, save) in [(&moments[1], 2), (&moments[0], 1)] {
+            core.load_state(moment).expect("a state of its own");
+            saves.rewound();
+            assert!(saves.write_all(&*core));
+            assert_eq!(
+                saves_in(&dir),
+                held(&[("game.sav", save), ("game.sav.bak", 3)])
+            );
+        }
+        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.bak")]);
+
+        // Rewinding that passes no save keeps nothing.
+        saves.rewind_began();
+        core.load_state(&moments[0]).expect("a state of its own");
+        saves.rewound();
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[("game.sav", 1), ("game.sav.bak", 3)])
+        );
+        assert!(saves.take_said().is_empty());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
