@@ -104,12 +104,12 @@ impl WorkFolder {
             "ds-emulator-{kind}-{}-{number}",
             std::process::id()
         ));
-        fs::remove_dir_all(&path).ok();
+        remove_folder(&path);
         fs::create_dir_all(&path)?;
         let lock = match emu_os::lock::lock(&path.join(LOCK)) {
             Ok(lock) => lock,
             Err(error) => {
-                fs::remove_dir_all(&path).ok();
+                remove_folder(&path);
                 return Err(error);
             }
         };
@@ -222,8 +222,54 @@ impl Drop for WorkFolder {
         // Closed first: Windows can't remove a folder while a file in it
         // is open, and the fields would only close after this.
         drop(self.lock.take());
-        fs::remove_dir_all(&self.path).ok();
+        remove_folder(&self.path);
         let_go(&self.path);
+    }
+}
+
+/// Removes the work folder at `path` with everything in it, as far as it
+/// can.
+///
+/// What is in it came out of an archive, and an archive can hold a folder
+/// that nobody may open or write in (mode 000, say). Unpacked so, nothing
+/// under it can be listed or removed, and the work folder, with up to a
+/// game in it, would be left for good: now, at quit and at every later
+/// launch. So if it cannot be removed as it is, each folder in it is
+/// first made its owner's to read, write and search. Windows has no such
+/// bits.
+fn remove_folder(path: &Path) {
+    if fs::remove_dir_all(path).is_ok() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        open_folders(path);
+        fs::remove_dir_all(path).ok();
+    }
+}
+
+/// Makes the folder at `path`, and each folder under it, its owner's to
+/// read, write and search. Links are not followed.
+#[cfg(unix)]
+fn open_folders(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Ok(found) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !found.is_dir() {
+        return;
+    }
+    let mode = found.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700)).ok();
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            open_folders(&entry.path());
+        }
     }
 }
 
@@ -333,7 +379,7 @@ pub(crate) fn remove_own_where(wanted: impl Fn(&Path) -> bool) {
     for path in held {
         if path.is_dir() {
             stop_working_in(&path);
-            fs::remove_dir_all(&path).ok();
+            remove_folder(&path);
         } else {
             fs::remove_file(&path).ok();
         }
@@ -368,7 +414,7 @@ fn remove_left_behind_in(temp: &Path, folders: &[PathBuf]) -> u64 {
                 #[cfg(target_os = "macos")]
                 stop_tar_left_unpacking_into(&path);
                 freed += size(&path);
-                fs::remove_dir_all(&path).ok();
+                remove_folder(&path);
             }
         }
     }
@@ -736,6 +782,50 @@ mod tests {
         assert!(lock(&child).try_wait().expect("waits").is_some(), "stopped");
         drop(folder);
         fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    #[cfg_attr(not(unix), ignore = "Windows: folders have no permission bits")]
+    fn a_work_folder_holding_folders_nobody_may_open_is_removed_all_the_same() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let temp = temp_dir("closed-folders");
+            // As an archive can unpack: a folder nobody may open, and one
+            // nobody may write in, each with something in it.
+            let fill = |work: &Path| {
+                for (folder, mode) in [("closed", 0o000), ("read-only", 0o500)] {
+                    let folder = work.join("Game").join(folder);
+                    fs::create_dir_all(folder.join("inner")).expect("folders");
+                    fs::write(folder.join("inner/Game.3ds"), [0; 100]).expect("file");
+                    fs::set_permissions(folder.join("inner"), fs::Permissions::from_mode(mode))
+                        .expect("mode");
+                    fs::set_permissions(&folder, fs::Permissions::from_mode(mode)).expect("mode");
+                }
+            };
+            // When the work is done, or stopped.
+            let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+            let path = folder.path().to_owned();
+            fill(&path);
+            drop(folder);
+            assert!(!path.exists(), "removed when done");
+            // When the app quits.
+            let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+            let path = folder.path().to_owned();
+            fill(&path);
+            std::mem::forget(folder);
+            remove_own_where(|held| held == path);
+            assert!(!path.exists(), "removed on quit");
+            // And one an app that was killed left behind, at a later launch.
+            let left = temp.join("ds-emulator-unpack-1-0");
+            fs::create_dir_all(&left).expect("folder");
+            fs::write(left.join(LOCK), b"").expect("lock");
+            fill(&left);
+            remove_left_behind_in(&temp, &[]);
+            assert!(!left.exists(), "removed at launch");
+            fs::remove_dir_all(&temp).ok();
+        }
     }
 
     #[test]
