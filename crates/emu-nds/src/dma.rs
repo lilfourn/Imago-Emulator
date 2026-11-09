@@ -266,6 +266,7 @@ impl Dma {
     ) -> bool {
         let timing = self.timing(index);
         let full_count = self.count(index);
+        let destination_mask = self.address_mask(index, true);
         let channel = &mut self.channels[index];
         channel.pending = false;
         channel.current_source = source;
@@ -278,7 +279,8 @@ impl Dma {
         if channel.repeat() && timing != Timing::Immediate {
             channel.remaining = full_count;
             if (channel.control >> 21) & 3 == 3 {
-                channel.current_destination = channel.destination & 0x0FFF_FFFE;
+                // As it was latched when the channel was enabled.
+                channel.current_destination = channel.destination & destination_mask;
             }
         } else {
             channel.control &= !(1 << 31);
@@ -333,6 +335,31 @@ mod tests {
         dma.trigger(Timing::Cart);
         assert!(dma.finish(0, 1, 0x0410_0010, 0x0200_0008), "IRQ at the end");
         assert_eq!(dma.read(8) & ENABLE, 0);
+    }
+
+    /// A repeating channel reloads its destination with the mask it
+    /// started with: 27 bits on the ARM7's channels 0 to 2, where the
+    /// reload used to keep 28.
+    #[test]
+    fn a_repeat_reloads_the_destination_as_the_start_masks_it() {
+        // Repeat, at VBlank, destination incrementing and reloading.
+        const RELOAD: u32 = ENABLE | 1 << 25 | 3 << 21 | 1 << 28 | 4;
+        for (owner, index, kept) in [
+            (Owner::Arm7, 0, 0x07FF_FFFE),
+            (Owner::Arm7, 2, 0x07FF_FFFE),
+            (Owner::Arm7, 3, 0x0FFF_FFFE),
+            (Owner::Arm9, 0, 0x0FFF_FFFE),
+        ] {
+            let mut dma = Dma::new(owner);
+            let base = index as u32 * 12;
+            dma.write(base + 4, 0xFFFF_FFFF);
+            dma.write(base + 8, RELOAD);
+            dma.trigger(Timing::VBlank);
+            assert_eq!(dma.transfer(index).destination, kept, "at the start");
+            dma.finish(index, 4, 0, 0x0200_0000);
+            dma.trigger(Timing::VBlank);
+            assert_eq!(dma.transfer(index).destination, kept, "{owner:?} {index}");
+        }
     }
 
     #[test]
