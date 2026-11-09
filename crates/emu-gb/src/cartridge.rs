@@ -659,7 +659,8 @@ impl Rtc {
             *latched = word(5 + index);
         }
         if !self.halted && now > timestamp {
-            for _ in 0..(now - timestamp).min(MAX_CATCH_UP_SECONDS) {
+            // A trailer may hold any timestamp, as far back as there is.
+            for _ in 0..now.saturating_sub(timestamp).min(MAX_CATCH_UP_SECONDS) {
                 self.advance_second();
             }
         }
@@ -786,6 +787,25 @@ mod tests {
         assert_eq!(cart.read_ram(0xA010), 0x00, "bank 0 is still selected");
         cart.write_rom(0x4000, 2);
         assert_eq!(cart.read_ram(0xA010), 0x55);
+    }
+
+    /// A save whose trailer says it was written at the start of time: the
+    /// seconds since overflowed, which in a debug build stopped the game
+    /// loading and in a release build skipped the clock's catching up.
+    #[test]
+    fn a_save_from_the_start_of_time_catches_the_clock_up() {
+        let mut save = vec![0; 0x2000 + 48];
+        save[0x2000 + 40..].copy_from_slice(&i64::MIN.to_le_bytes());
+        let mut cart = Cartridge::new(&rom(0x10, 2, 4), Some(&save), 1_000).expect("valid");
+        cart.write_rom(0x0000, 0x0A);
+        cart.write_rom(0x6000, 0);
+        cart.write_rom(0x6000, 1);
+        // As far as the clock catches up: a second past 512 days, with
+        // the day counter's carry set.
+        cart.write_rom(0x4000, 0x08);
+        assert_eq!(cart.read_ram(0xA000), 1, "seconds");
+        cart.write_rom(0x4000, 0x0C);
+        assert_eq!(cart.read_ram(0xA000) & 0x81, 0x80, "the day carry");
     }
 
     #[test]
