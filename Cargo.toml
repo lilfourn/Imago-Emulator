@@ -43,7 +43,10 @@ lz4_flex = "0.14"
 mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }
 png = "0.18"
 rtrb = "0.4"
-postcard = { version = "1", features = ["use-std"] }
+# Without its default feature, which only adds fixed-size buffers for
+# no_std through heapless, and with it the unmaintained atomic-polyfill
+# (RUSTSEC-2023-0089). The cores write states into a Vec.
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1"

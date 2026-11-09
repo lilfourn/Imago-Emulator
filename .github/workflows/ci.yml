@@ -49,6 +49,20 @@ jobs:
         if: ${{ !cancelled() }}
         run: scripts/determinism/check.sh
 
+  # RustSec's advisories against Cargo.lock: a dependency with a known
+  # vulnerability, or one newly unmaintained, fails the run. deny.toml
+  # lists the few that are ignored, and why. The action runs cargo-deny
+  # in a container of its own, so it needs an x86-64 Linux runner.
+  advisories:
+    name: Advisories
+    runs-on: namespace-profile-default
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+
   # Linux on Namespace's runners (the account's default profiles), on both
   # x86-64 and arm64. The x86-64 one also starts the app under Xvfb and
   # screenshots it (scripts/linux/smoke.sh).
