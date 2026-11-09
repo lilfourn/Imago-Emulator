@@ -1093,6 +1093,35 @@ fn a_gba_game_after_a_ds_game_goes_in_the_gba_slot() {
 }
 
 #[test]
+fn a_ds_game_with_a_cartridge_in_names_its_states_apart_from_the_game_alone() {
+    let (dir, paths) = rom_dir(
+        "slot-states",
+        &[("platinum.nds", &nds_rom()), ("emerald.gba", &gba_rom())],
+    );
+    let alone = load(&paths[..1], DmgColors::Grey).expect("loads");
+    let slotted = load(&paths, DmgColors::Grey).expect("loads");
+    assert_eq!(alone.states().path(1), dir.join("platinum.ss1"));
+    assert_eq!(slotted.states().path(1), dir.join("platinum.emerald.ss1"));
+    assert_eq!(
+        slotted.states().path(CHECKPOINT),
+        dir.join("platinum.emerald.ss0")
+    );
+    // Neither can load the other's, which their states say.
+    assert_ne!(alone.states().rom_crc32(), slotted.states().rom_crc32());
+    drop((alone, slotted));
+
+    // Linked games keep the names they had.
+    let (linked_dir, linked) = rom_dir(
+        "slot-states-linked",
+        &[("ruby.gba", &gba_rom()), ("sapphire.gba", &gba_rom())],
+    );
+    let loaded = load(&linked, DmgColors::Grey).expect("loads");
+    assert_eq!(loaded.states().path(1), linked_dir.join("ruby.ls1"));
+    fs::remove_dir_all(&dir).expect("clean up");
+    fs::remove_dir_all(&linked_dir).expect("clean up");
+}
+
+#[test]
 fn games_for_one_system_still_link() {
     let (dir, paths) = rom_dir(
         "link",

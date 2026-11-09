@@ -28,6 +28,10 @@ seeddb.bin
 *.ss[0-9]
 *.ls[0-9]
 *.state
+# Saves and save states the app set aside rather than replace.
+*.sav.bak*
+*.ss[0-9].bak*
+*.ls[0-9].bak*
 bios*.bin
 firmware*.bin
 /test-roms/

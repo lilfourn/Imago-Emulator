@@ -4,8 +4,10 @@
 //! to the ROM, as in mGBA and melonDS: `game.nds` gets `game.sav`,
 //! `game.ss1`, `game.cht` and `game.bindings.toml`. A linked pair saves its
 //! states next to the first player's ROM as `game.ls1`. A GBA game in a
-//! DS's GBA slot keeps its own `.sav`; the session's states, cheats and
-//! bindings are the DS game's. An RPG Maker game, a folder, has its files
+//! DS's GBA slot keeps its own `.sav`; the session's cheats and bindings
+//! are the DS game's, and its states are named after both games,
+//! `game.emerald.ss1`, as the DS game alone cannot load them, nor it theirs
+//! (see [`StateFiles`]). An RPG Maker game, a folder, has its files
 //! beside the folder, under its whole name: `Game 1.2` gets `Game 1.2.ss1`.
 //! Screenshots and recordings go there too,
 //! named after the game and the time, as macOS names its own:
@@ -27,8 +29,10 @@
 
 use std::borrow::Cow;
 use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
+
+use emu_core::System;
 
 use crate::slots::STATE_SLOTS;
 
@@ -110,6 +114,148 @@ impl GameFiles {
         .into_iter()
         .chain(states)
         .any(|path| path.exists())
+    }
+}
+
+/// A session's save states: where each slot's file is, and how to tell
+/// them from another session's that sit under the same names.
+///
+/// A state loads only in a session of the same system and ROMs, which its
+/// header names. So a DS game with a GBA cartridge in its slot names its
+/// states after both, `game.emerald.ss1`: they are neither the DS game's
+/// own (`game.ss1`) nor its states with another cartridge. Before they
+/// were, such a session shared the DS game's names; a state it left under
+/// one still loads in it (see [`StateFiles::to_read`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateFiles {
+    /// The first player's game's files, which name the states.
+    game: GameFiles,
+    /// Whether the session links several players.
+    linked: bool,
+    /// The name, without its extension, of the game in the first player's
+    /// second slot, if there is one.
+    cartridge: Option<String>,
+    /// The session's system and ROMs, as its states' headers have them.
+    system: System,
+    rom_crc32: u32,
+}
+
+/// What is at a save state's path (see [`StateFiles::found`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Found {
+    /// No file.
+    Nothing,
+    /// A state of this session's system and ROMs.
+    Ours,
+    /// Anything else: another session's state, such as the same game's
+    /// with a different cartridge in its slot, or a file that is no state
+    /// of this app's at all.
+    Another,
+}
+
+impl StateFiles {
+    /// The states of a session whose first player's game has the files
+    /// `game`, `linked` if it has several players, with the game at
+    /// `cartridge` in its second slot if it has one. Its states say they
+    /// are for `system` and the ROMs with the checksum `rom_crc32`.
+    pub fn new(
+        game: GameFiles,
+        linked: bool,
+        cartridge: Option<&Path>,
+        system: System,
+        rom_crc32: u32,
+    ) -> Self {
+        let cartridge = cartridge
+            .and_then(Path::file_stem)
+            .map(|stem| stem.to_string_lossy().into_owned());
+        Self {
+            game,
+            linked,
+            cartridge,
+            system,
+            rom_crc32,
+        }
+    }
+
+    /// The checksum of the session's ROMs, which its states' headers
+    /// carry.
+    pub fn rom_crc32(&self) -> u32 {
+        self.rom_crc32
+    }
+
+    /// The session's own file for the state in `slot`, where it is saved.
+    pub fn path(&self, slot: u8) -> PathBuf {
+        match &self.cartridge {
+            Some(cartridge) => self.game.named(&format!("{cartridge}.ss{slot}")),
+            None => self.game.state(slot, self.linked),
+        }
+    }
+
+    /// The file to load the state in `slot` from: the session's own, or,
+    /// if it has none there, the one under the name its states had before
+    /// they were named apart, while that file is this session's.
+    pub fn to_read(&self, slot: u8) -> PathBuf {
+        let own = self.path(slot);
+        if self.cartridge.is_none() || own.exists() {
+            return own;
+        }
+        let former = self.game.state(slot, self.linked);
+        match self.found(&former) {
+            Ok(Found::Ours) => former,
+            _ => own,
+        }
+    }
+
+    /// What is at `path`, by the first bytes of a save state's header (see
+    /// `emu-state`): its magic, its system and its ROMs' checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if there is a file but it cannot be read.
+    pub fn found(&self, path: &Path) -> io::Result<Found> {
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Found::Nothing),
+            Err(error) => return Err(error),
+        };
+        let mut header = [0; 20];
+        let ours = match file.read_exact(&mut header) {
+            Ok(()) => {
+                &header[..8] == b"EMUSTATE"
+                    && header[10] == self.system.tag()
+                    && header[16..20] == self.rom_crc32.to_le_bytes()
+            }
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
+            Err(error) => return Err(error),
+        };
+        Ok(if ours { Found::Ours } else { Found::Another })
+    }
+
+    /// Removes the session's state in `slot`, with the record and the
+    /// picture beside it: its own file, and the one [`StateFiles::to_read`]
+    /// would fall back to once that is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if a file is there but cannot be removed.
+    pub fn remove(&self, slot: u8) -> io::Result<()> {
+        // The second is another file only if the first was the session's
+        // own and there is one under the former name too.
+        for _ in 0..2 {
+            let state = self.to_read(slot);
+            remove_if_present(&state)?;
+            remove_if_present(&saves_record_path(&state))?;
+            remove_if_present(&state_picture_path(&state))?;
+        }
+        Ok(())
+    }
+}
+
+/// Removes the file at `path`, if there is one.
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 
@@ -583,6 +729,96 @@ mod tests {
         }
         assert_eq!(fs::read(dir.join("game.sav.bak")).expect("first"), [1]);
         assert_eq!(fs::read(dir.join("game.sav.bak2")).expect("second"), [2]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A save state's bytes for `system` and the ROMs `rom_crc32`.
+    fn state_of(system: System, rom_crc32: u32) -> Vec<u8> {
+        let header = emu_state::Header {
+            system,
+            state_version: 1,
+            rom_crc32,
+        };
+        emu_state::encode(&header, b"payload", None)
+    }
+
+    #[test]
+    fn a_game_with_a_cartridge_in_its_slot_names_its_states_after_both() {
+        let dir = temp_dir("state-files");
+        let game = GameFiles::of(&dir.join("platinum.nds"));
+        let alone = StateFiles::new(game.clone(), false, None, System::Nds, 0xA);
+        let cartridge = dir.join("gba/emerald.gba");
+        let slotted = StateFiles::new(game.clone(), false, Some(&cartridge), System::Nds, 0xB);
+        assert_eq!(alone.path(1), dir.join("platinum.ss1"));
+        assert_eq!(slotted.path(1), dir.join("platinum.emerald.ss1"));
+        assert_eq!(slotted.path(0), dir.join("platinum.emerald.ss0"));
+        // Another cartridge is another session again.
+        let other = StateFiles::new(
+            game.clone(),
+            false,
+            Some(&dir.join("ruby.gba")),
+            System::Nds,
+            0xC,
+        );
+        assert_eq!(other.path(1), dir.join("platinum.ruby.ss1"));
+        // Linked consoles keep the names they had.
+        let linked = StateFiles::new(game, true, None, System::Nds, 0xD);
+        assert_eq!(linked.path(2), dir.join("platinum.ls2"));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_state_file_is_ours_only_with_our_system_and_roms() {
+        let dir = temp_dir("state-found");
+        let game = GameFiles::of(&dir.join("platinum.nds"));
+        let states = StateFiles::new(game, false, None, System::Nds, 0xA);
+        let path = states.path(1);
+        assert_eq!(states.found(&path).expect("none"), Found::Nothing);
+        fs::write(&path, state_of(System::Nds, 0xA)).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Ours);
+        fs::write(&path, state_of(System::Nds, 0xB)).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Another);
+        fs::write(&path, state_of(System::Gba, 0xA)).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Another);
+        // Another emulator's file of the same name, or a cut-off one.
+        fs::write(&path, b"mGBA save state, not ours at all").expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Another);
+        fs::write(&path, b"EMUSTATE").expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Another);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn states_left_under_the_shared_names_still_load_in_the_session_that_made_them() {
+        let dir = temp_dir("state-former");
+        let game = GameFiles::of(&dir.join("platinum.nds"));
+        let alone = StateFiles::new(game.clone(), false, None, System::Nds, 0xA);
+        let cartridge = dir.join("emerald.gba");
+        let slotted = StateFiles::new(game, false, Some(&cartridge), System::Nds, 0xB);
+        // Before the names were apart: slot 1 saved with the cartridge in,
+        // slot 2 without.
+        fs::write(dir.join("platinum.ss1"), state_of(System::Nds, 0xB)).expect("write");
+        fs::write(dir.join("platinum.ss2"), state_of(System::Nds, 0xA)).expect("write");
+        assert_eq!(slotted.to_read(1), dir.join("platinum.ss1"));
+        assert_eq!(slotted.to_read(2), dir.join("platinum.emerald.ss2"));
+        assert_eq!(alone.to_read(1), dir.join("platinum.ss1"));
+        assert_eq!(alone.to_read(2), dir.join("platinum.ss2"));
+        // Once it has saved under its own name, that is the one it reads.
+        fs::write(slotted.path(1), state_of(System::Nds, 0xB)).expect("write");
+        assert_eq!(slotted.to_read(1), dir.join("platinum.emerald.ss1"));
+
+        // Removing a slot takes both, with what sits beside them, and
+        // leaves the other session's.
+        fs::write(dir.join("platinum.ss1.saves"), b"record").expect("write");
+        fs::write(dir.join("platinum.emerald.ss1.png"), b"picture").expect("write");
+        slotted.remove(1).expect("removed");
+        slotted.remove(2).expect("nothing of its own there");
+        let mut left: Vec<String> = fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| file_name(&entry.expect("entry").path()))
+            .collect();
+        left.sort();
+        assert_eq!(left, ["platinum.ss2"]);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

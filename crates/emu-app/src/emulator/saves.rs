@@ -23,7 +23,7 @@ use emu_core::Core;
 
 use super::{Loaded, OwnSaves};
 use crate::capture;
-use crate::persist::{self, GameFiles, file_name};
+use crate::persist::{self, Found, GameFiles, StateFiles, file_name};
 use crate::save_writer::SaveWriter;
 use crate::video;
 
@@ -48,13 +48,8 @@ fn generations(core: &dyn Core, cartridges: usize) -> Vec<Option<u64>> {
 
 /// A running game's battery saves, save states and checkpoint.
 pub(super) struct Saves {
-    /// The first player's game's files, which name the session's states.
-    states: GameFiles,
-    /// Whether the session links several players, whose states are named
-    /// apart from one player's.
-    linked: bool,
-    /// Identifies the ROMs in save states.
-    rom_crc32: u32,
+    /// Where the session's save states are, and whose a file there is.
+    states: StateFiles,
     /// Where an RPG Maker or 3DS game keeps the saves it makes itself.
     own_saves: OwnSaves,
     /// Per cartridge: the backup generation last handed to `writer`, or
@@ -82,9 +77,7 @@ impl Saves {
     /// be on disk as its core has them.
     pub(super) fn new(loaded: &Loaded) -> Self {
         Self {
-            states: loaded.files[0].clone(),
-            linked: loaded.core.info().players > 1,
-            rom_crc32: loaded.rom_crc32,
+            states: loaded.states(),
             own_saves: loaded.own_saves.clone(),
             flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
             backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
@@ -107,13 +100,11 @@ impl Saves {
         self.unheard > 0
     }
 
-    /// The session's save state file in `slot`.
-    fn state_path(&self, slot: u8) -> PathBuf {
-        self.states.state(slot, self.linked)
-    }
-
-    /// Writes `core`'s state to `slot`'s file.
-    pub(super) fn save_state(&self, core: &dyn Core, slot: u8) -> anyhow::Result<()> {
+    /// Writes `core`'s state to `slot`'s file. A file there that is not a
+    /// state of this session's, such as one the same game left with
+    /// another cartridge in its slot, is set aside first, never replaced,
+    /// and the player is told where it is.
+    pub(super) fn save_state(&mut self, core: &dyn Core, slot: u8) -> anyhow::Result<()> {
         let info = core.info();
         let mut payload = Vec::new();
         core.try_save_state(&mut payload)
@@ -121,7 +112,7 @@ impl Saves {
         let header = emu_state::Header {
             system: info.system,
             state_version: info.state_version,
-            rom_crc32: self.rom_crc32,
+            rom_crc32: self.states.rom_crc32(),
         };
         // At the screen's own size, whatever the 3D resolution.
         let screen = video::shrink(&core.screens()[0], info.screens[0]);
@@ -139,7 +130,22 @@ impl Saves {
             height: size.height,
             rgb: &rgb,
         };
-        let path = self.state_path(slot);
+        let path = self.states.path(slot);
+        let found = self
+            .states
+            .found(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        if found == Found::Another {
+            let kept = persist::set_aside(&path)
+                .with_context(|| format!("cannot set {} aside", path.display()))?;
+            if let Some(kept) = kept {
+                self.said.push(format!(
+                    "{} was another game's, or this one's with another cartridge in; it is kept as {}",
+                    file_name(&path),
+                    file_name(&kept)
+                ));
+            }
+        }
         persist::write_atomic(
             &path,
             &emu_state::encode(&header, &payload, Some(thumbnail)),
@@ -159,10 +165,11 @@ impl Saves {
         self.went_back.fill(Some(self.jumps));
     }
 
-    /// Restores `core` from the state in `slot`'s file. The next write of
-    /// each battery save follows a jump back.
+    /// Restores `core` from the state in `slot` (see
+    /// [`StateFiles::to_read`]). The next write of each battery save
+    /// follows a jump back.
     pub(super) fn load_state(&mut self, core: &mut dyn Core, slot: u8) -> anyhow::Result<()> {
-        let path = self.state_path(slot);
+        let path = self.states.to_read(slot);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let emu_state::Decoded {
             header, payload, ..
@@ -174,7 +181,7 @@ impl Saves {
             header.system
         );
         ensure!(
-            header.rom_crc32 == self.rom_crc32,
+            header.rom_crc32 == self.states.rom_crc32(),
             "it was saved from a different ROM"
         );
         ensure!(
@@ -203,7 +210,7 @@ impl Saves {
             "the battery save could not be written"
         );
         self.save_state(core, slot)?;
-        let state = self.state_path(slot);
+        let state = self.states.path(slot);
         // The library's picture of where the game was left: the first
         // screen, a DS's top one. It shows behind the game last played,
         // and in place of box art libretro doesn't have.
@@ -226,14 +233,19 @@ impl Saves {
     /// says it was saved with. A state saved before records were kept is
     /// loaded only if its battery saves are the same as the game's now,
     /// and otherwise undone; for a game that saves only when asked, which
-    /// cannot be undone so, it is left alone.
+    /// cannot be undone so, it is left alone. A file there that is not a
+    /// state of this session's is no checkpoint of its.
     pub(super) fn load_checkpoint(
         &mut self,
         core: &mut dyn Core,
         slot: u8,
     ) -> anyhow::Result<PickUp> {
-        let state = self.state_path(slot);
-        if !state.exists() {
+        let state = self.states.to_read(slot);
+        let found = self
+            .states
+            .found(&state)
+            .with_context(|| format!("cannot read {}", state.display()))?;
+        if found != Found::Ours {
             return Ok(PickUp::Empty);
         }
         let record = persist::saves_record_path(&state);
@@ -669,6 +681,164 @@ mod tests {
             held(&[("game.sav", 1), ("game.sav.bak", 3)])
         );
         assert!(saves.take_said().is_empty());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The saves of a [`Battery`] as [`game`] makes it, but one whose
+    /// states say they are for the ROMs `rom_crc32`, with the game at
+    /// `cartridge` in its second slot.
+    fn session(
+        dir: &Path,
+        save: u8,
+        rom_crc32: u32,
+        cartridge: Option<&str>,
+    ) -> (Box<dyn Core>, Saves) {
+        let (core, mut saves) = game(dir, save);
+        let cartridge = cartridge.map(|name| dir.join(name));
+        saves.states = StateFiles::new(
+            GameFiles::of(&dir.join("game.gba")),
+            false,
+            cartridge.as_deref(),
+            core.info().system,
+            rom_crc32,
+        );
+        (core, saves)
+    }
+
+    /// Every file in `dir`, by name.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| file_name(&entry.expect("entry").path()))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_game_with_a_cartridge_in_keeps_states_and_a_checkpoint_of_its_own() {
+        let dir = empty_dir("slotted");
+        // The game alone saves a state and leaves a checkpoint.
+        let (mut alone, mut alone_saves) = session(&dir, 0, 0xA, None);
+        alone.poke(0, 1, 1);
+        alone_saves.save_state(&*alone, 1).expect("saved");
+        alone_saves.save_checkpoint(&*alone, 0).expect("left");
+        let alone_state = fs::read(dir.join("game.ss1")).expect("its state");
+        let alone_checkpoint = fs::read(dir.join("game.ss0")).expect("its checkpoint");
+
+        // With a cartridge in, the same slots are other files.
+        let (mut slotted, mut slotted_saves) = session(&dir, 0, 0xB, Some("emerald.gba"));
+        assert_eq!(
+            slotted_saves
+                .load_checkpoint(&mut *slotted, 0)
+                .expect("none of its own"),
+            PickUp::Empty
+        );
+        assert!(slotted_saves.load_state(&mut *slotted, 1).is_err());
+        slotted.poke(0, 1, 2);
+        slotted_saves.save_state(&*slotted, 1).expect("saved");
+        slotted_saves.save_checkpoint(&*slotted, 0).expect("left");
+        assert_eq!(
+            names_in(&dir),
+            [
+                "game.emerald.ss0",
+                "game.emerald.ss0.png",
+                "game.emerald.ss0.saves",
+                "game.emerald.ss1",
+                "game.ss0",
+                "game.ss0.png",
+                "game.ss0.saves",
+                "game.ss1",
+            ]
+        );
+        assert_eq!(fs::read(dir.join("game.ss1")).expect("kept"), alone_state);
+        assert_eq!(
+            fs::read(dir.join("game.ss0")).expect("kept"),
+            alone_checkpoint
+        );
+        assert!(slotted_saves.take_said().is_empty());
+
+        // Each picks up its own.
+        let (mut alone, mut alone_saves) = session(&dir, 0, 0xA, None);
+        assert_eq!(
+            alone_saves
+                .load_checkpoint(&mut *alone, 0)
+                .expect("its own"),
+            PickUp::Loaded
+        );
+        assert_eq!(bytes(&*alone), (0, 1));
+        let (mut slotted, mut slotted_saves) = session(&dir, 0, 0xB, Some("emerald.gba"));
+        assert_eq!(
+            slotted_saves
+                .load_checkpoint(&mut *slotted, 0)
+                .expect("its own"),
+            PickUp::Loaded
+        );
+        assert_eq!(bytes(&*slotted), (0, 2));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn states_from_before_the_names_were_apart_load_and_are_never_replaced_unsaid() {
+        let dir = empty_dir("slotted-former");
+        // As older builds left them: the game with a cartridge in saved
+        // slot 1 and its checkpoint under the game's own names.
+        let (mut slotted, mut old_saves) = session(&dir, 0, 0xB, None);
+        slotted.poke(0, 1, 7);
+        old_saves.save_state(&*slotted, 1).expect("saved");
+        old_saves.save_checkpoint(&*slotted, 0).expect("left");
+        let old_state = fs::read(dir.join("game.ss1")).expect("the old state");
+        let old_checkpoint = fs::read(dir.join("game.ss0")).expect("the old checkpoint");
+
+        // The game with its cartridge still loads both.
+        let (mut slotted, mut slotted_saves) = session(&dir, 0, 0xB, Some("emerald.gba"));
+        assert_eq!(
+            slotted_saves
+                .load_checkpoint(&mut *slotted, 0)
+                .expect("the old one"),
+            PickUp::Loaded
+        );
+        assert_eq!(bytes(&*slotted), (0, 7));
+        slotted.poke(0, 1, 0);
+        slotted_saves
+            .load_state(&mut *slotted, 1)
+            .expect("the old one");
+        assert_eq!(bytes(&*slotted), (0, 7));
+
+        // The game alone does not take the checkpoint for its own, and
+        // says nothing untrue about its battery save.
+        let (mut alone, mut alone_saves) = session(&dir, 0, 0xA, None);
+        assert_eq!(
+            alone_saves
+                .load_checkpoint(&mut *alone, 0)
+                .expect("not its own"),
+            PickUp::Empty
+        );
+        let refused = alone_saves
+            .load_state(&mut *alone, 1)
+            .expect_err("not its own");
+        assert_eq!(format!("{refused:#}"), "it was saved from a different ROM");
+        // Saving there sets the other's state aside, and says so.
+        alone_saves.save_state(&*alone, 1).expect("saved");
+        assert_eq!(fs::read(dir.join("game.ss1.bak")).expect("kept"), old_state);
+        assert_eq!(
+            alone_saves.take_said(),
+            [
+                "game.ss1 was another game's, or this one's with another cartridge in; it is kept as game.ss1.bak"
+            ]
+        );
+        alone_saves.save_checkpoint(&*alone, 0).expect("left");
+        assert_eq!(
+            fs::read(dir.join("game.ss0.bak")).expect("kept"),
+            old_checkpoint
+        );
+        assert_eq!(alone_saves.take_said().len(), 1);
+        // Its own states it replaces as ever.
+        alone_saves.save_state(&*alone, 1).expect("saved");
+        alone_saves.save_checkpoint(&*alone, 0).expect("left");
+        assert!(alone_saves.take_said().is_empty());
+        assert!(!dir.join("game.ss1.bak2").exists());
+        assert!(!dir.join("game.ss0.bak2").exists());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

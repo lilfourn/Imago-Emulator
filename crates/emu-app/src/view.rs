@@ -63,7 +63,7 @@ use crate::library::{self, Library};
 use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
-use crate::persist::{self, GameFiles, file_name};
+use crate::persist::{self, GameFiles, StateFiles, file_name};
 use crate::picture::{self, Look, Picture, Resolution3d};
 use crate::probe;
 use crate::randomize_window::{self, RandomizeWindow};
@@ -274,6 +274,8 @@ struct Session {
     /// Each cartridge's own files, in `rom_paths`' order, named as the
     /// game started and kept so while it runs.
     files: Vec<GameFiles>,
+    /// Where the session's save states are.
+    states: StateFiles,
     frames: Vec<Frame>,
     sequence: u64,
     /// Per player: the cheat file's text when last sent to the emulator.
@@ -883,6 +885,7 @@ impl EmulatorView {
             .update(cx, |library, cx| library.add(played, cx));
         let player_rom_paths = loaded.player_rom_paths().to_vec();
         let files = loaded.files().to_vec();
+        let states = loaded.states();
         let emulator = Emulator::start(loaded, events, audio_sink);
         // As the window lays the game out now; drawing it corrects this if
         // its screens come out another size.
@@ -935,6 +938,7 @@ impl EmulatorView {
             rom_paths,
             player_rom_paths,
             files,
+            states,
             frames: Vec::new(),
             sequence: 0,
             cheat_texts: vec![None; info.players.max(1)],
@@ -1690,7 +1694,8 @@ impl EmulatorView {
         let slot = self.state_slot;
         self.show_notice(format!("State slot {slot}"), cx);
         self.save_settings(cx);
-        let Some(state) = self.session.as_ref().map(|s| s.state_path(slot)) else {
+        // The file Load State would read.
+        let Some(state) = self.session.as_ref().map(|s| s.states.to_read(slot)) else {
             return;
         };
         let preview = cx
@@ -2161,13 +2166,12 @@ impl EmulatorView {
         let roms = session.rom_paths.clone();
         let rom = roms.get(self.active_player).cloned();
         let save = session.player_files_of(self.active_player).backup();
-        let checkpoint = session.state_path(CHECKPOINT);
+        let states = session.states.clone();
         // Stopping writes the battery saves, so the save is set aside after.
         let stopped = self.stop(window, cx);
         self.keep_for_start(stopped);
-        let erased = remove_if_present(&checkpoint)
-            .and_then(|()| remove_if_present(&persist::saves_record_path(&checkpoint)))
-            .and_then(|()| remove_if_present(&persist::state_picture_path(&checkpoint)))
+        let erased = states
+            .remove(CHECKPOINT)
             .and_then(|()| persist::set_aside(&save))
             .and_then(|kept| {
                 // A 3DS game's own save is on the core's SD card.
@@ -3000,11 +3004,6 @@ impl Session {
     /// are fewer.
     fn player_files_of(&self, player: usize) -> &GameFiles {
         &self.files[player.min(self.player_rom_paths.len() - 1)]
-    }
-
-    /// The session's save state file in `slot`.
-    fn state_path(&self, slot: u8) -> PathBuf {
-        self.files[0].state(slot, self.info.players > 1)
     }
 
     /// Stops the emulation thread, which first finishes what it was asked,
@@ -4113,14 +4112,6 @@ fn checkpoint_notice(text: String) -> Option<String> {
         Some("Picked up where you left off".to_owned())
     } else {
         Some(text)
-    }
-}
-
-/// Removes the file at `path`, if there is one.
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
     }
 }
 

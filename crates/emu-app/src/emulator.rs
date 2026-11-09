@@ -59,7 +59,7 @@ use crate::audio::AudioSink;
 use crate::capture;
 use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
-use crate::persist::{self, GameFiles, file_name};
+use crate::persist::{self, GameFiles, StateFiles, file_name};
 use crate::qos;
 use crate::recorder::Recorder;
 use crate::refresh::Lock;
@@ -163,6 +163,22 @@ impl Loaded {
     /// Each cartridge's own files, in the order of [`Loaded::rom_paths`].
     pub fn files(&self) -> &[GameFiles] {
         &self.files
+    }
+
+    /// Where the session's save states are: named after the first
+    /// player's game, and after the game in its second slot too if it has
+    /// one (a DS game with a GBA cartridge).
+    pub fn states(&self) -> StateFiles {
+        let info = self.core.info();
+        // A cartridge past the players' is in the first player's slot.
+        let cartridge = (info.players == 1).then(|| self.rom_paths.get(1)).flatten();
+        StateFiles::new(
+            self.files[0].clone(),
+            info.players > 1,
+            cartridge.map(PathBuf::as_path),
+            info.system,
+            self.rom_crc32,
+        )
     }
 }
 
@@ -1069,10 +1085,15 @@ impl Runner {
                 self.debug.stopped = None;
                 self.notice("Reset");
             }
-            Command::SaveState(slot) => match self.saves.save_state(&*self.loaded.core, slot) {
-                Ok(()) => self.notice(format!("Saved state {slot}")),
-                Err(error) => self.notice(format!("Could not save state: {error:#}")),
-            },
+            Command::SaveState(slot) => {
+                let saved = self.saves.save_state(&*self.loaded.core, slot);
+                match saved {
+                    Ok(()) => self.notice(format!("Saved state {slot}")),
+                    Err(error) => self.notice(format!("Could not save state: {error:#}")),
+                }
+                // After, so it is what stays on screen.
+                self.say_saves();
+            }
             Command::Debug(command) => self.debug_command(command),
             Command::SetRenderScale(scale) => {
                 self.loaded.core.set_render_scale(scale);
