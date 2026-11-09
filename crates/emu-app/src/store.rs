@@ -43,6 +43,9 @@ use crate::rom_info::Platform;
 const HOMEBREW_HUB: &str = "https://hh3.gbdev.io";
 /// How many entries to ask Homebrew Hub for at once.
 const PAGE: usize = 500;
+/// The most pages asked for, whatever number Homebrew Hub gives: ten times
+/// the four its 1,600 entries make today.
+const MAX_PAGES: u64 = 40;
 /// Catalog entries the store never offers, whatever the catalog or the
 /// checks say:
 ///
@@ -300,7 +303,7 @@ pub fn cached(cache: &Path) -> Catalog {
 pub fn fetch(cache: &Path) -> anyhow::Result<Catalog> {
     let folder = cache_dir(cache);
     let (hub, udb) = std::thread::scope(|scope| {
-        let hub = scope.spawn(fetch_homebrew_hub);
+        let hub = scope.spawn(|| fetch_homebrew_hub(HOMEBREW_HUB));
         let udb = scope.spawn(|| -> anyhow::Result<String> {
             let bytes = boxart::fetch(UNIVERSAL_DB, 120)?
                 .with_context(|| format!("{UNIVERSAL_DB} is gone"))?;
@@ -329,22 +332,23 @@ pub fn fetch(cache: &Path) -> anyhow::Result<Catalog> {
     }
 }
 
-/// Homebrew Hub's whole catalog, a page at a time, as one JSON object with
-/// every entry in `entries`.
+/// The whole catalog of Homebrew Hub, at `site`, a page at a time, as one
+/// JSON object with every entry in `entries`.
 ///
 /// Pages are asked for in slug order: in the default order, entries added
 /// at the same moment move between pages, so some come twice and some
-/// never. If any are still missing, all are asked for in one page.
-fn fetch_homebrew_hub() -> anyhow::Result<String> {
+/// never. If any are still missing, all are asked for in one page. It says
+/// how many pages there are, and no more than [`MAX_PAGES`] are asked for.
+fn fetch_homebrew_hub(site: &str) -> anyhow::Result<String> {
     let get = |query: &str| -> anyhow::Result<Value> {
-        let url = format!("{HOMEBREW_HUB}/api/search?{query}&sort=slug&order=asc");
+        let url = format!("{site}/api/search?{query}&sort=slug&order=asc");
         let bytes = boxart::fetch(&url, 120)?.with_context(|| format!("{url} is gone"))?;
         serde_json::from_slice(&bytes).context("Homebrew Hub's answer")
     };
     let mut entries = Vec::new();
     let mut slugs = HashSet::new();
     let mut total = 0;
-    for page in 1.. {
+    for page in 1..=MAX_PAGES {
         let mut body = get(&format!("results={PAGE}&page={page}"))?;
         total = body["results"].as_u64().unwrap_or(0);
         let pages = body["page_total"].as_u64().unwrap_or(0);
@@ -1240,6 +1244,32 @@ mod tests {
             .count();
         assert_eq!(work_folders, 0, "the downloads are removed");
         fs::remove_dir_all(&games).ok();
+    }
+
+    #[test]
+    fn homebrew_hub_is_asked_for_only_so_many_pages() {
+        use std::sync::atomic::Ordering;
+
+        // A catalog that says it has 120 pages, each with one game.
+        let server = boxart::stand_in::serve(|path| {
+            let page = path
+                .split("page=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .unwrap_or_default();
+            let body = format!(
+                r#"{{"results": 60000, "page_total": 120, "entries": [{{"slug": "game-{page}"}}]}}"#
+            );
+            (200, body.into_bytes())
+        });
+        let catalog = fetch_homebrew_hub(&server.site).expect("fetched");
+        assert_eq!(
+            server.requests.load(Ordering::SeqCst) as u64,
+            MAX_PAGES + 1,
+            "the pages it may ask for, then all at once for what is missing"
+        );
+        let catalog: Value = serde_json::from_str(&catalog).expect("JSON");
+        assert!(catalog["entries"].is_array());
     }
 
     #[test]
