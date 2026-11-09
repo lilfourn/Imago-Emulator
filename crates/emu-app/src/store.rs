@@ -219,7 +219,7 @@ pub struct Offer {
     pub tags: Vec<String>,
     /// The licence it is shared under, if the catalog says.
     pub license: Option<String>,
-    /// Its website or source code.
+    /// Its website or source code: an `http://` or `https://` link.
     pub website: Option<String>,
     /// When the catalog listed it, as an RFC 3339 date, which sorts as
     /// text.
@@ -469,7 +469,7 @@ fn homebrew_hub_offer(entry: &Value) -> Option<Offer> {
         website: strings(&entry["website"])
             .into_iter()
             .chain(strings(&entry["repository"]))
-            .find(|link| link.starts_with("http")),
+            .find(|link| is_web_link(link)),
         added: text(&entry["firstadded_date"]).unwrap_or_default(),
         url: url_of(file),
         file: file_name(file)?,
@@ -529,13 +529,27 @@ fn universal_db_offer(entry: &Value) -> Option<Offer> {
         tags: Vec::new(),
         license: text(&entry["license_name"]),
         website: text(&entry["website"])
-            .or_else(|| text(&entry["source"]))
-            .or_else(|| strings(&entry["urls"]).into_iter().next()),
+            .into_iter()
+            .chain(text(&entry["source"]))
+            .chain(strings(&entry["urls"]))
+            .find(|link| is_web_link(link)),
         added: text(&entry["created"]).unwrap_or_default(),
         url: text(&download["url"]).filter(|url| downloadable(url))?,
         file: file_name(file)?,
         screenshots,
         tested: false,
+    })
+}
+
+/// Whether `link`, which a catalog gives as a game's website or source
+/// code, is a web link, `http://` or `https://` and something after it.
+/// The app opens a game's website in the browser, and the system would
+/// open a link of any other kind, such as `file:`, with whatever program
+/// takes it.
+fn is_web_link(link: &str) -> bool {
+    ["http://", "https://"].iter().any(|scheme| {
+        link.strip_prefix(scheme)
+            .is_some_and(|rest| !rest.is_empty())
     })
 }
 
@@ -1226,6 +1240,51 @@ mod tests {
             .count();
         assert_eq!(work_folders, 0, "the downloads are removed");
         fs::remove_dir_all(&games).ok();
+    }
+
+    #[test]
+    fn a_game_s_website_is_a_web_link_or_none() {
+        // As the app opens it in the browser: nothing a catalog names that
+        // the system would open with another program.
+        let hub = r#"{"entries": [
+            {"slug": "a", "title": "A", "platform": "GB", "basepath": "database-gb",
+             "website": ["httpx://x/a", "file:///Applications/Calculator.app", "http://a.example/"],
+             "repository": "https://github.com/a/a",
+             "files": [{"filename": "a.gb", "playable": true}]},
+            {"slug": "b", "title": "B", "platform": "GB", "basepath": "database-gb",
+             "website": "javascript:alert(1)", "repository": "ssh://git@x/b.git",
+             "files": [{"filename": "b.gb", "playable": true}]}
+        ]}"#;
+        let offers = read_offers(Source::HomebrewHub, hub, &HashMap::new()).expect("parses");
+        assert_eq!(
+            by_slug(&offers, "a").website.as_deref(),
+            Some("http://a.example/"),
+            "the first that is a web link"
+        );
+        assert_eq!(by_slug(&offers, "b").website, None);
+
+        let udb = r#"[
+            {"slug": "c", "title": "C", "systems": ["DS"], "categories": ["game"],
+             "website": "file:///Applications/Calculator.app", "source": "https://github.com/c/c",
+             "downloads": {"c.nds": {"url": "https://x/c.nds"}}},
+            {"slug": "d", "title": "D", "systems": ["DS"], "categories": ["game"],
+             "source": "smb://x/share", "urls": ["mailto:d@x", "https://", " https://d.example/ "],
+             "downloads": {"d.nds": {"url": "https://x/d.nds"}}},
+            {"slug": "e", "title": "E", "systems": ["DS"], "categories": ["game"],
+             "website": "x-apple.systempreferences:com.apple.preference.security",
+             "downloads": {"e.nds": {"url": "https://x/e.nds"}}}
+        ]"#;
+        let offers = read_offers(Source::UniversalDb, udb, &HashMap::new()).expect("parses");
+        assert_eq!(
+            by_slug(&offers, "c").website.as_deref(),
+            Some("https://github.com/c/c")
+        );
+        assert_eq!(
+            by_slug(&offers, "d").website.as_deref(),
+            Some("https://d.example/"),
+            "the first of its links that is one"
+        );
+        assert_eq!(by_slug(&offers, "e").website, None);
     }
 
     #[test]
