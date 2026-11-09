@@ -274,6 +274,9 @@ pub struct LibraryView {
     /// or wrote it, by path: one it holds beyond these, another copy
     /// added.
     on_disk: HashSet<PathBuf>,
+    /// The games the player has been told the file cannot hold, by path,
+    /// so each is said once.
+    told_left_out: HashSet<PathBuf>,
     /// Where box art is kept, if there is a cache folder.
     cache: Option<PathBuf>,
     /// Each game's pictures and when it was played, by its path.
@@ -352,6 +355,7 @@ impl LibraryView {
             .detach();
         let mut view = Self {
             on_disk: library.paths(),
+            told_left_out: HashSet::new(),
             library,
             path,
             cache: boxart::cache_dir(),
@@ -887,6 +891,9 @@ impl LibraryView {
                 let message = format!("Cannot save the library to {}: {error}", path.display());
                 cx.emit(LibraryEvent::Notice(message));
             }
+        }
+        for notice in left_out_notices(&self.library, &mut self.told_left_out) {
+            cx.emit(LibraryEvent::Notice(notice));
         }
     }
 
@@ -2542,6 +2549,22 @@ fn thumbnail(game: &Game, pictures: &Pictures, side: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// What to tell the player of the games in `library` that its file cannot
+/// hold, which `told` does not have yet: each is said once, and `told`
+/// then has it.
+fn left_out_notices(library: &Library, told: &mut HashSet<PathBuf>) -> Vec<String> {
+    library
+        .left_out()
+        .filter(|game| told.insert(game.path.clone()))
+        .map(|game| {
+            format!(
+                "{} plays, but will not be in the library next time: its file's name is not valid Unicode. Rename the file to keep it.",
+                game.title
+            )
+        })
+        .collect()
+}
+
 /// What `game`'s files say of it: whether its ROM or folder is there, its
 /// size, when its battery save was written and how many save states it
 /// has.
@@ -2647,6 +2670,29 @@ fn position(shown: &[&Game], selected: Option<&Path>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_game_the_library_file_cannot_hold_is_said_once() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/games/Pok\xE9mon Fan Game".to_vec(),
+        ));
+        let mut library = Library::default();
+        library.add(Game::rpg_maker(Path::new("/games/Uranium"), None));
+        let mut told = HashSet::new();
+        assert!(left_out_notices(&library, &mut told).is_empty());
+        library.add(Game::rpg_maker(&odd, Some("Fan Game".to_owned())));
+        assert_eq!(
+            left_out_notices(&library, &mut told),
+            [
+                "Fan Game plays, but will not be in the library next time: its file's name is not valid Unicode. Rename the file to keep it."
+            ]
+        );
+        // Every later save says nothing more of it.
+        assert!(left_out_notices(&library, &mut told).is_empty());
+    }
 
     #[test]
     fn the_game_menus_words_read_on_its_surface() {

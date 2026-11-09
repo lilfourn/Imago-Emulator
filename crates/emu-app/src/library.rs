@@ -12,6 +12,11 @@
 //! looked_up = true           # the game database has been asked
 //! play_time = 4520           # seconds played, once it has been
 //! ```
+//!
+//! A path is kept as text, so a game whose path is not valid Unicode (a
+//! file from an old archive, on Linux or Windows) cannot be written. It
+//! stays in the library for as long as the app runs, and plays, but is
+//! left out of the file (see [`Library::left_out`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -227,12 +232,27 @@ impl Library {
         Ok(Self { games })
     }
 
-    /// The library as the TOML [`Library::from_toml`] reads.
-    pub fn to_toml(&self) -> String {
+    /// The games the library file cannot hold, which are left out of it:
+    /// those whose paths are not valid Unicode, as TOML text must be.
+    pub fn left_out(&self) -> impl Iterator<Item = &Game> {
+        self.games
+            .iter()
+            .filter(|game| game.path.to_str().is_none())
+    }
+
+    /// The library as the TOML [`Library::from_toml`] reads, without the
+    /// games it cannot hold ([`Library::left_out`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Unwritable`] if the games cannot be written
+    /// as TOML, which none of those kept is known to cause.
+    pub fn to_toml(&self) -> Result<String, LibraryError> {
         let file = LibraryFile {
             game: self
                 .games
                 .iter()
+                .filter(|game| game.path.to_str().is_some())
                 .map(|game| GameEntry {
                     path: game.path.clone(),
                     platform: game.platform.tag().to_owned(),
@@ -245,8 +265,11 @@ impl Library {
                 })
                 .collect(),
         };
-        let body = toml::to_string(&file).expect("plain tables and values always serialize");
-        format!("# Saved by ds-emulator whenever the library changes.\n\n{body}")
+        let body =
+            toml::to_string(&file).map_err(|error| LibraryError::Unwritable(error.to_string()))?;
+        Ok(format!(
+            "# Saved by ds-emulator whenever the library changes.\n\n{body}"
+        ))
     }
 
     /// Reads the library from `path`, or an empty one if it does not
@@ -264,16 +287,19 @@ impl Library {
         }
     }
 
-    /// Writes the library to `path`, creating its folder if needed.
+    /// Writes the library to `path`, creating its folder if needed. The
+    /// games the file cannot hold are left out ([`Library::left_out`]).
     ///
     /// # Errors
     ///
-    /// Returns the I/O error if the folder or file cannot be written.
+    /// Returns the I/O error if the folder or file cannot be written, or
+    /// the library cannot be written as TOML; the file is then as it was.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let text = self.to_toml().map_err(std::io::Error::other)?;
         if let Some(folder) = path.parent() {
             std::fs::create_dir_all(folder)?;
         }
-        persist::write_atomic(path, self.to_toml().as_bytes())
+        persist::write_atomic(path, text.as_bytes())
     }
 
     /// The path of every game, as `known` for [`Library::save_keeping`].
@@ -409,6 +435,9 @@ pub enum LibraryError {
     /// A game's platform is not one of the five names.
     #[error("unknown platform {0:?} in the library")]
     UnknownPlatform(String),
+    /// The games could not be written as TOML.
+    #[error("cannot write the library: {0}")]
+    Unwritable(String),
     /// A game's checksum is not eight hex digits.
     #[error("bad checksum {0:?} in the library")]
     BadChecksum(String),
@@ -511,6 +540,73 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
+    /// A path that is not valid Unicode, as an old archive's file names
+    /// can be.
+    #[cfg(unix)]
+    fn odd_path() -> PathBuf {
+        use std::os::unix::ffi::OsStringExt as _;
+        PathBuf::from(std::ffi::OsString::from_vec(
+            b"/roms/Pok\xE9mon.gba".to_vec(),
+        ))
+    }
+
+    /// A path that is not valid Unicode, as an old archive's file names
+    /// can be.
+    #[cfg(windows)]
+    fn odd_path() -> PathBuf {
+        use std::os::windows::ffi::OsStringExt as _;
+        let mut wide: Vec<u16> = "C:\\roms\\Pok".encode_utf16().collect();
+        // Half of a surrogate pair.
+        wide.push(0xD800);
+        wide.extend(".gba".encode_utf16());
+        PathBuf::from(std::ffi::OsString::from_wide(&wide))
+    }
+
+    #[test]
+    fn a_game_whose_path_is_not_unicode_is_left_out_of_the_file_and_nothing_panics() {
+        let dir = std::env::temp_dir().join(format!("emu-app-library-odd-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("library.toml");
+        let odd = odd_path();
+        assert!(odd.to_str().is_none());
+        let mut library = Library::default();
+        library.add(Game::new(
+            Path::new("/roms/Ruby.gba"),
+            &info(Platform::Gba, 1),
+        ));
+        library.add(Game::new(&odd, &info(Platform::Gba, 2)));
+        library.add(Game::new(
+            Path::new("/roms/Emerald.gba"),
+            &info(Platform::Gba, 3),
+        ));
+        // It is a game like any other while the app runs.
+        assert!(library.contains(&odd));
+        assert!(library.add_play_time(&odd, Duration::from_secs(60)));
+        let left_out: Vec<&Path> = library.left_out().map(|game| &*game.path).collect();
+        assert_eq!(left_out, [odd.as_path()]);
+
+        // The file holds the others, and reads as files always have.
+        library.save(&path).expect("saved");
+        let read = Library::load(&path).expect("reads");
+        let kept: Vec<&str> = read.games.iter().map(|game| &*game.title).collect();
+        assert_eq!(kept, ["Ruby", "Emerald"]);
+        assert_eq!(
+            library
+                .to_toml()
+                .expect("writes")
+                .matches("[[game]]")
+                .count(),
+            2
+        );
+        // Saved again with another copy's games kept, it is still there
+        // here and still left out there.
+        let mut known = library.paths();
+        assert_eq!(library.save_keeping(&path, &mut known).expect("saved"), 0);
+        assert!(library.contains(&odd));
+        assert_eq!(Library::load(&path), Ok(read));
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
     #[test]
     fn found_names_give_the_title() {
         let mut game = Game::new(Path::new("/roms/zelda.gba"), &info(Platform::Gba, 1));
@@ -581,7 +677,7 @@ mod tests {
             Path::new("/roms/tetris.gb"),
             &info(Platform::Gb, 7),
         ));
-        let text = library.to_toml();
+        let text = library.to_toml().expect("writes");
         assert!(text.contains("crc32 = \"ABCEBBB1\""), "{text}");
         assert!(text.contains("platform = \"nds\""), "{text}");
         assert_eq!(Library::from_toml(&text), Ok(library));
@@ -592,11 +688,11 @@ mod tests {
         let path = Path::new("/roms/tetris.gb");
         let mut library = Library::default();
         library.add(Game::new(path, &info(Platform::Gb, 7)));
-        let unplayed = library.to_toml();
+        let unplayed = library.to_toml().expect("writes");
         assert!(!unplayed.contains("play_time"), "{unplayed}");
         assert!(library.add_play_time(path, Duration::from_millis(90_400)));
         assert!(!library.add_play_time(Path::new("/roms/other.gb"), Duration::from_secs(1)));
-        let text = library.to_toml();
+        let text = library.to_toml().expect("writes");
         assert!(text.contains("play_time = 90"), "{text}");
         let read = Library::from_toml(&text).expect("reads");
         assert_eq!(read.games[0].play_time, Duration::from_secs(90));
@@ -668,7 +764,7 @@ mod tests {
         let mut library = Library::default();
         library.add(game);
         library.add(other);
-        let text = library.to_toml();
+        let text = library.to_toml().expect("writes");
         assert!(text.contains("platform = \"rpgmaker\""), "{text}");
         assert_eq!(Library::from_toml(&text), Ok(library));
     }
