@@ -7,7 +7,8 @@
 //! page it lands on says how connecting actually went. Declining on
 //! OpenRouter returns to the callback with no code, which ends the flow at
 //! once. Anything else the browser asks for, such as a favicon, gets a 404
-//! and the wait goes on.
+//! and the wait goes on; so does a request for the callback that a page
+//! makes in the background, which is not the browser coming back.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -254,14 +255,33 @@ fn read_head(stream: &mut TcpStream) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
-/// `None` unless the request is `GET /callback`; then its `code`, `None`
-/// when it has none.
+/// `None` unless the request is `GET /callback` and may be the browser
+/// coming back; then its `code`, `None` when it has none.
+///
+/// OpenRouter sends the browser back by a navigation. A page the browser
+/// has open can also ask for the callback by itself, in the background,
+/// and a browser marks such a request with a `Sec-Fetch-Mode` that is not
+/// `navigate`: those are not the return, so they neither end the wait as
+/// declined nor spend its one exchange on a code of the page's making. A
+/// request without the header, as an older browser sends, is taken as
+/// before.
 fn callback(head: &str) -> Option<Option<String>> {
-    let mut request = head.lines().next()?.split_whitespace();
+    let mut lines = head.lines();
+    let mut request = lines.next()?.split_whitespace();
     if request.next()? != "GET" {
         return None;
     }
     let target = request.next()?;
+    let in_the_background = lines
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .any(|(name, mode)| {
+            name.trim().eq_ignore_ascii_case("sec-fetch-mode")
+                && !mode.trim().eq_ignore_ascii_case("navigate")
+        });
+    if in_the_background {
+        return None;
+    }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     (path == "/callback").then(|| url::query_value(query, "code").filter(|code| !code.is_empty()))
 }
@@ -407,10 +427,16 @@ mod tests {
 
     /// What a browser gets asking `path` of the callback at `port`.
     fn browse(port: u16, path: &str) -> String {
+        browse_with(port, path, "")
+    }
+
+    /// What a browser gets asking `path` of the callback at `port`, with
+    /// the header lines `headers`, each ended by a line break.
+    fn browse_with(port: u16, path: &str, headers: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(
             stream,
-            "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\n{headers}\r\n"
         )
         .unwrap();
         let mut page = String::new();
@@ -543,6 +569,45 @@ mod tests {
         let (url, _, flow) = start(Endpoints::at("http://127.0.0.1:9"), store.clone(), TIMEOUT);
         let (port, _) = port_and_challenge(&url);
         assert!(browse(port, "/callback").contains("You declined access."));
+        assert!(matches!(flow.join().unwrap().0, Err(LoginError::Declined)));
+        assert_eq!(store.load_with(None), None);
+    }
+
+    #[test]
+    fn a_page_s_background_request_cannot_end_the_flow() {
+        // As a browser marks a request a page makes by itself, and the
+        // navigation that brings the player back from OpenRouter.
+        let asked = |mode: &str| {
+            format!(
+                "GET /callback?code=abc HTTP/1.1\r\nHost: localhost\r\nSec-Fetch-Mode: {mode}\r\n\r\n"
+            )
+        };
+        assert_eq!(callback(&asked("no-cors")), None);
+        assert_eq!(callback(&asked("cors")), None);
+        assert_eq!(callback(&asked("navigate")), Some(Some("abc".into())));
+        assert_eq!(
+            callback("GET /callback HTTP/1.1\r\nsec-fetch-mode:  NO-CORS \r\n\r\n"),
+            None,
+            "however the header is written"
+        );
+
+        // A page asking for the callback without a code would read as the
+        // player declining.
+        let store = store("background");
+        let (url, _, flow) = start(Endpoints::at("http://127.0.0.1:9"), store.clone(), TIMEOUT);
+        let (port, _) = port_and_challenge(&url);
+        let page = browse_with(
+            port,
+            "/callback",
+            "Sec-Fetch-Mode: no-cors\r\nSec-Fetch-Site: cross-site\r\n",
+        );
+        assert!(page.starts_with("HTTP/1.1 404"), "{page}");
+        let forged = browse_with(port, "/callback?code=forged", "Sec-Fetch-Mode: cors\r\n");
+        assert!(forged.starts_with("HTTP/1.1 404"), "{forged}");
+        assert!(!flow.is_finished(), "the wait goes on");
+        // The browser coming back, a navigation, still ends it.
+        let page = browse_with(port, "/callback", "Sec-Fetch-Mode: navigate\r\n");
+        assert!(page.contains("You declined access."), "{page}");
         assert!(matches!(flow.join().unwrap().0, Err(LoginError::Declined)));
         assert_eq!(store.load_with(None), None);
     }
