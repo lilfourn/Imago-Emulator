@@ -1268,7 +1268,9 @@ mod tests {
 
     /// A stand-in for `tar`, in `dir`: a shell script that lists a `Game.gb`
     /// of `listed` bytes in any archive, and unpacks one of `megabytes`
-    /// MiB from it, a MiB at a time, noting that it was asked to.
+    /// MiB from it, a MiB every hundredth of a second, noting that it was
+    /// asked to (`asked-to-unpack`) and, once it has written it all, that
+    /// it did (`unpacked-it-all`).
     #[cfg(unix)]
     fn fake_tar(dir: &Path, listed: u64, megabytes: u32) -> Unpacker {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1277,9 +1279,11 @@ mod tests {
              -tvf) echo '-rw-r--r--  0 0      0  {listed} Dec 25  1996 Game.gb' ;;\n\
              -xf) : > '{asked}'; i=0\n\
              while [ $i -lt {megabytes} ]; do\n\
-             head -c 1048576 /dev/zero >> \"$4/Game.gb\"; i=$((i+1))\n\
-             done ;;\nesac\n",
-            asked = dir.join("asked-to-unpack").display()
+             head -c 1048576 /dev/zero >> \"$4/Game.gb\"; i=$((i+1)); sleep 0.01\n\
+             done\n\
+             : > '{done}' ;;\nesac\n",
+            asked = dir.join("asked-to-unpack").display(),
+            done = dir.join("unpacked-it-all").display()
         );
         let program = dir.join("tar");
         fs::write(&program, script).expect("script");
@@ -1310,13 +1314,19 @@ mod tests {
                     })
                     .count()
             };
-            // It lists five bytes and writes 24 MiB.
-            let tar = fake_tar(&dir, 5, 24);
+            // It lists five bytes and would write 400 MiB, over some
+            // seconds: it may write 16 MiB.
+            let tar = fake_tar(&dir, 5, 400);
             let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
             let error = unpacked.expect_err("too big");
             assert_eq!(
                 error.to_string(),
                 "it unpacks to more than twice what it lists"
+            );
+            assert!(dir.join("asked-to-unpack").exists(), "it was started");
+            assert!(
+                !dir.join("unpacked-it-all").exists(),
+                "and stopped while it ran, not found too big once it was done"
             );
             assert!(!games.exists(), "nothing of it is kept");
             assert_eq!(work_folders(), 0, "what it wrote is removed");
@@ -1324,6 +1334,7 @@ mod tests {
             let tar = fake_tar(&dir, 3 << 20, 3);
             let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
             assert_eq!(unpacked.expect("unpacks"), [games.join("Game.gb")]);
+            assert!(dir.join("unpacked-it-all").exists(), "left to finish");
             assert_eq!(
                 fs::metadata(games.join("Game.gb")).expect("kept").len(),
                 3 << 20
