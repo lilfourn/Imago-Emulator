@@ -82,7 +82,8 @@ pub struct Output {
     /// Per player, from player 0: buttons to press or release on the next
     /// frame. Players past the end press nothing.
     pub joypad: Vec<Joypad>,
-    /// States to save or load before the next frame, in order.
+    /// States to save or load before the next frame, in order: at most
+    /// the first 18 asked for, and none the same as the one before it.
     pub states: Vec<StateRequest>,
     /// The script asked to pause.
     pub pause: bool,
@@ -292,7 +293,10 @@ impl Script {
     /// Everything the script asked for since this was last called.
     pub fn take_output(&mut self) -> Output {
         api::state_mut(&self.lua)
-            .map(|mut state| std::mem::take(&mut state.output))
+            .map(|mut state| {
+                state.states_left_out = false;
+                std::mem::take(&mut state.output)
+            })
             .unwrap_or_default()
     }
 

@@ -465,6 +465,71 @@ fn state_slots_and_pausing_are_requests() {
     assert_eq!(script.take_output(), Output::default(), "taken once");
 }
 
+/// A script used to queue as many requests as its instruction budget
+/// let it make, tens of millions, each a state for the frontend to save
+/// or load before the next frame.
+#[test]
+fn state_requests_past_the_first_few_are_left_out() {
+    let mut core = TestCore::new();
+    let mut script = started(
+        r#"
+        for turn = 1, 100000 do
+            emu.save_state(turn % 9 + 1)
+            emu.load_state(turn % 9 + 1)
+        end
+        emu.on_frame(function() emu.load_state(4) end)
+        "#,
+        &mut core,
+    );
+    let output = script.take_output();
+    assert_eq!(output.states.len(), 18);
+    // The first are kept, in the order they were asked for.
+    assert_eq!(
+        output.states[..3],
+        [
+            StateRequest::Save(2),
+            StateRequest::Load(2),
+            StateRequest::Save(3)
+        ]
+    );
+    assert_eq!(
+        output.log,
+        ["(more than 18 states asked for since the last frame; the rest are left out)"]
+    );
+    // The count starts again once the frontend has taken them.
+    let output = frame(&mut script, &mut core, &Output::default(), Buttons::NONE);
+    assert_eq!(output.states, [StateRequest::Load(4)]);
+    assert!(output.log.is_empty());
+}
+
+/// The machine stands still between a script's requests, so the same one
+/// twice in a row is one.
+#[test]
+fn asking_for_the_same_state_twice_in_a_row_asks_once() {
+    let mut core = TestCore::new();
+    let mut script = started(
+        r#"
+        for _ = 1, 1000 do emu.save_state(1) end
+        emu.load_state(2)
+        emu.load_state(2)
+        emu.save_state(1)
+        emu.save_state(2)
+        "#,
+        &mut core,
+    );
+    let output = script.take_output();
+    assert_eq!(
+        output.states,
+        [
+            StateRequest::Save(1),
+            StateRequest::Load(2),
+            StateRequest::Save(1),
+            StateRequest::Save(2)
+        ]
+    );
+    assert!(output.log.is_empty());
+}
+
 #[test]
 fn exec_callbacks_run_where_the_cpu_is_about_to_be() {
     let mut core = TestCore::new();

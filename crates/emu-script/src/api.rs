@@ -37,8 +37,17 @@ const LONGEST_TEXT: usize = 256;
 /// stays small next to its memory limit.
 const LONGEST_LINE: usize = 4_096;
 
-/// Save-state slots scripts can use, as in the app's `.ss1` to `.ss9`.
+/// Save-state slots scripts can use. The app keeps them as `.ss1` to
+/// `.ss9` beside the game; its own menus and keys reach the first four.
 const SLOTS: std::ops::RangeInclusive<i64> = 1..=9;
+
+/// Asking for more than this many states between frames logs one note,
+/// then asks for nothing more: each is a whole state for the frontend to
+/// save or load, and a script could ask for millions. It is enough to
+/// save and to load every slot once. The first are the ones kept, so
+/// what the frontend does is what the script asked for, in order, as far
+/// as it goes; the last few could load a state whose save was left out.
+const MOST_STATES: usize = 18;
 
 /// Facts about the machine a script runs on, read when it starts.
 #[derive(Debug, Clone, Copy, Default)]
@@ -73,6 +82,9 @@ pub struct State {
     pub inputs: Vec<Input>,
     /// What the script asked for since the frontend last took it.
     pub output: Output,
+    /// Whether it asked for more than [`MOST_STATES`] states in that
+    /// time, and the log says so.
+    pub states_left_out: bool,
     pub on_frame: Vec<Function>,
     pub on_exec: Vec<(Breakpoint, Function)>,
 }
@@ -163,16 +175,14 @@ fn emu(lua: &Lua) -> mlua::Result<Table> {
         "save_state",
         lua.create_function(|lua, slot: Value| {
             let slot = slot_number(lua, "emu.save_state", &slot)?;
-            state_mut(lua)?.output.states.push(StateRequest::Save(slot));
-            Ok(())
+            request_state(lua, StateRequest::Save(slot))
         })?,
     )?;
     emu.set(
         "load_state",
         lua.create_function(|lua, slot: Value| {
             let slot = slot_number(lua, "emu.load_state", &slot)?;
-            state_mut(lua)?.output.states.push(StateRequest::Load(slot));
-            Ok(())
+            request_state(lua, StateRequest::Load(slot))
         })?,
     )?;
     emu.set(
@@ -373,19 +383,47 @@ fn console(lua: &Lua) -> mlua::Result<Table> {
                 .map(|value| to_text(lua, value))
                 .collect::<mlua::Result<Vec<_>>>()?;
             let line = cut(parts.join("\t"), LONGEST_LINE);
-            let mut state = state_mut(lua)?;
-            let log = &mut state.output.log;
-            match log.len() {
-                length if length < MOST_LINES => log.push(line),
-                MOST_LINES => log.push(format!(
-                    "(more than {MOST_LINES} lines since the last frame; the rest are left out)"
-                )),
-                _ => {}
-            }
+            log(&mut state_mut(lua)?.output, line);
             Ok(())
         })?,
     )?;
     Ok(console)
+}
+
+/// Adds `line` to the log, unless there is already plenty: the line past
+/// the last says so instead.
+fn log(output: &mut Output, line: String) {
+    match output.log.len() {
+        length if length < MOST_LINES => output.log.push(line),
+        MOST_LINES => output.log.push(format!(
+            "(more than {MOST_LINES} lines since the last frame; the rest are left out)"
+        )),
+        _ => {}
+    }
+}
+
+/// Adds `request` to the states asked for, unless it is what was last
+/// asked for, which the frontend's doing once already does (the machine
+/// stands still meanwhile), or there are already [`MOST_STATES`]: the
+/// log says so once.
+fn request_state(lua: &Lua, request: StateRequest) -> mlua::Result<()> {
+    let mut state = state_mut(lua)?;
+    if state.output.states.last() == Some(&request) {
+        return Ok(());
+    }
+    if state.output.states.len() < MOST_STATES {
+        state.output.states.push(request);
+    } else if !state.states_left_out {
+        state.states_left_out = true;
+        log(
+            &mut state.output,
+            format!(
+                "(more than {MOST_STATES} states asked for since the last frame; \
+                 the rest are left out)"
+            ),
+        );
+    }
+    Ok(())
 }
 
 /// `text`, ending in "…" after `most` characters if it is longer.
