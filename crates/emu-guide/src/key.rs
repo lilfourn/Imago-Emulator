@@ -3,9 +3,14 @@
 //! alone, as Imago keeps its key. `OPENROUTER_API_KEY` in the environment
 //! overrides the file, for testing.
 //!
-//! A file rather than the Keychain, as in Imago: the app is signed ad hoc,
-//! so a Keychain item's access list would name a code signature that
-//! changes with every build, and macOS would ask again after each one.
+//! A file rather than the Keychain, as in Imago. A build made from source
+//! is signed ad hoc, so a Keychain item's access list would name a code
+//! signature that changes with every build, and macOS would ask again
+//! after each one. Public builds are signed with a Developer ID
+//! (`scripts/macos/release.sh`) and keep one signature, so there the key
+//! could live in the Keychain; it stays a file all the same, so that every
+//! build finds the one key, and Linux and Windows, which have no Keychain,
+//! keep it the same way.
 
 use std::fmt;
 use std::fs;
