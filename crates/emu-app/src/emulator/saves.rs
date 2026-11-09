@@ -4,8 +4,11 @@
 //!
 //! Battery saves are copied from the core when they change and written on a
 //! thread of their own (see `save_writer.rs`). What there is to tell the
-//! player, such as a save that could not be written, is kept until
-//! [`Saves::take_said`] is asked for it.
+//! player is kept until it is asked for: notices with [`Saves::take_said`],
+//! and warnings the player must not miss, such as a save that could not be
+//! written, with [`Saves::take_warned`]. A save that cannot be written is
+//! tried again at every flush, quietly: its warning is said again only
+//! when its words change.
 //!
 //! Going back to an earlier moment, by loading a state or rewinding, takes
 //! the game's save memory back too, and the cores count that as a save
@@ -70,6 +73,10 @@ pub(super) struct Saves {
     unheard: usize,
     /// What there is to tell the player, oldest first, until it is taken.
     said: Vec<String>,
+    /// What the player must not miss, oldest first, until it is taken.
+    warned: Vec<String>,
+    /// Per cartridge: the warning of its last write, if that failed.
+    last_failure: Vec<Option<String>>,
 }
 
 impl Saves {
@@ -86,6 +93,8 @@ impl Saves {
             writer: SaveWriter::start(),
             unheard: 0,
             said: Vec::new(),
+            warned: Vec::new(),
+            last_failure: vec![None; loaded.rom_paths.len()],
         }
     }
 
@@ -94,10 +103,23 @@ impl Saves {
         std::mem::take(&mut self.said)
     }
 
+    /// What the player must not miss since last asked, oldest first: to
+    /// be shown for longer than a notice.
+    pub(super) fn take_warned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warned)
+    }
+
     /// Whether a battery save handed to the writer has not been heard of
-    /// since: [`Saves::flush`] will have how it went, once it is written.
+    /// since: [`Saves::hear`] will have how it went, once it is written.
     pub(super) fn writing(&self) -> bool {
         self.unheard > 0
+    }
+
+    /// Notes how the battery saves written since last asked went, to tell
+    /// the player, without handing over any more: a failed one waits for
+    /// the next [`Saves::flush`].
+    pub(super) fn hear(&mut self) {
+        self.take_written();
     }
 
     /// Writes `core`'s state to `slot`'s file. A file there that is not a
@@ -348,7 +370,8 @@ impl Saves {
     }
 
     /// Notes the battery save writes finished since last asked: a save
-    /// set aside is said, once, with where it is; a failed write is said,
+    /// set aside is said, once, with where it is; a failed write is
+    /// warned of, unless the write before it failed with the same words,
     /// and written again at the next flush unless a newer one is on its
     /// way.
     fn take_written(&mut self) {
@@ -361,12 +384,15 @@ impl Saves {
                 ));
             }
             let Err(error) = written.result else {
+                self.last_failure[written.cartridge] = None;
                 continue;
             };
-            self.said.push(format!(
-                "Could not write {}: {error}",
-                written.path.display()
-            ));
+            let warning = format!("Could not write {}: {error}", written.path.display());
+            let last = &mut self.last_failure[written.cartridge];
+            if last.as_deref() != Some(warning.as_str()) {
+                self.warned.push(warning.clone());
+                *last = Some(warning);
+            }
             let flushed = &mut self.flushed_generations[written.cartridge];
             if *flushed == Some(written.generation) {
                 *flushed = None;
@@ -514,21 +540,34 @@ mod tests {
     }
 
     #[test]
-    fn a_save_that_cannot_be_written_is_said_and_tried_again() {
+    fn a_save_that_cannot_be_written_is_warned_of_once_and_tried_again() {
         let dir = empty_dir("retry");
         // The game's folder is gone, as an unplugged drive's is.
         let gone = dir.join("gone");
         let (mut core, mut saves) = game(&gone, 0);
         core.poke(0, 0, 7);
         assert!(!saves.write_all(&*core));
-        let said = saves.take_said();
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with("Could not write "), "{said:?}");
-        assert!(said[0].contains("game.sav"), "{said:?}");
+        let warned = saves.take_warned();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].starts_with("Could not write "), "{warned:?}");
+        assert!(warned[0].contains("game.sav"), "{warned:?}");
+        // Tried again at every flush, a second apart while the game runs,
+        // and each time it fails the same way nothing more is said.
+        for _ in 0..3 {
+            assert!(!saves.write_all(&*core));
+            assert!(saves.take_warned().is_empty());
+        }
+        assert!(saves.take_said().is_empty());
         // Back again: the same save is written without the game saving anew.
         fs::create_dir_all(&gone).expect("back");
         assert!(saves.write_all(&*core));
         assert_eq!(fs::read(gone.join("game.sav")).expect("written"), [7]);
+        assert!(saves.take_warned().is_empty());
+        // Gone once more: that is news again.
+        fs::remove_dir_all(&gone).expect("gone again");
+        core.poke(0, 0, 8);
+        assert!(!saves.write_all(&*core));
+        assert_eq!(saves.take_warned(), warned);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

@@ -1943,13 +1943,78 @@ fn wait_for_stopped(events: &async_channel::Receiver<Event>) -> String {
 }
 
 /// Makes writing `save` fail, as a full or locked disk would, while
-/// other files in its folder can still be written.
+/// other files in its folder can still be written: a folder of its name
+/// is in the way, which no file can be renamed over.
 fn block(save: &Path) -> PathBuf {
-    let mut temporary = save.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    fs::create_dir(&temporary).expect("in the way");
-    temporary
+    fs::create_dir(save).expect("in the way");
+    save.to_owned()
+}
+
+/// Every warning sent so far.
+fn warnings(events: &async_channel::Receiver<Event>) -> Vec<String> {
+    std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::Warning(text) => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_save_that_keeps_failing_is_warned_of_once_not_every_second() {
+    let dir = empty_dir("warn-once");
+    let in_the_way = block(&dir.join("game.sav"));
+    // The save changes every frame, and is flushed on each pause.
+    let (emulator, events) = start_cart(&dir, 0, 1, None);
+    thread::sleep(Duration::from_millis(20));
+    emulator.send(Command::TogglePause);
+    let mut warned = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while warned.is_empty() {
+        assert!(Instant::now() < deadline, "no warning");
+        thread::sleep(Duration::from_millis(1));
+        warned = warnings(&events);
+    }
+    // Windows tries a rename for about a second before it gives up.
+    let a_write = Duration::from_millis(if cfg!(windows) { 1500 } else { 150 });
+    for _ in 0..3 {
+        emulator.send(Command::TogglePause);
+        thread::sleep(Duration::from_millis(20));
+        emulator.send(Command::TogglePause);
+        thread::sleep(a_write);
+    }
+    warned.extend(warnings(&events));
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].starts_with("Could not write "), "{warned:?}");
+    // Once it can be written, it is, without the game saving again.
+    fs::remove_dir(&in_the_way).expect("out of the way");
+    let (save, _) = cart_bytes(&emulator);
+    drop(emulator);
+    assert_eq!(fs::read(dir.join("game.sav")).expect("written"), [save]);
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
+fn a_game_in_a_folder_that_refuses_files_is_found_out_as_it_loads() {
+    let dir = empty_dir("unwritable");
+    let here = [GameFiles::of(&dir.join("game.gba"))];
+    assert_eq!(unwritable(&here), None);
+    assert_eq!(fs::read_dir(&dir).expect("read dir").count(), 0);
+    // A DS game here with a GBA game from a folder that is gone.
+    let gone = dir.join("gone");
+    let both = [
+        GameFiles::of(&dir.join("platinum.nds")),
+        GameFiles::of(&gone.join("emerald.gba")),
+    ];
+    let why = unwritable(&both).expect("the second folder refuses");
+    assert!(why.starts_with(&format!("{} cannot be written to (", gone.display())));
+    assert!(
+        why.ends_with(
+            "so the app cannot keep this game's saves or save states there. Move the game to a folder you can write to."
+        ),
+        "{why}"
+    );
+    fs::remove_dir_all(&dir).expect("clean up");
 }
 
 #[test]

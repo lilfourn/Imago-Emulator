@@ -419,6 +419,24 @@ fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
     })
 }
 
+/// Why the game whose cartridges have `files` cannot keep its saves, if it
+/// cannot: a folder they are in refuses new files, as a read-only disk
+/// does. Its battery saves, save states and checkpoint would each fail to
+/// be written, so the player is told as the game starts.
+///
+/// Makes and removes a file in each folder; call it off the UI thread.
+pub fn unwritable(files: &[GameFiles]) -> Option<String> {
+    let mut folders: Vec<&Path> = files.iter().map(GameFiles::folder).collect();
+    folders.dedup();
+    folders.into_iter().find_map(|folder| {
+        let error = persist::check_writable(folder).err()?;
+        Some(format!(
+            "{} cannot be written to ({error}), so the app cannot keep this game's saves or save states there. Move the game to a folder you can write to.",
+            folder.display()
+        ))
+    })
+}
+
 /// Erases a stopped game's progress on disk, for Start Over: removes the
 /// session's checkpoint in `states`, and sets aside the battery save at
 /// `save` and the saves the game makes itself, `own`, each renamed to end
@@ -596,6 +614,9 @@ pub enum Event {
     Debug,
     /// Something the user should see briefly, such as "State saved".
     Notice(String),
+    /// Something the user must not miss, such as a battery save that
+    /// could not be written: shown for longer than a notice.
+    Warning(String),
     /// A recording started (true) or finished (false).
     Recording(bool),
     /// What came of [`Command::LoadCheckpoint`] when there was one: true
@@ -883,6 +904,10 @@ impl Runner {
         let mut last_flush = Instant::now();
         let mut next_checkpoint = Instant::now() + CHECKPOINT_INTERVAL;
 
+        // While paused: whether a battery save handed over is being waited
+        // on, and only heard of, not flushed again.
+        let mut hearing = false;
+
         'running: loop {
             let turn = Instant::now();
             loop {
@@ -890,12 +915,18 @@ impl Runner {
                 // everything else waits.
                 let waiting = self.paused && !self.rewinding && self.debug.pending.is_none();
                 let next = if waiting {
-                    // The timed flush waits too, so flush before.
-                    self.flush_backup();
-                    if self.saves.writing() {
+                    if hearing {
+                        self.hear_saves();
+                    } else {
+                        // The timed flush waits too, so flush before.
+                        self.flush_backup();
+                    }
+                    hearing = self.saves.writing();
+                    if hearing {
                         match commands.recv_timeout(WRITTEN_CHECK_INTERVAL) {
                             Ok(command) => Ok(command),
-                            // Round again, to hear how the write went.
+                            // Round again, to hear how the write went. One
+                            // that failed waits for the next flush.
                             Err(RecvTimeoutError::Timeout) => continue,
                             Err(RecvTimeoutError::Disconnected) => Err(TryRecvError::Disconnected),
                         }
@@ -905,6 +936,7 @@ impl Runner {
                 } else {
                     commands.try_recv()
                 };
+                hearing = false;
                 match next {
                     Ok(command) => {
                         self.apply(command);
@@ -1581,20 +1613,37 @@ impl Runner {
         self.say_saves();
     }
 
-    /// Tells the user what the saves have to say, such as a battery save
-    /// that could not be written.
+    /// Hears how the battery saves handed to their writer went, without
+    /// handing over any more.
+    fn hear_saves(&mut self) {
+        self.saves.hear();
+        self.say_saves();
+    }
+
+    /// Tells the user what the saves have to say, and last, to stay on
+    /// screen, what they warn of, such as a battery save that could not be
+    /// written.
     fn say_saves(&mut self) {
         for text in self.saves.take_said() {
             self.notice(text);
         }
+        for text in self.saves.take_warned() {
+            self.tell(Event::Warning(text));
+        }
     }
 
-    /// Shows `text` to the user, or, once the UI has stopped listening,
-    /// prints it, as for a battery save that failed as the game closed.
+    /// Shows `text` to the user briefly (see [`Runner::tell`]).
     fn notice(&self, text: impl Into<String>) {
-        let sent = self.events.try_send(Event::Notice(text.into()));
+        self.tell(Event::Notice(text.into()));
+    }
+
+    /// Sends a notice or a warning to the UI, or, once it has stopped
+    /// listening, prints its words, as for a battery save that failed as
+    /// the game closed.
+    fn tell(&self, event: Event) {
+        let sent = self.events.try_send(event);
         if let Err(unsent) = sent
-            && let Event::Notice(text) = unsent.into_inner()
+            && let Event::Notice(text) | Event::Warning(text) = unsent.into_inner()
         {
             eprintln!("ds-emulator: {text}");
         }

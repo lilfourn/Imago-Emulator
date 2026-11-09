@@ -31,6 +31,7 @@ use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use emu_core::System;
 
@@ -65,6 +66,14 @@ impl GameFiles {
     pub fn of_folder(folder: &Path) -> Self {
         Self {
             base: folder.to_owned(),
+        }
+    }
+
+    /// The folder the files are in.
+    pub fn folder(&self) -> &Path {
+        match self.base.parent() {
+            Some(folder) if !folder.as_os_str().is_empty() => folder,
+            _ => Path::new("."),
         }
     }
 
@@ -381,6 +390,28 @@ pub fn set_aside_unless_same(path: &Path, bytes: &[u8]) -> io::Result<Option<Pat
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Checks that files can be made in `folder`, as a game's saves and save
+/// states are, by making an empty one there and removing it: asking the
+/// system is not enough, as a disk mounted read-only, or a share, says no
+/// only when written to. No file already there is touched.
+///
+/// # Errors
+///
+/// Returns why no file could be made.
+pub fn check_writable(folder: &Path) -> io::Result<()> {
+    static MADE: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        ".ds-emulator-{}-{}.tmp",
+        std::process::id(),
+        MADE.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = folder.join(name);
+    File::create_new(&path)?;
+    // It could be made; one that cannot be removed is no reason to warn.
+    fs::remove_file(&path).ok();
+    Ok(())
 }
 
 /// Creates a new, empty file next to `rom` for a screenshot or recording
@@ -837,6 +868,42 @@ mod tests {
         );
         assert!(!save.exists());
         assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), b"old");
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_folder_is_checked_by_making_a_file_and_leaves_nothing_behind() {
+        let dir = temp_dir("check-writable");
+        fs::write(dir.join("game.sav"), b"save").expect("write");
+        check_writable(&dir).expect("writable");
+        check_writable(&dir).expect("writable again");
+        let left: Vec<String> = fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| file_name(&entry.expect("entry").path()))
+            .collect();
+        assert_eq!(left, ["game.sav"]);
+        // A folder that is gone, as an unplugged drive's is.
+        assert!(check_writable(&dir.join("gone")).is_err());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_folder_is_found_out() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = temp_dir("check-read-only");
+        let locked = dir.join("locked");
+        fs::create_dir(&locked).expect("create");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).expect("read-only");
+        // An administrator may write anywhere, as in a container's tests.
+        let privileged = File::create(locked.join("probe")).is_ok();
+        if !privileged {
+            let refused = check_writable(&locked).expect_err("read-only");
+            assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(GameFiles::of(&locked.join("game.gba")).folder(), locked);
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("writable");
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

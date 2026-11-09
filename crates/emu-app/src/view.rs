@@ -80,6 +80,10 @@ use crate::window_chrome;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
+/// How long a warning the player must not miss shows, such as a game
+/// whose saves cannot be kept: long enough to read a sentence or two.
+const WARNING_DURATION: Duration = Duration::from_secs(12);
+
 /// How long the pill that opens Guide stays once the pointer rests.
 const GUIDE_PILL_REST: Duration = Duration::from_secs(2);
 
@@ -219,6 +223,9 @@ pub struct EmulatorView {
     active_player: usize,
     state_slot: u8,
     notice: Option<SharedString>,
+    /// Whether the notice shown is a warning, which shows for longer, and
+    /// so does what joins it.
+    notice_is_warning: bool,
     notice_timer: Option<Task<()>>,
     /// Screenshot of the selected save-state slot, shown with the notice.
     slot_image: Option<Arc<RenderImage>>,
@@ -685,6 +692,7 @@ impl EmulatorView {
             active_player: 0,
             state_slot: 1,
             notice: None,
+            notice_is_warning: false,
             notice_timer: None,
             slot_image: None,
             stale_images: Vec::new(),
@@ -799,15 +807,18 @@ impl EmulatorView {
         self.show_notice(loading_notice(&paths, &name), cx);
         let dmg_colors = self.dmg_colors;
         self.loading_games.clone_from(&paths);
-        let load = cx
-            .background_executor()
-            .spawn(async move { emulator::load(&paths, dmg_colors) });
+        let load = cx.background_executor().spawn(async move {
+            let loaded = emulator::load(&paths, dmg_colors)?;
+            // Found out now, not at the first save that fails.
+            let unwritable = emulator::unwritable(loaded.files());
+            anyhow::Ok((loaded, unwritable))
+        });
         self.loading = Some(cx.spawn_in(window, async move |this, cx| {
             let loaded = load.await;
             this.update_in(cx, |this, window, cx| {
                 this.loading_games.clear();
                 match loaded {
-                    Ok(loaded) => this.start(loaded, &name, window, cx),
+                    Ok((loaded, unwritable)) => this.start(loaded, unwritable, &name, window, cx),
                     Err(error) => this.show_notice(format!("{error:#}"), cx),
                 }
             })
@@ -863,7 +874,17 @@ impl EmulatorView {
         });
     }
 
-    fn start(&mut self, loaded: Loaded, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Starts `loaded`, called `name`, in place of any game running.
+    /// `unwritable` says why its saves cannot be kept, if they cannot
+    /// (see [`emulator::unwritable`]).
+    fn start(
+        &mut self,
+        loaded: Loaded,
+        unwritable: Option<String>,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Stop the previous game first so its battery save is flushed.
         self.save_checkpoint();
         let stopped = self.stop(window, cx);
@@ -999,7 +1020,12 @@ impl EmulatorView {
             self.startup_notice.take(),
         ];
         let notice: Vec<String> = notes.into_iter().flatten().collect();
-        self.show_notice(notice.join(" · "), cx);
+        match unwritable {
+            // First, and long enough to read: nothing of this game will
+            // be saved.
+            Some(why) => self.show_warning(format!("{why} · {}", notice.join(" · ")), cx),
+            None => self.show_notice(notice.join(" · "), cx),
+        }
         if let Some(script) = self.startup_script.take() {
             self.run_script_file(script, cx);
         }
@@ -1195,6 +1221,7 @@ impl EmulatorView {
                     self.show_notice(text, cx);
                 }
             }
+            Event::Warning(text) => self.show_warning(text, cx),
             // Joins the game's starting notice, which may hold warnings.
             Event::PickedUp(loaded) => {
                 let own_save = self.session.as_ref().is_some_and(|session| {
@@ -1207,11 +1234,14 @@ impl EmulatorView {
                 } else {
                     "The battery save changed after you left off, so the game starts from it"
                 };
-                let text = match &self.notice {
-                    Some(shown) => format!("{shown} · {picked}"),
-                    None => picked.to_owned(),
-                };
-                self.show_notice(text, cx);
+                // A warning it joins still shows as long as a warning.
+                match &self.notice {
+                    Some(shown) if self.notice_is_warning => {
+                        self.show_warning(format!("{shown} · {picked}"), cx);
+                    }
+                    Some(shown) => self.show_notice(format!("{shown} · {picked}"), cx),
+                    None => self.show_notice(picked, cx),
+                }
             }
             Event::Recording(on) => {
                 if let Some(session) = &mut self.session {
@@ -1231,11 +1261,26 @@ impl EmulatorView {
     /// Shows `text` for a few seconds in place of any notice shown, and
     /// of the save state screenshot shown with it.
     fn show_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.notice = Some(text.into());
+        self.show_for(text.into(), false, cx);
+    }
+
+    /// Shows `text` as [`Self::show_notice`] does, but for long enough to
+    /// read a sentence or two: for what the player must not miss.
+    fn show_warning(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.show_for(text.into(), true, cx);
+    }
+
+    fn show_for(&mut self, text: SharedString, warning: bool, cx: &mut Context<Self>) {
+        self.notice = Some(text);
+        self.notice_is_warning = warning;
         // A screenshot belongs to the slot's notice; `show_slot_preview`
         // brings the new slot's, if it has one.
         self.stale_images.extend(self.slot_image.take());
-        let timer = cx.background_executor().timer(NOTICE_DURATION);
+        let timer = cx.background_executor().timer(if warning {
+            WARNING_DURATION
+        } else {
+            NOTICE_DURATION
+        });
         self.notice_timer = Some(cx.spawn(async move |this, cx| {
             timer.await;
             this.update(cx, |this, cx| {
@@ -3003,7 +3048,7 @@ impl Session {
         drop(audio);
         std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
-                Event::Notice(text) | Event::Stopped(text) => Some(text),
+                Event::Notice(text) | Event::Warning(text) | Event::Stopped(text) => Some(text),
                 _ => None,
             })
             .collect()
