@@ -131,8 +131,6 @@ impl Gb {
     /// runs on a Game Boy Color in DMG mode unless [`Media::dmg_colors`] is
     /// [`DmgColors::Grey`]; that never runs a boot ROM.
     ///
-    /// # Errors
-    ///
     /// A wrong header checksum (Pan Docs, "0x014D") is no bar. A boot ROM
     /// given in `media` locks up on it, as on hardware; without one the
     /// game starts, as in other emulators. Some homebrew, mostly demos
