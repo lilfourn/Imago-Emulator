@@ -8,13 +8,18 @@
 //! installed. A core's machine says what it holds in its fields:
 //!
 //! - [`mod@bytes`] on a byte buffer whose length varies with the game
-//!   (cartridge RAM, a save chip), which the core then compares with the
-//!   running game's;
+//!   (cartridge RAM, a save chip), which the core then checks is one its
+//!   kind comes in;
 //! - [`Exact`] on a buffer of a fixed length: `#[serde(with =
 //!   "payload::Exact::<0x8000>")]`;
 //! - [`Below`] on a number used as an index or a count:
 //!   `#[serde(with = "payload::Below::<8>")]`;
 //! - [`AtMost`] on a list that only ever holds a few entries.
+//!
+//! What no one field can say, a core asks of the machine once it is read,
+//! with [`check`]: that parts agree with each other, and that clocks and
+//! counts are ones a loop can catch up on. Where a value is only data, a
+//! running total or a clock, the arithmetic on it is made total instead.
 //!
 //! [`load`] reads a machine and refuses bytes left over after it;
 //! [`append`] writes one. None of the helpers changes the bytes: a buffer
