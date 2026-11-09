@@ -144,22 +144,16 @@ impl PictureStore {
         )
     }
 
+    /// Keeps the picture and its page's address, each written whole, so a
+    /// reader never sees half of one.
     fn keep(&self, image: &Path, page: &Path, bytes: &[u8], address: &str) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
-        write(page, address.as_bytes())?;
+        emu_os::file::write_atomic(page, address.as_bytes())?;
         // The picture last: a page file alone is never read.
-        write(image, bytes)?;
+        emu_os::file::write_atomic(image, bytes)?;
         prune(&self.dir, KEPT);
         Ok(())
     }
-}
-
-/// Writes `bytes` to `path` through a file beside it, so a reader never
-/// sees half of it.
-fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let partial = path.with_extension("partial");
-    fs::write(&partial, bytes)?;
-    fs::rename(&partial, path)
 }
 
 /// Deletes the oldest pictures in `dir` past the newest `kept`.

@@ -363,20 +363,13 @@ fn same_executable(path: &Path, cia: &mut File, layout: &Layout) -> io::Result<b
 /// Writes the executable `layout` places in `cia` to `path`, through a
 /// temporary file, so `path` is only ever the whole executable.
 fn write_out(cia: &mut File, layout: &Layout, path: &Path) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    if let Err(error) = copy_executable(cia, layout, &temporary) {
-        fs::remove_file(&temporary).ok();
-        return Err(error);
-    }
-    fs::rename(&temporary, path)
+    emu_os::file::write_atomic_with(path, None, |to| copy_executable(cia, layout, to))
 }
 
-/// Copies the executable `layout` places in `cia` into a new file at `to`.
-fn copy_executable(cia: &mut File, layout: &Layout, to: &Path) -> io::Result<()> {
+/// Copies the executable `layout` places in `cia` into the new file `to`.
+fn copy_executable(cia: &mut File, layout: &Layout, to: &mut File) -> io::Result<()> {
     cia.seek(SeekFrom::Start(layout.offset))?;
-    let mut out = BufWriter::with_capacity(WRITE_BUFFER, File::create(to)?);
+    let mut out = BufWriter::with_capacity(WRITE_BUFFER, to);
     let copied = io::copy(&mut (&*cia).take(layout.size), &mut out)?;
     if copied < layout.size {
         return Err(io::Error::new(
@@ -384,8 +377,7 @@ fn copy_executable(cia: &mut File, layout: &Layout, to: &Path) -> io::Result<()>
             "the title ended before its executable did",
         ));
     }
-    out.flush()?;
-    out.get_ref().sync_all()
+    out.flush()
 }
 
 /// `at` rounded up to a multiple of 64 bytes, if that is a `u64`.

@@ -31,7 +31,7 @@
 //! `shader_jit_x64_compiler.cpp`), so they need none.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write as _};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -92,10 +92,7 @@ impl Fix<'_> {
         let Some(fixed) = self.fixed(&fs::read(path)?) else {
             return Ok(false);
         };
-        let temp = path.with_extension("fixing");
-        fs::write(&temp, fixed)?;
-        crate::install::set_mode(&temp, 0o755)?;
-        fs::rename(&temp, path)?;
+        emu_os::file::write_atomic_with(path, Some(0o755), |file| file.write_all(&fixed))?;
         Ok(true)
     }
 
@@ -229,7 +226,8 @@ mod tests {
         let mut kept = Vec::new();
         running.read_to_end(&mut kept).expect("read the original");
         assert_eq!(kept, library());
-        assert!(!path.with_extension("fixing").exists());
+        let dir = path.parent().expect("dir");
+        assert_eq!(fs::read_dir(dir).expect("dir").count(), 1, "the core alone");
 
         assert!(!fix.wanted(&path).expect("wanted"), "fixed already");
         assert!(!fix.apply(&path).expect("apply again"));

@@ -19,11 +19,12 @@
 //! folders without it.
 //!
 //! [`process`] runs other programs, such as `curl`, alike on every system,
-//! and [`ThreadClass`] passes a thread's scheduling class to the threads
-//! that work for it.
+//! [`file`] writes files whole or not at all, and [`ThreadClass`] passes a
+//! thread's scheduling class to the threads that work for it.
 
 use std::path::{Path, PathBuf};
 
+pub mod file;
 pub mod process;
 #[allow(unsafe_code)]
 mod thread_class;

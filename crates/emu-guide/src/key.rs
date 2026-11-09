@@ -8,7 +8,7 @@
 //! changes with every build, and macOS would ask again after each one.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -153,27 +153,7 @@ fn private_folder(folder: &Path) -> io::Result<()> {
 /// folder's own access list, as [`private_folder`] says), then renamed over
 /// `path`.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    // A leftover from an interrupted write keeps its old permissions when
-    // opened again, so it goes first.
-    match fs::remove_file(&temporary) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file: File = options.open(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&temporary, path)
+    emu_os::file::write_atomic_with(path, Some(0o600), |file| file.write_all(bytes))
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@
 
 use std::borrow::Cow;
 use std::fs::{self, File};
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -784,110 +784,11 @@ fn is_windows_device(stem: &str) -> bool {
         })
 }
 
-/// Renames the file or folder at `from` to `to`, replacing a file there,
-/// as [`fs::rename`] does.
-///
-/// On Windows that can fail for a moment while another program, such as a
-/// virus scanner or the search indexer, has either file open, so it is
-/// tried again for about a second. A read-only file at `to` is made
-/// writable first, as macOS and Linux replace one anyway.
-pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        windows::rename(from, to)
-    }
-    #[cfg(not(windows))]
-    {
-        fs::rename(from, to)
-    }
-}
-
-#[cfg(windows)]
-mod windows {
-    use std::fs;
-    use std::io;
-    use std::path::Path;
-    use std::thread;
-    use std::time::Duration;
-
-    /// How many times a rename is tried.
-    const TRIES: u32 = 10;
-    /// How long to wait after a rename fails, at first and at most: in all,
-    /// about a second.
-    const FIRST_WAIT: Duration = Duration::from_millis(10);
-    const LONGEST_WAIT: Duration = Duration::from_millis(200);
-
-    /// Windows's `ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION` and
-    /// `ERROR_LOCK_VIOLATION`: another program has the file open.
-    const IN_USE: [i32; 3] = [5, 32, 33];
-
-    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
-        let mut wait = FIRST_WAIT;
-        for _ in 1..TRIES {
-            match fs::rename(from, to) {
-                Err(error)
-                    if error
-                        .raw_os_error()
-                        .is_some_and(|code| IN_USE.contains(&code)) =>
-                {
-                    if error.kind() == io::ErrorKind::PermissionDenied {
-                        make_writable(to);
-                    }
-                    thread::sleep(wait);
-                    wait = (wait * 2).min(LONGEST_WAIT);
-                }
-                done => return done,
-            }
-        }
-        fs::rename(from, to)
-    }
-
-    /// Clears the read-only flag of the file at `path`, if it has one.
-    #[allow(
-        clippy::permissions_set_readonly_false,
-        reason = "Windows: this clears the file's read-only flag, nothing more"
-    )]
-    fn make_writable(path: &Path) {
-        if let Ok(metadata) = fs::metadata(path)
-            && metadata.is_file()
-            && metadata.permissions().readonly()
-        {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            fs::set_permissions(path, permissions).ok();
-        }
-    }
-}
-
-/// Replaces `path` with `bytes` so that a crash or power cut mid-write
-/// never leaves a half-written file: the bytes go to a sibling temporary
-/// file first, reach the disk, and only then is it renamed over `path`
-/// (with [`rename`], which on Windows waits out a virus scanner).
-///
-/// On macOS the folder is not synced after the rename: syncing there
-/// flushes the whole drive's cache, which is slow, and without it a power
-/// cut can at worst undo the rename, leaving the old file whole. Windows
-/// can't open a folder to sync it, and NTFS journals the rename itself.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    let mut file = File::create(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    rename(&temporary, path)?;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let folder = match path.parent() {
-            Some(folder) if !folder.as_os_str().is_empty() => folder,
-            _ => Path::new("."),
-        };
-        // Best effort: not every file system can sync a folder.
-        File::open(folder).and_then(|folder| folder.sync_all()).ok();
-    }
-    Ok(())
-}
+/// Renames a file or folder, on Windows waiting out a program that has
+/// it open for a moment, and replaces a file so that a crash mid-write
+/// never leaves half of one: `emu_os`'s, which Guide and the 3DS games'
+/// crates use too.
+pub use emu_os::file::{rename, write_atomic};
 
 #[cfg(test)]
 mod tests {
