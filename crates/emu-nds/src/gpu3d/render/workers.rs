@@ -1,7 +1,7 @@
-//! Threads kept for drawing the bands of each frame, so that a frame
-//! starts none: starting a thread costs about as much as drawing a small
-//! band. They start when first needed and stop when the renderer that owns
-//! them is dropped.
+//! Threads kept for drawing the bands of each frame, and of the larger
+//! screen around it, so that a frame starts none: starting a thread costs
+//! about as much as drawing a small band. They start when first needed and
+//! stop when the renderer that owns them is dropped.
 
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;

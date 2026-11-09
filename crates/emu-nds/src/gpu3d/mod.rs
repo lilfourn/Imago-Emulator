@@ -9,8 +9,8 @@
 //! the result for engine A's BG0: per pixel, 6-bit red, green and blue in
 //! bits 0–17 and a 5-bit alpha in bits 18–22 (0 where there is no 3D
 //! pixel). With [`Gpu3d::set_render_scale`], it also draws each frame
-//! larger for the screen ([`Gpu3d::scaled_frame`]); the game only ever
-//! sees the native frame.
+//! larger for the screen ([`Gpu3d::take_scaled_frame`]); the game only
+//! ever sees the native frame.
 //!
 //! Commands execute instantly, so the FIFO only fills while a swap waits
 //! for VBlank, and the test and matrix busy flags never read as busy.
@@ -22,7 +22,9 @@ mod polygon;
 mod registers;
 mod render;
 
-pub(crate) use self::render::{MAX_SCALE, ScaledFrame};
+#[cfg(test)]
+use self::render::ScaledFrame;
+pub(crate) use self::render::{Job, LentFrame, MAX_SCALE};
 
 use serde::{Deserialize, Serialize};
 
@@ -211,7 +213,7 @@ impl Gpu3d {
     /// are now. Call once per frame, when the hardware starts rendering
     /// (line 214), and before reading [`Self::line`]. VRAM is read now; the
     /// drawing finishes on worker threads, which [`Self::line`] and
-    /// [`Self::scaled_frame`] wait for.
+    /// [`Self::take_scaled_frame`] wait for.
     pub(crate) fn render_frame(&mut self, vram: &Vram) {
         let config = self.registers.config();
         self.renderer.render(&self.rendering, &config, vram);
@@ -253,8 +255,31 @@ impl Gpu3d {
     /// The last larger frame drawn, waiting for it if it is still drawing:
     /// rows 0 to `192 * scale - 1` of `256 * scale` pixels, as
     /// [`Gpu3d::line`]'s. Its rows are `None` at the native scale.
+    #[cfg(test)]
     pub(crate) fn scaled_frame(&mut self) -> ScaledFrame<'_> {
         self.renderer.scaled_frame()
+    }
+
+    /// Takes the last larger frame drawn out of the engine, waiting for
+    /// it if it is still drawing, for jobs given to [`Gpu3d::run_jobs`]
+    /// to read: rows 0 to `192 * scale - 1` of `256 * scale` pixels, as
+    /// [`Gpu3d::line`]'s, and none at the native scale. It must be put
+    /// back, with [`Gpu3d::put_scaled_frame`], before the engine draws
+    /// again.
+    pub(crate) fn take_scaled_frame(&mut self) -> LentFrame {
+        self.renderer.take_scaled_frame()
+    }
+
+    /// Puts back the frame [`Gpu3d::take_scaled_frame`] took.
+    pub(crate) fn put_scaled_frame(&mut self, frame: LentFrame) {
+        self.renderer.put_scaled_frame(frame);
+    }
+
+    /// Runs `jobs` on the threads that draw the 3D frames: as many as
+    /// half the processors, in the scheduling class of the thread that
+    /// runs the core, or here and now if no thread will start.
+    pub(crate) fn run_jobs(&mut self, jobs: Vec<Job>) {
+        self.renderer.run(jobs);
     }
 }
 

@@ -218,20 +218,20 @@ impl Nds {
     /// upscaled 3D, into the frames.
     fn present(&mut self) {
         let hw = &self.machine.hw;
-        let (a, b) = if hw.scaled.scale > 1 {
-            (&hw.scaled.a, &hw.scaled.b)
-        } else {
-            (&hw.screen_a, &hw.screen_b)
-        };
+        let [top, bottom] = &mut self.screens;
         // POWCNT1 bit 15 puts engine A on the top screen.
-        let (top, bottom) = if hw.powcnt1 & 0x8000 != 0 {
-            (a, b)
+        let (a, b) = if hw.powcnt1 & 0x8000 != 0 {
+            (top, bottom)
         } else {
-            (b, a)
+            (bottom, top)
         };
-        let [top_frame, bottom_frame] = &mut self.screens;
-        top_frame.pixels_mut().copy_from_slice(top);
-        bottom_frame.pixels_mut().copy_from_slice(bottom);
+        if hw.scaled.scale > 1 {
+            hw.scaled.copy_a(a.pixels_mut());
+            b.pixels_mut().copy_from_slice(&hw.scaled.b);
+        } else {
+            a.pixels_mut().copy_from_slice(&hw.screen_a);
+            b.pixels_mut().copy_from_slice(&hw.screen_b);
+        }
     }
 
     /// Both CPUs' program counters, modes and halt states, and the
@@ -610,6 +610,7 @@ mod tests {
         hw.arm9_write_16(0x0400_0304, 0x820F); // POWCNT1: everything on
         hw.arm9_write_32(0x0400_0000, 0x0001_0108); // DISPCNT: BG0 as 3D
         hw.arm9_write_8(0x0400_0240, 0x83); // VRAMCNT_A: textures
+        hw.arm9_write_16(0x0400_0354, 0x7FFF); // CLEAR_DEPTH: farthest
         hw.arm9_write_32(0x0400_0454, 0); // MTX_IDENTITY
         hw.arm9_write_32(0x0400_0580, 0xBFFF_0000); // VIEWPORT: the screen
         hw.arm9_write_32(0x0400_04A4, 31 << 16 | 0xC0); // POLYGON_ATTR
