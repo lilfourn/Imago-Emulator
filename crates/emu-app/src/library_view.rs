@@ -270,6 +270,10 @@ pub struct LibraryView {
     library: Library,
     /// Where the library is saved, if there is a config folder.
     path: Option<PathBuf>,
+    /// The games the library file held when this copy of the app last read
+    /// or wrote it, by path: one it holds beyond these, another copy
+    /// added.
+    on_disk: HashSet<PathBuf>,
     /// Where box art is kept, if there is a cache folder.
     cache: Option<PathBuf>,
     /// Each game's pictures and when it was played, by its path.
@@ -347,6 +351,7 @@ impl LibraryView {
             })
             .detach();
         let mut view = Self {
+            on_disk: library.paths(),
             library,
             path,
             cache: boxart::cache_dir(),
@@ -866,13 +871,22 @@ impl LibraryView {
         }
     }
 
+    /// Writes the library to its file, keeping the games another copy of
+    /// the app added to it meanwhile, which then show here too.
     fn save(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.path else {
             return;
         };
-        if let Err(error) = self.library.save(path) {
-            let message = format!("Cannot save the library to {}: {error}", path.display());
-            cx.emit(LibraryEvent::Notice(message));
+        match self.library.save_keeping(path, &mut self.on_disk) {
+            Ok(0) => {}
+            Ok(_) => {
+                self.refresh(cx);
+                cx.notify();
+            }
+            Err(error) => {
+                let message = format!("Cannot save the library to {}: {error}", path.display());
+                cx.emit(LibraryEvent::Notice(message));
+            }
         }
     }
 

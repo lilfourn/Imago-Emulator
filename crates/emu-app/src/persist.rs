@@ -26,6 +26,10 @@
 //!
 //! The names are decided once, as a game starts (see [`GameFiles`]), and
 //! kept for as long as it runs.
+//!
+//! Every file is rewritten whole from memory, so two copies of the app
+//! must never have one game open: each would replace the other's save. A
+//! running game holds a lock for as long as it runs (see [`GameLock`]).
 
 use std::borrow::Cow;
 use std::fs::{self, File};
@@ -306,6 +310,54 @@ pub fn backup_key(save: &Path) -> String {
         _ => save.to_owned(),
     };
     resolved.to_string_lossy().to_lowercase()
+}
+
+/// A game's files held for this copy of the app, until it is dropped: an
+/// empty file in the app's data folder, locked. It is named by
+/// [`backup_key`] of the game's battery save, so it is one file for a game
+/// however its path is spelled, and it can be made for a game in a folder
+/// that cannot be written to. The files are never removed: removing one
+/// another copy has just opened would let two hold the game at once.
+#[derive(Debug)]
+pub struct GameLock {
+    /// Locked until it is closed.
+    _file: File,
+}
+
+impl GameLock {
+    /// Takes the lock on the game whose battery save is `save`, with its
+    /// lock file in `folder`, which is made if it is not there. Returns
+    /// `None` if another copy of the app, or another game running in this
+    /// one, holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if the lock file cannot be made or locked at all,
+    /// as when the folder cannot be written to: nothing says the game is
+    /// open elsewhere then.
+    pub fn take(folder: &Path, save: &Path) -> io::Result<Option<Self>> {
+        fs::create_dir_all(folder)?;
+        // The key's own spelling of the save's name, so the lock is one
+        // file where names differ by case, as the key is one.
+        let key = backup_key(save);
+        let name = format!(
+            "{}-{:08x}.lock",
+            safe_file_name(&file_name(Path::new(&key))),
+            crc32fast::hash(key.as_bytes())
+        );
+        // Opened as it is, not emptied: Windows may refuse to empty a file
+        // another process holds locked.
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(folder.join(name))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
 }
 
 /// The record beside the save state at `state` of the battery saves it
@@ -868,6 +920,48 @@ mod tests {
         );
         assert!(!save.exists());
         assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), b"old");
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_game_is_locked_by_one_holder_at_a_time_however_its_path_is_spelled() {
+        let dir = temp_dir("game-lock");
+        let locks = dir.join("data/Locks");
+        fs::create_dir_all(dir.join("games/sub")).expect("create");
+        let save = dir.join("games/Pokemon.sav");
+        let held = GameLock::take(&locks, &save).expect("usable");
+        assert!(held.is_some());
+        // Another copy of the app, which opens the lock file itself.
+        assert!(GameLock::take(&locks, &save).expect("usable").is_none());
+        let respelled = dir.join("games/sub/../pokemon.sav");
+        assert!(
+            GameLock::take(&locks, &respelled)
+                .expect("usable")
+                .is_none()
+        );
+        // Another game is no matter, nor one of the same name elsewhere.
+        assert!(
+            GameLock::take(&locks, &dir.join("games/Other.sav"))
+                .expect("usable")
+                .is_some()
+        );
+        assert!(
+            GameLock::take(&locks, &dir.join("games/sub/Pokemon.sav"))
+                .expect("usable")
+                .is_some()
+        );
+        // Once the first lets go, the game can be held again.
+        drop(held);
+        assert!(GameLock::take(&locks, &save).expect("usable").is_some());
+        // A game in a folder that is gone can still be held.
+        assert!(
+            GameLock::take(&locks, &dir.join("gone/game.sav"))
+                .expect("usable")
+                .is_some()
+        );
+        // A lock folder that cannot be made is an error, not a held game.
+        fs::write(dir.join("file"), b"in the way").expect("write");
+        assert!(GameLock::take(&dir.join("file/Locks"), &save).is_err());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

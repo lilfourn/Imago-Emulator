@@ -48,7 +48,7 @@ use crate::controls::{Controls, HeldState};
 use crate::cursor::{self, Cursor};
 use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
-use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Loaded, OwnSaves};
+use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Opened, OwnSaves};
 use crate::filter::Filter;
 use crate::fonts;
 use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
@@ -63,7 +63,7 @@ use crate::library::{self, Library};
 use crate::library_view::{LibraryEvent, LibraryView};
 use crate::meter::{self, Meter};
 use crate::microphone::{self, Loudness, Microphone};
-use crate::persist::{self, GameFiles, StateFiles, file_name};
+use crate::persist::{self, GameFiles, GameLock, StateFiles, file_name};
 use crate::picture::{self, Look, Picture, Resolution3d};
 use crate::probe;
 use crate::randomize_window::{self, RandomizeWindow};
@@ -320,6 +320,9 @@ struct Session {
     fade_wake: Option<Task<()>>,
     /// How long the game has been played since the library last heard.
     play: library::PlayClock,
+    /// Keeps the session's games from another copy of the app. Dropped
+    /// after `emulator`, once the thread has written the saves.
+    _locks: Vec<GameLock>,
     /// Dropped after `emulator`, so the thread stops before the device.
     _audio: Option<AudioOutput>,
 }
@@ -807,19 +810,18 @@ impl EmulatorView {
         self.show_notice(loading_notice(&paths, &name), cx);
         let dmg_colors = self.dmg_colors;
         self.loading_games.clone_from(&paths);
-        let load = cx.background_executor().spawn(async move {
-            let loaded = emulator::load(&paths, dmg_colors)?;
-            // Found out now, not at the first save that fails.
-            let unwritable = emulator::unwritable(loaded.files());
-            anyhow::Ok((loaded, unwritable))
-        });
+        let open = cx
+            .background_executor()
+            .spawn(async move { emulator::open(&paths, dmg_colors) });
         self.loading = Some(cx.spawn_in(window, async move |this, cx| {
-            let loaded = load.await;
+            let opened = open.await;
             this.update_in(cx, |this, window, cx| {
                 this.loading_games.clear();
-                match loaded {
-                    Ok((loaded, unwritable)) => this.start(loaded, unwritable, &name, window, cx),
-                    Err(error) => this.show_notice(format!("{error:#}"), cx),
+                match opened {
+                    Ok(opened) => this.start(opened, &name, window, cx),
+                    // Long enough to read why, as for a game another copy
+                    // of the app has open.
+                    Err(error) => this.show_warning(format!("{error:#}"), cx),
                 }
             })
             .ok();
@@ -874,17 +876,13 @@ impl EmulatorView {
         });
     }
 
-    /// Starts `loaded`, called `name`, in place of any game running.
-    /// `unwritable` says why its saves cannot be kept, if they cannot
-    /// (see [`emulator::unwritable`]).
-    fn start(
-        &mut self,
-        loaded: Loaded,
-        unwritable: Option<String>,
-        name: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Starts the game `opened`, called `name`, in place of any running.
+    fn start(&mut self, opened: Opened, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Opened {
+            loaded,
+            unwritable,
+            locks,
+        } = opened;
         // Stop the previous game first so its battery save is flushed.
         self.save_checkpoint();
         let stopped = self.stop(window, cx);
@@ -971,6 +969,7 @@ impl EmulatorView {
             taken_at: None,
             fade_wake: None,
             play: library::PlayClock::default(),
+            _locks: locks,
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.

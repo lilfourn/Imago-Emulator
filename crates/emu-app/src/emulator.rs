@@ -59,7 +59,7 @@ use crate::audio::AudioSink;
 use crate::capture;
 use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
-use crate::persist::{self, GameFiles, StateFiles, file_name};
+use crate::persist::{self, GameFiles, GameLock, StateFiles, file_name};
 use crate::qos;
 use crate::recorder::Recorder;
 use crate::refresh::Lock;
@@ -289,6 +289,95 @@ fn read_rom(rom_path: &Path, backup_path: &Path) -> anyhow::Result<RomFile> {
         rom,
         backup,
     })
+}
+
+/// A game opened to play: loaded, with what the window is to know of its
+/// files, and held for this copy of the app.
+pub struct Opened {
+    /// The game, ready to run.
+    pub loaded: Loaded,
+    /// Why its saves cannot be kept, if they cannot (see [`unwritable`]).
+    pub unwritable: Option<String>,
+    /// Each of its games' locks, to keep for as long as it runs: another
+    /// copy of the app is refused the game meanwhile.
+    pub locks: Vec<GameLock>,
+}
+
+/// Opens the games at `rom_paths` to play, as [`load`] loads them, but
+/// only once each is held for this copy of the app: two copies with one
+/// game open would each replace the other's saves, as every file is
+/// written whole from memory.
+///
+/// Blocking, as [`load`] is; call it off the UI thread.
+///
+/// # Errors
+///
+/// Fails if one of the games is open already, here or in another copy of
+/// the app, before anything of it is read, or as [`load`] does.
+pub fn open(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Opened> {
+    let locks = emu_os::data_dir().map(|data| data.join("ds-emulator").join("Locks"));
+    open_with(rom_paths, dmg_colors, locks.as_deref())
+}
+
+/// Opens games as [`open`] does, with their lock files in `locks`, or
+/// without locks if there is no folder for them.
+fn open_with(
+    rom_paths: &[PathBuf],
+    dmg_colors: DmgColors,
+    locks: Option<&Path>,
+) -> anyhow::Result<Opened> {
+    let locks = match locks {
+        Some(folder) => lock_games(folder, rom_paths)?,
+        None => Vec::new(),
+    };
+    let loaded = load(rom_paths, dmg_colors)?;
+    let unwritable = unwritable(loaded.files());
+    Ok(Opened {
+        loaded,
+        unwritable,
+        locks,
+    })
+}
+
+/// The files a session gives the game at `path`, as the folder holds
+/// things now: an RPG Maker game's are named after its folder, whether
+/// `path` is the folder or the player app in it.
+pub fn files_of(path: &Path) -> GameFiles {
+    match rpg_maker::game_folder(path) {
+        Some(game) => GameFiles::of_folder(&game),
+        None => GameFiles::of(path),
+    }
+}
+
+/// Takes the lock of each game at `rom_paths`, with their lock files in
+/// `folder`. A game named twice is held once. If the locks cannot be used
+/// at all, as when `folder` cannot be written to, the games play without:
+/// that is no reason to refuse them.
+fn lock_games(folder: &Path, rom_paths: &[PathBuf]) -> anyhow::Result<Vec<GameLock>> {
+    let mut held = Vec::new();
+    let mut keys = Vec::new();
+    for rom in rom_paths {
+        let save = files_of(rom).backup();
+        let key = persist::backup_key(&save);
+        if keys.contains(&key) {
+            continue;
+        }
+        match GameLock::take(folder, &save) {
+            Ok(Some(lock)) => held.push(lock),
+            Ok(None) => bail!(
+                "{} is already open. If another copy of Imago Emulator is playing it, close it there first.",
+                file_name(rom)
+            ),
+            Err(error) => {
+                eprintln!(
+                    "ds-emulator: no lock on {}: {error}; playing without",
+                    file_name(rom)
+                );
+            }
+        }
+        keys.push(key);
+    }
+    Ok(held)
 }
 
 /// Reads each ROM and battery save and powers on the right core: one

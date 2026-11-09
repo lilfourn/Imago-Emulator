@@ -1995,6 +1995,78 @@ fn a_save_that_keeps_failing_is_warned_of_once_not_every_second() {
 }
 
 #[test]
+fn a_game_another_copy_of_the_app_has_open_is_refused_untouched() {
+    let (dir, paths) = rom_dir("locked", &[("ruby.gba", &gba_rom())]);
+    fs::write(dir.join("ruby.sav"), b"twenty hours").expect("write");
+    let locks = dir.join("data/Locks");
+    // This copy opens it and keeps it for as long as it plays.
+    let here = open_with(&paths, DmgColors::Grey, Some(&locks)).expect("opens");
+    assert_eq!(here.locks.len(), 1);
+    assert_eq!(here.unwritable, None);
+    let before = tree(&dir);
+
+    // Another copy, with the game's path spelled its own way.
+    let respelled = [dir.join("./ruby.gba")];
+    let refused = open_with(&respelled, DmgColors::Grey, Some(&locks))
+        .err()
+        .expect("refused");
+    assert_eq!(
+        format!("{refused:#}"),
+        "ruby.gba is already open. If another copy of Imago Emulator is playing it, close it there first."
+    );
+    assert_eq!(tree(&dir), before, "nothing of it was read or written");
+    // Nor linked to another game.
+    let (other_dir, other) = rom_dir("locked-other", &[("sapphire.gba", &gba_rom())]);
+    let linked = [other[0].clone(), paths[0].clone()];
+    assert!(open_with(&linked, DmgColors::Grey, Some(&locks)).is_err());
+    assert_eq!(
+        fs::read(dir.join("ruby.sav")).expect("kept"),
+        b"twenty hours"
+    );
+    assert!(!other_dir.join("sapphire.sav").exists());
+    // The game that could have been held was let go again.
+    drop(open_with(&other, DmgColors::Grey, Some(&locks)).expect("opens"));
+
+    // Once the first copy closes the game, it opens.
+    drop(here);
+    let again = open_with(&paths, DmgColors::Grey, Some(&locks)).expect("opens");
+    assert_eq!(again.locks.len(), 1);
+    drop(again);
+    // A game linked to itself is still refused for its shared save, not
+    // as one open elsewhere.
+    let twice = [paths[0].clone(), paths[0].clone()];
+    let error = open_with(&twice, DmgColors::Grey, Some(&locks))
+        .err()
+        .expect("refused");
+    assert!(
+        format!("{error:#}").contains("would both save to"),
+        "{error:#}"
+    );
+    // With nowhere to keep locks, games still open.
+    fs::write(dir.join("file"), b"in the way").expect("write");
+    let unlocked = open_with(&paths, DmgColors::Grey, Some(&dir.join("file/Locks")));
+    assert!(unlocked.expect("opens").locks.is_empty());
+    fs::remove_dir_all(&dir).expect("clean up");
+    fs::remove_dir_all(&other_dir).expect("clean up");
+}
+
+#[test]
+fn a_game_s_files_are_named_as_its_session_names_them() {
+    let dir = empty_dir("files-of");
+    // An RPG Maker game: a folder with a dot in its name, and no files
+    // of the app's beside it yet.
+    let game = dir.join("Fan Game 1.2");
+    fs::create_dir_all(game.join("Player.app")).expect("the player's folder");
+    fs::write(game.join("Game.ini"), b"Title=Fan Game").expect("write");
+    fs::write(game.join("Game.exe"), b"player").expect("write");
+    assert_eq!(files_of(&game), GameFiles::of_folder(&game));
+    assert_eq!(files_of(&game).backup(), dir.join("Fan Game 1.2.sav"));
+    let rom = dir.join("ruby.gba");
+    assert_eq!(files_of(&rom), GameFiles::of(&rom));
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
 fn a_game_in_a_folder_that_refuses_files_is_found_out_as_it_loads() {
     let dir = empty_dir("unwritable");
     let here = [GameFiles::of(&dir.join("game.gba"))];

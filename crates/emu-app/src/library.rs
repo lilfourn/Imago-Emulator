@@ -13,6 +13,7 @@
 //! play_time = 4520           # seconds played, once it has been
 //! ```
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -274,6 +275,45 @@ impl Library {
         }
         persist::write_atomic(path, self.to_toml().as_bytes())
     }
+
+    /// The path of every game, as `known` for [`Library::save_keeping`].
+    pub fn paths(&self) -> HashSet<PathBuf> {
+        self.games.iter().map(|game| game.path.clone()).collect()
+    }
+
+    /// Writes the library to `path` as [`Library::save`] does, but first
+    /// reads the file and takes in the games another copy of the app added
+    /// to it: those it holds that this library has not, and that were not
+    /// in the file when this copy last read or wrote it (`known`, which is
+    /// brought up to date). A game this copy took out stays out. Returns
+    /// how many games were taken in.
+    ///
+    /// Each game's other facts are still as the last copy to write has
+    /// them, and two copies writing at the same moment can still miss each
+    /// other's game until one writes again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error if the folder or file cannot be written.
+    pub fn save_keeping(
+        &mut self,
+        path: &Path,
+        known: &mut HashSet<PathBuf>,
+    ) -> std::io::Result<usize> {
+        let mut added = 0;
+        // A file that cannot be read now is replaced, as it always was.
+        if let Ok(disk) = Self::load(path) {
+            for game in disk.games {
+                if !known.contains(&game.path) && !self.contains(&game.path) {
+                    self.games.push(game);
+                    added += 1;
+                }
+            }
+        }
+        self.save(path)?;
+        *known = self.paths();
+        Ok(added)
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -401,6 +441,74 @@ mod tests {
             Game::new(Path::new("/roms/mkds.nds"), &ds).title,
             "Mario Kart DS"
         );
+    }
+
+    #[test]
+    fn saving_keeps_the_games_another_copy_of_the_app_added() {
+        let dir = std::env::temp_dir().join(format!("emu-app-library-two-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("library.toml");
+        let game = |name: &str| Game::new(&Path::new("/roms").join(name), &info(Platform::Gba, 1));
+        let titles = |library: &Library| -> Vec<String> {
+            let games = library.games.iter();
+            games.map(|game| game.title.clone()).collect()
+        };
+        // Two copies of the app start with the same library file.
+        let mut first = Library::default();
+        first.add(game("Ruby.gba"));
+        first.save(&path).expect("saved");
+        let mut second = Library::load(&path).expect("read");
+        let (mut first_known, mut second_known) = (first.paths(), second.paths());
+
+        // Each adds a game; the second to write keeps the first's.
+        second.add(game("Sapphire.gba"));
+        assert_eq!(
+            second
+                .save_keeping(&path, &mut second_known)
+                .expect("saved"),
+            0
+        );
+        first.add(game("Emerald.gba"));
+        assert_eq!(
+            first.save_keeping(&path, &mut first_known).expect("saved"),
+            1
+        );
+        assert_eq!(titles(&first), ["Ruby", "Emerald", "Sapphire"]);
+        assert_eq!(
+            titles(&Library::load(&path).expect("read")),
+            ["Ruby", "Emerald", "Sapphire"]
+        );
+        // And the other copy takes that one in when it next saves.
+        assert_eq!(
+            second
+                .save_keeping(&path, &mut second_known)
+                .expect("saved"),
+            1
+        );
+        assert_eq!(titles(&second), ["Ruby", "Sapphire", "Emerald"]);
+
+        // A game this copy takes out stays out, though the file has it.
+        first
+            .remove(Path::new("/roms/Sapphire.gba"))
+            .expect("there");
+        assert_eq!(
+            first.save_keeping(&path, &mut first_known).expect("saved"),
+            0
+        );
+        assert_eq!(
+            titles(&Library::load(&path).expect("read")),
+            ["Ruby", "Emerald"]
+        );
+        // With no file yet, it is written as it is.
+        let fresh = dir.join("new/library.toml");
+        assert_eq!(
+            first
+                .save_keeping(&fresh, &mut HashSet::new())
+                .expect("saved"),
+            0
+        );
+        assert_eq!(Library::load(&fresh), Ok(first));
+        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]
