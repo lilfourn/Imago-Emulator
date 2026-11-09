@@ -4,6 +4,12 @@
 //! 32-bit accesses split in two; DMA, the maths unit and the IPC FIFO are
 //! 32-bit; VRAMCNT, WRAMCNT, POSTFLG and HALTCNT are bytes. Registers
 //! without side effects are kept raw so they read back what was written.
+//!
+//! The raw copy is only of what halfword and byte writes stored: a 32-bit
+//! write to a 32-bit register goes to its device alone. So the registers
+//! written that way are read from their device at every width, and a byte
+//! written to one is merged into the device's value, not the raw copy's
+//! ([`kept_by_its_device`]).
 
 use crate::dma::Timing;
 use crate::hardware::{Event, Hardware};
@@ -18,6 +24,16 @@ const IO_PAGE: u32 = 0x1FFF;
 fn with_half(word: u32, offset: u32, half: u16) -> u32 {
     let shift = (offset & 2) * 8;
     (word & !(0xFFFF << shift)) | u32::from(half) << shift
+}
+
+/// Whether the register at `offset` in `side`'s page is one a 32-bit write
+/// stores in its device and nowhere else, and whose halfwords read back
+/// from there: the DMA channels and the game card's ROMCTRL on both CPUs,
+/// and the ARM9's DMA fill values and maths unit. (The 3D engine's take
+/// bytes themselves, and the IPC FIFO's send port takes only words.)
+fn kept_by_its_device(side: Side, offset: u32) -> bool {
+    matches!(offset, 0x0B0..=0x0DF | 0x1A4..=0x1A7)
+        || (side == Side::Arm9 && matches!(offset, 0x0E0..=0x0EF | 0x280..=0x2BF))
 }
 
 /// The VRAM bank (A-I as 0-8) whose VRAMCNT byte is at `offset`:
@@ -309,6 +325,10 @@ impl Hardware {
                 (self.gpu3d.read_register(offset & !3) >> ((offset & 2) * 8)) as u16
             }
             0x000..=0x05F | 0x06C..=0x06F => self.engine_a.read_register(offset),
+            0x0E0..=0x0EF => {
+                let fill = self.arm9.dma.fill[((offset >> 2) & 3) as usize];
+                (fill >> ((offset & 2) * 8)) as u16
+            }
             0x1000..=0x106F => self.engine_b.read_register(offset - 0x1000),
             0x204 => self.exmemcnt,
             0x240..=0x249 => {
@@ -358,6 +378,10 @@ impl Hardware {
         match offset {
             0x060..=0x063 | 0x320..=0x6A3 => self.gpu3d.write_register_16(offset, value),
             0x000..=0x05F | 0x06C..=0x06F => self.engine_a.write_register(offset, value),
+            0x0E0..=0x0EF => {
+                let fill = &mut self.arm9.dma.fill[((offset >> 2) & 3) as usize];
+                *fill = with_half(*fill, offset, value);
+            }
             0x1000..=0x106F => self.engine_b.write_register(offset - 0x1000, value),
             0x204 => self.exmemcnt = value,
             0x240..=0x249 => {
@@ -393,7 +417,14 @@ impl Hardware {
             0x300 => self.arm9.postflg = value & 3,
             0x060..=0x063 | 0x320..=0x6A3 => self.gpu3d.write_register_8(offset, value),
             _ => {
-                let mut bytes = self.raw_16(Side::Arm9, offset & !1).to_le_bytes();
+                // The halfword's other byte stays as it is: in the device
+                // for a register kept there, else as last written.
+                let half = if kept_by_its_device(Side::Arm9, offset) {
+                    self.io9_page_16(address & !1)
+                } else {
+                    self.raw_16(Side::Arm9, offset & !1)
+                };
+                let mut bytes = half.to_le_bytes();
                 bytes[(offset & 1) as usize] = value;
                 self.io9_write_16(address & !1, u16::from_le_bytes(bytes));
             }
@@ -524,7 +555,13 @@ impl Hardware {
                 }
             }
             _ => {
-                let mut bytes = self.raw_16(Side::Arm7, offset & !1).to_le_bytes();
+                // As on the ARM9.
+                let half = if kept_by_its_device(Side::Arm7, offset) {
+                    self.io7_page_16(address & !1)
+                } else {
+                    self.raw_16(Side::Arm7, offset & !1)
+                };
+                let mut bytes = half.to_le_bytes();
                 bytes[(offset & 1) as usize] = value;
                 self.io7_write_16(address & !1, u16::from_le_bytes(bytes));
             }
@@ -556,6 +593,7 @@ impl Hardware {
 mod tests {
     use crate::hardware::Hardware;
     use crate::interrupt::irq;
+    use crate::ipc::Side;
 
     fn hardware() -> Hardware {
         Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into())
@@ -639,6 +677,119 @@ mod tests {
         assert_eq!(hw.arm7.interrupts.flags, irq::VBLANK);
         assert_eq!(hw.wramcnt, 0);
         assert!(!hw.arm7.halted);
+    }
+
+    /// A 32-bit write to a fill register went to the DMA unit alone, and
+    /// halfword and byte reads to a shadow it never reached: they read 0.
+    #[test]
+    fn a_dma_fill_register_reads_the_same_at_every_width() {
+        let mut hw = hardware();
+        hw.arm9_write_32(0x0400_00EC, 0xCAFE_1234);
+        assert_eq!(hw.arm9_read_32(0x0400_00EC), 0xCAFE_1234);
+        assert_eq!(hw.arm9_read_16(0x0400_00EC), 0x1234);
+        assert_eq!(hw.arm9_read_16(0x0400_00EE), 0xCAFE);
+        let bytes = [0, 1, 2, 3].map(|byte| hw.arm9_read_8(0x0400_00EC + byte));
+        assert_eq!(bytes, [0x34, 0x12, 0xFE, 0xCA]);
+        // The others are untouched, and the ARM7 has none.
+        assert_eq!(hw.arm9_read_32(0x0400_00E8), 0);
+        assert_eq!(hw.arm7_read_16(0x0400_00EC), 0);
+    }
+
+    /// And halfword and byte writes went to the shadow alone, which a
+    /// 32-bit read, and the DMA, never saw.
+    #[test]
+    fn a_dma_fill_register_takes_writes_of_every_width() {
+        let mut hw = hardware();
+        hw.arm9_write_16(0x0400_00E0, 0x5678);
+        hw.arm9_write_16(0x0400_00E2, 0x1234);
+        assert_eq!(hw.arm9_read_32(0x0400_00E0), 0x1234_5678);
+        hw.arm9_write_8(0x0400_00E1, 0xAB);
+        hw.arm9_write_8(0x0400_00E3, 0xCD);
+        assert_eq!(hw.arm9_read_32(0x0400_00E0), 0xCD34_AB78);
+        // A byte write after a 32-bit one keeps the other three bytes.
+        hw.arm9_write_32(0x0400_00E4, 0x1122_3344);
+        hw.arm9_write_8(0x0400_00E6, 0xFF);
+        assert_eq!(hw.arm9_read_32(0x0400_00E4), 0x11FF_3344);
+    }
+
+    /// What libnds's `dmaFillHalfWords` does: the value into the fill
+    /// register as a word, then a halfword DMA with a fixed source there.
+    /// The halfwords read were the shadow's zeros.
+    #[test]
+    fn a_halfword_dma_from_the_fill_register_fills_with_its_value() {
+        for (units, control, expected) in [
+            // Enabled, source fixed, four halfwords.
+            (
+                2,
+                0x8100_0004u32,
+                [0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12],
+            ),
+            // The same in two words.
+            (
+                4,
+                0x8500_0002,
+                [0x34, 0x12, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00],
+            ),
+        ] {
+            let mut hw = hardware();
+            hw.arm9_write_32(0x0400_00EC, 0x1234);
+            hw.arm9_write_32(0x0400_00D4, 0x0400_00EC); // DMA3SAD
+            hw.arm9_write_32(0x0400_00D8, 0x0200_0000); // DMA3DAD
+            hw.arm9_write_32(0x0400_00DC, control);
+            assert!(hw.run_dma(Side::Arm9), "the DMA runs");
+            let filled = [0, 1, 2, 3, 4, 5, 6, 7].map(|byte| hw.arm9_read_8(0x0200_0000 + byte));
+            assert_eq!(filled, expected, "{units}-byte units");
+        }
+    }
+
+    /// A byte write rebuilt its halfword from the shadow, which a 32-bit
+    /// write never reached: writing DMA0CNT's top byte wiped the count's
+    /// top bits and the address controls in the byte below it.
+    #[test]
+    fn a_byte_write_keeps_what_a_32_bit_write_stored() {
+        let mut hw = hardware();
+        // DMA0CNT: not enabled, destination fixed, source decrementing,
+        // 0x12345 units.
+        hw.arm9_write_32(0x0400_00B8, 0x00C1_2345);
+        hw.arm9_write_8(0x0400_00BB, 0x04); // 32-bit units
+        assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x04C1_2345);
+        hw.arm9_write_8(0x0400_00B9, 0xFF);
+        assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x04C1_FF45);
+        // The source and destination registers too, on either CPU.
+        hw.arm9_write_32(0x0400_00B0, 0x0212_3456);
+        hw.arm9_write_8(0x0400_00B1, 0x00);
+        assert_eq!(hw.arm9_read_32(0x0400_00B0), 0x0212_0056);
+        hw.arm7_write_32(0x0400_00C8, 0x0234_5678);
+        hw.arm7_write_8(0x0400_00CA, 0xFF);
+        assert_eq!(hw.arm7_read_32(0x0400_00C8), 0x02FF_5678);
+
+        // The maths unit: one byte of a numerator written as a word.
+        hw.arm9_write_32(0x0400_0290, 0x1234_5678);
+        hw.arm9_write_8(0x0400_0291, 0xAB);
+        assert_eq!(hw.arm9_read_32(0x0400_0290), 0x1234_AB78);
+        hw.arm9_write_32(0x0400_0298, 0x10);
+        assert_eq!(hw.arm9_read_32(0x0400_02A0), 0x1234_AB78 / 0x10);
+
+        // ROMCTRL: the top byte alone, with no transfer started.
+        hw.arm9_write_32(0x0400_01A4, 0x0041_6657);
+        hw.arm9_write_8(0x0400_01A7, 0x20);
+        assert_eq!(hw.arm9_read_32(0x0400_01A4), 0x2041_6657);
+    }
+
+    /// A finished DMA has cleared its enable bit, which the shadow still
+    /// had set: a byte written beside it must not start the DMA again.
+    #[test]
+    fn a_byte_write_beside_a_finished_dma_does_not_start_it_again() {
+        let mut hw = hardware();
+        hw.arm9_write_32(0x0400_00B0, 0x0200_0100);
+        hw.arm9_write_32(0x0400_00B4, 0x0200_0200);
+        hw.arm9_write_16(0x0400_00B8, 1);
+        hw.arm9_write_16(0x0400_00BA, 0x8000); // enable, at once
+        assert!(hw.run_dma(Side::Arm9));
+        assert_eq!(hw.arm9_read_32(0x0400_00B8) >> 31, 0, "finished");
+        hw.arm9_write_8(0x0400_00BA, 0x60); // destination fixed
+        assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x0060_0001);
+        assert_eq!(hw.arm9.dma.next_pending(), None);
     }
 
     #[test]
