@@ -472,6 +472,82 @@ fn ards_parse_errors() {
     }
 }
 
+/// Memory all of which reads as zero and takes writes, counting them.
+#[derive(Default)]
+struct Counting {
+    pokes: u64,
+    /// The last address written.
+    last: u32,
+}
+
+impl Memory for Counting {
+    fn peek(&self, _: u32) -> Option<u8> {
+        Some(0)
+    }
+
+    fn poke(&mut self, address: u32, _: u8) -> bool {
+        self.pokes += 1;
+        self.last = address;
+        true
+    }
+}
+
+/// How many bytes applying `text` once writes.
+fn pokes(system: System, text: &str) -> u64 {
+    let cheats = parse(system, text).unwrap_or_else(|error| panic!("{error}"));
+    let mut memory = Counting::default();
+    apply(&cheats, &mut memory);
+    memory.pokes
+}
+
+/// Four lines that copied all of main RAM on each of four billion turns:
+/// the step limit let half a million of them through, forty minutes of
+/// one frame.
+#[test]
+fn ards_copies_in_a_loop_stop_at_the_write_budget() {
+    let budget = u64::from(crate::ops::WRITE_BUDGET);
+    let copy = "D3000000 02000000\nC0000000 FFFFFFFF\nF2000000 00400000\n\
+                D1000000 00000000\n";
+    assert_eq!(pokes(System::Nds, copy), budget);
+    // The same with an E code and its two lines of data.
+    let patch = "C0000000 FFFFFFFF\nE2000000 00000010\n11111111 22222222\n\
+                 33333333 44444444\nD1000000 00000000\n";
+    assert_eq!(pokes(System::Nds, patch), budget);
+    // Each cheat has a budget of its own.
+    let two = format!("[A]\n{copy}[B]\n{copy}");
+    assert_eq!(pokes(System::Nds, &two), budget * 2);
+}
+
+/// A copy of all of main RAM, the most one F code moves, is still whole,
+/// and the codes after it still run.
+#[test]
+fn ards_one_copy_of_all_of_main_ram_fits_the_write_budget() {
+    let text = "F2000000 00400000\n02000000 00000001\nF2000000 00000004\n\
+                0200F000 00000001\n";
+    let cheats = parse(System::Nds, text).expect("valid");
+    let mut memory = Counting::default();
+    apply(&cheats, &mut memory);
+    // The copy and the write after it; the second copy has no budget
+    // left, and ends the cheat before its last write.
+    assert_eq!(memory.pokes, u64::from(crate::ops::WRITE_BUDGET) + 4);
+    assert_eq!(memory.last, 0x0200_0003);
+}
+
+/// A cheat of many fills, each within the limit one fill has, used to
+/// write them all, 128 KiB each.
+#[test]
+fn fills_and_slides_stop_at_the_write_budget() {
+    // CodeBreaker type 4: 0xFFFF halfwords from 0x02000000, 64 times.
+    let slides = "42000000 0000\n0000FFFF 0002\n".repeat(64);
+    let cheats = parse(System::Gba, &format!("[Fill] cb\n{slides}")).expect("valid");
+    let mut memory = Counting::default();
+    apply(&cheats, &mut memory);
+    assert_eq!(memory.pokes, u64::from(crate::ops::WRITE_BUDGET));
+    // 32 fills fit whole. The 33rd has the 64 bytes left, and the cheat
+    // ends with it.
+    assert_eq!(memory.last, 0x0200_003F);
+}
+
 #[test]
 fn ards_runaway_loops_stop() {
     let mut memory = TestMemory::default();
