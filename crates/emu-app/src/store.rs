@@ -772,7 +772,7 @@ pub fn install_dir(games: &Path, offer: &Offer) -> PathBuf {
 /// # Errors
 ///
 /// Fails, with a message for the user, if the game cannot be downloaded,
-/// is gone, or holds no ROM the app plays.
+/// is gone, cannot be unpacked (and why), or holds no ROM the app plays.
 pub fn install(offer: &Offer, games: &Path) -> Result<Vec<PathBuf>, String> {
     let max_bytes = match offer.platform {
         Platform::N3ds => archive::MAX_3DS_GAME,
@@ -808,7 +808,12 @@ fn install_up_to(offer: &Offer, games: &Path, max_bytes: u64) -> Result<Vec<Path
         };
         let unpacked = archive::unpack_to(&download, &folder);
         drop(scratch);
-        let games = unpacked.map_err(|_| format!("{} holds no game the app plays", offer.title))?;
+        // Why it failed, if it did: a full disk, a password or a program
+        // to install is not an archive without a game.
+        let games = unpacked.map_err(|error| format!("Cannot unpack {}: {error}", offer.title))?;
+        if games.is_empty() {
+            return Err(format!("{} holds no game the app plays", offer.title));
+        }
         return Ok(match offer.platform {
             Platform::N3ds => best_3ds_game(games),
             _ => games,
@@ -1104,22 +1109,52 @@ mod tests {
         }
     }
 
+    /// A ZIP file holding `bytes` as `name`.
+    fn zip_of(name: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .expect("start");
+        std::io::Write::write_all(&mut zip, bytes).expect("write");
+        zip.finish().expect("finish").into_inner()
+    }
+
     /// What the stand-in for a catalog's file server answers: a game, a
-    /// ZIP of a game named as the ROM inside is, and a file that is no
-    /// game.
+    /// ZIP of a game named as the ROM inside is, a file that is no game,
+    /// a ZIP without a game, and one cut short.
     fn files(path: &str) -> (u16, Vec<u8>) {
         match path {
             "/game.gb" => (200, b"a Game Boy game".to_vec()),
-            "/zipped.gba" => {
-                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-                zip.start_file("Inner.gba", zip::write::SimpleFileOptions::default())
-                    .expect("start");
-                std::io::Write::write_all(&mut zip, b"a GBA game").expect("write");
-                (200, zip.finish().expect("finish").into_inner())
-            }
+            "/zipped.gba" => (200, zip_of("Inner.gba", b"a GBA game")),
             "/notes.txt" => (200, b"notes".to_vec()),
+            "/notes.zip" => (200, zip_of("notes.txt", b"notes")),
+            "/broken.zip" => (
+                200,
+                b"PK\x03\x04 and then nothing a ZIP should have".to_vec(),
+            ),
             _ => (404, b"<html>Not Found</html>".to_vec()),
         }
+    }
+
+    #[test]
+    fn a_download_that_cannot_be_unpacked_says_why() {
+        let server = boxart::stand_in::serve(files);
+        let games = std::env::temp_dir().join(format!("ds-emulator-why-{}", std::process::id()));
+        fs::remove_dir_all(&games).ok();
+        let at = |path: &str| format!("{}{path}", server.site);
+        let broken = offer(at("/broken.zip"), "broken.zip", Platform::Nds);
+        let error = install(&broken, &games).expect_err("not a ZIP file");
+        assert!(error.starts_with("Cannot unpack Test Game: "), "{error}");
+        assert!(
+            !error.contains("ds-emulator-store-") && !error.contains("broken.zip"),
+            "the game is named, not the file it was downloaded to: {error}"
+        );
+        // Only an archive that unpacks, and has none, holds no game.
+        let notes = offer(at("/notes.zip"), "notes.zip", Platform::Nds);
+        assert_eq!(
+            install(&notes, &games),
+            Err("Test Game holds no game the app plays".to_owned())
+        );
+        fs::remove_dir_all(&games).ok();
     }
 
     #[test]

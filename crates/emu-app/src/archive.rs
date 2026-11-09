@@ -153,13 +153,16 @@ pub fn unpack(archive: &Path, progress: &Progress) -> Result<Vec<PathBuf>, Strin
 }
 
 /// Unpacks the archive at `archive` as [`unpack`] does, but its games into
-/// `folder`.
+/// `folder`, for an archive the user did not choose, such as a download
+/// of the store's: it returns the games, none if the archive holds none.
 ///
 /// # Errors
 ///
-/// As [`unpack`].
-pub fn unpack_to(archive: &Path, folder: &Path) -> Result<Vec<PathBuf>, String> {
-    unpack_into(archive, folder, &patches_dir(), &Progress::default())
+/// Why the archive cannot be unpacked, without its path, which says
+/// nothing to the user: that it is damaged or locked with a password, that
+/// the disk is full, or which program to install to unpack it.
+pub fn unpack_to(archive: &Path, folder: &Path) -> io::Result<Vec<PathBuf>> {
+    unpack_any(archive, folder, &patches_dir(), &Progress::default())
 }
 
 fn unpack_into(
@@ -168,15 +171,8 @@ fn unpack_into(
     patches: &Path,
     progress: &Progress,
 ) -> Result<Vec<PathBuf>, String> {
-    let unpacked = if has_extension(archive, &["zip"]) {
-        unpack_zip(archive, folder, patches, progress)
-    } else if has_extension(archive, &["7z"]) && !cfg!(target_os = "macos") {
-        unpack_7z_or_else(archive, folder, patches, progress)
-    } else {
-        unpack_with_programs(archive, folder, patches, progress)
-    };
-    let games =
-        unpacked.map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
+    let games = unpack_any(archive, folder, patches, progress)
+        .map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
     if games.is_empty() {
         return Err(format!(
             "{} holds no .gb, .gbc, .gba, .nds or .3ds game, or patch for one",
@@ -184,6 +180,23 @@ fn unpack_into(
         ));
     }
     Ok(games)
+}
+
+/// Unpacks the games and patches in the archive at `archive`, whichever
+/// kind it is, and returns where each is now: none if it holds none.
+fn unpack_any(
+    archive: &Path,
+    folder: &Path,
+    patches: &Path,
+    progress: &Progress,
+) -> io::Result<Vec<PathBuf>> {
+    if has_extension(archive, &["zip"]) {
+        unpack_zip(archive, folder, patches, progress)
+    } else if has_extension(archive, &["7z"]) && !cfg!(target_os = "macos") {
+        unpack_7z_or_else(archive, folder, patches, progress)
+    } else {
+        unpack_with_programs(archive, folder, patches, progress)
+    }
 }
 
 /// Whether to unpack the file `inner` from an archive: a game or a patch,
