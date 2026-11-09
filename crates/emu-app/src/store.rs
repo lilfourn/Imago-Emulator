@@ -129,6 +129,10 @@ const DOWNLOAD_SECONDS: u32 = 600;
 /// Covers narrower than this many pixels are enlarged, by whole pixels, to
 /// at least this wide, so pixel art stays sharp when the store scales it.
 const COVER_WIDTH: u32 = 480;
+/// The most pixels a cover is enlarged to, about five times a 3DS's two
+/// screens at twice their size. A picture is enlarged fewer times over,
+/// or not at all, to stay within it.
+const COVER_PIXELS: u64 = 4_000_000;
 
 /// Where a game in the store comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -925,11 +929,16 @@ pub fn download_cover(cache: &Path, offer: &Offer) -> anyhow::Result<Option<Path
 }
 
 /// The picture in `bytes` as a PNG, enlarged by whole pixels to at least
-/// [`COVER_WIDTH`] wide, or `None` if it is not a picture.
+/// [`COVER_WIDTH`] wide, if that is no more than [`COVER_PIXELS`] in all,
+/// or `None` if it is not a picture.
 pub fn cover_png(bytes: &[u8]) -> Option<Vec<u8>> {
     let picture = image::load_from_memory(bytes).ok()?.into_rgba8();
     let width = picture.width().max(1);
-    let factor = COVER_WIDTH.div_ceil(width).clamp(1, 8);
+    // A narrow picture can be very tall: the most times over, each way,
+    // that keep it a cover's size.
+    let pixels = u64::from(width) * u64::from(picture.height().max(1));
+    let most = u32::try_from((COVER_PIXELS / pixels).isqrt()).unwrap_or(u32::MAX);
+    let factor = COVER_WIDTH.div_ceil(width).clamp(1, 8).min(most.max(1));
     let picture = if factor > 1 {
         image::imageops::resize(
             &picture,
@@ -1611,6 +1620,36 @@ mod tests {
         );
         assert_eq!(cover.get_pixel(3, 3).0[3], 0);
         assert!(cover_png(b"<html>Not Found</html>").is_none());
+    }
+
+    #[test]
+    fn a_tall_narrow_picture_is_not_enlarged_past_a_cover_s_size() {
+        // 100 by 8,000: five times over, it would be 20 million pixels.
+        let picture = image::RgbaImage::from_pixel(100, 8000, image::Rgba([0, 0, 255, 255]));
+        let mut png = Vec::new();
+        picture
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encodes");
+        let cover = cover_png(&png).expect("a picture");
+        let cover = image::load_from_memory(&cover)
+            .expect("decodes")
+            .into_rgba8();
+        assert_eq!(
+            (cover.width(), cover.height()),
+            (200, 16000),
+            "twice, the most whole times that fit"
+        );
+        // One past the size as it is stays as it is.
+        let picture = image::RgbaImage::from_pixel(30, 150_000, image::Rgba([0, 0, 255, 255]));
+        let mut png = Vec::new();
+        picture
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encodes");
+        let cover = cover_png(&png).expect("a picture");
+        let cover = image::load_from_memory(&cover)
+            .expect("decodes")
+            .into_rgba8();
+        assert_eq!((cover.width(), cover.height()), (30, 150_000));
     }
 
     #[test]
