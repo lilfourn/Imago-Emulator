@@ -734,8 +734,10 @@ mod tests {
         // so a player must not: what is in the file shows whether it did.
         fs::write(&lock, b"held by another player").expect("lock");
         let player = Player::prepare(&game, &work).expect("player");
-        assert_eq!(fs::read(&lock).expect("lock"), b"held by another player");
+        // Read once the player has let go: on Windows nobody but its
+        // holder can read a locked file.
         drop(player);
+        assert_eq!(fs::read(&lock).expect("lock"), b"held by another player");
         fs::remove_dir_all(&dir).ok();
     }
 

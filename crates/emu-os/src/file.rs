@@ -250,6 +250,9 @@ mod tests {
         let mut kept = String::new();
         running.read_to_string(&mut kept).expect("read the old");
         assert_eq!(kept, "old");
+        // Closed before its folder goes: Windows may not remove a folder
+        // that holds an open file.
+        drop(running);
         // A write that fails leaves the file as it was.
         let failed = write_atomic_with(&path, None, |_| Err(io::Error::other("disk full")));
         assert_eq!(failed.expect_err("fails").to_string(), "disk full");

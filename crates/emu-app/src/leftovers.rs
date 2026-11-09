@@ -770,9 +770,12 @@ mod tests {
         let again = partial.clone();
         std::thread::spawn(move || made.send(Unfinished::create(&again)));
         let second = second.recv_timeout(Duration::from_secs(2));
+        // Measured, not read: on Windows nobody but its holder can read a
+        // locked file. What is in it is read once it is in place, below.
+        let length = |path: &Path| fs::metadata(path).expect("there").len();
         assert_eq!(
-            fs::read(&partial).expect("the first's file"),
-            b"half a game",
+            length(&partial),
+            b"half a game".len() as u64,
             "the second writer emptied the file the first is writing"
         );
         let mut second = second
@@ -794,7 +797,7 @@ mod tests {
         fs::write(&partial, b"left behind").expect("left");
         let mut third = Unfinished::create(&partial).expect("made");
         assert_eq!(third.path, partial);
-        assert_eq!(fs::read(&partial).expect("emptied"), b"");
+        assert_eq!(length(&partial), 0, "emptied");
         io::Write::write_all(third.file(), b"new").expect("written");
         drop(third);
         assert!(!partial.exists());

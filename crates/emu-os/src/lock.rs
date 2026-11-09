@@ -79,7 +79,10 @@ mod tests {
         fs::write(&path, b"what its holder wrote").expect("write");
         let held = lock(&path).expect("locked");
         assert!(try_lock(&path).expect("opened").is_none(), "held");
-        assert_eq!(fs::read(&path).expect("read"), b"what its holder wrote");
+        // Measured, not read: on Windows nobody but its holder can read a
+        // locked file, where macOS and Linux only keep a second lock off.
+        let length = |path: &Path| fs::metadata(path).expect("there").len();
+        assert_eq!(length(&path), 21, "as long as what its holder wrote");
         drop(held);
         // Waited for, not tried: a program another test starts at this
         // moment holds every open file for an instant, this one too.
@@ -87,8 +90,41 @@ mod tests {
         assert_eq!(fs::read(&path).expect("read"), b"what its holder wrote");
         let free = try_lock(&dir.join("other.lock")).expect("opened");
         assert!(free.is_some(), "nobody holds a new one");
+        // Closed before its folder goes: Windows may not remove a folder
+        // that holds an open file.
+        drop(free);
         // A folder that is not there holds no lock file to make.
         assert!(lock(&dir.join("missing").join("install.lock")).is_err());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_locked_file_can_be_renamed_by_its_holder() {
+        use std::io::Write as _;
+
+        // As a game is put in place when it is all written: renamed while
+        // its `.partial` is still locked, as let go of first, another
+        // writer could take it and empty it before it moved.
+        let dir = temp_dir("renamed");
+        let game = dir.join("Game.3ds");
+        let partial = dir.join("Game.3ds.partial");
+        let mut held = lock(&partial).expect("locked");
+        held.write_all(b"a game").expect("written");
+        crate::file::rename(&partial, &game).expect("renamed while locked");
+        assert!(!partial.exists());
+        assert!(
+            try_lock(&game).expect("opened").is_none(),
+            "still held, under its new name"
+        );
+        drop(held);
+        assert_eq!(fs::read(&game).expect("read"), b"a game");
+        // Over a file that is there, too.
+        let second = dir.join("Game.3ds.2.partial");
+        let mut held = lock(&second).expect("locked");
+        held.write_all(b"the same game").expect("written");
+        crate::file::rename(&second, &game).expect("renamed over the first");
+        drop(held);
+        assert_eq!(fs::read(&game).expect("read"), b"the same game");
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
