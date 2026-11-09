@@ -187,20 +187,38 @@ pub struct Unfinished {
     file: Option<File>,
 }
 
+/// How many writers of one game at once each get a file of their own.
+const WRITERS: u32 = 16;
+
 impl Unfinished {
-    /// Creates the file at `path`, empty and locked.
+    /// Creates the file at `path`, `….partial`, empty and locked.
+    ///
+    /// The file is locked before it is emptied, never after: one that is
+    /// locked is being written by another unpacking of the same game, or
+    /// by another copy of the app, and stays as it is. This writer then
+    /// takes a file of its own beside it, `….2.partial` and so on.
     pub fn create(path: &Path) -> io::Result<Self> {
-        let file = File::create(path)?;
-        if let Err(error) = file.lock() {
-            drop(file);
-            fs::remove_file(path).ok();
-            return Err(error);
+        for number in 1..=WRITERS {
+            let path = numbered(path, number);
+            let Some(file) = emu_os::lock::try_lock(&path)? else {
+                continue;
+            };
+            // Its own now, whatever an app that quit left in it.
+            if let Err(error) = file.set_len(0) {
+                drop(file);
+                fs::remove_file(&path).ok();
+                return Err(error);
+            }
+            hold(&path);
+            return Ok(Self {
+                path,
+                file: Some(file),
+            });
         }
-        hold(path);
-        Ok(Self {
-            path: path.to_owned(),
-            file: Some(file),
-        })
+        Err(io::Error::other(format!(
+            "{} is being written {WRITERS} times over",
+            persist::file_name(path)
+        )))
     }
 
     /// The file, to write to.
@@ -210,13 +228,33 @@ impl Unfinished {
 
     /// Renames the whole file to `path`.
     pub fn finish(mut self, path: &Path) -> io::Result<()> {
+        // Renamed while still locked: let go of first, another writer
+        // could take the file and empty it before it is moved.
+        let renamed = persist::rename(&self.path, path);
         // Unlocked once closed.
         self.file = None;
-        persist::rename(&self.path, path)?;
+        // Should Windows refuse to rename a file still open here, it is
+        // tried once more closed, as it always was.
+        if cfg!(windows) && renamed.is_err() {
+            persist::rename(&self.path, path)?;
+        } else {
+            renamed?;
+        }
         let_go(&self.path);
         self.path = PathBuf::new();
         Ok(())
     }
+}
+
+/// `path`, a game's `….partial`, for the `number`th of its writers at
+/// once: itself for the first, and `….2.partial` and so on after it.
+fn numbered(path: &Path, number: u32) -> PathBuf {
+    if number == 1 {
+        return path.to_owned();
+    }
+    let name = path.as_os_str().to_string_lossy();
+    let stem = name.strip_suffix(PARTIAL).unwrap_or(&name);
+    PathBuf::from(format!("{stem}.{number}{PARTIAL}"))
 }
 
 impl Drop for Unfinished {
@@ -593,6 +631,52 @@ mod tests {
         remove_own_where(|path| path.starts_with(&temp));
         assert!(!folder_path.exists() && !file_path.exists());
         assert!(!own().contains(&folder_path) && !own().contains(&file_path));
+        fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    fn a_second_writer_of_a_game_leaves_the_first_s_file_alone() {
+        use std::sync::mpsc;
+
+        let temp = temp_dir("second-writer");
+        let partial = temp.join("Game.3ds.partial");
+        let mut first = Unfinished::create(&partial).expect("made");
+        io::Write::write_all(first.file(), b"half a game").expect("written");
+        // Another unpacking of the same game, or another copy of the app,
+        // starts writing it: on a thread of its own, as it once waited for
+        // the first here, after emptying its file.
+        let (made, second) = mpsc::channel();
+        let again = partial.clone();
+        std::thread::spawn(move || made.send(Unfinished::create(&again)));
+        let second = second.recv_timeout(Duration::from_secs(2));
+        assert_eq!(
+            fs::read(&partial).expect("the first's file"),
+            b"half a game",
+            "the second writer emptied the file the first is writing"
+        );
+        let mut second = second
+            .expect("the second writer does not wait")
+            .expect("made");
+        assert_eq!(second.path, temp.join("Game.3ds.2.partial"), "its own file");
+        io::Write::write_all(second.file(), b"the same game").expect("written");
+        // Each is whole when it is put in place, the later over the earlier.
+        io::Write::write_all(first.file(), b", and the rest").expect("written");
+        let game = temp.join("Game.3ds");
+        first.finish(&game).expect("renamed");
+        assert_eq!(fs::read(&game).expect("kept"), b"half a game, and the rest");
+        second.finish(&game).expect("renamed");
+        assert_eq!(fs::read(&game).expect("kept"), b"the same game");
+        let left: Vec<_> = fs::read_dir(&temp).expect("folder").flatten().collect();
+        assert_eq!(left.len(), 1, "the game alone: {left:?}");
+        // A file left by an app that quit, which nobody holds, is taken
+        // over and emptied.
+        fs::write(&partial, b"left behind").expect("left");
+        let mut third = Unfinished::create(&partial).expect("made");
+        assert_eq!(third.path, partial);
+        assert_eq!(fs::read(&partial).expect("emptied"), b"");
+        io::Write::write_all(third.file(), b"new").expect("written");
+        drop(third);
+        assert!(!partial.exists());
         fs::remove_dir_all(&temp).ok();
     }
 
