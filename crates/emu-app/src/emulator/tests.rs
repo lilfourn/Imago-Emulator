@@ -2015,7 +2015,10 @@ fn a_save_that_keeps_failing_is_warned_of_once_not_every_second() {
 fn a_game_another_copy_of_the_app_has_open_is_refused_untouched() {
     let (dir, paths) = rom_dir("locked", &[("ruby.gba", &gba_rom())]);
     fs::write(dir.join("ruby.sav"), b"twenty hours").expect("write");
-    let locks = dir.join("data/Locks");
+    // In a folder of their own, as they are in the app's data folder:
+    // Windows lets no one else read a locked file, and `tree` reads all.
+    let data = empty_dir("locked-data");
+    let locks = data.join("Locks");
     // This copy opens it and keeps it for as long as it plays.
     let here = open_with(&paths, DmgColors::Grey, Some(&locks)).expect("opens");
     assert_eq!(here.locks.len(), 1);
@@ -2065,6 +2068,7 @@ fn a_game_another_copy_of_the_app_has_open_is_refused_untouched() {
     assert!(unlocked.expect("opens").locks.is_empty());
     fs::remove_dir_all(&dir).expect("clean up");
     fs::remove_dir_all(&other_dir).expect("clean up");
+    fs::remove_dir_all(&data).expect("clean up");
 }
 
 #[test]
