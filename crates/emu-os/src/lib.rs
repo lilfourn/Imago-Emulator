@@ -19,14 +19,16 @@
 //! folders without it.
 //!
 //! [`process`] runs other programs alike on every system, [`fetch`]
-//! downloads through `curl`, [`file`] writes files whole or not at all,
-//! [`lock`] holds a lock file, and [`ThreadClass`] passes a thread's
-//! scheduling class to the threads that work for it.
+//! downloads through `curl`, [`install`] installs a pinned download,
+//! [`file`] writes files whole or not at all, [`lock`] holds a lock file,
+//! and [`ThreadClass`] passes a thread's scheduling class to the threads
+//! that work for it.
 
 use std::path::{Path, PathBuf};
 
 pub mod fetch;
 pub mod file;
+pub mod install;
 pub mod lock;
 pub mod process;
 #[allow(unsafe_code)]
