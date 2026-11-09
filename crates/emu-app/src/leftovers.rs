@@ -1,7 +1,7 @@
 //! What the app writes for a while and then removes: the folders it
-//! unpacks archives and downloads into, in the temporary folder, and the
-//! games it is writing, as `….partial` files beside where they go. A big
-//! 3DS game makes either 4 GB, so none may be left behind.
+//! unpacks archives, downloads and randomizes games into, in the temporary
+//! folder, and the games it is writing, as `….partial` files beside where
+//! they go. A big 3DS game makes either 4 GB, so none may be left behind.
 //!
 //! Each is locked while the app works in it. The system lets go of a lock
 //! when its process ends, crashed or killed, so one that no running app
@@ -12,20 +12,29 @@
 //! no lock on, such as a save's `….tmp`, are removed once they are old.
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
-use std::process::{Child, ChildStderr, Command, ExitStatus};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use crate::persist;
 
 /// How the names of the work folders start, in the temporary folder:
-/// `ds-emulator-unpack-<pid>-<n>`, `ds-emulator-store-<pid>-<n>`.
-const KINDS: [&str; 2] = ["ds-emulator-unpack-", "ds-emulator-store-"];
+/// `ds-emulator-unpack-<pid>-<n>`, `ds-emulator-store-<pid>-<n>`,
+/// `ds-emulator-randomize-<pid>-<n>`.
+const KINDS: [&str; 3] = [
+    "ds-emulator-unpack-",
+    "ds-emulator-store-",
+    "ds-emulator-randomize-",
+];
+
+/// How often a program that is waited for is looked at.
+const WAIT: Duration = Duration::from_millis(20);
 
 /// The lock file in each work folder, held while the folder is in use.
 const LOCK: &str = ".ds-emulator-lock";
@@ -79,12 +88,14 @@ pub struct WorkFolder {
 }
 
 impl WorkFolder {
-    /// A work folder for `kind` of work, `"unpack"` or `"store"`.
+    /// A work folder for `kind` of work: `"unpack"`, `"store"` or
+    /// `"randomize"`.
     pub fn new(kind: &str) -> io::Result<Self> {
         Self::new_in(&std::env::temp_dir(), kind)
     }
 
-    fn new_in(temp: &Path, kind: &str) -> io::Result<Self> {
+    /// A work folder for `kind` of work in the folder `temp`.
+    pub(crate) fn new_in(temp: &Path, kind: &str) -> io::Result<Self> {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = temp.join(format!(
@@ -136,6 +147,40 @@ impl Worker {
     /// How it ended, once it has.
     pub fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
         lock(&self.child).try_wait()
+    }
+
+    /// Waits for it to end, and returns how it ended and all it printed,
+    /// as [`Command::output`] does, for a program started with its output
+    /// and errors piped. It can still be stopped while this waits, as when
+    /// the app quits.
+    pub fn output(&self) -> io::Result<Output> {
+        let (stdout, stderr) = {
+            let mut child = lock(&self.child);
+            (child.stdout.take(), child.stderr.take())
+        };
+        // Read as it comes, so the program never waits on a full pipe.
+        fn all(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
+            thread::spawn(move || {
+                let mut printed = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    pipe.read_to_end(&mut printed).ok();
+                }
+                printed
+            })
+        }
+        let (stdout, stderr) = (all(stdout), all(stderr));
+        // Looked at, not waited on: stopping it takes the same lock.
+        let status = loop {
+            match self.try_wait()? {
+                Some(status) => break status,
+                None => thread::sleep(WAIT),
+            }
+        };
+        Ok(Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
     }
 }
 
@@ -274,7 +319,7 @@ pub fn remove_own() {
 }
 
 /// Removes what this app has under way that `wanted` takes.
-fn remove_own_where(wanted: impl Fn(&Path) -> bool) {
+pub(crate) fn remove_own_where(wanted: impl Fn(&Path) -> bool) {
     let held: Vec<PathBuf> = {
         let mut own = own();
         let (held, kept) = own.drain(..).partition(|path| wanted(path));
@@ -489,9 +534,17 @@ mod tests {
             fs::write(folder.join("game.zip"), [0; 10]).expect("download");
         }
         age(&old, Duration::from_secs(2 * 60 * 60));
+        // A randomizer's run, from before its folders had locks, and one
+        // under way.
+        let random = temp.join("ds-emulator-randomize-1-0");
+        fs::create_dir_all(&random).expect("folder");
+        fs::write(random.join("randomized.nds"), [0; 30]).expect("game");
+        age(&random, Duration::from_secs(2 * 60 * 60));
+        let running = WorkFolder::new_in(&temp, "randomize").expect("made");
         // Not the app's own.
-        let other = temp.join("ds-emulator-randomize-1-0");
+        let other = temp.join("ds-emulator-shaders-1-0");
         fs::create_dir_all(&other).expect("folder");
+        age(&other, Duration::from_secs(2 * 60 * 60));
         // Unpacked patches, old and new.
         let patches = temp.join(PATCHES);
         fs::create_dir_all(&patches).expect("patches");
@@ -517,9 +570,11 @@ mod tests {
         age(&games.join("Game.gba"), Duration::from_secs(2 * 60 * 60));
 
         let freed = remove_left_behind_in(&temp, std::slice::from_ref(&games));
-        assert_eq!(freed, 1000 + 10 + 5 + 100 + 20);
-        assert!(!left.exists() && !old.exists());
+        assert_eq!(freed, 1000 + 10 + 30 + 5 + 100 + 20);
+        assert!(!left.exists() && !old.exists() && !random.exists());
         assert!(new.exists() && other.exists());
+        assert!(running.path().exists(), "a run under way keeps its folder");
+        drop(running);
         assert!(!patches.join("Old.ips").exists());
         assert!(patches.join("New.ips").exists());
         assert!(!games.join("Half.3ds.partial").exists());

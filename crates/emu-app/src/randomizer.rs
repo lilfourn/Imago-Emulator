@@ -23,9 +23,8 @@ use std::fs::{self, File};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, SystemTime};
+use std::process::{Command, Output, Stdio};
+use std::time::SystemTime;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -33,6 +32,7 @@ use emu_os::install::{Fetch, Install, Pinned};
 use zip::ZipArchive;
 
 use crate::archive;
+use crate::leftovers::WorkFolder;
 use crate::romhack;
 
 /// The FVX release the app runs.
@@ -482,9 +482,6 @@ pub fn new_seed() -> u32 {
 /// for both Game Boy generations, `gba` and `nds`.
 const WRITTEN: [&str; 3] = ["gbc", "gba", "nds"];
 
-/// Runs so far, which tells their work folders apart.
-static RUNS: AtomicU32 = AtomicU32::new(0);
-
 /// A game the randomizer made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Made {
@@ -512,42 +509,16 @@ pub fn randomize(
     seed: u32,
     hacks: &Path,
 ) -> Result<Made, String> {
-    let temp = std::env::temp_dir();
-    clear_stale_work(&temp);
-    let work = temp.join(format!(
-        "{WORK_PREFIX}{}-{}",
-        std::process::id(),
-        RUNS.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::remove_dir_all(&work).ok();
-    fs::create_dir_all(&work).map_err(|error| format!("Cannot randomize: {error}"))?;
-    let made = randomize_in(randomizer, base, title, settings, seed, hacks, &work);
-    fs::remove_dir_all(&work).ok();
-    made
+    // In a work folder of the app's, removed when this is done, or at the
+    // next launch if the app quits meanwhile.
+    let work =
+        WorkFolder::new("randomize").map_err(|error| format!("Cannot randomize: {error}"))?;
+    randomize_in(randomizer, base, title, settings, seed, hacks, &work)
 }
 
-/// How the names of the runs' work folders start, in the temporary folder.
-const WORK_PREFIX: &str = "ds-emulator-randomize-";
-/// How old a work folder must be to be one a run left behind, as when the
-/// app quit during it: runs take seconds.
-const STALE_WORK: Duration = Duration::from_secs(60 * 60);
-
-/// Removes the work folders, in `temp`, of runs that never finished.
-fn clear_stale_work(temp: &Path) {
-    let Ok(entries) = fs::read_dir(temp) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > STALE_WORK));
-        if stale && entry.file_name().to_string_lossy().starts_with(WORK_PREFIX) {
-            fs::remove_dir_all(entry.path()).ok();
-        }
-    }
-}
-
+/// Randomizes as [`randomize`] does, in the work folder `work`. The
+/// randomizer's Java is the folder's worker, so it is stopped if the app
+/// quits while it runs.
 fn randomize_in(
     randomizer: &Randomizer,
     base: &Path,
@@ -555,10 +526,11 @@ fn randomize_in(
     settings: &str,
     seed: u32,
     hacks: &Path,
-    work: &Path,
+    work: &WorkFolder,
 ) -> Result<Made, String> {
     // On Windows it opens no console window.
-    let output = emu_os::process::command(randomizer.java())
+    let mut java = emu_os::process::command(randomizer.java());
+    java
         // What FVX's own launcher gives it, which the 3DS games need.
         .arg("-Xmx4608M")
         // No Dock icon, nor any window.
@@ -570,7 +542,7 @@ fn randomize_in(
         .arg(base)
         // FVX adds the extension it gives the game's generation.
         .arg("-o")
-        .arg(work.join("randomized"))
+        .arg(work.path().join("randomized"))
         .args(["-S", settings, "-z", &seed.to_string(), "-l"])
         // It reads its name lists from its own `data` folder.
         .current_dir(&randomizer.folder)
@@ -578,9 +550,14 @@ fn randomize_in(
         .env_remove("JAVA_TOOL_OPTIONS")
         .env_remove("JDK_JAVA_OPTIONS")
         .env_remove("_JAVA_OPTIONS")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = work
+        .spawn(&mut java)
+        .and_then(|java| java.output())
         .map_err(|error| format!("Cannot run the randomizer: {error}"))?;
-    let rom = fs::read_dir(work)
+    let rom = fs::read_dir(work.path())
         .map_err(|error| format!("Cannot randomize: {error}"))?
         .flatten()
         .map(|entry| entry.path())
@@ -693,6 +670,7 @@ mod tests {
     use super::*;
     use emu_os::install::{TEMP_PREFIX, sha256};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     /// A fresh, empty folder for `test`.
     fn temp_dir(test: &str) -> PathBuf {
@@ -1224,23 +1202,48 @@ echo "Randomized successfully!"
     }
 
     #[test]
-    fn work_folders_left_by_runs_that_never_finished_are_cleared() {
-        let temp = temp_dir("stale");
-        let old = SystemTime::now() - 2 * STALE_WORK;
-        let stale = temp.join(format!("{WORK_PREFIX}1-0"));
-        let running = temp.join(format!("{WORK_PREFIX}2-0"));
-        let other = temp.join("someone-elses-folder");
-        for folder in [&stale, &running, &other] {
-            write(&folder.join("randomized.nds"), b"ROM");
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script; randomizes_for_real runs FVX itself"
+    )]
+    fn quitting_stops_the_randomizer_and_removes_its_work_folder() {
+        use std::sync::mpsc;
+
+        let dir = temp_dir("quit");
+        // A randomizer that says it has started and then takes a minute.
+        // Like one the app starts, it ignores being asked to stop.
+        let started = dir.join("started");
+        let script = format!(
+            "#!/bin/sh\ntrap '' TERM\n: > '{}'\nexec sleep 60\n",
+            started.display()
+        );
+        let randomizer = fake_randomizer(&dir, &script);
+        let base = dir.join("Red.gb");
+        write(&base, b"RED");
+        let hacks = dir.join("Hacks");
+        let work = WorkFolder::new_in(&dir, "randomize").expect("work folder");
+        let folder = work.path().to_owned();
+        let (done, ended) = mpsc::channel();
+        let run = thread::spawn(move || {
+            let made = randomize_in(&randomizer, &base, "Red", "428", 1, &hacks, &work);
+            // As if the app quit: the folder is not dropped.
+            std::mem::forget(work);
+            done.send(made).ok();
+        });
+        let waiting = Instant::now();
+        while !started.exists() {
+            assert!(waiting.elapsed() < Duration::from_secs(20), "it starts");
+            thread::sleep(Duration::from_millis(10));
         }
-        for folder in [&stale, &other] {
-            crate::leftovers::set_modified(folder, old).expect("age the folder");
-        }
-        clear_stale_work(&temp);
-        assert!(!stale.exists(), "an hour old: left behind");
-        assert!(running.exists(), "a run under way keeps its folder");
-        assert!(other.exists(), "not the randomizer's");
-        fs::remove_dir_all(&temp).ok();
+        // Only this test's, as other tests randomize meanwhile.
+        crate::leftovers::remove_own_where(|path| path.starts_with(&dir));
+        let made = ended
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the randomizer is stopped, not waited a minute for");
+        assert!(made.is_err(), "{made:?}");
+        assert!(!folder.exists(), "its work folder is removed");
+        run.join().expect("no panic");
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// Downloads FVX for real (41 MB) into `DS_EMULATOR_RANDOMIZER_DATA`,
