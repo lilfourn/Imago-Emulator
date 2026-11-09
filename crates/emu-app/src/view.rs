@@ -783,18 +783,10 @@ impl EmulatorView {
         if self.loading_games == paths {
             return;
         }
-        // Stopping writes the running game's battery saves. Reopening one
-        // of its games (to link it or insert a cartridge) must read those,
-        // not the copy on disk from up to a second ago.
-        let saves: Vec<String> = paths
-            .iter()
-            .map(|path| persist::backup_key(&GameFiles::of(path).backup()))
-            .collect();
-        let reopening = self.session.as_ref().is_some_and(|session| {
-            let mut files = session.files.iter();
-            files.any(|files| saves.contains(&persist::backup_key(&files.backup())))
+        let stops_first = self.session.as_ref().is_some_and(|session| {
+            stops_before_loading(session.info.system, &session.files, &paths)
         });
-        if reopening {
+        if stops_first {
             self.save_checkpoint();
             let stopped = self.stop(window, cx);
             self.keep_for_start(stopped);
@@ -4232,6 +4224,32 @@ fn prepare(
     }
 }
 
+/// Whether the running game, one for `system` whose cartridges have
+/// `files`, must stop before the games at `paths` load, rather than once
+/// they have loaded.
+///
+/// Stopping writes the running game's battery saves, and reopening one of
+/// its games (to link it or insert a cartridge) must read those, not the
+/// copy on disk from up to a second ago. And a 3DS or RPG Maker game plays
+/// in a process of its own, on files only one process may have open: the
+/// emulated 3DS's NAND and SD card, a game's player. So when the running
+/// game or a new one is one of those, the old process has gone before the
+/// new one starts.
+fn stops_before_loading(system: System, files: &[GameFiles], paths: &[PathBuf]) -> bool {
+    let saves: Vec<String> = paths
+        .iter()
+        .map(|path| persist::backup_key(&GameFiles::of(path).backup()))
+        .collect();
+    let reopening = files
+        .iter()
+        .any(|files| saves.contains(&persist::backup_key(&files.backup())));
+    let apart = matches!(system, System::N3ds | System::RpgMaker)
+        || paths.iter().any(|path| {
+            emu_3ds::is_game(path) || emu_cores::rpg_maker::game_folder(path).is_some()
+        });
+    reopening || apart
+}
+
 /// Why the games at `paths` can't be played on this system, if they
 /// can't: 3DS games, until 3DS games play here (`emu_3ds::UNSUPPORTED`).
 fn refused(paths: &[PathBuf]) -> Option<&'static str> {
@@ -4455,6 +4473,62 @@ mod tests {
         let (stage, width) = guide_stage(true, &layout, &DS, 1, (800.0, 860.0));
         assert_eq!(width, Some(guide::COLUMN_WIDTH));
         assert_eq!(stage, (800.0 - guide::COLUMN_WIDTH, 860.0));
+    }
+
+    #[test]
+    fn a_game_that_plays_in_another_process_never_starts_beside_the_running_one() {
+        let dir = std::env::temp_dir().join(format!("emu-app-stops-first-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        // An RPG Maker game: a folder with its Game.ini and a player.
+        let fan_game = dir.join("Fan Game");
+        fs::create_dir_all(fan_game.join("Player.app")).expect("the player's folder");
+        fs::write(fan_game.join("Game.ini"), b"Title=Fan Game").expect("write");
+        fs::write(fan_game.join("Game.exe"), b"player").expect("write");
+        let files = |name: &str| vec![GameFiles::of(&dir.join(name))];
+        let paths = |name: &str| vec![dir.join(name)];
+
+        // A game on one of the app's own cores plays on until another has
+        // loaded, so a file that fails to load costs nothing.
+        assert!(!stops_before_loading(
+            System::Gba,
+            &files("ruby.gba"),
+            &paths("emerald.gba")
+        ));
+        // Reopened, as when it is linked or given a cartridge, it stops
+        // first, so its battery save is on disk to read.
+        assert!(stops_before_loading(
+            System::Gba,
+            &files("ruby.gba"),
+            &[dir.join("ruby.gba"), dir.join("sapphire.gba")]
+        ));
+        // Two 3DS games would share the emulated console's SD card.
+        assert!(stops_before_loading(
+            System::N3ds,
+            &files("omega.3ds"),
+            &paths("alpha.3ds")
+        ));
+        // Whichever of the two plays in another process.
+        assert!(stops_before_loading(
+            System::N3ds,
+            &files("omega.3ds"),
+            &paths("emerald.gba")
+        ));
+        assert!(stops_before_loading(
+            System::Gba,
+            &files("ruby.gba"),
+            &paths("alpha.cia")
+        ));
+        assert!(stops_before_loading(
+            System::RpgMaker,
+            &[GameFiles::of_folder(&fan_game)],
+            &paths("emerald.gba")
+        ));
+        assert!(stops_before_loading(
+            System::Gba,
+            &files("ruby.gba"),
+            std::slice::from_ref(&fan_game)
+        ));
+        fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]
