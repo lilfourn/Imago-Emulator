@@ -14,9 +14,10 @@
 //! the game's save memory back too, and the cores count that as a save
 //! written. So that the file on disk, which may hold hours more, is not
 //! lost to it, the first write after each jump back sets the file aside if
-//! it holds anything else (`game.sav.bak`, never replacing an earlier one),
+//! it holds another save (`game.sav.bak`, never replacing an earlier one),
 //! and the player is told where it is. A jump back that leaves the save as
-//! it is on disk sets nothing aside.
+//! it is on disk sets nothing aside, nor one that changes only the time of
+//! a Game Boy cartridge's clock, which every moment has its own.
 
 use std::fs;
 use std::path::PathBuf;
@@ -364,6 +365,7 @@ impl Saves {
     /// and is not written again.
     pub(super) fn flush(&mut self, core: &dyn Core) {
         self.take_written();
+        let system = core.info().system;
         for cartridge in 0..self.flushed_generations.len() {
             let Some(generation) = core.backup_generation(cartridge) else {
                 continue;
@@ -384,7 +386,7 @@ impl Saves {
             match jump {
                 Some(jump) => {
                     self.writer
-                        .write_after_jump(cartridge, generation, path, backup, jump);
+                        .write_after_jump(cartridge, generation, path, backup, jump, system);
                 }
                 None => self.writer.write(cartridge, generation, path, backup),
             }
@@ -800,6 +802,75 @@ mod tests {
         assert!(saves.write_all(&*core));
         assert_eq!(saves_in(&dir), held(&[("game.sav", 3)]));
         assert!(saves.take_said().is_empty());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A Game Boy game on a cartridge with a clock and 32 KiB of save
+    /// memory (MBC3), which writes `value` to that memory and then waits.
+    fn clock_game(value: u8) -> Box<dyn Core> {
+        let mut rom = vec![0; 0x8000];
+        // LD A, 0x0A; LD (0x0000), A enables the memory; LD A, value;
+        // LD (0xA000), A writes it; JR -2 waits.
+        let program = [
+            0x3E, 0x0A, 0xEA, 0x00, 0x00, 0x3E, value, 0xEA, 0x00, 0xA0, 0x18, 0xFE,
+        ];
+        rom[0x100..0x100 + program.len()].copy_from_slice(&program);
+        rom[0x147] = 0x10;
+        rom[0x149] = 0x03;
+        rom[0x14D] = rom[0x134..0x14D]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
+        emu_cores::create(System::Gb, &emu_core::Media::new(&rom)).expect("valid rom")
+    }
+
+    #[test]
+    fn a_clock_s_time_alone_never_sets_a_save_aside() {
+        let dir = empty_dir("clock");
+        let save = dir.join("game.sav");
+        // The saves of any game will do: they are handed the core.
+        let (_, mut saves) = game(&dir, 0);
+        let mut core = clock_game(0x42);
+        let mut sound = Vec::new();
+        let mut run = |core: &mut dyn Core, frames: usize| {
+            for _ in 0..frames {
+                core.run_frame(&[Input::default()], &mut sound);
+                sound.clear();
+            }
+        };
+        // The game saves, and the save reaches the disk with the time.
+        run(&mut *core, 5);
+        assert!(saves.write_all(&*core));
+        let first = fs::read(&save).expect("written");
+        assert_eq!((first.len(), first[0]), (0x8000 + 48, 0x42));
+
+        // Three seconds on, a moment to go back to; then a second more.
+        run(&mut *core, 180);
+        let mut moment = Vec::new();
+        core.save_state(&mut moment);
+        run(&mut *core, 60);
+        // Rewound to it, or its state loaded: the save memory is as on
+        // disk, and only the clock's time is another.
+        saves.rewind_began();
+        core.load_state(&moment).expect("a state of its own");
+        saves.rewound();
+        assert!(saves.write_all(&*core));
+        let second = fs::read(&save).expect("written");
+        assert_ne!(second, first, "the clock's time is kept up to date");
+        assert_eq!(second[..0x8000], first[..0x8000]);
+        assert_eq!(saves_in(&dir).len(), 1, "and nothing was set aside");
+        assert!(saves.take_said().is_empty());
+
+        // A game whose save memory differs is another matter.
+        let mut other = clock_game(0x43);
+        run(&mut *other, 5);
+        let mut earlier = Vec::new();
+        other.save_state(&mut earlier);
+        saves.rewind_began();
+        core.load_state(&earlier).expect("a state of the same game");
+        saves.rewound();
+        assert!(saves.write_all(&*core));
+        assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), second);
+        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.bak")]);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

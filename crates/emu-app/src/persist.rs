@@ -428,17 +428,43 @@ pub fn set_aside(path: &Path) -> io::Result<Option<PathBuf>> {
     Err(io::Error::other("every backup name is taken"))
 }
 
+/// Whether the battery saves `a` and `b`, of a game for `system`, hold the
+/// same save: the same bytes, but for a Game Boy cartridge's clock.
+///
+/// A Game Boy cartridge with a clock (MBC3) ends its save with the clock's
+/// time, in the trailer other emulators write too: 48 bytes, or 44 in older
+/// files, after save memory that is always a whole number of 512-byte
+/// blocks. The time moves on by itself, so it differs between almost any
+/// two moments, though the game has saved nothing.
+pub fn same_save(system: System, a: &[u8], b: &[u8]) -> bool {
+    /// `save` without a clock's trailer, if it ends with one.
+    fn memory(save: &[u8]) -> &[u8] {
+        match save.len() % 512 {
+            trailer @ (44 | 48) => &save[..save.len() - trailer],
+            _ => save,
+        }
+    }
+    match system {
+        System::Gb => memory(a) == memory(b),
+        _ => a == b,
+    }
+}
+
 /// Sets the file at `path` aside, as [`set_aside`] does, unless it holds
-/// exactly `bytes` or is not there: for a file about to be replaced with
-/// `bytes` whose old contents nothing else keeps. Returns where it went, if
-/// it was set aside.
+/// the same save as `bytes` ([`same_save`], for a game for `system`) or is
+/// not there: for a file about to be replaced with `bytes` whose old
+/// contents nothing else keeps. Returns where it went, if it was set aside.
 ///
 /// # Errors
 ///
 /// Returns the error if the file cannot be read or renamed.
-pub fn set_aside_unless_same(path: &Path, bytes: &[u8]) -> io::Result<Option<PathBuf>> {
+pub fn set_aside_unless_same(
+    path: &Path,
+    bytes: &[u8],
+    system: System,
+) -> io::Result<Option<PathBuf>> {
     match fs::read(path) {
-        Ok(there) if there == bytes => Ok(None),
+        Ok(there) if same_save(system, &there, bytes) => Ok(None),
         Ok(_) => set_aside(path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -930,18 +956,46 @@ mod tests {
     fn a_file_about_to_be_replaced_is_set_aside_only_if_it_differs() {
         let dir = temp_dir("set-aside-unless");
         let save = dir.join("game.sav");
-        assert_eq!(set_aside_unless_same(&save, b"new").expect("none"), None);
+        let same = |bytes| set_aside_unless_same(&save, bytes, System::Gba);
+        assert_eq!(same(b"new").expect("none"), None);
         fs::write(&save, b"new").expect("write");
-        assert_eq!(set_aside_unless_same(&save, b"new").expect("same"), None);
+        assert_eq!(same(b"new").expect("same"), None);
         assert_eq!(fs::read(&save).expect("left"), b"new");
         fs::write(&save, b"old").expect("write");
         assert_eq!(
-            set_aside_unless_same(&save, b"new").expect("differs"),
+            same(b"new").expect("differs"),
             Some(dir.join("game.sav.bak"))
         );
         assert!(!save.exists());
         assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), b"old");
         fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_game_boy_clock_s_time_is_no_part_of_what_a_save_holds() {
+        // 8 KiB of save memory, then the clock's 48-byte trailer.
+        let save = |memory: u8, clock: u8| {
+            let mut save = vec![memory; 8192];
+            save.extend([clock; 48]);
+            save
+        };
+        assert!(same_save(System::Gb, &save(1, 10), &save(1, 99)));
+        assert!(!same_save(System::Gb, &save(1, 10), &save(2, 10)));
+        // An older file's 44-byte trailer, or a file with none.
+        assert!(same_save(
+            System::Gb,
+            &save(1, 10)[..8192 + 44],
+            &save(1, 99)
+        ));
+        assert!(same_save(System::Gb, &save(1, 10)[..8192], &save(1, 99)));
+        assert!(!same_save(System::Gb, &save(2, 10)[..8192], &save(1, 99)));
+        // A cartridge with a clock and no save memory holds nothing else.
+        assert!(same_save(System::Gb, &[1; 48], &[2; 48]));
+        // Memory of another size is another save.
+        assert!(!same_save(System::Gb, &[1; 8192], &[1; 32768]));
+        // Other systems' saves end with no clock: every byte counts.
+        assert!(!same_save(System::Gba, &save(1, 10), &save(1, 99)));
+        assert!(same_save(System::Nds, &save(1, 10), &save(1, 10)));
     }
 
     #[test]

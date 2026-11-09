@@ -7,13 +7,16 @@
 //! loaded, or rewind) may be older than the file it replaces, which may be
 //! the only copy of the player's latest save. So the first such write after
 //! each jump back sets the file aside first, with [`persist::set_aside`], if
-//! it holds anything else.
+//! it holds another save ([`persist::same_save`]: a clock's time alone is
+//! none).
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+
+use emu_core::System;
 
 use crate::persist;
 
@@ -41,8 +44,9 @@ enum Job {
         generation: u64,
         path: PathBuf,
         bytes: Vec<u8>,
-        /// The jump back this is the first write after, if it is.
-        jump: Option<u64>,
+        /// The jump back this is the first write after, if it is, and
+        /// the system the save is for.
+        jump: Option<(u64, System)>,
     },
     /// Say when every write before this one is done.
     Wait(Sender<()>),
@@ -54,7 +58,7 @@ enum Job {
 struct Guard {
     /// The jump back whose write failed, so the next write is checked in
     /// its place.
-    owed: Option<u64>,
+    owed: Option<(u64, System)>,
     /// The jump back the file was last set aside for: once is enough, as
     /// the writes that follow replace only what this thread wrote.
     kept_for: Option<u64>,
@@ -63,25 +67,25 @@ struct Guard {
 impl Guard {
     /// Writes `bytes` to `path`. If this is the first write after the jump
     /// back `jump`, or stands in for one that failed, the file there is
-    /// set aside first if it holds anything else, and nothing is written
+    /// set aside first if it holds another save, and nothing is written
     /// unless that worked. Returns where it went, and how the write went.
     fn write(
         &mut self,
         path: &Path,
         bytes: &[u8],
-        jump: Option<u64>,
+        jump: Option<(u64, System)>,
     ) -> (Option<PathBuf>, io::Result<()>) {
         let jump = jump.or(self.owed);
         let aside = match jump {
-            Some(jump) if self.kept_for != Some(jump) => {
-                persist::set_aside_unless_same(path, bytes)
+            Some((number, system)) if self.kept_for != Some(number) => {
+                persist::set_aside_unless_same(path, bytes, system)
             }
             _ => Ok(None),
         };
         let (kept, result) = match aside {
             Ok(kept) => {
                 if kept.is_some() {
-                    self.kept_for = jump;
+                    self.kept_for = jump.map(|(number, _)| number);
                 }
                 (kept, persist::write_atomic(path, bytes))
             }
@@ -163,7 +167,7 @@ impl SaveWriter {
     /// first since the game went back to an earlier moment: `jump` numbers
     /// the jump back, one for a state loaded and one for a whole stretch of
     /// rewinding. The file at `path` is set aside first if it holds
-    /// anything else, once per jump.
+    /// another save for `system`, once per jump.
     pub fn write_after_jump(
         &self,
         cartridge: usize,
@@ -171,13 +175,14 @@ impl SaveWriter {
         path: PathBuf,
         bytes: Vec<u8>,
         jump: u64,
+        system: System,
     ) {
         self.send(Job::Write {
             cartridge,
             generation,
             path,
             bytes,
-            jump: Some(jump),
+            jump: Some((jump, system)),
         });
     }
 
@@ -275,9 +280,9 @@ mod tests {
         assert_eq!(files_in(&dir), held(&[("game.sav", b"hour 20")]));
 
         // A state from hour 2 is loaded: the save from hour 20 is kept.
-        writer.write_after_jump(0, 2, save.clone(), b"hour 2".to_vec(), 1);
+        writer.write_after_jump(0, 2, save.clone(), b"hour 2".to_vec(), 1, System::Gba);
         // More writes after the same jump replace only what was written.
-        writer.write_after_jump(0, 3, save.clone(), b"hour 1".to_vec(), 1);
+        writer.write_after_jump(0, 3, save.clone(), b"hour 1".to_vec(), 1, System::Gba);
         writer.wait();
         let after_first = held(&[("game.sav", b"hour 1"), ("game.sav.bak", b"hour 20")]);
         assert_eq!(files_in(&dir), after_first);
@@ -290,14 +295,14 @@ mod tests {
 
         // Another jump to a moment with the save already on disk: nothing
         // to keep.
-        writer.write_after_jump(0, 4, save.clone(), b"hour 1".to_vec(), 2);
+        writer.write_after_jump(0, 4, save.clone(), b"hour 1".to_vec(), 2, System::Gba);
         writer.wait();
         assert_eq!(files_in(&dir), after_first);
         // The game saving on from there is no jump back.
         writer.write(0, 5, save.clone(), b"hour 3".to_vec());
         writer.wait();
         // A third jump, over that save, keeps it beside the first.
-        writer.write_after_jump(0, 6, save.clone(), b"hour 2".to_vec(), 3);
+        writer.write_after_jump(0, 6, save.clone(), b"hour 2".to_vec(), 3, System::Gba);
         writer.wait();
         assert_eq!(
             files_in(&dir),
@@ -317,7 +322,7 @@ mod tests {
         let save = dir.join("game.sav");
         let writer = SaveWriter::start().expect("the thread starts");
         // The folder is gone, as an unplugged drive's is.
-        writer.write_after_jump(0, 1, save.clone(), b"hour 2".to_vec(), 1);
+        writer.write_after_jump(0, 1, save.clone(), b"hour 2".to_vec(), 1, System::Gba);
         writer.wait();
         assert!(writer.finished()[0].result.is_err());
         // Back, with the save it held: the retry, an ordinary write, still
