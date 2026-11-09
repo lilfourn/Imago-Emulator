@@ -48,8 +48,11 @@ its only zero-copy surface takes 4:2:0 YCbCr, which smears pixel art.
 4. **An `unsafe` exception for one module.** objc2's Metal and MetalFX
    calls are `unsafe`. `gpu_upscale` is marked `#[allow(unsafe_code)]`,
    every block has a `// SAFETY:` comment, and the CPU only touches a
-   texture or buffer once the GPU's work on it is finished: each upscale
-   waits for its own command buffer.
+   texture or buffer once the GPU's work on it is finished: one batch is
+   on the GPU at a time, and the next is uploaded only once it is taken.
+   Since November 2026 a draw waits for a batch at most 4 ms, as with
+   other apps busy on the GPU one in a hundred took 14–30 ms; a slower
+   one is put in place by a later draw.
 5. **The CPU path stays** for Sharp Pixels, the LCD grid and scanlines,
    while the GPU starts, and on a Mac without Metal, where Scale2x and
    Scale3x stand in for Rounded Pixels.

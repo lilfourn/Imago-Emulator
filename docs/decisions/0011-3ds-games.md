@@ -35,7 +35,10 @@ title at 28.
    fresh process anyway, and a crash in the core ends the game, not the
    app. The two talk over the helper's stdin and stdout (`link.rs`),
    request and answer, one frame at a time: the app sends what the player
-   holds and gets both screens and the frame's sound back. Its stdout is
+   holds and gets both screens and the frame's sound back. On Unix the
+   screens' pixels come through memory the app makes and the helper
+   maps (`shared_pixels.rs`), not the pipe: at 4× a frame is 11 MB, and
+   through a 64 KB pipe it took about 170 writes and 2 ms. Its stdout is
    kept for the link alone; anything else in the process that prints goes
    to `3DS/helper.log`.
 3. **Vulkan through MoltenVK.** The helper is the frontend in libretro's

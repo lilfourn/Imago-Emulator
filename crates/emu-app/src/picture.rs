@@ -15,7 +15,8 @@
 //! Display, the default, draws it as large as the screens are shown, up
 //! to [`match_display_cap`], and the upscaler covers the rest. It keeps
 //! the speed asked for first: when the game falls behind, it draws 3D a
-//! step smaller ([`keep_speed`]).
+//! step smaller, and tries a step larger again once it has kept up a
+//! while ([`SpeedKeeper`]).
 
 use emu_core::{ScreenSize, System, TextureUpscaling};
 
@@ -145,26 +146,145 @@ pub fn matched_resolution(
 /// How often Match Display checks that the game keeps its speed.
 pub const SPEED_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The most Match Display may draw 3D at from now, given that it may draw
-/// at most `ceiling` and drew at `scale` while the game ran `ran` frames a
-/// second, asked for `wanted` (`None` for unlimited speed) on a system of
-/// `normal` frames a second: a step smaller if the game fell behind, by
-/// more than 5%, and was running at all (not paused or loading), else as
-/// it was. It never steps up; the view starts it again at
-/// [`match_display_cap`] when the speed asked for or the screens change.
+/// Seconds in a row the game must fall behind before Match Display draws
+/// 3D a step smaller: one slow second is often a loading screen, a
+/// shader the 3DS compiles for the first time, or another app's burst.
+const SLOW_CHECKS: u32 = 2;
+
+/// Seconds the game must keep up before Match Display first tries a step
+/// larger again.
+const FIRST_PATIENCE: u32 = 10;
+
+/// The longest Match Display waits between tries, about five minutes.
+/// Each try that fails doubles the wait up to this.
+const MOST_PATIENCE: u32 = 320;
+
+/// About the most speed drawing 3D smaller buys, all the way down to 1×:
+/// Pokémon Platinum ran 1.4 times as fast at 1× as at 2× (3.75 ms a frame
+/// against 5.2 ms), and Omega Ruby 1.4 times as fast as at 4× (80 frames
+/// a second against 57, with the GPU busy). A game fast-forwarded further
+/// ahead of itself than this, such as a 3DS game at 3×, cannot catch up
+/// by drawing smaller, so it keeps its picture. At normal speed or
+/// slower, every step that helps counts.
+const MOST_GAIN: f64 = 1.6;
+
+/// Match Display's check that the game keeps the speed asked for, once
+/// every [`SPEED_CHECK`]: the most it may draw 3D at now.
+///
+/// When the game falls behind by more than 5% for [`SLOW_CHECKS`] seconds
+/// in a row while running at all (not paused or loading), and, when fast
+/// forwarded, not so far that drawing smaller could not catch up
+/// ([`MOST_GAIN`]), 3D is drawn a step smaller. Once the game has kept up for a while, it tries a step
+/// larger, up to the scale that matches the screens. A try the game
+/// cannot keep up at goes back at its first slow second, and doubles the
+/// wait for the next, so a Mac that is busy for good (another app's
+/// work on the GPU, say) settles on a scale rather than switching back
+/// and forth. The view starts it afresh when the speed asked for or the
+/// screens change.
 ///
 /// The DS's 3D is the costliest thing the app does: in Pokémon Platinum's
 /// overworld, headless on an M5 Max, the core took 3.75 ms a frame with 3D
 /// at 1×, 5.2 ms at 2× and 7.35 ms at 4×, against 5.6 ms a frame at 3×
-/// fast-forward.
-pub fn keep_speed(ceiling: u32, scale: u32, ran: f64, wanted: Option<f64>, normal: f64) -> u32 {
-    let running = ran >= 0.25 * wanted.unwrap_or(normal).min(normal);
-    let behind = wanted.is_none_or(|wanted| ran < 0.95 * wanted);
-    if running && behind && scale > 1 {
-        ceiling.min(scale - 1)
-    } else {
-        ceiling
+/// fast-forward. The 3DS draws on the GPU, so it slows when other apps
+/// fill the GPU, and speeds up again when they stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeedKeeper {
+    /// The scale that matches the screens: the most it ever allows.
+    most: u32,
+    ceiling: u32,
+    /// Checks in a row the game fell behind.
+    slow: u32,
+    /// Checks in a row it kept up.
+    steady: u32,
+    /// Checks it must keep up before the next try at a step larger.
+    patience: u32,
+    /// The last change was a try at a step larger, not yet proven.
+    trying: bool,
+}
+
+impl SpeedKeeper {
+    /// Starting at `most`, the scale that matches the screens.
+    pub fn new(most: u32) -> Self {
+        let most = most.max(1);
+        Self {
+            most,
+            ceiling: most,
+            slow: 0,
+            steady: 0,
+            patience: FIRST_PATIENCE,
+            trying: false,
+        }
     }
+
+    /// The most Match Display may draw 3D at now.
+    pub fn ceiling(&self) -> u32 {
+        self.ceiling
+    }
+
+    /// Takes one second's measure: the game ran `ran` frames a second
+    /// while 3D was drawn at `scale`, asked for `wanted` (`None` for
+    /// unlimited speed) on a system of `normal` frames a second.
+    pub fn check(&mut self, scale: u32, ran: f64, wanted: Option<f64>, normal: f64) {
+        let running = ran >= 0.25 * wanted.unwrap_or(normal).min(normal);
+        if !running {
+            // Paused or loading: neither behind nor keeping up.
+            return;
+        }
+        let behind = wanted.is_none_or(|wanted| ran < 0.95 * wanted);
+        let hopeless =
+            wanted.is_some_and(|wanted| wanted > normal * 1.05 && ran * MOST_GAIN < wanted);
+        if hopeless && !self.trying {
+            // Fast-forward too far ahead for the picture to be what holds
+            // the game back: keep it, and try no larger either.
+            self.slow = 0;
+            self.steady = 0;
+            return;
+        }
+        if behind {
+            self.steady = 0;
+            self.slow += 1;
+            if scale > 1 && (self.trying || self.slow >= SLOW_CHECKS) {
+                if self.trying {
+                    self.patience = (self.patience * 2).min(MOST_PATIENCE);
+                }
+                self.ceiling = self.ceiling.min(scale - 1);
+                self.trying = false;
+                self.slow = 0;
+            }
+        } else {
+            self.slow = 0;
+            self.steady += 1;
+            if self.trying && self.steady >= SLOW_CHECKS {
+                // The step held: it stays until the game falls behind
+                // again like any other.
+                self.trying = false;
+            }
+            if scale == self.ceiling && self.ceiling < self.most && self.steady >= self.patience {
+                self.ceiling += 1;
+                self.trying = true;
+                self.steady = 0;
+            }
+        }
+    }
+}
+
+/// How near the size it is shown at a frame must be, along each side, for
+/// Smooth to show it as it is: within a tenth.
+const NEAR_ENOUGH: f64 = 1.1;
+
+/// Whether Smooth shows a `frame`-sized picture `target` device pixels
+/// across as it is, rather than on the GPU: when it is within a tenth of
+/// that size along both sides, as a 3DS game drawn at 4× is on the
+/// MacBook Pro's display (1600 pixels across for 1636). There MetalFX
+/// would only resample it, at the cost of a trip to the GPU and back
+/// each frame, which with other apps busy on the GPU took up to 30 ms.
+/// GPUI's own filter covers the difference.
+pub fn shown_as_drawn(frame: (u16, u16), target: (u32, u32)) -> bool {
+    let near = |frame: u16, target: u32| {
+        let ratio = f64::from(target) / f64::from(frame.max(1));
+        (1.0 / NEAR_ENOUGH..=NEAR_ENOUGH).contains(&ratio)
+    };
+    near(frame.0, target.0) && near(frame.1, target.1)
 }
 
 /// The most pixels the GPU draws in all a frame's screens together. Past
@@ -416,26 +536,157 @@ mod tests {
         }
     }
 
+    fn normal_rate() -> f64 {
+        59.83
+    }
+
+    /// Runs `keeper` for `seconds` checks at whatever it allows, the game
+    /// keeping up at `fast_enough` and below and running `slow` above.
+    fn play(keeper: &mut SpeedKeeper, seconds: u32, fast_enough: u32, wanted: f64) {
+        let normal = 59.83;
+        for _ in 0..seconds {
+            let scale = keeper.ceiling();
+            let ran = if scale <= fast_enough {
+                wanted
+            } else {
+                wanted * 0.8
+            };
+            keeper.check(scale, ran, Some(wanted), normal);
+        }
+    }
+
     #[test]
     fn match_display_steps_3d_down_to_keep_the_speed_asked_for() {
         let normal = 59.83;
-        // 3× fast-forward at 2× speed: a step down, and so on each second
-        // it stays behind.
-        assert_eq!(keep_speed(4, 4, 119.0, Some(179.5), normal), 3);
-        assert_eq!(keep_speed(3, 3, 140.0, Some(179.5), normal), 2);
+        let mut keeper = SpeedKeeper::new(4);
+        // 3× fast-forward at 2× speed: one slow second is let pass, two in
+        // a row take a step down, and so on while it stays behind.
+        keeper.check(4, 119.0, Some(179.5), normal);
+        assert_eq!(keeper.ceiling(), 4);
+        keeper.check(4, 119.0, Some(179.5), normal);
+        assert_eq!(keeper.ceiling(), 3);
+        keeper.check(3, 140.0, Some(179.5), normal);
+        keeper.check(3, 140.0, Some(179.5), normal);
+        assert_eq!(keeper.ceiling(), 2);
         // Keeping up, or nearly: no change.
-        assert_eq!(keep_speed(4, 4, 59.8, Some(normal), normal), 4);
-        assert_eq!(keep_speed(2, 2, 172.0, Some(179.5), normal), 2);
-        // Paused or loading: not behind, just stopped.
-        assert_eq!(keep_speed(4, 4, 0.0, Some(normal), normal), 4);
-        assert_eq!(keep_speed(4, 4, 10.0, Some(179.5), normal), 4);
+        let mut keeper = SpeedKeeper::new(4);
+        for _ in 0..5 {
+            keeper.check(4, 59.8, Some(normal), normal);
+            keeper.check(4, 172.0, Some(179.5), normal);
+        }
+        assert_eq!(keeper.ceiling(), 4);
+        // Paused or loading between two slow seconds: not behind, just
+        // stopped, and the slow seconds still count as in a row.
+        let mut keeper = SpeedKeeper::new(4);
+        keeper.check(4, 119.0, Some(179.5), normal);
+        keeper.check(4, 0.0, Some(normal), normal);
+        keeper.check(4, 10.0, Some(179.5), normal);
+        assert_eq!(keeper.ceiling(), 4);
+        keeper.check(4, 119.0, Some(179.5), normal);
+        assert_eq!(keeper.ceiling(), 3);
+        // A 3DS game at 3× fast-forward, at a third of it: drawing smaller
+        // could not catch up, so the picture stays.
+        let mut keeper = SpeedKeeper::new(4);
+        for _ in 0..10 {
+            keeper.check(4, 57.0, Some(179.5), normal);
+        }
+        assert_eq!(keeper.ceiling(), 4);
+        // At normal speed a game that slow still steps down: every bit
+        // of speed counts.
+        let mut keeper = SpeedKeeper::new(4);
+        keeper.check(4, 30.0, Some(normal), normal);
+        keeper.check(4, 30.0, Some(normal), normal);
+        assert_eq!(keeper.ceiling(), 3);
         // Slow motion at a quarter: 15 frames a second is keeping up.
-        assert_eq!(keep_speed(4, 4, 15.0, Some(normal / 4.0), normal), 4);
+        let mut keeper = SpeedKeeper::new(4);
+        for _ in 0..5 {
+            keeper.check(4, 15.0, Some(normal / 4.0), normal);
+        }
+        assert_eq!(keeper.ceiling(), 4);
         // Unlimited wants all it can get, down to 1×, and no lower.
-        assert_eq!(keep_speed(4, 2, 400.0, None, normal), 1);
-        assert_eq!(keep_speed(1, 1, 400.0, None, normal), 1);
-        // A ceiling already below the scale drawn stays.
-        assert_eq!(keep_speed(2, 4, 100.0, Some(179.5), normal), 2);
+        let mut keeper = SpeedKeeper::new(2);
+        for _ in 0..6 {
+            keeper.check(keeper.ceiling(), 400.0, None, normal);
+        }
+        assert_eq!(keeper.ceiling(), 1);
+    }
+
+    #[test]
+    fn match_display_steps_back_up_once_the_game_keeps_up() {
+        let wanted = 59.83;
+        // The Mac was busy for a moment: 4× fell behind and went to 3×.
+        let mut keeper = SpeedKeeper::new(4);
+        play(&mut keeper, 2, 3, wanted);
+        assert_eq!(keeper.ceiling(), 3);
+        // Once the Mac is free again, 4× keeps up: after ten steady
+        // seconds it tries 4× and keeps it.
+        play(&mut keeper, 9, 4, wanted);
+        assert_eq!(keeper.ceiling(), 3);
+        play(&mut keeper, 1, 4, wanted);
+        assert_eq!(keeper.ceiling(), 4);
+        play(&mut keeper, 60, 4, wanted);
+        assert_eq!(keeper.ceiling(), 4);
+        // A try that leaves fast-forward hopelessly behind still goes back.
+        let mut keeper = SpeedKeeper::new(4);
+        keeper.check(4, 120.0, Some(179.5), normal_rate());
+        keeper.check(4, 120.0, Some(179.5), normal_rate());
+        assert_eq!(keeper.ceiling(), 3);
+        for _ in 0..FIRST_PATIENCE {
+            keeper.check(3, 179.5, Some(179.5), normal_rate());
+        }
+        assert_eq!(keeper.ceiling(), 4);
+        keeper.check(4, 60.0, Some(179.5), normal_rate());
+        assert_eq!(keeper.ceiling(), 3);
+        // Never past the scale that matches the screens.
+        let mut keeper = SpeedKeeper::new(2);
+        play(&mut keeper, 100, 8, wanted);
+        assert_eq!(keeper.ceiling(), 2);
+    }
+
+    #[test]
+    fn a_failed_try_waits_twice_as_long_for_the_next() {
+        let wanted = 59.83;
+        // Another app keeps the GPU busy: only 2× keeps up.
+        let mut keeper = SpeedKeeper::new(4);
+        play(&mut keeper, 4, 2, wanted);
+        assert_eq!(keeper.ceiling(), 2);
+        // Ten seconds on, it tries 3× and goes back at the first slow
+        // second, not two.
+        play(&mut keeper, 10, 2, wanted);
+        assert_eq!(keeper.ceiling(), 3);
+        play(&mut keeper, 1, 2, wanted);
+        assert_eq!(keeper.ceiling(), 2);
+        // The next try waits 20 seconds, then 40.
+        play(&mut keeper, 19, 2, wanted);
+        assert_eq!(keeper.ceiling(), 2);
+        play(&mut keeper, 1, 2, wanted);
+        assert_eq!(keeper.ceiling(), 3);
+        play(&mut keeper, 1, 2, wanted);
+        play(&mut keeper, 39, 2, wanted);
+        assert_eq!(keeper.ceiling(), 2);
+        play(&mut keeper, 1, 2, wanted);
+        assert_eq!(keeper.ceiling(), 3);
+        // Tries never come further apart than about five minutes.
+        let mut keeper = SpeedKeeper::new(4);
+        play(&mut keeper, 4, 1, wanted);
+        for _ in 0..12 {
+            play(&mut keeper, MOST_PATIENCE + 1, 1, wanted);
+        }
+        assert_eq!(keeper.patience, MOST_PATIENCE);
+    }
+
+    #[test]
+    fn smooth_shows_a_frame_near_its_size_as_it_is() {
+        // The 3DS's top screen at 4× on the MacBook Pro: 1600 for 1636.
+        assert!(shown_as_drawn((1600, 960), (1636, 982)));
+        assert!(shown_as_drawn((1280, 960), (1309, 982)));
+        // A little smaller is as near.
+        assert!(shown_as_drawn((1600, 960), (1500, 900)));
+        // At 3×, 1200 for 1636 is MetalFX's to enlarge.
+        assert!(!shown_as_drawn((1200, 720), (1636, 982)));
+        // Both sides must be near.
+        assert!(!shown_as_drawn((1600, 960), (1636, 1300)));
+        assert!(!shown_as_drawn((0, 0), (1636, 982)));
     }
 
     #[test]

@@ -35,6 +35,9 @@ mod libretro;
 mod link;
 #[allow(unsafe_code)]
 mod pipelines;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod shared_pixels;
 #[allow(unsafe_code)]
 mod vulkan;
 

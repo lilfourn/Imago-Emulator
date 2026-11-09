@@ -1797,6 +1797,7 @@ dependencies = [
  "emu-cheats",
  "emu-core",
  "emu-gba-cart",
+ "emu-os",
  "emu-sched",
  "png 0.18.1",
  "postcard",
@@ -1808,6 +1809,7 @@ name = "emu-os"
 version = "0.1.0"
 dependencies = [
  "dirs 7.0.0",
+ "libc",
 ]
 
 [[package]]

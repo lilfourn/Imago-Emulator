@@ -167,11 +167,7 @@ fn time_base(rate: FrameRate) -> (u32, u32) {
 /// decodes.
 fn encode_jpeg(picture: &Frame, out: &mut Vec<u8>) -> io::Result<()> {
     let size = picture.size();
-    let bgra: Vec<u8> = picture
-        .pixels()
-        .iter()
-        .flat_map(|pixel| pixel.to_le_bytes())
-        .collect();
+    let bgra = crate::video::pixel_bytes(picture.pixels());
     let mut encoder = Encoder::new(out, JPEG_QUALITY);
     encoder.set_sampling_factor(SamplingFactor::F_2_2);
     encoder

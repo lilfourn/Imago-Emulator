@@ -17,8 +17,11 @@
 //! The helper starts by saying [`HELLO`]: the protocol's [`VERSION`]
 //! (u16) and the renderer's name. A [`FRAME`] is the top screen's width and
 //! height and the bottom screen's (u16 each), the number of stereo samples
-//! (u32), then the top screen's pixels and the bottom's (u32 each, as
-//! [`Frame`] has them) and the samples (i16 left, i16 right). [`FAILED`],
+//! (u32), where the pixels are (u8: 1 here, 0 in the memory the two share,
+//! `shared_pixels`), then, if here, the top screen's pixels and the
+//! bottom's (u32 each, as [`Frame`] has them), and the samples (i16 left,
+//! i16 right). Pixels in the shared memory are laid out the same, from its
+//! start. [`FAILED`],
 //! said in place of any answer, is why the helper stopped, in UTF-8; it
 //! exits after.
 
@@ -35,7 +38,7 @@ use emu_core::{Frame, ScreenSize, StereoSample};
 use crate::{HELPER_FLAG, OpenError, install::Parts};
 
 /// The protocol's version, which the helper says in its hello.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// Runs a frame with the pad held.
 pub const RUN: u8 = 1;
@@ -155,42 +158,61 @@ pub fn read_message(input: &mut impl Read, payload: &mut Vec<u8>) -> io::Result<
     Ok(Some(head[0]))
 }
 
-/// The head of a [`FRAME`]: the two screens' sizes and the samples' count.
-pub fn frame_head(top: ScreenSize, bottom: ScreenSize, samples: usize) -> [u8; 12] {
-    let mut out = [0; 12];
+/// The bytes of a [`FRAME`]'s head.
+pub const FRAME_HEAD: usize = 13;
+
+/// The head of a [`FRAME`]: the two screens' sizes, the samples' count,
+/// and whether the pixels follow (`inline`) or are in the shared memory.
+pub fn frame_head(
+    top: ScreenSize,
+    bottom: ScreenSize,
+    samples: usize,
+    inline: bool,
+) -> [u8; FRAME_HEAD] {
+    let mut out = [0; FRAME_HEAD];
     out[0..2].copy_from_slice(&top.width.to_le_bytes());
     out[2..4].copy_from_slice(&top.height.to_le_bytes());
     out[4..6].copy_from_slice(&bottom.width.to_le_bytes());
     out[6..8].copy_from_slice(&bottom.height.to_le_bytes());
     out[8..12].copy_from_slice(&u32::try_from(samples).unwrap_or(u32::MAX).to_le_bytes());
+    out[12] = u8::from(inline);
     out
 }
 
-/// Copies a [`FRAME`] payload into `screens` (resized if its sizes
-/// changed) and appends its samples to `audio`.
+/// Copies a [`FRAME`] payload, with its pixels there or in `shared`, into
+/// `screens` (resized if its sizes changed) and appends its samples to
+/// `audio`.
 fn decode_frame(
     payload: &[u8],
+    shared: Option<&[u8]>,
     screens: &mut [Frame; 2],
     audio: &mut Vec<StereoSample>,
 ) -> Result<(), String> {
     let bad = || "the 3DS helper sent a broken frame".to_owned();
-    let head = payload.get(..12).ok_or_else(bad)?;
+    let head = payload.get(..FRAME_HEAD).ok_or_else(bad)?;
     let u16_at = |at: usize| u16::from_le_bytes([head[at], head[at + 1]]);
     let sizes = [
         ScreenSize::new(u16_at(0), u16_at(2)),
         ScreenSize::new(u16_at(4), u16_at(6)),
     ];
     let samples = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as usize;
-    let mut rest = &payload[12..];
+    let mut rest = &payload[FRAME_HEAD..];
+    let mut pixels = match head[12] {
+        1 => rest,
+        _ => shared.ok_or_else(bad)?,
+    };
     for (screen, size) in screens.iter_mut().zip(sizes) {
         if screen.size() != size {
             *screen = Frame::new(size);
         }
-        let bytes = rest.get(..size.pixel_count() * 4).ok_or_else(bad)?;
+        let bytes = pixels.get(..size.pixel_count() * 4).ok_or_else(bad)?;
         for (pixel, word) in screen.pixels_mut().iter_mut().zip(bytes.chunks_exact(4)) {
             *pixel = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
         }
-        rest = &rest[bytes.len()..];
+        pixels = &pixels[bytes.len()..];
+    }
+    if head[12] == 1 {
+        rest = pixels;
     }
     let sound = rest.get(..samples * 4).ok_or_else(bad)?;
     audio.extend(sound.chunks_exact(4).map(|sample| -> StereoSample {
@@ -219,6 +241,9 @@ pub struct Client {
     /// Frames' buffers, handed back to the reading thread to fill again,
     /// so a frame of several megabytes is not allocated each time.
     spare: Sender<Vec<u8>>,
+    /// The memory the helper leaves frames' pixels in, on Unix.
+    #[cfg(unix)]
+    pixels: Option<crate::shared_pixels::SharedPixels>,
     /// Where the helper's own messages go, named when it stops.
     log: PathBuf,
     /// Why the helper stopped, once it has: every request after fails with
@@ -266,6 +291,19 @@ impl Client {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr);
+        // Where the helper leaves the pixels. Without it, as when the
+        // system will not make it, they come through the link. The
+        // helper removes its name as it opens it; `_name` removes it as
+        // this returns, for a helper that never did.
+        #[cfg(unix)]
+        let (pixels, _name) =
+            match crate::shared_pixels::SharedPixels::create(crate::host::most_pixel_bytes()) {
+                Ok((pixels, name)) => {
+                    command.env(crate::shared_pixels::ENV, name.as_str());
+                    (Some(pixels), Some(name))
+                }
+                Err(_) => (None, None),
+            };
         let mut child = command.spawn().map_err(start)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
@@ -298,6 +336,8 @@ impl Client {
             to_helper: BufWriter::with_capacity(64 << 10, stdin),
             answers,
             spare,
+            #[cfg(unix)]
+            pixels,
             log,
             dead: None,
         };
@@ -323,7 +363,11 @@ impl Client {
         audio: &mut Vec<StereoSample>,
     ) -> Result<(), String> {
         let payload = self.ask(RUN, &pad.encode(), FRAME)?;
-        let decoded = decode_frame(&payload, screens, audio);
+        #[cfg(unix)]
+        let shared = self.pixels.as_ref().map(|pixels| pixels.bytes());
+        #[cfg(not(unix))]
+        let shared = None;
+        let decoded = decode_frame(&payload, shared, screens, audio);
         // The reading thread has gone if this fails, which the next
         // request finds out.
         let _ = self.spare.send(payload);
@@ -554,14 +598,28 @@ mod tests {
             .iter()
             .flat_map(|sample| sample.to_le_bytes())
             .collect();
-        let payload = [&frame_head(top, bottom, 2)[..], &pixels, &sound].concat();
+        let payload = [&frame_head(top, bottom, 2, true)[..], &pixels, &sound].concat();
         let mut screens = crate::SCREENS.map(Frame::new);
         let mut audio = Vec::new();
-        decode_frame(&payload, &mut screens, &mut audio).unwrap();
+        decode_frame(&payload, None, &mut screens, &mut audio).unwrap();
         assert_eq!(screens[0].size(), top);
         assert_eq!(screens[0].pixels(), &[rgb(1, 2, 3), rgb(4, 5, 6)]);
         assert_eq!(screens[1].pixels(), &[rgb(7, 8, 9), rgb(10, 11, 12)]);
         assert_eq!(audio, [[-1, 2], [3, -4]]);
-        assert!(decode_frame(&payload[..20], &mut screens, &mut audio).is_err());
+        assert!(decode_frame(&payload[..20], None, &mut screens, &mut audio).is_err());
+
+        // The same frame with its pixels in the shared memory, which holds
+        // more than one frame needs.
+        let payload = [&frame_head(top, bottom, 2, false)[..], &sound].concat();
+        let shared = [&pixels[..], &[0xEE; 64]].concat();
+        let mut screens = crate::SCREENS.map(Frame::new);
+        let mut audio = Vec::new();
+        decode_frame(&payload, Some(&shared), &mut screens, &mut audio).unwrap();
+        assert_eq!(screens[0].pixels(), &[rgb(1, 2, 3), rgb(4, 5, 6)]);
+        assert_eq!(screens[1].pixels(), &[rgb(7, 8, 9), rgb(10, 11, 12)]);
+        assert_eq!(audio, [[-1, 2], [3, -4]]);
+        // No shared memory, or too little: broken.
+        assert!(decode_frame(&payload, None, &mut screens, &mut audio).is_err());
+        assert!(decode_frame(&payload, Some(&shared[..8]), &mut screens, &mut audio).is_err());
     }
 }
