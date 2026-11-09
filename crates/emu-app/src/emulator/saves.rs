@@ -313,11 +313,18 @@ impl Saves {
         // and in place of box art libretro doesn't have.
         // Not save data, so written without waiting for the disk.
         if let Some(screen) = core.screens().first() {
-            let picture = persist::state_picture_path(&state);
-            let unfinished = picture.with_extension("png.tmp");
-            fs::write(&unfinished, capture::encode_png(screen))
-                .and_then(|()| fs::rename(&unfinished, &picture))
-                .ok();
+            let png = capture::encode_png(screen);
+            // A DS game played with a cartridge in is still that game in
+            // the library, which looks beside the game's own checkpoint:
+            // the picture goes there too, and its time is when the game
+            // was last played.
+            let own = persist::state_picture_path(&state);
+            for picture in std::iter::once(own).chain(self.states.library_picture(slot)) {
+                let unfinished = picture.with_extension("png.tmp");
+                fs::write(&unfinished, &png)
+                    .and_then(|()| fs::rename(&unfinished, &picture))
+                    .ok();
+            }
         }
         let record = persist::saves_record_path(&state);
         let saves =
@@ -1173,6 +1180,37 @@ mod tests {
             PickUp::Loaded
         );
         assert_eq!(bytes(&*slotted), (0, 2));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_game_played_with_a_cartridge_in_leaves_its_picture_where_the_library_looks() {
+        let dir = empty_dir("slotted-picture");
+        // Never played alone: only with the cartridge in.
+        let (mut slotted, mut saves) = session(&dir, 0, 0xB, Some("emerald.gba"));
+        slotted.poke(0, 1, 2);
+        saves.save_checkpoint(&*slotted, 0).expect("left");
+        assert_eq!(
+            names_in(&dir),
+            [
+                "game.emerald.ss0",
+                "game.emerald.ss0.png",
+                "game.emerald.ss0.saves",
+                // The game's tile in the library: its picture, and by the
+                // picture's time, when it was last played.
+                "game.ss0.png",
+            ]
+        );
+        assert_eq!(
+            fs::read(dir.join("game.ss0.png")).expect("the tile's picture"),
+            fs::read(dir.join("game.emerald.ss0.png")).expect("the session's")
+        );
+        // The game alone has no checkpoint of its own for all that.
+        let (mut alone, mut alone_saves) = session(&dir, 0, 0xA, None);
+        assert_eq!(
+            alone_saves.load_checkpoint(&mut *alone, 0).expect("none"),
+            PickUp::Empty
+        );
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

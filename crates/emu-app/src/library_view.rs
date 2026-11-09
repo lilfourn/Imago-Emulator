@@ -2173,15 +2173,21 @@ fn cached_pictures(cache: Option<&Path>, game: &Game) -> Pictures {
 }
 
 /// The pictures of `game` on disk, with `cache` holding its box art and
-/// icon, and when it was last played.
+/// icon, and when it was last played: the time of its checkpoint or of
+/// the picture beside it, whichever is newer. A DS game played with a GBA
+/// cartridge in keeps that session's checkpoint under another name, and
+/// leaves only its picture here (see `persist::StateFiles`).
 fn pictures_on_disk(cache: Option<&Path>, game: &Game) -> Pictures {
     let Pictures { art, icon, .. } = cached_pictures(cache, game);
     let checkpoint = library::checkpoint_path(game);
-    let played = fs::metadata(&checkpoint)
-        .and_then(|metadata| metadata.modified())
-        .ok();
+    let picture = persist::state_picture_path(&checkpoint);
+    let modified = |path: &Path| {
+        let metadata = fs::metadata(path);
+        metadata.and_then(|metadata| metadata.modified()).ok()
+    };
+    let played = modified(&checkpoint).max(modified(&picture));
     let left_at = played
-        .and_then(|_| fs::read(persist::state_picture_path(&checkpoint)).ok())
+        .and_then(|_| fs::read(&picture).ok())
         .map(|bytes| Arc::new(gpui::Image::from_bytes(ImageFormat::Png, bytes)));
     Pictures {
         art,
@@ -2806,6 +2812,20 @@ mod tests {
         // Without a cache folder, the game still has where it was left.
         let pictures = pictures_on_disk(None, &game);
         assert!(pictures.art.is_none() && pictures.left_at.is_some());
+
+        // A DS game played only with a GBA cartridge in: that session's
+        // checkpoint has another name, and its picture is left here.
+        let info = rom_info::RomInfo {
+            platform: rom_info::Platform::Nds,
+            ..info
+        };
+        let slotted = Game::new(&dir.join("Platinum.nds"), &info);
+        assert!(pictures_on_disk(None, &slotted).played.is_none());
+        fs::write(dir.join("Platinum.Emerald.ss0"), b"state").expect("checkpoint");
+        fs::write(dir.join("Platinum.ss0.png"), png).expect("picture");
+        let pictures = pictures_on_disk(None, &slotted);
+        assert!(pictures.played.is_some(), "last played with the cartridge");
+        assert!(pictures.left_at.is_some());
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -214,6 +214,15 @@ impl StateFiles {
         }
     }
 
+    /// Where the library looks for the picture of where the first player's
+    /// game was left in `slot`, beside that game's own state
+    /// (`game.ss0.png`), when that is not this session's own picture: for
+    /// a session with a game in its second slot. `None` for other sessions.
+    pub fn library_picture(&self, slot: u8) -> Option<PathBuf> {
+        self.cartridge.as_ref()?;
+        Some(state_picture_path(&self.game.state(slot, self.linked)))
+    }
+
     /// The file to load the state in `slot` from: the session's own, or,
     /// if it has none there, the one under the name its states had before
     /// they were named apart, while that file is this session's.
@@ -1014,6 +1023,12 @@ mod tests {
         assert_eq!(alone.path(1), dir.join("platinum.ss1"));
         assert_eq!(slotted.path(1), dir.join("platinum.emerald.ss1"));
         assert_eq!(slotted.path(0), dir.join("platinum.emerald.ss0"));
+        // The library looks for the game's picture beside its own state.
+        assert_eq!(
+            slotted.library_picture(0),
+            Some(dir.join("platinum.ss0.png"))
+        );
+        assert_eq!(alone.library_picture(0), None, "its own picture is there");
         // Another cartridge is another session again.
         let other = StateFiles::new(
             game.clone(),
