@@ -108,7 +108,8 @@ impl Eeprom {
             self.start(input);
             return IDLE;
         };
-        self.count += 1;
+        // A game may clock on for as long as it holds chip select.
+        self.count = self.count.saturating_add(1);
         let base = self.base(command);
         if self.count <= self.address_bytes && matches!(base, READ | WRITE) {
             self.address = self.address << 8 | u32::from(input);

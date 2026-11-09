@@ -93,6 +93,11 @@ const PAGE_ERASE: u8 = 0xDB;
 /// byte reads.
 const IDLE: u8 = 0xFF;
 
+/// The most bytes of one instruction an unknown chip keeps to replay:
+/// three of address and a page, the longest write any of the chips
+/// takes. A longer one wraps within its page on the chip itself.
+const WRITTEN_MOST: usize = 3 + 256;
+
 /// The game code at header 0x0C, if the ROM is long enough.
 pub(crate) fn game_code(rom: &[u8]) -> Option<&[u8]> {
     rom.get(0x0C..0x10)
@@ -246,7 +251,8 @@ struct Detector {
     command: Option<u8>,
     /// Bytes received after the instruction.
     count: u32,
-    /// Those bytes, for an instruction that changes the chip.
+    /// The first [`WRITTEN_MOST`] of those bytes, for an instruction that
+    /// changes the chip.
     #[serde(with = "payload::bytes")]
     written: Vec<u8>,
 }
@@ -263,15 +269,19 @@ impl Detector {
             self.command = Some(input);
             return IDLE;
         };
-        self.count += 1;
+        // A game may hold chip select and clock on for as long as it
+        // likes, and a save state hold any count.
+        self.count = self.count.saturating_add(1);
         match command {
             READ_STATUS => u8::from(self.write_enabled) << 1,
             READ_ID => flash_id(FLASH_SIZE)
-                .get(self.count as usize - 1)
+                .get((self.count as usize).wrapping_sub(1))
                 .copied()
                 .unwrap_or(IDLE),
             WRITE | WRITE_HIGH_OR_PAGE | SECTOR_ERASE | PAGE_ERASE => {
-                self.written.push(input);
+                if self.written.len() < WRITTEN_MOST {
+                    self.written.push(input);
+                }
                 IDLE
             }
             _ => IDLE,
@@ -408,7 +418,7 @@ impl Backup {
             infrared.command = Some(input);
             return 0;
         };
-        infrared.count += 1;
+        infrared.count = infrared.count.saturating_add(1);
         let count = infrared.count;
         match command {
             IR_SAVE => self.chip_transfer(input),
@@ -545,6 +555,35 @@ mod tests {
         command(&mut backup, &write);
         assert_eq!(backup.data().len(), 512);
         assert_eq!(backup.data()[0x20..0x30], [0x5A; 16]);
+    }
+
+    /// Bytes clocked into an unknown chip were all kept for as long as
+    /// chip select was held, megabytes of them, in every save state and
+    /// rewind snapshot. A chip takes a page at a time.
+    #[test]
+    fn an_unknown_chip_keeps_no_more_than_a_page_of_an_instruction() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x06]);
+        backup.transfer(0x0A);
+        for byte in 0..100_000u32 {
+            backup.transfer(byte as u8);
+        }
+        let Chip::Unknown(detector) = &backup.chip else {
+            panic!("still unknown while select is held");
+        };
+        assert_eq!(detector.written.len(), WRITTEN_MOST);
+        assert_eq!(detector.count, 100_000, "every byte is counted");
+
+        // A whole page, the longest write a chip takes, is kept whole:
+        // three address bytes and 256 of data.
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x06]);
+        let mut write = vec![0x0A, 0x00, 0x02, 0x00];
+        write.extend((0..=255u8).rev());
+        command(&mut backup, &write);
+        assert!(matches!(backup.chip, Chip::Flash(_)));
+        let page: Vec<u8> = (0..=255u8).rev().collect();
+        assert!(backup.data()[0x200..0x300] == page[..]);
     }
 
     #[test]
