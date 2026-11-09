@@ -6,7 +6,8 @@
 //! it follows. The address is checked before `curl` starts, and reaches it
 //! as the value of `--url`, as one address (`--globoff`), so nothing in an
 //! address from a catalog can be read as an option, a list of addresses or
-//! a file. A [`Download`] is also held to a size: `curl` is told it, and
+//! a file. `curl` is told what to do by the app alone: it reads no config
+//! file of the user's (`--disable`). A [`Download`] is also held to a size: `curl` is told it, and
 //! refuses a file the server says is bigger, and the app stops one that
 //! grows past it all the same, as only newer `curl`s do when the server
 //! does not say.
@@ -134,10 +135,12 @@ pub fn user_agent(part: Option<&str>) -> String {
 }
 
 /// `curl`, asked for `url`, with what every request of the app's has: it
-/// is quiet but for errors, gives a server ten seconds to connect, names
-/// the app (and the `part` of it asking, see [`user_agent`]), and goes
-/// only where `allow` lets it, redirects included. The caller adds what
-/// its own request needs.
+/// reads no config file of the user's, is quiet but for errors, gives a
+/// server ten seconds to connect, names the app (and the `part` of it
+/// asking, see [`user_agent`]), and goes only where `allow` lets it,
+/// redirects included. The caller adds what its own request needs. A
+/// proxy named in the environment (`https_proxy`) is still used; one named
+/// only in `~/.curlrc` is not.
 ///
 /// # Errors
 ///
@@ -148,6 +151,11 @@ pub fn curl(url: &str, part: Option<&str>, allow: Allow) -> Result<Command, Erro
     }
     let mut command = process::command(CURL);
     command
+        // First, where alone it counts: the user's own config file is not
+        // read. A line in `~/.curlrc` such as `insecure`, or a proxy,
+        // would otherwise apply to every request here, the one that
+        // carries Guide's key too.
+        .arg("--disable")
         .args(["--silent", "--show-error", "--connect-timeout", "10"])
         .arg("--user-agent")
         .arg(user_agent(part))
@@ -396,6 +404,15 @@ mod tests {
                     .unwrap_or_default();
                 with_length("200 OK", agent.as_bytes())
             }
+            // Whether the request carries what a config file told curl to
+            // send.
+            "/config" => {
+                let said = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("X-From-Curlrc: "))
+                    .unwrap_or("nothing");
+                with_length("200 OK", said.as_bytes())
+            }
             "/moved" => redirect(&format!("{site}/game.gb")),
             "/to-a-file" => redirect("file:///etc/hosts"),
             "/to-ftp" => redirect("ftp://127.0.0.1:1/game.gb"),
@@ -501,6 +518,7 @@ mod tests {
         assert_eq!(
             args(&command),
             [
+                "--disable",
                 "--silent",
                 "--show-error",
                 "--connect-timeout",
@@ -537,7 +555,7 @@ mod tests {
         };
         let command = pinned.command().expect("an address it takes");
         assert_eq!(
-            args(&command)[13..],
+            args(&command)[14..],
             [
                 "--location",
                 "--max-time",
@@ -559,7 +577,7 @@ mod tests {
         };
         let command = quick.command().expect("an address it takes");
         assert_eq!(
-            args(&command)[13..],
+            args(&command)[14..],
             [
                 "--location",
                 "--max-time",
@@ -569,6 +587,32 @@ mod tests {
                 "--compressed",
             ]
         );
+    }
+
+    #[test]
+    fn the_user_s_own_curl_config_is_not_read() {
+        let server = serve();
+        let home = temp_dir("curlrc");
+        // As a `.curlrc` in the home folder can tell curl for every
+        // request: here a header to send, as well `insecure`, or a proxy
+        // to send everything through. Windows also calls it `_curlrc`.
+        for name in [".curlrc", "_curlrc"] {
+            fs::write(home.join(name), "header = \"X-From-Curlrc: a header\"\n").expect("config");
+        }
+        let url = format!("{}/config", server.site);
+        let output = curl(&url, None, Allow::HttpsOrLoopback)
+            .expect("an address it takes")
+            // Where curl looks for its config file first.
+            .env("CURL_HOME", &home)
+            .output()
+            .expect("curl runs");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "nothing",
+            "what the config file said to send"
+        );
+        fs::remove_dir_all(&home).expect("clean up");
     }
 
     #[test]
