@@ -552,6 +552,8 @@ fn keep_copy_with(
 /// ([`keep_copy`]) becomes `game.sav.before-load`, the saves kept before it
 /// each move up a number, and the fifth of them goes
 /// ([`before_load_path`]). So the newest five are kept, none of them twice.
+/// A save kept already becomes the newest of them again, as it is the one
+/// being replaced now: it is not the next to go.
 ///
 /// The save itself stays where it is, and the copy is made before any
 /// other is moved or dropped: whatever fails, here or in the write that
@@ -570,25 +572,66 @@ pub fn keep_before_load(path: &Path, bytes: &[u8], system: System) -> io::Result
     if same_save(system, &there, bytes) {
         return Ok(Kept::Unneeded);
     }
-    let kept_already = (1..=BEFORE_LOAD_KEPT).any(|number| {
-        fs::read(before_load_path(path, number)).is_ok_and(|kept| same_save(system, &kept, &there))
+    let kept_at = (1..=BEFORE_LOAD_KEPT).find(|number| {
+        fs::read(before_load_path(path, *number)).is_ok_and(|kept| same_save(system, &kept, &there))
     });
-    if kept_already {
-        return Ok(Kept::Already);
+    match kept_at {
+        Some(1) => Ok(Kept::Already),
+        Some(number) => {
+            // If no second copy of it can be made, the one kept stays in
+            // its place: the save is kept either way.
+            if let Ok(fresh) = fresh_copy_before_load(path) {
+                place_newest_before_load(path, &fresh, Some(number))?;
+            }
+            Ok(Kept::Already)
+        }
+        None => {
+            let fresh = fresh_copy_before_load(path)?;
+            place_newest_before_load(path, &fresh, None).map(Kept::New)
+        }
     }
-    // Under a name of its own until there is room for it.
-    let mut fresh = before_load_path(path, 1).into_os_string();
+}
+
+/// A copy of the battery save at `save` ([`keep_copy`]) under a name of
+/// its own, `game.sav.before-load.new`, until there is room for it among
+/// the saves kept. One left there by a run that was cut short goes first.
+fn fresh_copy_before_load(save: &Path) -> io::Result<PathBuf> {
+    let mut fresh = before_load_path(save, 1).into_os_string();
     fresh.push(".new");
     let fresh = PathBuf::from(fresh);
     remove_if_present(&fresh)?;
-    keep_copy(path, &fresh)?;
-    let newest = before_load_path(path, 1);
-    let placed = make_room_before_load(path).and_then(|()| rename(&fresh, &newest));
+    keep_copy(save, &fresh)?;
+    Ok(fresh)
+}
+
+/// Makes `fresh`, a copy of the battery save at `save`, the newest of the
+/// saves kept from before a state load, the others each moving up a
+/// number. `instead_of` is the place of an older copy of the same save,
+/// if one is kept, which goes first, so the save is kept once. Returns
+/// where the copy now is.
+///
+/// # Errors
+///
+/// Returns the error if a copy cannot be moved or removed. `fresh` is
+/// removed then, and the older copy may be gone too: the save is still at
+/// `save`, over which nothing must be written.
+fn place_newest_before_load(
+    save: &Path,
+    fresh: &Path,
+    instead_of: Option<u32>,
+) -> io::Result<PathBuf> {
+    let newest = before_load_path(save, 1);
+    let placed = instead_of
+        .map_or(Ok(()), |number| {
+            remove_if_present(&before_load_path(save, number))
+        })
+        .and_then(|()| make_room_before_load(save))
+        .and_then(|()| rename(fresh, &newest));
     if let Err(error) = placed {
-        fs::remove_file(&fresh).ok();
+        fs::remove_file(fresh).ok();
         return Err(error);
     }
-    Ok(Kept::New(newest))
+    Ok(newest)
 }
 
 /// Frees the newest place among the saves kept from before a state was
@@ -1228,13 +1271,28 @@ mod tests {
             ("game.sav.before-load5", &[2]),
         ]));
         assert_eq!(copies_in(&dir), six);
-        // One of the five is not kept again, wherever it is among them.
+        // One of the five is not kept again, wherever it is among them:
+        // it becomes the newest, as the save being replaced now.
         write_atomic(&save, &[3]).expect("write");
         assert_eq!(
             keep_before_load(&save, b"state", System::Nds).expect("kept already"),
             Kept::Already
         );
-        assert_eq!(copies_in(&dir), six);
+        let mut again = copies(&start_over);
+        again.extend(copies(&[
+            ("game.sav.before-load", &[3]),
+            ("game.sav.before-load2", &[6]),
+            ("game.sav.before-load3", &[5]),
+            ("game.sav.before-load4", &[4]),
+            ("game.sav.before-load5", &[2]),
+        ]));
+        assert_eq!(copies_in(&dir), again);
+        // The newest of them, kept again, stays where it is.
+        assert_eq!(
+            keep_before_load(&save, b"state", System::Nds).expect("kept already"),
+            Kept::Already
+        );
+        assert_eq!(copies_in(&dir), again);
         // A gap, as one deleted by hand leaves, is closed by the next.
         fs::remove_file(dir.join("game.sav.before-load2")).expect("removed");
         write_atomic(&save, &[7]).expect("write");
@@ -1242,12 +1300,45 @@ mod tests {
         let mut closed = copies(&start_over);
         closed.extend(copies(&[
             ("game.sav.before-load", &[7]),
-            ("game.sav.before-load2", &[6]),
-            ("game.sav.before-load3", &[4]),
-            ("game.sav.before-load4", &[3]),
+            ("game.sav.before-load2", &[3]),
+            ("game.sav.before-load3", &[5]),
+            ("game.sav.before-load4", &[4]),
             ("game.sav.before-load5", &[2]),
         ]));
         assert_eq!(copies_in(&dir), closed);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_save_kept_again_is_not_the_next_of_the_five_to_go() {
+        let dir = temp_dir("before-load-again");
+        let save = dir.join("game.sav");
+        // Kept in turn: 1 is the oldest of the five.
+        for number in 1..=5u8 {
+            write_atomic(&save, &[number]).expect("write");
+            keep_before_load(&save, b"state", System::Nds).expect("kept");
+        }
+        // The game holds 1 again, and a state is loaded over it.
+        write_atomic(&save, &[1]).expect("write");
+        assert_eq!(
+            keep_before_load(&save, b"state", System::Nds).expect("kept already"),
+            Kept::Already
+        );
+        // Then a save not kept yet is: the oldest goes, which is not 1.
+        write_atomic(&save, &[6]).expect("write");
+        keep_before_load(&save, b"state", System::Nds).expect("kept");
+        assert_eq!(
+            copies_in(&dir),
+            copies(&[
+                ("game.sav.before-load", &[6]),
+                ("game.sav.before-load2", &[1]),
+                ("game.sav.before-load3", &[5]),
+                ("game.sav.before-load4", &[4]),
+                ("game.sav.before-load5", &[3]),
+            ])
+        );
+        // The game's own file was never moved.
+        assert_eq!(fs::read(&save).expect("there"), [6]);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

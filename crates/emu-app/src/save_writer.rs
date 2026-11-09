@@ -33,6 +33,10 @@ pub struct Written {
     /// What became of the file there before, if this was the first write
     /// after a state was loaded: kept, if it held another save.
     pub kept: Kept,
+    /// The run of loads the file was kept for, or found kept already for,
+    /// if it was. A write that failed and was tried again reports the run
+    /// of the load it first followed, which may be over by then.
+    pub kept_run: Option<u64>,
     /// How it went.
     pub result: io::Result<()>,
 }
@@ -141,12 +145,15 @@ impl SaveWriter {
                         } => {
                             let guard = guards.entry(cartridge).or_default();
                             let (kept, result) = guard.write(&path, &bytes, load);
+                            // Set by the write just made, if it kept.
+                            let kept_run = guard.kept_for.filter(|_| kept != Kept::Unneeded);
                             report
                                 .send(Written {
                                     cartridge,
                                     generation,
                                     path,
                                     kept,
+                                    kept_run,
                                     result,
                                 })
                                 .ok();
@@ -372,12 +379,13 @@ mod tests {
                 Kept::Unneeded,
             ]
         );
+        // It is the newest of those kept again, as the one last replaced.
         assert_eq!(
             files_in(&dir),
             held(&[
                 ("game.sav", b"hour 2"),
-                ("game.sav.before-load", b"hour 4"),
-                ("game.sav.before-load2", b"hour 20"),
+                ("game.sav.before-load", b"hour 20"),
+                ("game.sav.before-load2", b"hour 4"),
             ])
         );
         fs::remove_dir_all(&dir).expect("clean up");

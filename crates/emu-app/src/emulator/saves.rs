@@ -32,7 +32,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, ensure};
 use emu_core::Core;
@@ -118,8 +118,10 @@ pub(super) struct Saves {
     last_handed: Vec<Option<Vec<u8>>>,
     /// Per cartridge: its battery save file.
     backup_paths: Vec<PathBuf>,
-    /// When a state was last loaded, if one has been.
-    last_load: Option<Instant>,
+    /// When a state was last loaded, if one has been: by the clock on the
+    /// wall, which goes on while the computer sleeps, so a load the next
+    /// morning is no part of last night's run.
+    last_load: Option<SystemTime>,
     /// The number of the run of loads the last load belongs to.
     run: u64,
     /// Per cartridge: whether a load of that run has kept the save on
@@ -249,12 +251,17 @@ impl Saves {
     /// [`StateFiles::to_read`]). The next write of each battery save
     /// follows a load, and keeps the file on disk if this load may.
     pub(super) fn load_state(&mut self, core: &mut dyn Core, slot: u8) -> anyhow::Result<()> {
-        self.load_state_at(core, slot, Instant::now())
+        self.load_state_at(core, slot, SystemTime::now())
     }
 
     /// Restores `core` from the state in `slot`, as [`Saves::load_state`]
     /// does, at the time `now`.
-    fn load_state_at(&mut self, core: &mut dyn Core, slot: u8, now: Instant) -> anyhow::Result<()> {
+    fn load_state_at(
+        &mut self,
+        core: &mut dyn Core,
+        slot: u8,
+        now: SystemTime,
+    ) -> anyhow::Result<()> {
         let path = self.states.to_read(slot);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let emu_state::Decoded {
@@ -277,9 +284,10 @@ impl Saves {
             info.state_version,
         );
         core.load_state(payload)?;
+        // A clock set back gives no gap, so that load starts a run.
         let since_last = self
             .last_load
-            .map(|last| now.saturating_duration_since(last));
+            .and_then(|last| now.duration_since(last).ok());
         self.last_load = Some(now);
         if starts_run(since_last) {
             self.run += 1;
@@ -467,14 +475,17 @@ impl Saves {
     fn take_written(&mut self) {
         for written in self.writer.finished() {
             self.unheard = self.unheard.saturating_sub(1);
+            // The run of loads has kept its save, if this is still that
+            // run: a write heard of late, after a load has begun another,
+            // says nothing of the new one.
+            if written.kept_run == Some(self.run) {
+                self.kept_in_run[written.cartridge] = true;
+            }
             match &written.kept {
-                Kept::Unneeded => {}
-                // The run of loads has kept its save.
-                Kept::Already => self.kept_in_run[written.cartridge] = true,
+                Kept::Unneeded | Kept::Already => {}
                 // A warning, which shows long enough to read: nothing else
                 // says where the save went.
                 Kept::New(kept) => {
-                    self.kept_in_run[written.cartridge] = true;
                     self.warned.push(format!(
                         "Your save from before you loaded the state is kept as {}",
                         file_name(kept)
@@ -875,7 +886,7 @@ mod tests {
         assert!(saves.write_all(&*core));
         // Load, fight, load, fight: before each load the game has written
         // its save memory again, so every load finds another save on disk.
-        let start = Instant::now();
+        let start = SystemTime::now();
         let first = held(&[("game.sav", 2), ("game.sav.before-load", 20)]);
         for turn in 0..20u8 {
             let now = start + MINUTE * u32::from(turn);
@@ -924,20 +935,21 @@ mod tests {
         // Slot 1, slot 2, slot 1, each load long after the last, so each
         // is a run of its own and may keep the save it finds: the other
         // slot's, which is inside that slot's state too.
-        let start = Instant::now();
+        let start = SystemTime::now();
         for turn in 0..12u32 {
             let slot = if turn % 2 == 0 { 1 } else { 2 };
             let now = start + MINUTE * 11 * turn;
             saves.load_state_at(&mut *core, slot, now).expect("loaded");
             assert!(saves.write_all(&*core));
         }
-        // The save from before the first load, and each slot's once.
+        // The save from before the first load, and each slot's once: the
+        // one the last load replaced is the newest of them.
         assert_eq!(
             saves_in(&dir),
             held(&[
                 ("game.sav", 2),
-                ("game.sav.before-load", 2),
-                ("game.sav.before-load2", 1),
+                ("game.sav.before-load", 1),
+                ("game.sav.before-load2", 2),
                 ("game.sav.before-load3", 9),
             ])
         );
@@ -974,7 +986,7 @@ mod tests {
         let (mut core, mut saves) = game(&dir, 0);
         core.poke(0, 0, 2);
         saves.save_state(&*core, 1).expect("saved");
-        let start = Instant::now();
+        let start = SystemTime::now();
         for run in 1..=6u8 {
             // Saved in the game, and long after the last load, the state
             // loaded over that save.
@@ -994,6 +1006,78 @@ mod tests {
                 ("game.sav.before-load3", 14),
                 ("game.sav.before-load4", 13),
                 ("game.sav.before-load5", 12),
+            ])
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_save_kept_for_one_run_heard_of_in_the_next_does_not_settle_that_one() {
+        let dir = empty_dir("load-late-report");
+        let (mut core, mut saves) = game(&dir, 0);
+        core.poke(0, 0, 2);
+        saves.save_state(&*core, 1).expect("saved");
+        core.poke(0, 0, 20);
+        assert!(saves.write_all(&*core));
+        let start = SystemTime::now();
+        // A load keeps the save, but how its write went is not heard of
+        // before the next run's first load, which changes nothing.
+        saves.load_state_at(&mut *core, 1, start).expect("loaded");
+        saves.flush(&*core);
+        saves.writer.wait();
+        saves
+            .load_state_at(&mut *core, 1, start + MINUTE * 11)
+            .expect("loaded");
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[("game.sav", 2), ("game.sav.before-load", 20)])
+        );
+        // Saved in the game, and the state loaded over that save a minute
+        // later: the first load of its run to change the save keeps it.
+        core.poke(0, 0, 30);
+        assert!(saves.write_all(&*core));
+        saves
+            .load_state_at(&mut *core, 1, start + MINUTE * 12)
+            .expect("loaded");
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[
+                ("game.sav", 2),
+                ("game.sav.before-load", 30),
+                ("game.sav.before-load2", 20),
+            ])
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_clock_set_back_starts_a_run_of_loads() {
+        let dir = empty_dir("load-clock-back");
+        let (mut core, mut saves) = game(&dir, 0);
+        core.poke(0, 0, 2);
+        saves.save_state(&*core, 1).expect("saved");
+        core.poke(0, 0, 20);
+        assert!(saves.write_all(&*core));
+        let start = SystemTime::now();
+        saves.load_state_at(&mut *core, 1, start).expect("loaded");
+        assert!(saves.write_all(&*core));
+        // Saved in the game, then a load that by the clock comes before
+        // the last one: how long ago that was cannot be told, so it is no
+        // part of its run, and keeps the save it replaces.
+        core.poke(0, 0, 30);
+        assert!(saves.write_all(&*core));
+        saves
+            .load_state_at(&mut *core, 1, start - MINUTE)
+            .expect("loaded");
+        assert!(saves.write_all(&*core));
+        assert_eq!(
+            saves_in(&dir),
+            held(&[
+                ("game.sav", 2),
+                ("game.sav.before-load", 30),
+                ("game.sav.before-load2", 20),
             ])
         );
         fs::remove_dir_all(&dir).expect("clean up");
