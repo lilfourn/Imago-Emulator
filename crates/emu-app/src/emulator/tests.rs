@@ -2084,6 +2084,50 @@ fn a_game_another_copy_of_the_app_has_open_is_refused_untouched() {
 }
 
 #[test]
+fn a_wrong_file_chosen_to_go_with_a_game_this_copy_runs_is_what_the_failure_names() {
+    let (dir, paths) = rom_dir(
+        "locked-wrong",
+        &[("ruby.gba", &gba_rom()), ("notes.txt", b"no game")],
+    );
+    let data = empty_dir("locked-wrong-data");
+    let locks = data.join("Locks");
+    let moved = dir.join("moved.gba");
+    assert!(loadable(&paths[0]));
+    assert!(!loadable(&paths[1]), "a file of no kind the app plays");
+    assert!(!loadable(&moved), "a game that is no longer there");
+    assert!(!loadable(&dir), "a folder that is no RPG Maker game");
+
+    // The game runs, and holds its lock. Connect Second Console, with a
+    // file that is no game: the game plays on behind the load, and the
+    // failure says what is wrong with the file, not that the game is open.
+    let here = open_with(&paths[..1], DmgColors::Grey, Some(&locks)).expect("opens");
+    let wrong = open_with(&paths, DmgColors::Grey, Some(&locks))
+        .err()
+        .expect("refused");
+    assert!(
+        format!("{wrong:#}").contains("notes.txt is not a .gb, .gbc, .gba, .nds or .3ds file"),
+        "{wrong:#}"
+    );
+    // Or with a game that has been moved away.
+    let gone = open_with(&[paths[0].clone(), moved], DmgColors::Grey, Some(&locks))
+        .err()
+        .expect("refused");
+    assert!(format!("{gone:#}").starts_with("cannot read "), "{gone:#}");
+    assert!(format!("{gone:#}").contains("moved.gba"), "{gone:#}");
+    // The game is as held as ever.
+    let second = open_with(&paths[..1], DmgColors::Grey, Some(&locks))
+        .err()
+        .expect("refused");
+    assert!(
+        format!("{second:#}").contains("is already open"),
+        "{second:#}"
+    );
+    drop(here);
+    fs::remove_dir_all(&dir).expect("clean up");
+    fs::remove_dir_all(&data).expect("clean up");
+}
+
+#[test]
 fn a_game_s_files_are_named_as_its_session_names_them() {
     let dir = empty_dir("files-of");
     // An RPG Maker game: a folder with a dot in its name, and no files

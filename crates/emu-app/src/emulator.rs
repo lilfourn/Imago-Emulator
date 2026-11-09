@@ -326,9 +326,15 @@ fn open_with(
     dmg_colors: DmgColors,
     locks: Option<&Path>,
 ) -> anyhow::Result<Opened> {
+    // Games that cannot all load are not held: `load` refuses them just
+    // below, and says what is wrong. Asked first, the lock of a game this
+    // window still runs, as it does behind a wrong file chosen to go with
+    // it, would have that game called already open instead.
     let locks = match locks {
-        Some(folder) => lock_games(folder, rom_paths)?,
-        None => Vec::new(),
+        Some(folder) if rom_paths.iter().all(|path| loadable(path)) => {
+            lock_games(folder, rom_paths)?
+        }
+        _ => Vec::new(),
     };
     let loaded = load(rom_paths, dmg_colors)?;
     let unwritable = unwritable(loaded.files());
@@ -337,6 +343,18 @@ fn open_with(
         unwritable,
         locks,
     })
+}
+
+/// Whether [`load`] could take the game at `path`, as far as can be told
+/// without reading it: an RPG Maker game's folder or the player app in it,
+/// or a file that is there with a game's extension (a ROM's, a 3DS game's,
+/// or an archive's, which is unpacked first). A file of any other kind, or
+/// one that has gone, fails to load, whatever is asked for with it.
+pub fn loadable(path: &Path) -> bool {
+    let known = emu_cores::system_for_path(path).is_some()
+        || emu_3ds::is_game(path)
+        || crate::archive::is_archive(path);
+    rpg_maker::game_folder(path).is_some() || (known && path.is_file())
 }
 
 /// The files a session gives the game at `path`, as the folder holds

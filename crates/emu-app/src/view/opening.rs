@@ -11,9 +11,10 @@
 //! which writes its saves and its checkpoint, before the game that takes
 //! its place starts: once that one has loaded, so that a file that fails
 //! to load costs nothing, or before it loads at all when the two may not
-//! overlap (see [`stops_before_loading`]). A game stopped first is
-//! opened again if the other then fails to load, so a wrong file never
-//! leaves the player with no game.
+//! overlap (see [`stops_before_loading`]). It is never stopped for a file
+//! that cannot load at all, and a game that was stopped first is opened
+//! again if the other then fails to load, so a wrong file never leaves
+//! the player with no game.
 
 // A part of the view, split off: it shares the view's names.
 use super::*;
@@ -213,10 +214,10 @@ impl EmulatorView {
     /// Games failed to load, for the reason `why`. If the running game
     /// was stopped for them (`stopped`, its games), it is opened again,
     /// from the checkpoint it left as it stopped, and says why once it
-    /// runs: a wrong file chosen for Connect Second Console or Insert GBA
-    /// Cartridge leaves the game playing. Otherwise the reason shows as a
-    /// warning, long enough to read, as for a game another copy of the
-    /// app has open.
+    /// runs: a game for another system chosen for Connect Second Console,
+    /// say, which is only found out as it loads. Otherwise the reason
+    /// shows as a warning, long enough to read, as for a game another copy
+    /// of the app has open, over the game still running if one is.
     fn failed_to_open(
         &mut self,
         why: String,
@@ -617,7 +618,16 @@ impl EmulatorView {
 /// emulated 3DS's NAND and SD card, a game's player. So when the running
 /// game or a new one is one of those, the old process has gone before the
 /// new one starts.
+///
+/// But only for games that could load ([`emulator::loadable`]). A file of
+/// no kind the app plays dropped on the window, or a game that has been
+/// moved away, fails to load behind the running game, which is not
+/// touched: stopped first, it would only have to be started again, for a
+/// 3DS or RPG Maker game after several seconds.
 fn stops_before_loading(system: System, files: &[GameFiles], paths: &[PathBuf]) -> bool {
+    if !paths.iter().all(|path| emulator::loadable(path)) {
+        return false;
+    }
     // Named as a session would name them: an RPG Maker game's after its
     // whole folder, dots and all.
     let saves: Vec<String> = paths
@@ -930,15 +940,35 @@ mod tests {
         assert!(matches!(idle, Game::Idle));
     }
 
-    #[test]
-    fn a_game_that_plays_in_another_process_never_starts_beside_the_running_one() {
-        let dir = std::env::temp_dir().join(format!("emu-app-stops-first-{}", std::process::id()));
+    /// A folder for `test` with an RPG Maker game in it, `Fan Game` (a
+    /// folder with its Game.ini and a player), and `files`, each a file
+    /// that is there to open.
+    fn games_dir(test: &str, files: &[&str]) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("emu-app-{test}-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
-        // An RPG Maker game: a folder with its Game.ini and a player.
         let fan_game = dir.join("Fan Game");
         fs::create_dir_all(fan_game.join("Player.app")).expect("the player's folder");
         fs::write(fan_game.join("Game.ini"), b"Title=Fan Game").expect("write");
         fs::write(fan_game.join("Game.exe"), b"player").expect("write");
+        for file in files {
+            fs::write(dir.join(file), b"a file").expect("write");
+        }
+        (dir, fan_game)
+    }
+
+    #[test]
+    fn a_game_that_plays_in_another_process_never_starts_beside_the_running_one() {
+        let (dir, fan_game) = games_dir(
+            "stops-first",
+            &[
+                "ruby.gba",
+                "emerald.gba",
+                "sapphire.gba",
+                "omega.3ds",
+                "alpha.3ds",
+                "alpha.cia",
+            ],
+        );
         let files = |name: &str| vec![GameFiles::of(&dir.join(name))];
         let paths = |name: &str| vec![dir.join(name)];
 
@@ -982,6 +1012,59 @@ mod tests {
             System::Gba,
             &files("ruby.gba"),
             std::slice::from_ref(&fan_game)
+        ));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_file_that_cannot_load_never_stops_the_running_game() {
+        let (dir, fan_game) = games_dir(
+            "stops-first-wrong",
+            &["ruby.gba", "omega.3ds", "alpha.3ds", "notes.txt"],
+        );
+        fs::create_dir_all(dir.join("Empty Folder")).expect("a folder that is no game");
+        let files = |name: &str| vec![GameFiles::of(&dir.join(name))];
+        // What can be dropped on the window, or chosen, and cannot load: a
+        // file of no kind the app plays, a game that has been moved away,
+        // a folder that is no RPG Maker game.
+        let wrong = [
+            "notes.txt",
+            "moved.gba",
+            "moved.3ds",
+            "Empty Folder",
+            "Gone",
+        ];
+        for name in wrong {
+            let asked = [dir.join(name)];
+            // A 3DS or RPG Maker game takes seconds to start again, and an
+            // RPG Maker game cannot always be saved: it is left playing.
+            assert!(
+                !stops_before_loading(System::N3ds, &files("omega.3ds"), &asked),
+                "{name} behind a 3DS game"
+            );
+            assert!(
+                !stops_before_loading(System::RpgMaker, &[GameFiles::of_folder(&fan_game)], &asked),
+                "{name} behind an RPG Maker game"
+            );
+            // Nor chosen to go with the running game, which would have
+            // stopped to be opened with it.
+            let with_it = [dir.join("ruby.gba"), dir.join(name)];
+            assert!(
+                !stops_before_loading(System::Gba, &files("ruby.gba"), &with_it),
+                "{name} with the running game"
+            );
+            // Nor with a game that could load.
+            let beside = [dir.join("alpha.3ds"), dir.join(name)];
+            assert!(
+                !stops_before_loading(System::N3ds, &files("omega.3ds"), &beside),
+                "{name} beside a 3DS game"
+            );
+        }
+        // The same games stop it when everything asked for can load.
+        assert!(stops_before_loading(
+            System::N3ds,
+            &files("omega.3ds"),
+            &[dir.join("alpha.3ds")]
         ));
         fs::remove_dir_all(&dir).expect("clean up");
     }
