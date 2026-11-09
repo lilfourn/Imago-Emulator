@@ -445,8 +445,17 @@ fn stop_tar_left_unpacking_into(path: &Path) {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return;
     };
-    // The folder's name is letters, digits and dashes, so it needs no
-    // escaping; it ends the folder's path, before a slash or a space.
+    // The name is read from disk and goes into a pattern, so only one the
+    // app gives a folder is used: letters, digits and dashes, which need
+    // no escaping. Any other could be a pattern of its own, and stop the
+    // `tar` of a folder in use. It ends the folder's path, before a slash
+    // or a space.
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return;
+    }
     Command::new("/usr/bin/pkill")
         .arg("-KILL")
         .arg("-f")
@@ -634,6 +643,49 @@ mod tests {
         }
         assert!(stopped, "tar is stopped");
         assert!(!left.exists());
+        fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "Linux, Windows: only macOS unpacks .7z files with tar, and stops a crashed app's one at launch"
+    )]
+    fn a_folder_s_name_is_never_a_pattern_that_stops_another_folder_s_tar() {
+        let temp = temp_dir("tar-pattern");
+        // A folder in use: its lock is held, and a `tar` unpacks into it.
+        let lock_and_tar = |name: &str| {
+            let folder = temp.join(name);
+            fs::create_dir_all(&folder).expect("folder");
+            let lock = emu_os::lock::lock(&folder.join(LOCK)).expect("locked");
+            let tar = Command::new("/bin/sh")
+                .arg("-c")
+                .arg("trap '' TERM; exec /usr/bin/tar -xf - -C \"$0\"")
+                .arg(&folder)
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("runs");
+            (lock, tar)
+        };
+        let (lock, mut tar) =
+            lock_and_tar(&format!("ds-emulator-unpack-{}-97", std::process::id()));
+        // Left behind beside it, a folder whose name, read as a pattern,
+        // takes in every folder the app unpacks into.
+        let odd = temp.join("ds-emulator-unpack-.*");
+        fs::create_dir_all(&odd).expect("folder");
+        fs::write(odd.join(LOCK), b"").expect("lock");
+        std::thread::sleep(Duration::from_millis(100));
+        remove_left_behind_in(&temp, &[]);
+        std::thread::sleep(Duration::from_millis(300));
+        let still_unpacking = tar.try_wait().expect("waits").is_none();
+        tar.kill().ok();
+        tar.wait().ok();
+        assert!(still_unpacking, "the tar of a folder in use was stopped");
+        assert!(
+            !odd.exists(),
+            "the folder left behind is removed all the same"
+        );
+        drop(lock);
         fs::remove_dir_all(&temp).ok();
     }
 
