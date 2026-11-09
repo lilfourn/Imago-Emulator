@@ -3,12 +3,11 @@
 //! hands them over. Writes happen in the order handed over, and each one
 //! reports back how it went.
 //!
-//! A save written after the game went back to an earlier moment (a state
-//! loaded, or rewind) may be older than the file it replaces, which may be
-//! the only copy of the player's latest save. So the first such write after
-//! each jump back sets the file aside first, with [`persist::set_aside`], if
-//! it holds another save ([`persist::same_save`]: a clock's time alone is
-//! none).
+//! A save written after a save state was loaded may be older than the file
+//! it replaces, which may be the only copy of the player's latest save. So
+//! such a write first keeps the file, with [`persist::keep_before_load`],
+//! if it holds another save: once for each run of loads (see `saves.rs`),
+//! however many of them change the save.
 
 use std::collections::HashMap;
 use std::io;
@@ -18,7 +17,7 @@ use std::thread::{self, JoinHandle};
 
 use emu_core::System;
 
-use crate::persist;
+use crate::persist::{self, Kept};
 
 /// A battery save written, or not.
 #[derive(Debug)]
@@ -29,9 +28,9 @@ pub struct Written {
     pub generation: u64,
     /// Where it went.
     pub path: PathBuf,
-    /// Where the file there before went, if it was set aside first: it
-    /// held another save than the one the game went back to.
-    pub kept: Option<PathBuf>,
+    /// What became of the file there before, if this was the first write
+    /// after a state was loaded: kept, if it held another save.
+    pub kept: Kept,
     /// How it went.
     pub result: io::Result<()>,
 }
@@ -44,54 +43,55 @@ enum Job {
         generation: u64,
         path: PathBuf,
         bytes: Vec<u8>,
-        /// The jump back this is the first write after, if it is, and
-        /// the system the save is for.
-        jump: Option<(u64, System)>,
+        /// The run of state loads this is the first write after one of,
+        /// if it is, and the system the save is for.
+        load: Option<(u64, System)>,
     },
     /// Say when every write before this one is done.
     Wait(Sender<()>),
 }
 
 /// What the writing thread remembers of one cartridge's save between
-/// writes, to set the file aside once after each jump back.
+/// writes, to keep the file once for each run of state loads.
 #[derive(Debug, Default)]
 struct Guard {
-    /// The jump back whose write failed, so the next write is checked in
-    /// its place.
+    /// The run of loads whose write failed, so the next write is checked
+    /// in its place.
     owed: Option<(u64, System)>,
-    /// The jump back the file was last set aside for: once is enough, as
-    /// the writes that follow replace only what this thread wrote.
+    /// The run of loads the file was last kept for, or found kept already:
+    /// only the first load of a run that would change the save keeps it.
     kept_for: Option<u64>,
 }
 
 impl Guard {
-    /// Writes `bytes` to `path`. If this is the first write after the jump
-    /// back `jump`, or stands in for one that failed, the file there is
-    /// set aside first if it holds another save, and nothing is written
-    /// unless that worked. Returns where it went, and how the write went.
+    /// Writes `bytes` to `path`. If this is the first write after a state
+    /// load of the run `load`, or stands in for one that failed, the file
+    /// there is kept first if it holds another save and none was kept for
+    /// the run yet, and nothing is written unless that worked. Returns
+    /// what became of the file, and how the write went.
     fn write(
         &mut self,
         path: &Path,
         bytes: &[u8],
-        jump: Option<(u64, System)>,
-    ) -> (Option<PathBuf>, io::Result<()>) {
-        let jump = jump.or(self.owed);
-        let aside = match jump {
-            Some((number, system)) if self.kept_for != Some(number) => {
-                persist::set_aside_unless_same(path, bytes, system)
+        load: Option<(u64, System)>,
+    ) -> (Kept, io::Result<()>) {
+        let load = load.or(self.owed);
+        let kept = match load {
+            Some((run, system)) if self.kept_for != Some(run) => {
+                persist::keep_before_load(path, bytes, system)
             }
-            _ => Ok(None),
+            _ => Ok(Kept::Unneeded),
         };
-        let (kept, result) = match aside {
+        let (kept, result) = match kept {
             Ok(kept) => {
-                if kept.is_some() {
-                    self.kept_for = jump.map(|(number, _)| number);
+                if kept != Kept::Unneeded {
+                    self.kept_for = load.map(|(run, _)| run);
                 }
                 (kept, persist::write_atomic(path, bytes))
             }
-            Err(error) => (None, Err(error)),
+            Err(error) => (Kept::Unneeded, Err(error)),
         };
-        self.owed = jump.filter(|_| result.is_err());
+        self.owed = load.filter(|_| result.is_err());
         (kept, result)
     }
 }
@@ -124,10 +124,10 @@ impl SaveWriter {
                             generation,
                             path,
                             bytes,
-                            jump,
+                            load,
                         } => {
                             let guard = guards.entry(cartridge).or_default();
-                            let (kept, result) = guard.write(&path, &bytes, jump);
+                            let (kept, result) = guard.write(&path, &bytes, load);
                             report
                                 .send(Written {
                                     cartridge,
@@ -159,22 +159,21 @@ impl SaveWriter {
             generation,
             path,
             bytes,
-            jump: None,
+            load: None,
         });
     }
 
     /// Hands over a battery save as [`SaveWriter::write`] does, as the
-    /// first since the game went back to an earlier moment: `jump` numbers
-    /// the jump back, one for a state loaded and one for a whole stretch of
-    /// rewinding. The file at `path` is set aside first if it holds
-    /// another save for `system`, once per jump.
-    pub fn write_after_jump(
+    /// first since a save state was loaded: `run` numbers the run of loads
+    /// it belongs to. The file at `path` is kept first if it holds another
+    /// save for `system`, unless one was kept for this run already.
+    pub fn write_after_load(
         &self,
         cartridge: usize,
         generation: u64,
         path: PathBuf,
         bytes: Vec<u8>,
-        jump: u64,
+        run: u64,
         system: System,
     ) {
         self.send(Job::Write {
@@ -182,7 +181,7 @@ impl SaveWriter {
             generation,
             path,
             bytes,
-            jump: Some((jump, system)),
+            load: Some((run, system)),
         });
     }
 
@@ -262,67 +261,123 @@ mod tests {
         files
     }
 
+    /// `files` as [`files_in`] gives them.
+    fn held(files: &[(&str, &[u8])]) -> Vec<(String, Vec<u8>)> {
+        let files = files.iter();
+        files
+            .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
+            .collect()
+    }
+
     #[test]
-    fn the_first_write_after_a_jump_back_sets_a_different_save_aside_once() {
-        let dir = std::env::temp_dir().join(format!("emu-app-writer-jump-{}", std::process::id()));
+    fn a_run_of_loads_keeps_the_save_on_disk_once() {
+        let dir = std::env::temp_dir().join(format!("emu-app-writer-load-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
         fs::create_dir_all(&dir).expect("temp dir");
         let save = dir.join("game.sav");
-        let held = |files: &[(&str, &[u8])]| -> Vec<(String, Vec<u8>)> {
-            let files = files.iter();
-            files
-                .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
-                .collect()
-        };
         let writer = SaveWriter::start().expect("the thread starts");
+        let load = |generation: u64, bytes: &[u8], run: u64| {
+            writer.write_after_load(
+                0,
+                generation,
+                save.clone(),
+                bytes.to_vec(),
+                run,
+                System::Gba,
+            );
+        };
         writer.write(0, 1, save.clone(), b"hour 20".to_vec());
         writer.wait();
         assert_eq!(files_in(&dir), held(&[("game.sav", b"hour 20")]));
 
         // A state from hour 2 is loaded: the save from hour 20 is kept.
-        writer.write_after_jump(0, 2, save.clone(), b"hour 2".to_vec(), 1, System::Gba);
-        // More writes after the same jump replace only what was written.
-        writer.write_after_jump(0, 3, save.clone(), b"hour 1".to_vec(), 1, System::Gba);
+        load(2, b"hour 2", 1);
+        // The game saves on, and another state of the same run of loads
+        // replaces that save unkept.
+        writer.write(0, 3, save.clone(), b"hour 3".to_vec());
+        load(4, b"hour 1", 1);
         writer.wait();
-        let after_first = held(&[("game.sav", b"hour 1"), ("game.sav.bak", b"hour 20")]);
+        let after_first = held(&[
+            ("game.sav", b"hour 1"),
+            ("game.sav.before-load", b"hour 20"),
+        ]);
         assert_eq!(files_in(&dir), after_first);
-        let kept: Vec<Option<PathBuf>> = writer
+        let kept: Vec<Kept> = writer
             .finished()
             .into_iter()
             .map(|written| written.kept)
             .collect();
-        assert_eq!(kept, [None, Some(dir.join("game.sav.bak")), None]);
+        let newest = dir.join("game.sav.before-load");
+        assert_eq!(
+            kept,
+            [
+                Kept::Unneeded,
+                Kept::New(newest.clone()),
+                Kept::Unneeded,
+                Kept::Unneeded
+            ]
+        );
 
-        // Another jump to a moment with the save already on disk: nothing
-        // to keep.
-        writer.write_after_jump(0, 4, save.clone(), b"hour 1".to_vec(), 2, System::Gba);
+        // A load of another run, of the save already on disk: nothing to
+        // keep, and the run may still keep one.
+        load(5, b"hour 1", 2);
         writer.wait();
         assert_eq!(files_in(&dir), after_first);
-        // The game saving on from there is no jump back.
-        writer.write(0, 5, save.clone(), b"hour 3".to_vec());
-        writer.wait();
-        // A third jump, over that save, keeps it beside the first.
-        writer.write_after_jump(0, 6, save.clone(), b"hour 2".to_vec(), 3, System::Gba);
+        writer.write(0, 6, save.clone(), b"hour 4".to_vec());
+        load(7, b"hour 2", 2);
         writer.wait();
         assert_eq!(
             files_in(&dir),
             held(&[
                 ("game.sav", b"hour 2"),
-                ("game.sav.bak", b"hour 20"),
-                ("game.sav.bak2", b"hour 3"),
+                ("game.sav.before-load", b"hour 4"),
+                ("game.sav.before-load2", b"hour 20"),
+            ])
+        );
+        // A save kept already is not kept again, and that settles its run.
+        writer.write(0, 8, save.clone(), b"hour 20".to_vec());
+        load(9, b"hour 2", 3);
+        writer.write(0, 10, save.clone(), b"hour 5".to_vec());
+        load(11, b"hour 2", 3);
+        writer.wait();
+        let kept: Vec<Kept> = writer
+            .finished()
+            .into_iter()
+            .map(|written| written.kept)
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                // The second run: its first load, a save, the load over it.
+                Kept::Unneeded,
+                Kept::Unneeded,
+                Kept::New(newest),
+                // The third: a save, the load over it, a save, a load.
+                Kept::Unneeded,
+                Kept::Already,
+                Kept::Unneeded,
+                Kept::Unneeded,
+            ]
+        );
+        assert_eq!(
+            files_in(&dir),
+            held(&[
+                ("game.sav", b"hour 2"),
+                ("game.sav.before-load", b"hour 4"),
+                ("game.sav.before-load2", b"hour 20"),
             ])
         );
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]
-    fn a_failed_write_after_a_jump_back_leaves_the_check_to_the_next() {
+    fn a_failed_write_after_a_load_leaves_the_check_to_the_next() {
         let dir = std::env::temp_dir().join(format!("emu-app-writer-owed-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
         let save = dir.join("game.sav");
         let writer = SaveWriter::start().expect("the thread starts");
         // The folder is gone, as an unplugged drive's is.
-        writer.write_after_jump(0, 1, save.clone(), b"hour 2".to_vec(), 1, System::Gba);
+        writer.write_after_load(0, 1, save.clone(), b"hour 2".to_vec(), 1, System::Gba);
         writer.wait();
         assert!(writer.finished()[0].result.is_err());
         // Back, with the save it held: the retry, an ordinary write, still
@@ -331,13 +386,15 @@ mod tests {
         fs::write(&save, b"hour 20").expect("as it was");
         writer.write(0, 1, save.clone(), b"hour 2".to_vec());
         writer.wait();
-        assert_eq!(fs::read(&save).expect("written"), b"hour 2");
         assert_eq!(
-            fs::read(dir.join("game.sav.bak")).expect("kept"),
-            b"hour 20"
+            files_in(&dir),
+            held(&[
+                ("game.sav", b"hour 2"),
+                ("game.sav.before-load", b"hour 20"),
+            ])
         );
         let written = writer.finished();
-        assert_eq!(written[0].kept, Some(dir.join("game.sav.bak")));
+        assert_eq!(written[0].kept, Kept::New(dir.join("game.sav.before-load")));
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

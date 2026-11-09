@@ -1883,7 +1883,7 @@ fn pausing_writes_the_battery_save() {
 }
 
 #[test]
-fn rewinding_past_a_save_made_in_the_game_keeps_that_save() {
+fn rewinding_past_a_save_made_in_the_game_undoes_it_and_keeps_no_copy() {
     let dir = empty_dir("rewind-save");
     let save = dir.join("game.sav");
     let (emulator, events) = start_cart(&dir, 0, 0, None);
@@ -1897,10 +1897,9 @@ fn rewinding_past_a_save_made_in_the_game_keeps_that_save() {
         assert!(Instant::now() < deadline, "the save was not written");
         thread::sleep(Duration::from_millis(1));
     }
-    assert!(!dir.join("game.sav.bak").exists());
     emulator.send(Command::TogglePause);
 
-    // Back to before it.
+    // Back to before it, as the player watches.
     emulator.send(Command::SetRewind(true));
     let deadline = Instant::now() + Duration::from_secs(5);
     while cart_bytes(&emulator).0 != 0 {
@@ -1908,12 +1907,22 @@ fn rewinding_past_a_save_made_in_the_game_keeps_that_save() {
         thread::sleep(Duration::from_millis(1));
     }
     emulator.send(Command::SetRewind(false));
-    let said = wait_for_notice(&events, "Your save from before you went back");
-    assert!(said.ends_with("is kept as game.sav.bak"), "{said}");
     drop(emulator);
+    // The save is undone with everything else, and that is all.
     assert_eq!(fs::read(&save).expect("as the game has it"), [0]);
-    assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), [5]);
-    assert!(!dir.join("game.sav.bak2").exists());
+    let left: Vec<String> = files_with(&dir, "sav")
+        .iter()
+        .map(|path| file_name(path))
+        .collect();
+    assert_eq!(left, ["game.sav"]);
+    assert_eq!(fs::read_dir(&dir).expect("read dir").count(), 1);
+    let said: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    assert!(
+        !said.iter().any(
+            |event| matches!(event, Event::Notice(text) | Event::Warning(text) if text.contains("is kept as"))
+        ),
+        "{said:?}"
+    );
     fs::remove_dir_all(&dir).expect("clean up");
 }
 
@@ -1935,11 +1944,14 @@ fn loading_a_state_never_loses_the_save_on_disk() {
     }
     emulator.send(Command::LoadState(1));
     wait_for_notice(&events, "Loaded state 1");
-    let said = wait_for_notice(&events, "Your save from before you went back");
-    assert!(said.ends_with("is kept as game.sav.bak"), "{said}");
+    let said = wait_for_notice(&events, "Your save from before you loaded the state");
+    assert!(said.ends_with("is kept as game.sav.before-load"), "{said}");
     drop(emulator);
     assert_eq!(fs::read(&save).expect("the state's"), [2]);
-    assert_eq!(fs::read(dir.join("game.sav.bak")).expect("kept"), [20]);
+    assert_eq!(
+        fs::read(dir.join("game.sav.before-load")).expect("kept"),
+        [20]
+    );
     fs::remove_dir_all(&dir).expect("clean up");
 }
 

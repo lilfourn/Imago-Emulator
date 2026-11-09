@@ -1059,8 +1059,6 @@ impl Runner {
                 if self.rewind.pop_with(|previous| {
                     core.load_state(previous).ok();
                 }) {
-                    // The save went back too (see `saves.rs`).
-                    self.saves.rewound();
                     self.clear_latches();
                     self.publish();
                     self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
@@ -1240,11 +1238,7 @@ impl Runner {
                 if on && !can {
                     self.notice(NO_REWIND);
                 }
-                let rewinding = on && can;
-                if rewinding && !self.rewinding {
-                    self.saves.rewind_began();
-                }
-                self.rewinding = rewinding;
+                self.rewinding = on && can;
             }
             Command::TogglePause => {
                 self.paused = !self.paused;

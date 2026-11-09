@@ -28,8 +28,10 @@ seeddb.bin
 *.ss[0-9]
 *.ls[0-9]
 *.state
-# Saves and save states the app set aside rather than replace.
+# Saves and save states the app set aside rather than replace, and saves
+# kept from before a state was loaded over them.
 *.sav.bak*
+*.sav.before-load*
 *.ss[0-9].bak*
 *.ls[0-9].bak*
 bios*.bin
