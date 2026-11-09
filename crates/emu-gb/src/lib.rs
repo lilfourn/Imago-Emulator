@@ -314,8 +314,7 @@ impl Core for Gb {
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
-        let bytes = postcard::to_stdvec(&self.machine).expect("machine state always serializes");
-        out.extend_from_slice(&bytes);
+        payload::append(&self.machine, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
@@ -445,6 +444,25 @@ mod tests {
             gb.reset();
             gb.run_frame(&[Input::default()], &mut audio);
         })
+    }
+
+    /// A state is written after whatever the caller's buffer holds, as
+    /// the app's rewind snapshot counts on, and is the same bytes at any
+    /// place in it.
+    #[test]
+    fn a_state_is_appended_to_what_the_buffer_holds() {
+        let rom = rom_with_program(&[0x18, 0xFE]);
+        let mut core = Gb::new(&Media::new(&rom)).expect("valid rom");
+        core.run_frame(&[Input::default()], &mut Vec::new());
+        let mut alone = Vec::new();
+        core.save_state(&mut alone);
+        let mut after = vec![0xAA, 0xBB, 0xCC];
+        core.save_state(&mut after);
+        assert_eq!(after[..3], [0xAA, 0xBB, 0xCC]);
+        assert!(after[3..] == alone[..], "the same state");
+        // As postcard writes the machine.
+        let plain = postcard::to_stdvec(&core.machine).expect("serializes");
+        assert!(alone == plain, "the bytes postcard writes");
     }
 
     /// A state with bytes after it is not that state: a linked pair's

@@ -252,8 +252,7 @@ impl Core for Gba {
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
-        let bytes = postcard::to_stdvec(&self.machine).expect("machine state always serializes");
-        out.extend_from_slice(&bytes);
+        payload::append(&self.machine, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
@@ -365,6 +364,25 @@ mod tests {
         rom[0xAC..0xB0].copy_from_slice(code);
         rom[0x100..0x100 + library.len()].copy_from_slice(library);
         rom
+    }
+
+    /// A state is written after whatever the caller's buffer holds, as
+    /// the app's rewind snapshot counts on, and is the same bytes at any
+    /// place in it.
+    #[test]
+    fn a_state_is_appended_to_what_the_buffer_holds() {
+        let rom = rom(&[0xEAFF_FFFE]);
+        let mut core = Gba::new(&Media::new(&rom)).expect("valid rom");
+        core.run_frame(&[Input::default()], &mut Vec::new());
+        let mut alone = Vec::new();
+        core.save_state(&mut alone);
+        let mut after = vec![0xAA, 0xBB, 0xCC];
+        core.save_state(&mut after);
+        assert_eq!(after[..3], [0xAA, 0xBB, 0xCC]);
+        assert!(after[3..] == alone[..], "the same state");
+        // As postcard writes the machine.
+        let plain = postcard::to_stdvec(&core.machine).expect("serializes");
+        assert!(alone == plain, "the bytes postcard writes");
     }
 
     /// A state with bytes after it is not that state: a linked pair's

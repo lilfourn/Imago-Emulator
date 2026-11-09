@@ -10,11 +10,12 @@ publish.workspace = true
 emu-core.workspace = true
 emu-psg.workspace = true
 emu-state.workspace = true
-postcard.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
 png.workspace = true
+# States are written with emu-state; tests compare them with postcard's own.
+postcard.workspace = true
 
 [lints]
 workspace = true
