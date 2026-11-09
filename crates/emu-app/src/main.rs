@@ -58,6 +58,7 @@ mod layout;
 mod leftovers;
 mod library;
 mod library_view;
+mod links;
 mod memory_viewer;
 mod meter;
 mod microphone;

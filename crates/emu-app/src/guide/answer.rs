@@ -316,7 +316,8 @@ fn clickable(id: ElementId, inline: Inline) -> AnyElement {
     InteractiveText::new(id, styled)
         .on_click(ranges, move |index, _, cx| {
             if let Some(url) = urls.get(index) {
-                cx.open_url(url);
+                // A destination the answer gave: web pages only.
+                crate::links::open_web_url(cx, url);
             }
         })
         .into_any_element()

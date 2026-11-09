@@ -15,7 +15,8 @@ mod render;
 pub mod shots;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::io;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -220,6 +221,9 @@ pub struct GuidePanel {
     composer: Entity<Composer>,
     openrouter: Entity<OpenRouter>,
     store: ChatStore,
+    /// The chats deleted here, which a write still on its way must not
+    /// bring back.
+    deleted: Deleted,
     game: Option<GuideGame>,
     chat: Chat,
     /// Each turn's answer, parsed.
@@ -319,6 +323,7 @@ impl GuidePanel {
             composer,
             openrouter,
             store,
+            deleted: Deleted::default(),
             game: None,
             chat: Chat::new(),
             documents: Vec::new(),
@@ -931,22 +936,24 @@ impl GuidePanel {
             self.stop(cx);
             self.load_chat(Chat::new(), cx);
         }
-        self.store.delete(&game.key, id).ok();
+        delete_for_good(&self.store, &self.deleted, &game.key, id).ok();
         self.history = Some(self.store.list(&game.key));
         cx.notify();
     }
 
-    /// Writes the chat, off the UI thread.
+    /// Writes the chat, off the UI thread, unless it is deleted before
+    /// the write is made.
     fn save(&self, cx: &mut Context<Self>) {
         let (Some(game), false) = (&self.game, self.chat.turns.is_empty()) else {
             return;
         };
         let store = self.store.clone();
+        let deleted = Arc::clone(&self.deleted);
         let key = game.key.clone();
         let chat = self.chat.clone();
         cx.background_executor()
             .spawn(async move {
-                store.save(&key, &chat).ok();
+                save_unless_deleted(&store, &deleted, &key, &chat).ok();
             })
             .detach();
     }
@@ -1066,9 +1073,69 @@ fn reduce_motion() -> bool {
         .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "1")
 }
 
+/// The chats deleted since the app started, by game and id. Chats are
+/// written off the UI thread and deleted on it, so a write asked for just
+/// before a chat is deleted, as stopping its answer asks for one, would
+/// land after and bring the chat back. Both take this lock for as long as
+/// they touch the file: a write that comes second finds the chat here and
+/// leaves it deleted.
+type Deleted = Arc<Mutex<HashSet<(String, String)>>>;
+
+/// Saves `chat` for `game`, unless it has been deleted.
+fn save_unless_deleted(
+    store: &ChatStore,
+    deleted: &Deleted,
+    game: &str,
+    chat: &Chat,
+) -> io::Result<()> {
+    let deleted = deleted.lock().unwrap_or_else(PoisonError::into_inner);
+    if deleted.contains(&(game.to_owned(), chat.id.clone())) {
+        return Ok(());
+    }
+    store.save(game, chat)
+}
+
+/// Deletes `game`'s chat `id`, and keeps any write of it still on its way
+/// from bringing it back.
+fn delete_for_good(store: &ChatStore, deleted: &Deleted, game: &str, id: &str) -> io::Result<()> {
+    let mut deleted = deleted.lock().unwrap_or_else(PoisonError::into_inner);
+    deleted.insert((game.to_owned(), id.to_owned()));
+    store.delete(game, id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_on_its_way_never_brings_a_deleted_chat_back() {
+        let dir = std::env::temp_dir().join(format!("emu-app-guide-chats-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let store = ChatStore::new(&dir);
+        let deleted = Deleted::default();
+        let mut chat = Chat::new();
+        chat.turns.push(Turn {
+            question: "Where is the third gym?".to_owned(),
+            ..Turn::default()
+        });
+        save_unless_deleted(&store, &deleted, "gba-1", &chat).expect("saved");
+        assert_eq!(store.list("gba-1").len(), 1);
+
+        // The chat is deleted while its answer streams: stopping the answer
+        // asked for a write, which is made after the delete.
+        delete_for_good(&store, &deleted, "gba-1", &chat.id).expect("deleted");
+        save_unless_deleted(&store, &deleted, "gba-1", &chat).expect("left deleted");
+        assert!(store.list("gba-1").is_empty(), "the chat came back");
+        // Another game's chat, and this game's next, are written as ever.
+        save_unless_deleted(&store, &deleted, "nds-2", &chat).expect("saved");
+        assert_eq!(store.list("nds-2").len(), 1);
+        let mut next = Chat::new();
+        next.id.push_str("-next");
+        next.turns = chat.turns.clone();
+        save_unless_deleted(&store, &deleted, "gba-1", &next).expect("saved");
+        assert_eq!(store.list("gba-1").len(), 1);
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
 
     #[test]
     fn the_panel_fits_a_margin_or_asks_for_a_column() {

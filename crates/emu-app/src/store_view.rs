@@ -1108,7 +1108,10 @@ impl StoreView {
                 .hover(|link| link.text_color(rgb(TEXT)))
                 .child(icons::icon(icons::GLOBE, 14.0, DIM))
                 .child(div().truncate().child(url.clone()))
-                .on_click(move |_, _, cx| cx.open_url(&url))
+                .on_click(move |_, _, cx| {
+                    // Whatever the catalog says: web pages only.
+                    crate::links::open_web_url(cx, &url);
+                })
         });
         let tags = (!offer.tags.is_empty()).then(|| {
             div()

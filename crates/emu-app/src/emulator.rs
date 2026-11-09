@@ -26,7 +26,8 @@
 //! Battery saves are copied here once a second while they change, and on
 //! pausing, and written to disk on a thread of their own (see
 //! `save_writer.rs`). Should the emulation thread panic, it still writes
-//! them, and tells the UI the game has stopped.
+//! them, and tells the UI the game has stopped. They, the save states and
+//! the checkpoint are kept by [`saves::Saves`].
 //!
 //! Each game's checkpoint, a save state in slot [`CHECKPOINT`], keeps where
 //! the player left it, with a record of the saves the game had then: the
@@ -42,7 +43,7 @@ use std::io::Write as _;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -58,21 +59,27 @@ use crate::audio::AudioSink;
 use crate::capture;
 use crate::debugger::{self, Pending, RunState, Snapshot};
 use crate::latch::Latch;
-use crate::persist::{self, GameFiles, file_name};
+use crate::persist::{self, GameFiles, GameLock, StateFiles, file_name};
 use crate::qos;
 use crate::recorder::Recorder;
 use crate::refresh::Lock;
 use crate::rewind;
 use crate::rewind_thread::RewindThread;
-use crate::save_writer::SaveWriter;
 use crate::scripting::{self, Running};
 use crate::speed::{self, Speed};
 use crate::trace;
 use crate::turbo::Turbo;
-use crate::video;
+
+mod saves;
+
+use saves::{PickUp, Saves};
 
 /// How often dirty battery saves are written to disk.
 const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often a paused game asks how a battery save being written went,
+/// to tell the player without waiting for the game to play on.
+const WRITTEN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Memory for rewind history: about a minute of Game Boy play.
 const REWIND_BUDGET_BYTES: usize = 64 << 20;
@@ -113,7 +120,7 @@ pub struct Loaded {
 
 /// The saves a game makes itself, outside the app's battery saves.
 #[derive(Debug, Clone, Default)]
-enum OwnSaves {
+pub enum OwnSaves {
     /// None: the game's saves are its battery saves, or it has none.
     #[default]
     None,
@@ -130,6 +137,45 @@ impl OwnSaves {
             Self::None => Vec::new(),
             Self::RpgMaker(folders) => folders.files(),
             Self::ThreeDs(data) => data.files(),
+        }
+    }
+
+    /// Sets the saves aside, so that the game starts from the very
+    /// beginning: each of an RPG Maker game's save files, and each folder
+    /// of a 3DS game's save data and extdata on the core's emulated SD
+    /// card, is renamed beside itself to end in `.bak`, or `.bak2` and so
+    /// on, never replacing an earlier one. Returns where they went. The
+    /// game must have stopped.
+    ///
+    /// # Errors
+    ///
+    /// Fails if one cannot be renamed; those set aside before stay so.
+    fn set_aside(&self) -> std::io::Result<Vec<PathBuf>> {
+        let saves = match self {
+            Self::None => Vec::new(),
+            Self::RpgMaker(folders) => folders.files(),
+            Self::ThreeDs(data) => data.folders(),
+        };
+        let mut kept = Vec::new();
+        for save in saves {
+            kept.extend(persist::set_aside(&save)?);
+        }
+        Ok(kept)
+    }
+
+    /// What to tell the player of the saves set aside to `kept`.
+    fn kept_notice(&self, kept: &[PathBuf]) -> Option<String> {
+        match (self, kept) {
+            (_, []) => None,
+            (Self::ThreeDs(_), _) => Some(
+                "Your old save is kept on the 3DS's SD card, in folders renamed to end in .bak"
+                    .to_owned(),
+            ),
+            (_, [one]) => Some(format!("Your old save is kept as {}", file_name(one))),
+            (_, many) => Some(format!(
+                "Your {} old saves are kept beside the game's, renamed to end in .bak",
+                many.len()
+            )),
         }
     }
 }
@@ -158,9 +204,26 @@ impl Loaded {
         &self.files
     }
 
-    /// The session's save state file in `slot`.
-    fn state_path(&self, slot: u8) -> PathBuf {
-        self.files[0].state(slot, self.core.info().players > 1)
+    /// Where the game keeps the saves it makes itself, which Start Over
+    /// sets aside (see [`erase_progress`]).
+    pub fn own_saves(&self) -> OwnSaves {
+        self.own_saves.clone()
+    }
+
+    /// Where the session's save states are: named after the first
+    /// player's game, and after the game in its second slot too if it has
+    /// one (a DS game with a GBA cartridge).
+    pub fn states(&self) -> StateFiles {
+        let info = self.core.info();
+        // A cartridge past the players' is in the first player's slot.
+        let cartridge = (info.players == 1).then(|| self.rom_paths.get(1)).flatten();
+        StateFiles::new(
+            self.files[0].clone(),
+            info.players > 1,
+            cartridge.map(PathBuf::as_path),
+            info.system,
+            self.rom_crc32,
+        )
     }
 }
 
@@ -226,6 +289,113 @@ fn read_rom(rom_path: &Path, backup_path: &Path) -> anyhow::Result<RomFile> {
         rom,
         backup,
     })
+}
+
+/// A game opened to play: loaded, with what the window is to know of its
+/// files, and held for this copy of the app.
+pub struct Opened {
+    /// The game, ready to run.
+    pub loaded: Loaded,
+    /// Why its saves cannot be kept, if they cannot (see [`unwritable`]).
+    pub unwritable: Option<String>,
+    /// Each of its games' locks, to keep for as long as it runs: another
+    /// copy of the app is refused the game meanwhile.
+    pub locks: Vec<GameLock>,
+}
+
+/// Opens the games at `rom_paths` to play, as [`load`] loads them, but
+/// only once each is held for this copy of the app: two copies with one
+/// game open would each replace the other's saves, as every file is
+/// written whole from memory.
+///
+/// Blocking, as [`load`] is; call it off the UI thread.
+///
+/// # Errors
+///
+/// Fails if one of the games is open already, here or in another copy of
+/// the app, before anything of it is read, or as [`load`] does.
+pub fn open(rom_paths: &[PathBuf], dmg_colors: DmgColors) -> anyhow::Result<Opened> {
+    let locks = emu_os::data_dir().map(|data| data.join("ds-emulator").join("Locks"));
+    open_with(rom_paths, dmg_colors, locks.as_deref())
+}
+
+/// Opens games as [`open`] does, with their lock files in `locks`, or
+/// without locks if there is no folder for them.
+fn open_with(
+    rom_paths: &[PathBuf],
+    dmg_colors: DmgColors,
+    locks: Option<&Path>,
+) -> anyhow::Result<Opened> {
+    // Games that cannot all load are not held: `load` refuses them just
+    // below, and says what is wrong. Asked first, the lock of a game this
+    // window still runs, as it does behind a wrong file chosen to go with
+    // it, would have that game called already open instead.
+    let locks = match locks {
+        Some(folder) if rom_paths.iter().all(|path| loadable(path)) => {
+            lock_games(folder, rom_paths)?
+        }
+        _ => Vec::new(),
+    };
+    let loaded = load(rom_paths, dmg_colors)?;
+    let unwritable = unwritable(loaded.files());
+    Ok(Opened {
+        loaded,
+        unwritable,
+        locks,
+    })
+}
+
+/// Whether [`load`] could take the game at `path`, as far as can be told
+/// without reading it: an RPG Maker game's folder or the player app in it,
+/// or a file that is there with a game's extension (a ROM's, a 3DS game's,
+/// or an archive's, which is unpacked first). A file of any other kind, or
+/// one that has gone, fails to load, whatever is asked for with it.
+pub fn loadable(path: &Path) -> bool {
+    let known = emu_cores::system_for_path(path).is_some()
+        || emu_3ds::is_game(path)
+        || crate::archive::is_archive(path);
+    rpg_maker::game_folder(path).is_some() || (known && path.is_file())
+}
+
+/// The files a session gives the game at `path`, as the folder holds
+/// things now: an RPG Maker game's are named after its folder, whether
+/// `path` is the folder or the player app in it.
+pub fn files_of(path: &Path) -> GameFiles {
+    match rpg_maker::game_folder(path) {
+        Some(game) => GameFiles::of_folder(&game),
+        None => GameFiles::of(path),
+    }
+}
+
+/// Takes the lock of each game at `rom_paths`, with their lock files in
+/// `folder`. A game named twice is held once. If the locks cannot be used
+/// at all, as when `folder` cannot be written to, the games play without:
+/// that is no reason to refuse them.
+fn lock_games(folder: &Path, rom_paths: &[PathBuf]) -> anyhow::Result<Vec<GameLock>> {
+    let mut held = Vec::new();
+    let mut keys = Vec::new();
+    for rom in rom_paths {
+        let save = files_of(rom).backup();
+        let key = persist::backup_key(&save);
+        if keys.contains(&key) {
+            continue;
+        }
+        match GameLock::take(folder, &save) {
+            Ok(Some(lock)) => held.push(lock),
+            Ok(None) => bail!(
+                "{} is already open. If another copy of Imago Emulator is playing it, close it there first.",
+                file_name(rom)
+            ),
+            Err(error) => {
+                eprintln!(
+                    "ds-emulator: no lock on {}: {error}; playing without",
+                    file_name(rom)
+                );
+            }
+        }
+        keys.push(key);
+    }
+    Ok(held)
 }
 
 /// Reads each ROM and battery save and powers on the right core: one
@@ -356,25 +526,47 @@ fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
     })
 }
 
-/// Sets aside the saves the game at `rom` keeps outside its battery save,
-/// so that it starts from the very beginning: a 3DS game's save data and
-/// extdata on the core's emulated SD card, each folder renamed beside
-/// itself to `.bak`, or `.bak2` and so on, never replacing an earlier one.
-/// Returns where they went; none for other games.
+/// Why the game whose cartridges have `files` cannot keep its saves, if it
+/// cannot: a folder they are in refuses new files, as a read-only disk
+/// does. Its battery saves, save states and checkpoint would each fail to
+/// be written, so the player is told as the game starts.
+///
+/// Makes and removes a file in each folder; call it off the UI thread.
+pub fn unwritable(files: &[GameFiles]) -> Option<String> {
+    let mut folders: Vec<&Path> = files.iter().map(GameFiles::folder).collect();
+    folders.dedup();
+    folders.into_iter().find_map(|folder| {
+        let error = persist::check_writable(folder).err()?;
+        Some(format!(
+            "{} cannot be written to ({error}), so the app cannot keep this game's saves or save states there. Move the game to a folder you can write to.",
+            folder.display()
+        ))
+    })
+}
+
+/// Erases a stopped game's progress on disk, for Start Over: removes the
+/// session's checkpoint in `states`, and sets aside the battery save at
+/// `save` and the saves the game makes itself, `own`, each renamed to end
+/// in `.bak`, or `.bak2` and so on, never replacing an earlier one. The
+/// game then starts from the very beginning. Returns what to tell the
+/// player of where the old saves are, if there were any.
 ///
 /// # Errors
 ///
-/// Fails if a folder cannot be renamed; those set aside before stay so.
-pub fn set_aside_own_saves(rom: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let Some(data) = emu_3ds::data_dir().filter(|_| emu_3ds::is_game(rom)) else {
-        return Ok(Vec::new());
-    };
-    let folders = emu_3ds::SaveData::of(rom, &data).folders();
-    let mut kept = Vec::new();
-    for folder in folders {
-        kept.extend(persist::set_aside(&folder)?);
-    }
-    Ok(kept)
+/// Fails if a file cannot be removed or renamed; what was done before
+/// stays done.
+pub fn erase_progress(
+    states: &StateFiles,
+    save: &Path,
+    own: &OwnSaves,
+) -> std::io::Result<Option<String>> {
+    states.remove(CHECKPOINT)?;
+    let battery = persist::set_aside(save)?;
+    let kept = own.set_aside()?;
+    Ok(match battery {
+        Some(battery) => Some(format!("Your old save is kept as {}", file_name(&battery))),
+        None => own.kept_notice(&kept),
+    })
 }
 
 /// The file the 3DS core opens for the game at `path`: the game itself,
@@ -529,6 +721,9 @@ pub enum Event {
     Debug,
     /// Something the user should see briefly, such as "State saved".
     Notice(String),
+    /// Something the user must not miss, such as a battery save that
+    /// could not be written: shown for longer than a notice.
+    Warning(String),
     /// A recording started (true) or finished (false).
     Recording(bool),
     /// What came of [`Command::LoadCheckpoint`] when there was one: true
@@ -594,11 +789,20 @@ pub struct Emulator {
 impl Emulator {
     /// Starts running `loaded` on a new thread. Events go to `events`;
     /// sound goes to `audio`, if there is an output device.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if the system will not start one of the game's
+    /// threads; the game is then dropped, having run nothing.
     pub fn start(
         loaded: Loaded,
         events: async_channel::Sender<Event>,
         audio: Option<AudioSink>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
+        // The threads that can fail to start come first, before anything
+        // is set going for them.
+        let saves = Saves::new(&loaded)?;
+        let rewind = RewindThread::start(REWIND_BUDGET_BYTES)?;
         let (commands, receiver) = mpsc::channel();
         let latest = Arc::new(Latest::default());
         let players = loaded.core.info().players.max(1);
@@ -612,9 +816,7 @@ impl Emulator {
             (_, audio) => audio,
         };
         let runner = Runner {
-            flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
-            backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
-            writer: SaveWriter::start(),
+            saves,
             loaded,
             latches: vec![Latch::default(); players],
             turbos: vec![Turbo::default(); players],
@@ -627,7 +829,7 @@ impl Emulator {
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
-            rewind: RewindThread::start(REWIND_BUDGET_BYTES),
+            rewind,
             lock,
             recorded_at: None,
             events,
@@ -647,13 +849,12 @@ impl Emulator {
                 if let Err(panic) = ran {
                     runner.stopped(&*panic);
                 }
-            })
-            .expect("spawning the emulation thread");
-        Self {
+            })?;
+        Ok(Self {
             commands: Some(commands),
             latest,
             thread: Some(thread),
-        }
+        })
     }
 
     /// Sends `command` to the emulation thread.
@@ -757,13 +958,8 @@ struct Runner {
     /// When rewind last recorded a frame, if it has since the history was
     /// last cleared.
     recorded_at: Option<Instant>,
-    /// Per cartridge: the backup generation last handed to `writer`, or
-    /// `None` if the cartridge has no battery or its last write failed.
-    flushed_generations: Vec<Option<u64>>,
-    /// Per cartridge: its battery save file.
-    backup_paths: Vec<PathBuf>,
-    /// Writes the battery saves to disk.
-    writer: SaveWriter,
+    /// The game's battery saves, save states and checkpoint.
+    saves: Saves,
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
     /// The next frame's screens, copied out of the core before they are
@@ -787,25 +983,6 @@ struct Debugging {
     pending: Option<Pending>,
     /// Why the emulation last stopped, until it runs on.
     stopped: Option<emu_core::debug::Stop>,
-}
-
-/// What came of picking up from a checkpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PickUp {
-    /// There is none.
-    Empty,
-    /// It was loaded.
-    Loaded,
-    /// A battery save changed after it was saved, so it was left alone.
-    SavesChanged,
-}
-
-/// Each of the first `cartridges` cartridges' backup generation in
-/// `core`, taken to be on disk already: 0 for one without a battery.
-fn generations(core: &dyn Core, cartridges: usize) -> Vec<Option<u64>> {
-    (0..cartridges)
-        .map(|cartridge| Some(core.backup_generation(cartridge).unwrap_or(0)))
-        .collect()
 }
 
 /// Copies `screens` into `frames`, into the buffers already there where
@@ -842,6 +1019,10 @@ impl Runner {
         let mut last_flush = Instant::now();
         let mut next_checkpoint = Instant::now() + CHECKPOINT_INTERVAL;
 
+        // While paused: whether a battery save handed over is being waited
+        // on, and only heard of, not flushed again.
+        let mut hearing = false;
+
         'running: loop {
             let turn = Instant::now();
             loop {
@@ -849,12 +1030,28 @@ impl Runner {
                 // everything else waits.
                 let waiting = self.paused && !self.rewinding && self.debug.pending.is_none();
                 let next = if waiting {
-                    // The timed flush waits too, so flush before.
-                    self.flush_backup();
-                    commands.recv().map_err(|_| TryRecvError::Disconnected)
+                    if hearing {
+                        self.hear_saves();
+                    } else {
+                        // The timed flush waits too, so flush before.
+                        self.flush_backup();
+                    }
+                    hearing = self.saves.writing();
+                    if hearing {
+                        match commands.recv_timeout(WRITTEN_CHECK_INTERVAL) {
+                            Ok(command) => Ok(command),
+                            // Round again, to hear how the write went. One
+                            // that failed waits for the next flush.
+                            Err(RecvTimeoutError::Timeout) => continue,
+                            Err(RecvTimeoutError::Disconnected) => Err(TryRecvError::Disconnected),
+                        }
+                    } else {
+                        commands.recv().map_err(|_| TryRecvError::Disconnected)
+                    }
                 } else {
                     commands.try_recv()
                 };
+                hearing = false;
                 match next {
                     Ok(command) => {
                         self.apply(command);
@@ -1000,16 +1197,9 @@ impl Runner {
     /// Writes the battery saves that changed and waits for them. Returns
     /// whether every one is now on disk as the game has it.
     fn write_saves(&mut self) -> bool {
-        self.flush_backup();
-        self.writer.wait();
-        self.take_written();
-        // A failed write leaves its cartridge unflushed (see `take_written`).
-        (0..self.flushed_generations.len()).all(|cartridge| {
-            match self.loaded.core.backup_generation(cartridge) {
-                Some(generation) => self.flushed_generations[cartridge] == Some(generation),
-                None => true,
-            }
-        })
+        let written = self.saves.write_all(&*self.loaded.core);
+        self.say_saves();
+        written
     }
 
     /// After `panic` on this thread: saves what can still be saved, and
@@ -1085,10 +1275,15 @@ impl Runner {
                 self.debug.stopped = None;
                 self.notice("Reset");
             }
-            Command::SaveState(slot) => match self.save_state(slot) {
-                Ok(()) => self.notice(format!("Saved state {slot}")),
-                Err(error) => self.notice(format!("Could not save state: {error:#}")),
-            },
+            Command::SaveState(slot) => {
+                let saved = self.saves.save_state(&*self.loaded.core, slot);
+                match saved {
+                    Ok(()) => self.notice(format!("Saved state {slot}")),
+                    Err(error) => self.notice(format!("Could not save state: {error:#}")),
+                }
+                // After, so it is what stays on screen.
+                self.say_saves();
+            }
             Command::Debug(command) => self.debug_command(command),
             Command::SetRenderScale(scale) => {
                 self.loaded.core.set_render_scale(scale);
@@ -1106,7 +1301,7 @@ impl Runner {
                     *slot = cheats;
                 }
             }
-            Command::LoadState(slot) => match self.load_state(slot) {
+            Command::LoadState(slot) => match self.saves.load_state(&mut *self.loaded.core, slot) {
                 Ok(()) => {
                     self.jumped();
                     self.notice(format!("Loaded state {slot}"));
@@ -1508,205 +1703,56 @@ impl Runner {
         }
     }
 
-    fn save_state(&self, slot: u8) -> anyhow::Result<()> {
-        let info = self.loaded.core.info();
-        let mut payload = Vec::new();
-        self.loaded
-            .core
-            .try_save_state(&mut payload)
-            .map_err(anyhow::Error::msg)?;
-        let header = emu_state::Header {
-            system: info.system,
-            state_version: info.state_version,
-            rom_crc32: self.loaded.rom_crc32,
-        };
-        // At the screen's own size, whatever the 3D resolution.
-        let screen = video::shrink(&self.loaded.core.screens()[0], info.screens[0]);
-        let size = screen.size();
-        let rgb: Vec<u8> = screen
-            .pixels()
-            .iter()
-            .flat_map(|pixel| {
-                let [b, g, r, _] = pixel.to_le_bytes();
-                [r, g, b]
-            })
-            .collect();
-        let thumbnail = emu_state::Thumbnail {
-            width: size.width,
-            height: size.height,
-            rgb: &rgb,
-        };
-        let path = self.loaded.state_path(slot);
-        persist::write_atomic(
-            &path,
-            &emu_state::encode(&header, &payload, Some(thumbnail)),
-        )
-        .with_context(|| format!("cannot write {}", path.display()))
-    }
-
-    fn load_state(&mut self, slot: u8) -> anyhow::Result<()> {
-        let path = self.loaded.state_path(slot);
-        let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let emu_state::Decoded {
-            header, payload, ..
-        } = emu_state::decode(&bytes)?;
-        let info = self.loaded.core.info();
-        ensure!(
-            header.system == info.system,
-            "it is a {} state",
-            header.system
-        );
-        ensure!(
-            header.rom_crc32 == self.loaded.rom_crc32,
-            "it was saved from a different ROM"
-        );
-        ensure!(
-            header.state_version == info.state_version,
-            "it is state version {}, this build reads {}",
-            header.state_version,
-            info.state_version,
-        );
-        Ok(self.loaded.core.load_state(payload)?)
-    }
-
-    /// Writes the battery saves and waits for them, then saves a state to
-    /// `slot` and records beside it the saves on disk (see
-    /// [`Runner::saves`]), which `load_checkpoint` checks. Nothing is
-    /// saved unless every battery save was written, and the record comes
-    /// last: should the state not be written, the one before keeps the
-    /// record that matches it.
+    /// Saves a checkpoint in `slot` (see [`Saves::save_checkpoint`]).
     fn save_checkpoint(&mut self, slot: u8) -> anyhow::Result<()> {
-        // A record of older saves on disk would let a later start load
-        // this state over them once they could be written again.
-        ensure!(self.write_saves(), "the battery save could not be written");
-        self.save_state(slot)?;
-        let state = self.loaded.state_path(slot);
-        // The library's picture of where the game was left: the first
-        // screen, a DS's top one. It shows behind the game last played,
-        // and in place of box art libretro doesn't have.
-        // Not save data, so written without waiting for the disk.
-        if let Some(screen) = self.loaded.core.screens().first() {
-            let picture = persist::state_picture_path(&state);
-            let unfinished = picture.with_extension("png.tmp");
-            fs::write(&unfinished, capture::encode_png(screen))
-                .and_then(|()| fs::rename(&unfinished, &picture))
-                .ok();
-        }
-        let record = persist::saves_record_path(&state);
-        let saves =
-            persist::saves_fingerprint(&self.saves()).context("cannot read the game's saves")?;
-        persist::write_atomic(&record, saves.as_bytes())
-            .with_context(|| format!("cannot write {}", record.display()))
+        let saved = self.saves.save_checkpoint(&*self.loaded.core, slot);
+        self.say_saves();
+        saved
     }
 
-    /// Loads the state in `slot` if the saves on disk are those its record
-    /// says it was saved with. A state saved before records were kept is
-    /// loaded only if its battery saves are the same as the game's now,
-    /// and otherwise undone; for a game that saves only when asked, which
-    /// cannot be undone so, it is left alone.
+    /// Picks up the checkpoint in `slot` (see [`Saves::load_checkpoint`]).
     fn load_checkpoint(&mut self, slot: u8) -> anyhow::Result<PickUp> {
-        let state = self.loaded.state_path(slot);
-        if !state.exists() {
-            return Ok(PickUp::Empty);
-        }
-        let record = persist::saves_record_path(&state);
-        match fs::read_to_string(&record) {
-            Ok(recorded) => {
-                let saves = persist::saves_fingerprint(&self.saves())
-                    .context("cannot read the game's saves")?;
-                if recorded != saves {
-                    return Ok(PickUp::SavesChanged);
-                }
-                self.load_state(slot)?;
-                Ok(PickUp::Loaded)
-            }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && !self.loaded.core.saves_every_frame() =>
-            {
-                Ok(PickUp::Empty)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let started = self.backups();
-                let mut undo = Vec::new();
-                self.loaded.core.save_state(&mut undo);
-                self.load_state(slot)?;
-                if self.backups() == started {
-                    return Ok(PickUp::Loaded);
-                }
-                let undone = self.loaded.core.load_state(&undo);
-                // The battery saves are back as on disk: nothing to write.
-                self.flushed_generations = generations(&*self.loaded.core, self.backup_paths.len());
-                undone.context("cannot undo loading it")?;
-                Ok(PickUp::SavesChanged)
-            }
-            Err(error) => Err(error).with_context(|| format!("cannot read {}", record.display())),
-        }
-    }
-
-    /// The saves a checkpoint goes with: each cartridge's battery save,
-    /// and the saves an RPG Maker game makes itself.
-    fn saves(&self) -> Vec<PathBuf> {
-        let mut saves = self.backup_paths.clone();
-        saves.extend(self.loaded.own_saves.files());
-        saves
-    }
-
-    /// Each cartridge's battery save as it is now.
-    fn backups(&self) -> Vec<Vec<u8>> {
-        (0..self.backup_paths.len())
-            .map(|cartridge| {
-                let mut backup = Vec::new();
-                self.loaded.core.save_backup(cartridge, &mut backup);
-                backup
-            })
-            .collect()
+        self.saves.load_checkpoint(&mut *self.loaded.core, slot)
     }
 
     /// Hands each cartridge's battery save that changed since the last
-    /// flush to the writer, and retries any whose write failed.
+    /// flush to its writer, and retries any whose write failed.
     fn flush_backup(&mut self) {
-        self.take_written();
-        for cartridge in 0..self.flushed_generations.len() {
-            let Some(generation) = self.loaded.core.backup_generation(cartridge) else {
-                continue;
-            };
-            if self.flushed_generations[cartridge] == Some(generation) {
-                continue;
-            }
-            let mut backup = Vec::new();
-            self.loaded.core.save_backup(cartridge, &mut backup);
-            let path = self.backup_paths[cartridge].clone();
-            self.writer.write(cartridge, generation, path, backup);
-            self.flushed_generations[cartridge] = Some(generation);
+        self.saves.flush(&*self.loaded.core);
+        self.say_saves();
+    }
+
+    /// Hears how the battery saves handed to their writer went, without
+    /// handing over any more.
+    fn hear_saves(&mut self) {
+        self.saves.hear();
+        self.say_saves();
+    }
+
+    /// Tells the user what the saves have to say, and last, to stay on
+    /// screen, what they warn of, such as a battery save that could not be
+    /// written.
+    fn say_saves(&mut self) {
+        for text in self.saves.take_said() {
+            self.notice(text);
+        }
+        for text in self.saves.take_warned() {
+            self.tell(Event::Warning(text));
         }
     }
 
-    /// Notes the battery save writes finished since last asked: a failed
-    /// one is said, and written again at the next flush unless a newer
-    /// one is on its way.
-    fn take_written(&mut self) {
-        for written in self.writer.finished() {
-            let Err(error) = written.result else {
-                continue;
-            };
-            self.notice(format!(
-                "Could not write {}: {error}",
-                written.path.display()
-            ));
-            let flushed = &mut self.flushed_generations[written.cartridge];
-            if *flushed == Some(written.generation) {
-                *flushed = None;
-            }
-        }
-    }
-
-    /// Shows `text` to the user, or, once the UI has stopped listening,
-    /// prints it, as for a battery save that failed as the game closed.
+    /// Shows `text` to the user briefly (see [`Runner::tell`]).
     fn notice(&self, text: impl Into<String>) {
-        let sent = self.events.try_send(Event::Notice(text.into()));
+        self.tell(Event::Notice(text.into()));
+    }
+
+    /// Sends a notice or a warning to the UI, or, once it has stopped
+    /// listening, prints its words, as for a battery save that failed as
+    /// the game closed.
+    fn tell(&self, event: Event) {
+        let sent = self.events.try_send(event);
         if let Err(unsent) = sent
-            && let Event::Notice(text) = unsent.into_inner()
+            && let Event::Notice(text) | Event::Warning(text) = unsent.into_inner()
         {
             eprintln!("ds-emulator: {text}");
         }
@@ -1714,1768 +1760,4 @@ impl Runner {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::AtomicU8;
-    use std::time::Duration;
-
-    use emu_core::{
-        Button, Buttons, CoreInfo, FrameRate, RomPatch, ScreenSize, StateError, StereoSample,
-        System, TouchPoint,
-    };
-
-    use emu_core::Debugger;
-    use emu_core::debug::{CpuInfo, Instruction, Register, Stops};
-
-    use super::*;
-    use crate::latch::{BUTTON_FRAMES, TOUCH_FRAMES};
-
-    const SCREENS: [ScreenSize; 1] = [ScreenSize::new(1, 1)];
-
-    /// A core whose single pixel is its frame counter.
-    struct Counter {
-        frames: [Frame; 1],
-    }
-
-    impl Counter {
-        fn count(&self) -> u32 {
-            self.frames[0].pixels()[0]
-        }
-
-        fn set(&mut self, count: u32) {
-            self.frames[0].pixels_mut()[0] = count;
-        }
-    }
-
-    impl Core for Counter {
-        fn info(&self) -> CoreInfo {
-            CoreInfo {
-                system: System::Gb,
-                screens: &SCREENS,
-                touch_screen: None,
-                players: 1,
-                // 1000 frames per second keeps the test fast.
-                frame_rate: FrameRate::new(1000, 1),
-                audio_sample_rate: 48_000,
-                state_version: 1,
-            }
-        }
-
-        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {
-            self.set(self.count() + 1);
-        }
-
-        fn screens(&self) -> &[Frame] {
-            &self.frames
-        }
-
-        fn reset(&mut self) {
-            self.set(0);
-        }
-
-        fn save_state(&self, out: &mut Vec<u8>) {
-            out.extend_from_slice(&self.count().to_le_bytes());
-        }
-
-        fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-            let bytes = state.try_into().map_err(|_| StateError::Truncated)?;
-            self.set(u32::from_le_bytes(bytes));
-            Ok(())
-        }
-
-        /// The counter is the only memory, at addresses 0-3.
-        fn peek(&self, _: usize, address: u32) -> Option<u8> {
-            self.count().to_le_bytes().get(address as usize).copied()
-        }
-
-        fn poke(&mut self, _: usize, address: u32, value: u8) -> bool {
-            let mut bytes = self.count().to_le_bytes();
-            let Some(byte) = bytes.get_mut(address as usize) else {
-                return false;
-            };
-            *byte = value;
-            self.set(u32::from_le_bytes(bytes));
-            true
-        }
-
-        fn debugger(&mut self) -> Option<&mut dyn Debugger> {
-            Some(self)
-        }
-    }
-
-    /// Gives a test core a debugger with one CPU, whose memory is the
-    /// core's `peek` and `poke` and which runs frames whole, so tests can
-    /// watch memory through the debugger's snapshot.
-    macro_rules! peek_debugger {
-        ($core:ty) => {
-            impl Debugger for $core {
-                fn cpus(&self) -> Vec<CpuInfo> {
-                    vec![CpuInfo {
-                        name: "TEST",
-                        player: 0,
-                    }]
-                }
-                fn registers(&self, _: usize) -> Vec<Register> {
-                    Vec::new()
-                }
-                fn status(&self, _: usize) -> String {
-                    String::new()
-                }
-                fn pc(&self, _: usize) -> u32 {
-                    0
-                }
-                fn read(&self, _: usize, address: u32) -> Option<u8> {
-                    self.peek(0, address)
-                }
-                fn write(&mut self, _: usize, address: u32, value: u8) -> bool {
-                    self.poke(0, address, value)
-                }
-                fn disassemble(&self, _: usize, address: u32) -> Instruction {
-                    Instruction {
-                        address,
-                        bytes: vec![0],
-                        text: String::new(),
-                        call: false,
-                    }
-                }
-                fn run_until(
-                    &mut self,
-                    inputs: &[Input],
-                    audio: &mut Vec<StereoSample>,
-                    _: &Stops,
-                ) -> RunOutcome {
-                    self.run_frame(inputs, audio);
-                    RunOutcome {
-                        frame_done: true,
-                        stop: None,
-                    }
-                }
-            }
-        };
-    }
-
-    peek_debugger!(Counter);
-    peek_debugger!(Keypad);
-
-    /// Opens the debugger's view, with its memory from `address`.
-    fn watch_memory(emulator: &Emulator, address: u32) {
-        let view = debugger::View {
-            memory: address,
-            ..debugger::View::default()
-        };
-        emulator.send(Command::Debug(debugger::Command::View(Some(view))));
-    }
-
-    /// Waits for the debugger's snapshot to pass `test`.
-    fn wait_for(emulator: &Emulator, test: impl Fn(&Snapshot) -> bool) -> Arc<Snapshot> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(snapshot) = emulator.debug_snapshot().filter(|shown| test(shown)) {
-                return snapshot;
-            }
-            assert!(Instant::now() < deadline, "the debugger never showed it");
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    fn start(rom_path: PathBuf) -> (Emulator, async_channel::Receiver<Event>) {
-        let core = Box::new(Counter {
-            frames: [Frame::new(SCREENS[0])],
-        });
-        let loaded = Loaded {
-            core,
-            files: vec![GameFiles::of(&rom_path)],
-            rom_paths: vec![rom_path],
-            rom_crc32: 0,
-            live_sound: None,
-            own_saves: OwnSaves::None,
-        };
-        let (events, receiver) = async_channel::unbounded();
-        (Emulator::start(loaded, events, None), receiver)
-    }
-
-    /// The count in the latest frame, read where it is published, as no
-    /// window takes frames in these tests.
-    fn latest_count(emulator: &Emulator) -> u32 {
-        let latest = emulator.latest.frames.lock().expect("not poisoned");
-        latest.1[0].pixels()[0]
-    }
-
-    #[test]
-    fn taken_frames_are_the_latest_and_their_buffers_come_back() {
-        let (emulator, _events) = start(PathBuf::from("/nonexistent/taken.gb"));
-        let mut frames = Vec::new();
-        let (mut seen, mut count) = (0, 0);
-        // Taken as a window does, while the frames run.
-        for _ in 0..20 {
-            let sequence = loop {
-                if let Some(sequence) = emulator.take_latest(seen, &mut frames) {
-                    break sequence;
-                }
-                thread::sleep(Duration::from_millis(1));
-            };
-            assert!(sequence > seen);
-            assert!(frames[0].pixels()[0] > count, "a newer frame");
-            (seen, count) = (sequence, frames[0].pixels()[0]);
-        }
-        emulator.send(Command::TogglePause);
-        thread::sleep(Duration::from_millis(20));
-        let seen = emulator.take_latest(seen, &mut frames).unwrap_or(seen);
-        let paused = frames[0].pixels()[0];
-        assert_eq!(emulator.take_latest(seen, &mut frames), None);
-        assert_eq!(frames[0].pixels()[0], paused, "kept while none is newer");
-    }
-
-    #[test]
-    fn copied_screens_match_whatever_the_buffers_held() {
-        let filled = |width, height, value| {
-            let mut frame = Frame::new(ScreenSize::new(width, height));
-            frame.pixels_mut().fill(value);
-            frame
-        };
-        let shapes: [&[(u16, u16)]; 5] = [
-            &[],
-            &[(4, 3)],
-            &[(4, 3), (4, 3)],
-            &[(8, 6), (4, 3)],
-            &[(4, 3), (4, 3), (2, 2)],
-        ];
-        for (from, screens_shape) in (0..).zip(shapes) {
-            for frames_shape in shapes {
-                let screens: Vec<Frame> = screens_shape
-                    .iter()
-                    .map(|&(width, height)| filled(width, height, from))
-                    .collect();
-                let mut frames: Vec<Frame> = frames_shape
-                    .iter()
-                    .map(|&(width, height)| filled(width, height, 99))
-                    .collect();
-                copy_screens(&mut frames, &screens);
-                assert_eq!(frames, screens, "{frames_shape:?} -> {screens_shape:?}");
-            }
-        }
-    }
-
-    /// Times handing a frame's screens from the core to the window, as
-    /// it was (copied into the shared frames under their lock, then
-    /// copied again out of them) against now (copied once, then swapped):
-    /// `cargo test --release -p emu-app -- --ignored --nocapture
-    /// frame_hand_off_timing`.
-    #[test]
-    #[ignore = "a timing, not a test"]
-    fn frame_hand_off_timing() {
-        use crate::bench::best_of;
-
-        for (name, size) in [
-            ("DS", ScreenSize::new(256, 192)),
-            ("DS, 3D at 4x", ScreenSize::new(1024, 768)),
-        ] {
-            let mut screens = vec![Frame::new(size), Frame::new(size)];
-            for (index, pixel) in (0u32..).zip(screens[0].pixels_mut()) {
-                *pixel = index;
-            }
-            let (mut shared, mut window) = (screens.clone(), screens.clone());
-            let old_publish = best_of(200, || shared.clone_from_slice(&screens));
-            let old_take = best_of(200, || window.clone_from(&shared));
-            let mut unpublished = screens.clone();
-            let new_publish = best_of(200, || {
-                copy_screens(&mut unpublished, &screens);
-                std::mem::swap(&mut shared, &mut unpublished);
-            });
-            let new_take = best_of(200, || std::mem::swap(&mut window, &mut shared));
-            println!(
-                "{name}: emulation thread {old_publish:?} -> {new_publish:?}, \
-                 window {old_take:?} -> {new_take:?}"
-            );
-        }
-    }
-
-    /// Every frame's inputs, one per player, as a core saw them.
-    type Seen = Arc<Mutex<Vec<Vec<Input>>>>;
-
-    /// A two-player core that records every frame's inputs.
-    struct Recorder {
-        seen: Seen,
-        frames: [Frame; 1],
-    }
-
-    impl Core for Recorder {
-        fn info(&self) -> CoreInfo {
-            CoreInfo {
-                system: System::Gba,
-                screens: &SCREENS,
-                touch_screen: None,
-                players: 2,
-                frame_rate: FrameRate::new(1000, 1),
-                audio_sample_rate: 48_000,
-                state_version: 1,
-            }
-        }
-
-        fn run_frame(&mut self, inputs: &[Input], _: &mut Vec<StereoSample>) {
-            self.seen.lock().expect("unpoisoned").push(inputs.to_vec());
-        }
-
-        fn screens(&self) -> &[Frame] {
-            &self.frames
-        }
-
-        fn reset(&mut self) {}
-
-        fn save_state(&self, _: &mut Vec<u8>) {}
-
-        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
-            Ok(())
-        }
-    }
-
-    fn start_recorder() -> (Emulator, Seen) {
-        let seen = Seen::default();
-        let loaded = Loaded {
-            core: Box::new(Recorder {
-                seen: Arc::clone(&seen),
-                frames: [Frame::new(SCREENS[0])],
-            }),
-            files: vec![GameFiles::of(&PathBuf::from("/nonexistent/recorder.gba"))],
-            rom_paths: vec![PathBuf::from("/nonexistent/recorder.gba")],
-            rom_crc32: 0,
-            live_sound: None,
-            own_saves: OwnSaves::None,
-        };
-        let (events, _) = async_channel::unbounded();
-        (Emulator::start(loaded, events, None), seen)
-    }
-
-    /// Waits for the emulator to run `count` more frames.
-    fn run_frames(seen: &Seen, count: usize) {
-        let target = seen.lock().expect("unpoisoned").len() + count;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while seen.lock().expect("unpoisoned").len() < target {
-            assert!(Instant::now() < deadline, "frames stopped running");
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    /// The number of recorded frames in which `player`'s input passed
-    /// `test`.
-    fn frames_where(seen: &Seen, player: usize, test: impl Fn(&Input) -> bool) -> usize {
-        let seen = seen.lock().expect("unpoisoned");
-        seen.iter().filter(|inputs| test(&inputs[player])).count()
-    }
-
-    const TAP: Input = Input {
-        buttons: Buttons::NONE,
-        touch: Some(TouchPoint { x: 10, y: 20 }),
-        microphone: 0,
-        gentle: false,
-    };
-
-    #[test]
-    fn a_press_and_release_between_two_frames_still_reaches_the_game() {
-        let (emulator, seen) = start_recorder();
-        let a = Input {
-            buttons: [Button::A].into_iter().collect(),
-            ..Input::default()
-        };
-        // Nothing runs while paused, so every press and release below
-        // arrives between the same two frames, as a trackpad's tap can.
-        emulator.send(Command::TogglePause);
-        let release = Input::default();
-        for (player, input) in [(0, TAP), (0, release), (1, a), (1, release)] {
-            emulator.send(Command::SetInput { player, input });
-        }
-        emulator.send(Command::TogglePause);
-        run_frames(&seen, 10);
-        let touched = frames_where(&seen, 0, |input| input.touch.is_some());
-        let pressed = frames_where(&seen, 1, |input| input.buttons.contains(Button::A));
-        assert_eq!(
-            (touched, pressed),
-            (usize::from(TOUCH_FRAMES), usize::from(BUTTON_FRAMES))
-        );
-        // Each player saw only their own.
-        assert_eq!(frames_where(&seen, 0, |input| !input.buttons.is_empty()), 0);
-        assert_eq!(frames_where(&seen, 1, |input| input.touch.is_some()), 0);
-    }
-
-    #[test]
-    fn turbo_alternates_frame_by_frame_past_the_latch() {
-        let (emulator, seen) = start_recorder();
-        let a: Buttons = [Button::A].into_iter().collect();
-        emulator.send(Command::SetTurbo {
-            player: 1,
-            buttons: a,
-            frames: 1,
-        });
-        run_frames(&seen, 10);
-        let held_until = seen.lock().expect("unpoisoned").len();
-        emulator.send(Command::SetTurbo {
-            player: 1,
-            buttons: Buttons::NONE,
-            frames: 1,
-        });
-        // A press under way finishes; then nothing.
-        run_frames(&seen, 3);
-        let released_from = seen.lock().expect("unpoisoned").len();
-        run_frames(&seen, 5);
-        let seen_now = seen.lock().expect("unpoisoned").clone();
-        let pressed: Vec<bool> = seen_now[..held_until]
-            .iter()
-            .map(|inputs| inputs[1].buttons.contains(Button::A))
-            .collect();
-        // Frames may run before the command arrives.
-        let start = pressed.iter().position(|a| *a).expect("turbo pressed A");
-        let turbo = &pressed[start..];
-        assert!(
-            turbo.windows(2).all(|pair| pair[0] != pair[1]),
-            "a one-frame press is not held for the latch's minimum: {turbo:?}"
-        );
-        let after = &seen_now[released_from..];
-        assert!(after.iter().all(|inputs| inputs[1].buttons.is_empty()));
-        assert_eq!(frames_where(&seen, 0, |input| !input.buttons.is_empty()), 0);
-    }
-
-    #[test]
-    fn reset_drops_a_release_still_waiting() {
-        let (emulator, seen) = start_recorder();
-        emulator.send(Command::TogglePause);
-        emulator.send(Command::SetInput {
-            player: 0,
-            input: TAP,
-        });
-        emulator.send(Command::SetInput {
-            player: 0,
-            input: Input::default(),
-        });
-        emulator.send(Command::Reset);
-        emulator.send(Command::TogglePause);
-        run_frames(&seen, 10);
-        assert_eq!(frames_where(&seen, 0, |input| input.touch.is_some()), 0);
-    }
-
-    #[test]
-    fn release_input_lets_go_of_one_player_at_once() {
-        let (emulator, seen) = start_recorder();
-        let held = |buttons: &[Button]| Input {
-            buttons: buttons.iter().copied().collect(),
-            ..Input::default()
-        };
-        emulator.send(Command::TogglePause);
-        // Player 1 taps A, holds Left and a turbo B; player 0 holds A.
-        for input in [held(&[Button::A]), held(&[]), held(&[Button::Left])] {
-            emulator.send(Command::SetInput { player: 1, input });
-        }
-        emulator.send(Command::SetTurbo {
-            player: 1,
-            buttons: [Button::B].into_iter().collect(),
-            frames: 3,
-        });
-        emulator.send(Command::SetInput {
-            player: 0,
-            input: held(&[Button::A]),
-        });
-        emulator.send(Command::ReleaseInput { player: 1 });
-        emulator.send(Command::TogglePause);
-        run_frames(&seen, 10);
-        assert_eq!(
-            frames_where(&seen, 1, |input| *input != Input::default()),
-            0
-        );
-        assert!(frames_where(&seen, 0, |input| input.buttons.contains(Button::A)) >= 10);
-    }
-
-    #[test]
-    fn counts_the_frames_shown() {
-        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while emulator.frames_shown() < 10 {
-            assert!(Instant::now() < deadline, "frames stopped running");
-            thread::sleep(Duration::from_millis(1));
-        }
-        emulator.send(Command::TogglePause);
-        wait_for_notice(&events, "Paused");
-        // Paused: the count stands still, and matches the game's own,
-        // which counts up from opaque black.
-        let shown = emulator.frames_shown();
-        assert_eq!(u64::from(latest_count(&emulator) & 0x00FF_FFFF), shown);
-        thread::sleep(Duration::from_millis(20));
-        assert_eq!(emulator.frames_shown(), shown);
-    }
-
-    #[test]
-    fn rewind_steps_back_through_frames() {
-        let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
-        thread::sleep(Duration::from_millis(200));
-        emulator.send(Command::SetRewind(true));
-        thread::sleep(Duration::from_millis(20));
-        let rewinding = latest_count(&emulator);
-        thread::sleep(Duration::from_millis(50));
-        let rewound = latest_count(&emulator);
-        assert!(rewound < rewinding, "{rewound} should be below {rewinding}");
-
-        emulator.send(Command::SetRewind(false));
-        thread::sleep(Duration::from_millis(50));
-        assert!(latest_count(&emulator) > rewound);
-    }
-
-    #[test]
-    fn cheats_run_after_every_frame() {
-        let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
-        let cheats = emu_cheats::parse(System::Gb, "[Hold]\n0000:00\n").expect("valid");
-        emulator.send(Command::SetCheats { player: 0, cheats });
-        watch_memory(&emulator, 0);
-        thread::sleep(Duration::from_millis(50));
-        // Each frame adds one; the cheat then zeroes the low byte.
-        let snapshot = emulator.debug_snapshot().expect("watching");
-        assert_eq!(snapshot.memory[0], Some(0));
-    }
-
-    /// A GBA-like core with KEYINPUT at 0x04000130 and one byte of RAM at
-    /// 0x02000000, which every frame clears.
-    struct Keypad {
-        keys: u16,
-        ram: u8,
-        frames: [Frame; 1],
-    }
-
-    impl Core for Keypad {
-        fn info(&self) -> CoreInfo {
-            CoreInfo {
-                system: System::Gba,
-                screens: &SCREENS,
-                touch_screen: None,
-                players: 1,
-                frame_rate: FrameRate::new(1000, 1),
-                audio_sample_rate: 48_000,
-                state_version: 1,
-            }
-        }
-
-        fn run_frame(&mut self, inputs: &[Input], _: &mut Vec<StereoSample>) {
-            let input = inputs.first().copied().unwrap_or_default();
-            self.keys = !input.buttons.bits() & 0x03FF;
-            self.ram = 0;
-        }
-
-        fn screens(&self) -> &[Frame] {
-            &self.frames
-        }
-
-        fn reset(&mut self) {}
-
-        fn save_state(&self, _: &mut Vec<u8>) {}
-
-        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
-            Ok(())
-        }
-
-        fn peek(&self, _: usize, address: u32) -> Option<u8> {
-            match address {
-                0x0200_0000 => Some(self.ram),
-                0x0400_0130 => Some(self.keys as u8),
-                0x0400_0131 => Some((self.keys >> 8) as u8),
-                _ => None,
-            }
-        }
-
-        fn poke(&mut self, _: usize, address: u32, value: u8) -> bool {
-            let ram = address == 0x0200_0000;
-            if ram {
-                self.ram = value;
-            }
-            ram
-        }
-
-        fn debugger(&mut self) -> Option<&mut dyn Debugger> {
-            Some(self)
-        }
-    }
-
-    #[test]
-    fn button_cheats_see_the_frame_s_own_input() {
-        let loaded = Loaded {
-            core: Box::new(Keypad {
-                keys: 0x03FF,
-                ram: 0,
-                frames: [Frame::new(SCREENS[0])],
-            }),
-            files: vec![GameFiles::of(&PathBuf::from("/nonexistent/keypad.gba"))],
-            rom_paths: vec![PathBuf::from("/nonexistent/keypad.gba")],
-            rom_crc32: 0,
-            live_sound: None,
-            own_saves: OwnSaves::None,
-        };
-        let (events, _events) = async_channel::unbounded();
-        let emulator = Emulator::start(loaded, events, None);
-        // CodeBreaker: if A is held, write 1.
-        let cheats =
-            emu_cheats::parse(System::Gba, "D0000020 0001\n32000000 0001\n").expect("valid");
-        emulator.send(Command::SetCheats { player: 0, cheats });
-        watch_memory(&emulator, 0x0200_0000);
-        emulator.send(Command::SetInput {
-            player: 0,
-            input: Input {
-                buttons: [Button::A].into_iter().collect(),
-                ..Input::default()
-            },
-        });
-        thread::sleep(Duration::from_millis(50));
-        // The frame cleared the byte; the cheat, seeing A, set it again.
-        let snapshot = emulator.debug_snapshot().expect("watching");
-        assert_eq!(snapshot.memory[0], Some(1));
-    }
-
-    /// A Game Boy running `program` at 0x0100 on the emulation thread.
-    fn start_game_boy(program: &[u8]) -> (Emulator, async_channel::Receiver<Event>) {
-        let mut rom = vec![0; 0x8000];
-        rom[0x100..0x100 + program.len()].copy_from_slice(program);
-        rom[0x14D] = rom[0x134..0x14D]
-            .iter()
-            .fold(0u8, |sum, byte| sum.wrapping_sub(*byte).wrapping_sub(1));
-        let core = emu_cores::create(System::Gb, &Media::new(&rom)).expect("valid rom");
-        let loaded = Loaded {
-            core,
-            files: vec![GameFiles::of(&PathBuf::from("/nonexistent/debugged.gb"))],
-            rom_paths: vec![PathBuf::from("/nonexistent/debugged.gb")],
-            rom_crc32: 0,
-            live_sound: None,
-            own_saves: OwnSaves::None,
-        };
-        let (events, receiver) = async_channel::unbounded();
-        (Emulator::start(loaded, events, None), receiver)
-    }
-
-    fn debug(emulator: &Emulator, command: debugger::Command) {
-        emulator.send(Command::Debug(command));
-    }
-
-    #[test]
-    fn breakpoints_pause_mid_frame_and_steps_run_one_instruction() {
-        // LD A, 0x42; LD (0xC000), A; INC A; NOP; JR -4 (back to INC A)
-        let program = [0x3E, 0x42, 0xEA, 0x00, 0xC0, 0x3C, 0x00, 0x18, 0xFC];
-        let (emulator, _events) = start_game_boy(&program);
-        watch_memory(&emulator, 0xC000);
-        let at_nop = Breakpoint {
-            cpu: 0,
-            address: 0x0106,
-        };
-        debug(
-            &emulator,
-            debugger::Command::SetStops {
-                breakpoints: vec![at_nop],
-                watchpoints: Vec::new(),
-            },
-        );
-        let stopped = wait_for(&emulator, |shown| {
-            matches!(shown.state, RunState::Stopped(_))
-        });
-        assert_eq!((stopped.pc, stopped.memory[0]), (0x0106, Some(0x42)));
-        assert!(stopped.code.iter().any(|line| line.address == 0x0106));
-        thread::sleep(Duration::from_millis(20));
-        assert_eq!(
-            emulator.debug_snapshot().expect("open").pc,
-            0x0106,
-            "still there"
-        );
-
-        debug(&emulator, debugger::Command::Step(0));
-        let stepped = wait_for(&emulator, |shown| shown.pc == 0x0107);
-        let step = emu_core::debug::Stop {
-            cpu: 0,
-            reason: StopReason::Step,
-        };
-        assert_eq!(stepped.state, RunState::Stopped(step));
-
-        debug(
-            &emulator,
-            debugger::Command::Write {
-                cpu: 0,
-                address: 0xC000,
-                value: 0x99,
-            },
-        );
-        wait_for(&emulator, |shown| shown.memory[0] == Some(0x99));
-
-        // Round the loop to the breakpoint again.
-        debug(&emulator, debugger::Command::Continue);
-        let again = wait_for(&emulator, |shown| shown.pc == 0x0106);
-        assert!(
-            matches!(again.state, RunState::Stopped(stop) if stop.reason == StopReason::Breakpoint)
-        );
-    }
-
-    #[test]
-    fn stepping_over_a_call_stops_after_it_returns() {
-        // CALL 0x0150; JR -5 (back to the CALL); and at 0x0150, INC A; RET.
-        let mut program = vec![0; 0x52];
-        program[..5].copy_from_slice(&[0xCD, 0x50, 0x01, 0x18, 0xFB]);
-        program[0x50..].copy_from_slice(&[0x3C, 0xC9]);
-        let (emulator, _events) = start_game_boy(&program);
-        watch_memory(&emulator, 0xC000);
-        debug(
-            &emulator,
-            debugger::Command::SetStops {
-                breakpoints: vec![Breakpoint {
-                    cpu: 0,
-                    address: 0x0100,
-                }],
-                watchpoints: Vec::new(),
-            },
-        );
-        wait_for(&emulator, |shown| {
-            matches!(shown.state, RunState::Stopped(_))
-        });
-        debug(&emulator, debugger::Command::StepOver(0));
-        let returned = wait_for(&emulator, |shown| shown.pc == 0x0103);
-        let step = emu_core::debug::Stop {
-            cpu: 0,
-            reason: StopReason::Step,
-        };
-        assert_eq!(returned.state, RunState::Stopped(step));
-    }
-
-    #[test]
-    fn next_frame_runs_one_frame_then_pauses() {
-        let (emulator, _events) = start(PathBuf::from("/nonexistent/counter.gb"));
-        watch_memory(&emulator, 0);
-        debug(&emulator, debugger::Command::Pause);
-        let paused = wait_for(&emulator, |shown| shown.state == RunState::Paused);
-        let before = paused.memory[0].expect("readable");
-        debug(&emulator, debugger::Command::NextFrame);
-        let after = wait_for(&emulator, |shown| {
-            shown.state == RunState::Paused && shown.memory[0] != Some(before)
-        });
-        assert_eq!(after.memory[0], Some(before.wrapping_add(1)));
-        thread::sleep(Duration::from_millis(20));
-        let later = emulator.debug_snapshot().expect("open");
-        assert_eq!(later.memory[0], after.memory[0], "still paused");
-    }
-
-    /// Every `set_rom_patches` call a core received.
-    type PatchLog = Arc<Mutex<Vec<(usize, Vec<RomPatch>)>>>;
-
-    /// A Game Boy-like core that records the ROM patches it is given.
-    struct Patchable {
-        log: PatchLog,
-        frames: [Frame; 1],
-    }
-
-    impl Core for Patchable {
-        fn info(&self) -> CoreInfo {
-            CoreInfo {
-                system: System::Gb,
-                screens: &SCREENS,
-                touch_screen: None,
-                players: 1,
-                frame_rate: FrameRate::new(1000, 1),
-                audio_sample_rate: 48_000,
-                state_version: 1,
-            }
-        }
-
-        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {}
-
-        fn screens(&self) -> &[Frame] {
-            &self.frames
-        }
-
-        fn reset(&mut self) {}
-
-        fn save_state(&self, _: &mut Vec<u8>) {}
-
-        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
-            Ok(())
-        }
-
-        fn set_rom_patches(&mut self, player: usize, patches: &[RomPatch]) {
-            let mut log = self.log.lock().expect("unpoisoned");
-            log.push((player, patches.to_vec()));
-        }
-    }
-
-    #[test]
-    fn cheat_lists_hand_their_rom_patches_to_the_core() {
-        let log = PatchLog::default();
-        let loaded = Loaded {
-            core: Box::new(Patchable {
-                log: Arc::clone(&log),
-                frames: [Frame::new(SCREENS[0])],
-            }),
-            files: vec![GameFiles::of(&PathBuf::from("/nonexistent/patchable.gb"))],
-            rom_paths: vec![PathBuf::from("/nonexistent/patchable.gb")],
-            rom_crc32: 0,
-            live_sound: None,
-            own_saves: OwnSaves::None,
-        };
-        let (events, _events) = async_channel::unbounded();
-        let emulator = Emulator::start(loaded, events, None);
-        for text in ["[Jump]\n3E1-23F\n", "[Jump] off\n3E1-23F\n"] {
-            let cheats = emu_cheats::parse(System::Gb, text).expect("valid");
-            emulator.send(Command::SetCheats { player: 0, cheats });
-        }
-        // Dropping the handle applies the queued commands, then stops.
-        drop(emulator);
-        let jump = RomPatch {
-            address: 0x0123,
-            value: 0x3E,
-            compare: None,
-        };
-        assert_eq!(
-            *log.lock().expect("unpoisoned"),
-            [(0, vec![jump]), (0, Vec::new())]
-        );
-    }
-
-    /// Waits for a notice starting with `start`, returning it.
-    fn wait_for_notice(events: &async_channel::Receiver<Event>, start: &str) -> String {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match events.try_recv() {
-                Ok(Event::Notice(text)) if text.starts_with(start) => return text,
-                Ok(_) => {}
-                Err(_) => {
-                    assert!(Instant::now() < deadline, "no notice {start:?}");
-                    thread::sleep(Duration::from_millis(1));
-                }
-            }
-        }
-    }
-
-    /// The files in `dir` with `extension`.
-    fn files_with(dir: &Path, extension: &str) -> Vec<PathBuf> {
-        let entries = fs::read_dir(dir).expect("read dir");
-        let paths = entries.map(|entry| entry.expect("entry").path());
-        paths
-            .filter(|path| path.extension().is_some_and(|found| found == extension))
-            .collect()
-    }
-
-    #[test]
-    fn screenshots_land_next_to_the_rom() {
-        let dir = std::env::temp_dir().join(format!("emu-app-shots-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("temp dir");
-        let (emulator, events) = start(dir.join("counter.gb"));
-        emulator.send(Command::SaveScreenshot);
-        let saved = wait_for_notice(&events, "Saved counter ");
-        let pngs = files_with(&dir, "png");
-        assert_eq!(pngs.len(), 1, "{saved}");
-        let bytes = fs::read(&pngs[0]).expect("the screenshot");
-        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn recordings_hold_every_frame_run_and_none_while_paused() {
-        let dir = std::env::temp_dir().join(format!("emu-app-movie-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("temp dir");
-        let (emulator, events) = start(dir.join("counter.gb"));
-        emulator.send(Command::TogglePause);
-        wait_for_notice(&events, "Paused");
-        let first = latest_count(&emulator);
-        emulator.send(Command::ToggleRecording);
-        wait_for_notice(&events, "Recording to counter ");
-        // As fast as it goes, which the writer must keep up with.
-        emulator.send(Command::SetSpeed(Speed::Unlimited));
-        emulator.send(Command::TogglePause);
-        thread::sleep(Duration::from_millis(50));
-        emulator.send(Command::TogglePause);
-        wait_for_notice(&events, "Paused");
-        let last = latest_count(&emulator);
-        thread::sleep(Duration::from_millis(20));
-        emulator.send(Command::ToggleRecording);
-        let saved = wait_for_notice(&events, "Saved counter ");
-        assert!(saved.ends_with(" of video"), "{saved}");
-
-        let movies = files_with(&dir, "mov");
-        assert_eq!(movies.len(), 1);
-        let bytes = fs::read(&movies[0]).expect("the movie");
-        let jpegs = bytes
-            .windows(4)
-            .filter(|window| *window == [0xFF, 0xD8, 0xFF, 0xE0])
-            .count();
-        assert!(last > first + 10, "frames ran: {first} to {last}");
-        assert_eq!(jpegs as u32, last - first, "one picture per frame run");
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn durations_read_as_minutes_and_seconds() {
-        assert_eq!(minutes_and_seconds(Duration::from_millis(83_900)), "1:23");
-        assert_eq!(minutes_and_seconds(Duration::from_secs(3723)), "1:02:03");
-    }
-
-    #[test]
-    fn save_states_round_trip_through_slot_files() {
-        let dir = std::env::temp_dir().join(format!("emu-app-states-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("temp dir");
-        let (emulator, events) = start(dir.join("counter.gb"));
-        thread::sleep(Duration::from_millis(50));
-        emulator.send(Command::TogglePause);
-        thread::sleep(Duration::from_millis(20));
-        let saved = latest_count(&emulator);
-        emulator.send(Command::SaveState(2));
-        emulator.send(Command::TogglePause);
-        thread::sleep(Duration::from_millis(50));
-        emulator.send(Command::LoadState(2));
-        emulator.send(Command::TogglePause);
-        thread::sleep(Duration::from_millis(20));
-        assert_eq!(latest_count(&emulator), saved);
-
-        // Both notices, however long they take: the state is written on
-        // another thread, and Windows took longer than the sleeps above.
-        let mut waiting = vec!["Saved state 2", "Loaded state 2"];
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !waiting.is_empty() {
-            match events.try_recv() {
-                Ok(Event::Notice(text)) => waiting.retain(|notice| *notice != text),
-                Ok(_) => {}
-                Err(_) => {
-                    assert!(Instant::now() < deadline, "no notices {waiting:?}");
-                    thread::sleep(Duration::from_millis(1));
-                }
-            }
-        }
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    fn run_script(emulator: &Emulator, source: &str) {
-        emulator.send(Command::RunScript {
-            name: "hud.lua".to_owned(),
-            source: source.to_owned(),
-        });
-    }
-
-    /// Waits for the script's drawing to pass `test`.
-    fn wait_for_overlay(emulator: &Emulator, test: impl Fn(&[Draw]) -> bool) -> Arc<[Draw]> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let overlay = emulator.overlay();
-            if test(&overlay) {
-                return overlay;
-            }
-            assert!(Instant::now() < deadline, "the script never drew it");
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    #[test]
-    fn scripts_read_write_and_draw_after_every_frame() {
-        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
-        run_script(
-            &emulator,
-            r#"
-            emu.on_frame(function()
-                gui.text(0, 0, "count " .. memory.read_u8(0))
-                memory.write_u8(1, 1)
-            end)
-            "#,
-        );
-        wait_for_notice(&events, "Running hud.lua");
-        let overlay = wait_for_overlay(&emulator, |drawn| !drawn.is_empty());
-        assert!(
-            matches!(&overlay[0], Draw::Text { text, .. } if text.starts_with("count ")),
-            "{overlay:?}"
-        );
-        // Byte 1 of the counter, which the script keeps at 1.
-        thread::sleep(Duration::from_millis(20));
-        assert_eq!(latest_count(&emulator) >> 8 & 0xFF, 1);
-
-        emulator.send(Command::StopScript);
-        wait_for_notice(&events, "Stopped hud.lua");
-        assert!(emulator.overlay().is_empty(), "stopping clears its drawing");
-        emulator.send(Command::StopScript);
-        wait_for_notice(&events, "No script is running");
-    }
-
-    #[test]
-    fn a_script_error_is_a_notice_and_stops_the_script() {
-        let (emulator, events) = start(PathBuf::from("/nonexistent/counter.gb"));
-        run_script(
-            &emulator,
-            r#"
-            emu.on_frame(function()
-                gui.box(0, 0, 0, 0)
-                if emu.frame() == 3 then error("boom") end
-            end)
-            "#,
-        );
-        wait_for_notice(&events, "hud.lua:4: boom · script stopped");
-        assert!(emulator.overlay().is_empty());
-        run_script(&emulator, "x = = 1");
-        wait_for_notice(&events, "hud.lua:1: unexpected symbol");
-        // The game runs on.
-        let before = latest_count(&emulator);
-        thread::sleep(Duration::from_millis(20));
-        assert!(latest_count(&emulator) > before);
-    }
-
-    #[test]
-    fn scripts_press_buttons_on_the_next_frame() {
-        let (emulator, seen) = start_recorder();
-        run_script(
-            &emulator,
-            "emu.on_frame(function() joypad.set({a = true}, 2) end)",
-        );
-        run_frames(&seen, 10);
-        let a = |input: &Input| input.buttons.contains(Button::A);
-        assert!(frames_where(&seen, 1, a) >= 5, "player 2 pressed A");
-        assert_eq!(frames_where(&seen, 0, a), 0, "player 1 did not");
-    }
-
-    #[test]
-    fn scripts_save_states_and_pause() {
-        let dir = std::env::temp_dir().join(format!("emu-app-script-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("temp dir");
-        let (emulator, events) = start(dir.join("counter.gb"));
-        run_script(
-            &emulator,
-            r#"
-            emu.save_state(3)
-            emu.on_frame(function()
-                if emu.frame() == 5 then emu.pause() end
-            end)
-            "#,
-        );
-        wait_for_notice(&events, "Saved state 3");
-        wait_for_notice(&events, "Paused by hud.lua");
-        assert!(
-            GameFiles::of(&dir.join("counter.gb"))
-                .state(3, false)
-                .exists()
-        );
-        let paused = latest_count(&emulator);
-        thread::sleep(Duration::from_millis(20));
-        assert_eq!(latest_count(&emulator), paused);
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    /// A DS ROM whose two programs loop forever.
-    fn nds_rom() -> Vec<u8> {
-        let mut rom = vec![0; 0x400];
-        let mut put = |offset: usize, value: u32| {
-            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        };
-        for (header, program, address) in [(0x20, 0x200, 0x0200_4000), (0x30, 0x300, 0x0238_0000)] {
-            put(header, program);
-            put(header + 4, address);
-            put(header + 8, address);
-            put(header + 12, 4);
-            put(program as usize, 0xEAFF_FFFE); // B .
-        }
-        rom
-    }
-
-    /// A GBA ROM with 128 KiB of Flash.
-    fn gba_rom() -> Vec<u8> {
-        let mut rom = vec![0; 0x400];
-        rom[0xB2] = 0x96;
-        rom[0x200..0x209].copy_from_slice(b"FLASH1M_V");
-        rom
-    }
-
-    /// Writes `files` into a fresh directory named after `test`.
-    fn rom_dir(test: &str, files: &[(&str, &[u8])]) -> (PathBuf, Vec<PathBuf>) {
-        let dir = std::env::temp_dir().join(format!("emu-app-{test}-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("temp dir");
-        let paths = files
-            .iter()
-            .map(|(name, bytes)| {
-                let path = dir.join(name);
-                fs::write(&path, bytes).expect("write rom");
-                path
-            })
-            .collect();
-        (dir, paths)
-    }
-
-    #[test]
-    fn a_gba_game_after_a_ds_game_goes_in_the_gba_slot() {
-        let (dir, paths) = rom_dir(
-            "slot",
-            &[("platinum.nds", &nds_rom()), ("emerald.gba", &gba_rom())],
-        );
-        let loaded = load(&paths, DmgColors::Grey).expect("loads");
-        assert_eq!(
-            (loaded.info().system, loaded.info().players),
-            (System::Nds, 1)
-        );
-        assert_eq!(loaded.rom_paths().len(), 2);
-        assert_eq!(loaded.player_rom_paths(), &paths[..1]);
-        assert!(loaded.core.backup_generation(1).is_some(), "the GBA save");
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn games_for_one_system_still_link() {
-        let (dir, paths) = rom_dir(
-            "link",
-            &[("ruby.gba", &gba_rom()), ("sapphire.gba", &gba_rom())],
-        );
-        let loaded = load(&paths, DmgColors::Grey).expect("loads");
-        assert_eq!(
-            (loaded.info().system, loaded.info().players),
-            (System::Gba, 2)
-        );
-        assert_eq!(loaded.player_rom_paths(), &paths[..]);
-        let (dir_mixed, mixed) = rom_dir(
-            "mixed",
-            &[("ruby.gba", &gba_rom()), ("platinum.nds", &nds_rom())],
-        );
-        let error = load(&mixed, DmgColors::Grey)
-            .err()
-            .expect("a GBA game cannot take a DS game");
-        assert!(format!("{error:#}").contains("same system"), "{error:#}");
-        fs::remove_dir_all(&dir).expect("clean up");
-        fs::remove_dir_all(&dir_mixed).expect("clean up");
-    }
-
-    #[test]
-    fn a_3ds_game_with_another_game_is_refused() {
-        let (dir, paths) = rom_dir(
-            "3ds-paired",
-            &[("platinum.nds", &nds_rom()), ("Game.3ds", b"NCSD")],
-        );
-        for paths in [paths.clone(), paths.iter().rev().cloned().collect()] {
-            let error = load(&paths, DmgColors::Grey).err().expect("refused");
-            assert_eq!(
-                format!("{error:#}"),
-                "A 3DS game plays on its own: open it without another game"
-            );
-        }
-        let twice = [paths[1].clone(), paths[1].clone()];
-        assert!(load(&twice, DmgColors::Grey).is_err(), "nor with itself");
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    /// An installable title whose one content, its executable, is
-    /// encrypted with the title key: a header, a TMD signed with RSA-2048,
-    /// and the content.
-    fn encrypted_cia() -> Vec<u8> {
-        let mut cia = vec![0; 0x2040];
-        cia[0..4].copy_from_slice(&0x2020_u32.to_le_bytes());
-        let tmd_size = 0x140 + 0xC4 + 0x900 + 0x30;
-        cia[0x10..0x14].copy_from_slice(&(tmd_size as u32).to_le_bytes());
-        cia[0x18..0x20].copy_from_slice(&0x200_u64.to_le_bytes());
-        cia[0x20] = 0x80; // Content 0 is there.
-        let mut tmd = vec![0; tmd_size];
-        tmd[0..4].copy_from_slice(&0x0001_0004_u32.to_be_bytes());
-        tmd[0x140 + 0x9E..0x140 + 0xA0].copy_from_slice(&1_u16.to_be_bytes());
-        let record = 0x140 + 0xC4 + 0x900;
-        tmd[record + 6..record + 8].copy_from_slice(&1_u16.to_be_bytes());
-        tmd[record + 8..record + 16].copy_from_slice(&0x200_u64.to_be_bytes());
-        cia.extend_from_slice(&tmd);
-        cia.resize(cia.len().next_multiple_of(64) + 0x200, 0x99);
-        cia
-    }
-
-    #[test]
-    fn an_encrypted_cia_is_refused_before_the_core_starts() {
-        let (dir, paths) = rom_dir("3ds-encrypted-cia", &[("Title.cia", &encrypted_cia())]);
-        let error = load(&paths, DmgColors::Grey).err().expect("refused");
-        assert_eq!(
-            format!("{error:#}"),
-            format!(
-                "{} is encrypted: Azahar plays only decrypted games",
-                paths[0].display()
-            )
-        );
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn two_ds_games_link_over_local_wireless() {
-        let (dir, paths) = rom_dir(
-            "wireless",
-            &[("white.nds", &nds_rom()), ("black.nds", &nds_rom())],
-        );
-        let loaded = load(&paths, DmgColors::Grey).expect("loads");
-        assert_eq!(
-            (loaded.info().system, loaded.info().players),
-            (System::Nds, 2)
-        );
-        assert_eq!(loaded.info().screens.len(), 4);
-        assert_eq!(loaded.player_rom_paths(), &paths[..]);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn same_named_games_for_two_systems_keep_saves_of_their_own() {
-        let (dir, paths) = rom_dir(
-            "namesake-roms",
-            &[("pokemon.nds", &nds_rom()), ("pokemon.gba", &gba_rom())],
-        );
-        // The GBA game goes in the DS game's slot, each with its own save.
-        let loaded = load(&paths, DmgColors::Grey).expect("loads");
-        assert!(loaded.core.backup_generation(1).is_some(), "the GBA save");
-        let saves: Vec<PathBuf> = loaded.files().iter().map(GameFiles::backup).collect();
-        assert_eq!(
-            saves,
-            [dir.join("pokemon.nds.sav"), dir.join("pokemon.gba.sav")]
-        );
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn games_that_would_share_a_save_file_are_refused() {
-        let (dir, paths) = rom_dir("shared-save", &[("ruby.gba", &gba_rom())]);
-        let twice = [paths[0].clone(), paths[0].clone()];
-        let error = load(&twice, DmgColors::Grey).err().expect("refused");
-        assert_eq!(
-            format!("{error:#}"),
-            "ruby.gba and ruby.gba would both save to ruby.sav; rename one of them"
-        );
-        assert!(!dir.join("ruby.sav").exists());
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    /// A core with a one-byte battery save at address 0 and a byte of
-    /// other progress at address 1, both kept in its save states. Each
-    /// frame adds `tick` to the save, and panics once it reaches
-    /// `crash_at`.
-    struct Cart {
-        save: u8,
-        progress: u8,
-        generation: u64,
-        tick: u8,
-        crash_at: Option<u8>,
-        frames: [Frame; 1],
-    }
-
-    impl Core for Cart {
-        fn info(&self) -> CoreInfo {
-            CoreInfo {
-                system: System::Gba,
-                screens: &SCREENS,
-                touch_screen: None,
-                players: 1,
-                frame_rate: FrameRate::new(1000, 1),
-                audio_sample_rate: 48_000,
-                state_version: 1,
-            }
-        }
-
-        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {
-            if self.tick > 0 {
-                self.save = self.save.wrapping_add(self.tick);
-                self.generation += 1;
-            }
-            if self.crash_at == Some(self.save) {
-                panic!("the cartridge caught fire");
-            }
-        }
-
-        fn screens(&self) -> &[Frame] {
-            &self.frames
-        }
-
-        fn reset(&mut self) {}
-
-        fn save_state(&self, out: &mut Vec<u8>) {
-            out.extend_from_slice(&[self.save, self.progress]);
-        }
-
-        fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-            let [save, progress]: [u8; 2] = state.try_into().map_err(|_| StateError::Truncated)?;
-            self.save = save;
-            self.progress = progress;
-            // As the real cores do, so the loaded save gets written.
-            self.generation += 1;
-            Ok(())
-        }
-
-        fn backup_generation(&self, cartridge: usize) -> Option<u64> {
-            (cartridge == 0).then_some(self.generation)
-        }
-
-        fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
-            if cartridge == 0 {
-                out.push(self.save);
-            }
-        }
-
-        fn peek(&self, _: usize, address: u32) -> Option<u8> {
-            match address {
-                0 => Some(self.save),
-                1 => Some(self.progress),
-                _ => None,
-            }
-        }
-
-        fn poke(&mut self, _: usize, address: u32, value: u8) -> bool {
-            match address {
-                0 => {
-                    self.save = value;
-                    self.generation += 1;
-                }
-                1 => self.progress = value,
-                _ => return false,
-            }
-            true
-        }
-
-        fn debugger(&mut self) -> Option<&mut dyn Debugger> {
-            Some(self)
-        }
-    }
-
-    peek_debugger!(Cart);
-
-    /// Starts a [`Cart`] for the ROM `dir/game.gba`, with `save` as its
-    /// battery save, as if read from disk.
-    fn start_cart(
-        dir: &Path,
-        save: u8,
-        tick: u8,
-        crash_at: Option<u8>,
-    ) -> (Emulator, async_channel::Receiver<Event>) {
-        let loaded = Loaded {
-            core: Box::new(Cart {
-                save,
-                progress: 0,
-                generation: 0,
-                tick,
-                crash_at,
-                frames: [Frame::new(SCREENS[0])],
-            }),
-            files: vec![GameFiles::of(&dir.join("game.gba"))],
-            rom_paths: vec![dir.join("game.gba")],
-            rom_crc32: 0,
-            live_sound: None,
-            own_saves: OwnSaves::None,
-        };
-        let (events, receiver) = async_channel::unbounded();
-        (Emulator::start(loaded, events, None), receiver)
-    }
-
-    /// Writes `value` at `address` in a [`Cart`], as its game would.
-    fn poke(emulator: &Emulator, address: u32, value: u8) {
-        debug(
-            emulator,
-            debugger::Command::Write {
-                cpu: 0,
-                address,
-                value,
-            },
-        );
-    }
-
-    /// A [`Cart`]'s battery save and other progress, as the debugger
-    /// shows them after the commands sent so far.
-    fn cart_bytes(emulator: &Emulator) -> (u8, u8) {
-        watch_memory(emulator, 0);
-        let shown = wait_for(emulator, |shown| shown.memory[0].is_some());
-        (
-            shown.memory[0].expect("the save"),
-            shown.memory[1].expect("the progress"),
-        )
-    }
-
-    /// Waits for `expected`.
-    fn wait_for_event(events: &async_channel::Receiver<Event>, expected: &Event) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match events.try_recv() {
-                Ok(event) if event == *expected => return,
-                Ok(_) => {}
-                Err(_) => {
-                    assert!(Instant::now() < deadline, "no {expected:?}");
-                    thread::sleep(Duration::from_millis(1));
-                }
-            }
-        }
-    }
-
-    /// A fresh, empty folder for `test`.
-    fn empty_dir(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("emu-app-{test}-{}", std::process::id()));
-        fs::remove_dir_all(&dir).ok();
-        fs::create_dir_all(&dir).expect("temp dir");
-        dir
-    }
-
-    /// Plays to battery save 1 and progress 7, then leaves a checkpoint
-    /// there.
-    fn leave_checkpoint(dir: &Path) {
-        let (emulator, _events) = start_cart(dir, 0, 0, None);
-        poke(&emulator, 0, 1);
-        poke(&emulator, 1, 7);
-        emulator.send(Command::SaveCheckpoint(0));
-        drop(emulator);
-        assert_eq!(fs::read(dir.join("game.sav")).expect("saved"), [1]);
-    }
-
-    #[test]
-    fn a_checkpoint_is_picked_up_with_the_battery_save_it_was_left_with() {
-        let dir = empty_dir("checkpoint-same");
-        leave_checkpoint(&dir);
-        assert!(dir.join("game.ss0.saves").exists());
-        let (emulator, events) = start_cart(&dir, 1, 0, None);
-        emulator.send(Command::LoadCheckpoint(0));
-        wait_for_event(&events, &Event::PickedUp(true));
-        assert_eq!(cart_bytes(&emulator), (1, 7));
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn a_checkpoint_never_rolls_back_a_newer_battery_save() {
-        let dir = empty_dir("checkpoint-newer");
-        let save = dir.join("game.sav");
-        // Left off at 1, then saved in the game at 2 and quit without a
-        // new checkpoint, as after a crash.
-        let (emulator, _events) = start_cart(&dir, 0, 0, None);
-        poke(&emulator, 0, 1);
-        poke(&emulator, 1, 7);
-        emulator.send(Command::SaveCheckpoint(0));
-        poke(&emulator, 0, 2);
-        drop(emulator);
-        assert_eq!(fs::read(&save).expect("saved"), [2]);
-
-        let (emulator, events) = start_cart(&dir, 2, 0, None);
-        emulator.send(Command::LoadCheckpoint(0));
-        wait_for_event(&events, &Event::PickedUp(false));
-        assert_eq!(cart_bytes(&emulator), (2, 0));
-        drop(emulator);
-        assert_eq!(fs::read(&save).expect("kept"), [2]);
-
-        // Nor one copied in from elsewhere.
-        fs::write(&save, [9]).expect("copied in");
-        let (emulator, events) = start_cart(&dir, 9, 0, None);
-        emulator.send(Command::LoadCheckpoint(0));
-        wait_for_event(&events, &Event::PickedUp(false));
-        drop(emulator);
-        assert_eq!(fs::read(&save).expect("kept"), [9]);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn a_checkpoint_from_before_records_is_picked_up_only_with_its_own_save() {
-        let dir = empty_dir("checkpoint-unrecorded");
-        let save = dir.join("game.sav");
-        leave_checkpoint(&dir);
-        fs::remove_file(dir.join("game.ss0.saves")).expect("as older versions left it");
-        let (emulator, events) = start_cart(&dir, 1, 0, None);
-        emulator.send(Command::LoadCheckpoint(0));
-        wait_for_event(&events, &Event::PickedUp(true));
-        assert_eq!(cart_bytes(&emulator), (1, 7));
-        drop(emulator);
-
-        fs::write(&save, [3]).expect("saved since");
-        let (emulator, events) = start_cart(&dir, 3, 0, None);
-        emulator.send(Command::LoadCheckpoint(0));
-        wait_for_event(&events, &Event::PickedUp(false));
-        assert_eq!(cart_bytes(&emulator), (3, 0), "undone");
-        drop(emulator);
-        assert_eq!(fs::read(&save).expect("kept"), [3]);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn an_empty_checkpoint_slot_is_no_matter() {
-        let dir = empty_dir("checkpoint-none");
-        let (emulator, events) = start_cart(&dir, 0, 0, None);
-        emulator.send(Command::LoadCheckpoint(0));
-        emulator.send(Command::TogglePause);
-        wait_for_notice(&events, "Paused");
-        drop(emulator);
-        let said: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
-        assert!(
-            !said
-                .iter()
-                .any(|event| matches!(event, Event::PickedUp(_) | Event::Notice(_))),
-            "{said:?}"
-        );
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    /// A game that saves only when asked, as an RPG Maker game's player
-    /// does: its state is its place, which it will not save while `busy`,
-    /// as in a battle.
-    struct Asked {
-        place: Arc<AtomicU8>,
-        busy: Arc<AtomicBool>,
-        frames: [Frame; 1],
-    }
-
-    impl Core for Asked {
-        fn info(&self) -> CoreInfo {
-            CoreInfo {
-                system: System::RpgMaker,
-                screens: &SCREENS,
-                touch_screen: None,
-                players: 1,
-                frame_rate: FrameRate::new(1000, 1),
-                audio_sample_rate: 48_000,
-                state_version: 1,
-            }
-        }
-
-        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {}
-
-        fn screens(&self) -> &[Frame] {
-            &self.frames
-        }
-
-        fn reset(&mut self) {}
-
-        fn save_state(&self, out: &mut Vec<u8>) {
-            self.try_save_state(out).ok();
-        }
-
-        fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-            let [place]: [u8; 1] = state.try_into().map_err(|_| StateError::Truncated)?;
-            self.place.store(place, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn try_save_state(&self, out: &mut Vec<u8>) -> Result<(), String> {
-            if self.busy.load(Ordering::SeqCst) {
-                return Err("in a battle".to_owned());
-            }
-            out.push(self.place.load(Ordering::SeqCst));
-            Ok(())
-        }
-
-        fn saves_every_frame(&self) -> bool {
-            false
-        }
-    }
-
-    /// An [`Asked`] game in the folder `dir/game` at `place`, which keeps
-    /// the saves it makes itself in `dir/saves`.
-    fn start_asked(
-        dir: &Path,
-        place: u8,
-        busy: bool,
-    ) -> (
-        Emulator,
-        async_channel::Receiver<Event>,
-        Arc<AtomicU8>,
-        Arc<AtomicBool>,
-    ) {
-        let game = dir.join("game");
-        let (place, busy) = (
-            Arc::new(AtomicU8::new(place)),
-            Arc::new(AtomicBool::new(busy)),
-        );
-        let loaded = Loaded {
-            core: Box::new(Asked {
-                place: Arc::clone(&place),
-                busy: Arc::clone(&busy),
-                frames: [Frame::new(SCREENS[0])],
-            }),
-            files: vec![GameFiles::of_folder(&game)],
-            rom_paths: vec![game],
-            rom_crc32: 0,
-            live_sound: None,
-            own_saves: OwnSaves::RpgMaker(rpg_maker::SaveFolders::new(vec![dir.join("saves")])),
-        };
-        let (events, receiver) = async_channel::unbounded();
-        (Emulator::start(loaded, events, None), receiver, place, busy)
-    }
-
-    /// Starts an [`Asked`] game at place 0 and picks up its checkpoint,
-    /// returning whether it was picked up and the place it is at then.
-    fn pick_up_asked(dir: &Path) -> (bool, u8) {
-        let (emulator, events, place, _) = start_asked(dir, 0, false);
-        emulator.send(Command::LoadCheckpoint(CHECKPOINT));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let picked = loop {
-            match events.try_recv() {
-                Ok(Event::PickedUp(picked)) => break picked,
-                Ok(_) => {}
-                Err(_) => {
-                    assert!(Instant::now() < deadline, "never picked up");
-                    thread::sleep(Duration::from_millis(1));
-                }
-            }
-        };
-        drop(emulator);
-        (picked, place.load(Ordering::SeqCst))
-    }
-
-    #[test]
-    fn a_game_that_saves_only_when_asked_is_picked_up_where_it_was_left() {
-        let dir = empty_dir("checkpoint-asked");
-        fs::create_dir_all(dir.join("saves")).expect("save folder");
-        fs::write(dir.join("saves/Game.rxdata"), b"saved in the game").expect("own save");
-        let (emulator, _events, _, _) = start_asked(&dir, 5, false);
-        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
-        drop(emulator);
-        assert!(dir.join("game.ss0").exists(), "the checkpoint");
-        let record = fs::read_to_string(dir.join("game.ss0.saves")).expect("its record");
-        assert!(record.contains("Game.rxdata "), "{record}");
-        assert_eq!(pick_up_asked(&dir), (true, 5));
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn a_game_that_saves_only_when_asked_is_never_picked_up_over_a_save_it_made_since() {
-        let dir = empty_dir("checkpoint-asked-newer");
-        let saves = dir.join("saves");
-        fs::create_dir_all(&saves).expect("save folder");
-        fs::write(saves.join("Game.rxdata"), b"first").expect("own save");
-        let (emulator, _events, _, _) = start_asked(&dir, 5, false);
-        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
-        drop(emulator);
-        // Saved in the game since, as before a crash, or playing it on its
-        // own.
-        fs::write(saves.join("Game.rxdata"), b"second").expect("saved again");
-        assert_eq!(pick_up_asked(&dir), (false, 0));
-        // A save file of another name counts too.
-        fs::write(saves.join("Game.rxdata"), b"first").expect("as it was");
-        assert_eq!(pick_up_asked(&dir), (true, 5));
-        fs::write(saves.join("Save2.rxdata"), b"another").expect("another save");
-        assert_eq!(pick_up_asked(&dir), (false, 0));
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn a_game_that_cannot_be_saved_now_keeps_the_checkpoint_before() {
-        let dir = empty_dir("checkpoint-asked-busy");
-        let (emulator, events, place, busy) = start_asked(&dir, 5, false);
-        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
-        // Its record is written last.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !dir.join("game.ss0.saves").exists() {
-            assert!(Instant::now() < deadline, "no checkpoint");
-            thread::sleep(Duration::from_millis(1));
-        }
-        place.store(6, Ordering::SeqCst);
-        busy.store(true, Ordering::SeqCst);
-        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
-        let said = wait_for_notice(&events, "Could not save where you left off");
-        assert!(said.ends_with("in a battle"), "{said}");
-        drop(emulator);
-        assert_eq!(pick_up_asked(&dir), (true, 5));
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn a_game_that_saves_only_when_asked_with_no_record_is_left_alone() {
-        let dir = empty_dir("checkpoint-asked-unrecorded");
-        let (emulator, _events, _, _) = start_asked(&dir, 5, false);
-        emulator.send(Command::SaveCheckpoint(CHECKPOINT));
-        drop(emulator);
-        fs::remove_file(dir.join("game.ss0.saves")).expect("no record");
-        let (emulator, events, place, _) = start_asked(&dir, 0, false);
-        emulator.send(Command::LoadCheckpoint(CHECKPOINT));
-        emulator.send(Command::TogglePause);
-        wait_for_notice(&events, "Paused");
-        drop(emulator);
-        let said: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
-        assert!(
-            !said.iter().any(|event| matches!(event, Event::PickedUp(_))),
-            "{said:?}"
-        );
-        assert_eq!(place.load(Ordering::SeqCst), 0);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn pausing_writes_the_battery_save() {
-        let dir = empty_dir("pause-flush");
-        let (emulator, events) = start_cart(&dir, 0, 1, None);
-        thread::sleep(Duration::from_millis(20));
-        emulator.send(Command::TogglePause);
-        wait_for_notice(&events, "Paused");
-        // Well before the timed flush, which never comes while paused.
-        let (save, _) = cart_bytes(&emulator);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while fs::read(dir.join("game.sav")).ok() != Some(vec![save]) {
-            assert!(Instant::now() < deadline, "the save was not written");
-            thread::sleep(Duration::from_millis(1));
-        }
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    /// Waits for the emulation thread to say it stopped, returning what
-    /// it said.
-    fn wait_for_stopped(events: &async_channel::Receiver<Event>) -> String {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match events.try_recv() {
-                Ok(Event::Stopped(text)) => return text,
-                Ok(_) => {}
-                Err(_) => {
-                    assert!(Instant::now() < deadline, "never said it stopped");
-                    thread::sleep(Duration::from_millis(1));
-                }
-            }
-        }
-    }
-
-    /// Makes writing `save` fail, as a full or locked disk would, while
-    /// other files in its folder can still be written.
-    fn block(save: &Path) -> PathBuf {
-        let mut temporary = save.as_os_str().to_owned();
-        temporary.push(".tmp");
-        let temporary = PathBuf::from(temporary);
-        fs::create_dir(&temporary).expect("in the way");
-        temporary
-    }
-
-    #[test]
-    fn a_panic_keeps_the_battery_save_and_says_the_game_stopped() {
-        let dir = empty_dir("panic");
-        let (emulator, events) = start_cart(&dir, 0, 1, Some(5));
-        let said = wait_for_stopped(&events);
-        assert!(said.contains("the cartridge caught fire"), "{said}");
-        assert!(said.contains("are kept"), "{said}");
-        assert_eq!(fs::read(dir.join("game.sav")).expect("written"), [5]);
-        // The handle still stops cleanly.
-        emulator.send(Command::TogglePause);
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn a_panic_says_so_when_the_battery_save_could_not_be_written() {
-        let dir = empty_dir("panic-unsaved");
-        block(&dir.join("game.sav"));
-        let (emulator, events) = start_cart(&dir, 0, 1, Some(5));
-        let said = wait_for_stopped(&events);
-        assert!(said.contains("may be lost"), "{said}");
-        drop(emulator);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn no_checkpoint_is_left_while_its_battery_save_cannot_be_written() {
-        let dir = empty_dir("checkpoint-unsaved");
-        let (state, record) = (dir.join("game.ss0"), dir.join("game.ss0.saves"));
-        let (emulator, events) = start_cart(&dir, 0, 0, None);
-        poke(&emulator, 0, 1);
-        let in_the_way = block(&dir.join("game.sav"));
-        emulator.send(Command::SaveCheckpoint(0));
-        wait_for_notice(&events, "Could not save where you left off");
-        assert!(!state.exists() && !record.exists());
-        // Once the save can be written, so can the checkpoint.
-        fs::remove_dir(&in_the_way).expect("out of the way");
-        emulator.send(Command::SaveCheckpoint(0));
-        drop(emulator);
-        assert!(state.exists() && record.exists());
-        assert_eq!(fs::read(dir.join("game.sav")).expect("written"), [1]);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn a_session_keeps_the_file_names_it_started_with() {
-        let (dir, paths) = rom_dir("names-kept", &[("solo.gba", &gba_rom())]);
-        let loaded = load(&paths, DmgColors::Grey).expect("loads");
-        let (events, _events) = async_channel::unbounded();
-        let emulator = Emulator::start(loaded, events, None);
-        // A namesake arrives mid-game; this game's files stay as named.
-        fs::write(dir.join("solo.nds"), nds_rom()).expect("written");
-        emulator.send(Command::SaveCheckpoint(0));
-        drop(emulator);
-        assert!(dir.join("solo.ss0").exists());
-        assert!(dir.join("solo.ss0.saves").exists());
-        assert!(!dir.join("solo.gba.ss0").exists());
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-}
+mod tests;

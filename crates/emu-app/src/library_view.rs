@@ -48,7 +48,7 @@ use crate::probe;
 use crate::randomizer;
 use crate::rom_info::{self, Platform};
 use crate::romhack::{self, MakeError};
-use crate::slots::STATE_SLOTS;
+use crate::slots::{LAST_FILE_SLOT, STATE_SLOTS};
 use crate::store_view::{StoreEvent, StoreView, platform_name, pulse};
 use crate::ui::{self, Section};
 
@@ -190,6 +190,8 @@ struct Facts {
     saved: Option<SystemTime>,
     /// How many of its save-state slots hold a state.
     states: usize,
+    /// How many of the slots only a script saves to hold a state.
+    script_states: usize,
     /// Whether the randomizer can make a randomized copy of it.
     randomizable: bool,
 }
@@ -270,6 +272,13 @@ pub struct LibraryView {
     library: Library,
     /// Where the library is saved, if there is a config folder.
     path: Option<PathBuf>,
+    /// The games the library file held when this copy of the app last read
+    /// or wrote it, by path: one it holds beyond these, another copy
+    /// added.
+    on_disk: HashSet<PathBuf>,
+    /// The games the player has been told the file cannot hold, by path,
+    /// so each is said once.
+    told_left_out: HashSet<PathBuf>,
     /// Where box art is kept, if there is a cache folder.
     cache: Option<PathBuf>,
     /// Each game's pictures and when it was played, by its path.
@@ -347,6 +356,8 @@ impl LibraryView {
             })
             .detach();
         let mut view = Self {
+            on_disk: library.paths(),
+            told_left_out: HashSet::new(),
             library,
             path,
             cache: boxart::cache_dir(),
@@ -866,13 +877,25 @@ impl LibraryView {
         }
     }
 
+    /// Writes the library to its file, keeping the games another copy of
+    /// the app added to it meanwhile, which then show here too.
     fn save(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.path else {
             return;
         };
-        if let Err(error) = self.library.save(path) {
-            let message = format!("Cannot save the library to {}: {error}", path.display());
-            cx.emit(LibraryEvent::Notice(message));
+        match self.library.save_keeping(path, &mut self.on_disk) {
+            Ok(0) => {}
+            Ok(_) => {
+                self.refresh(cx);
+                cx.notify();
+            }
+            Err(error) => {
+                let message = format!("Cannot save the library to {}: {error}", path.display());
+                cx.emit(LibraryEvent::Notice(message));
+            }
+        }
+        for notice in left_out_notices(&self.library, &mut self.told_left_out) {
+            cx.emit(LibraryEvent::Notice(notice));
         }
     }
 
@@ -1785,10 +1808,7 @@ impl LibraryView {
         if game.platform != Platform::RpgMaker {
             lines.push((
                 "Save states",
-                read(|facts| match facts.states {
-                    0 => "None".to_owned(),
-                    states => format!("{states} of {STATE_SLOTS}"),
-                }),
+                read(|facts| states_line(facts.states, facts.script_states)),
                 TEXT,
             ));
         }
@@ -2153,15 +2173,21 @@ fn cached_pictures(cache: Option<&Path>, game: &Game) -> Pictures {
 }
 
 /// The pictures of `game` on disk, with `cache` holding its box art and
-/// icon, and when it was last played.
+/// icon, and when it was last played: the time of its checkpoint or of
+/// the picture beside it, whichever is newer. A DS game played with a GBA
+/// cartridge in keeps that session's checkpoint under another name, and
+/// leaves only its picture here (see `persist::StateFiles`).
 fn pictures_on_disk(cache: Option<&Path>, game: &Game) -> Pictures {
     let Pictures { art, icon, .. } = cached_pictures(cache, game);
     let checkpoint = library::checkpoint_path(game);
-    let played = fs::metadata(&checkpoint)
-        .and_then(|metadata| metadata.modified())
-        .ok();
+    let picture = persist::state_picture_path(&checkpoint);
+    let modified = |path: &Path| {
+        let metadata = fs::metadata(path);
+        metadata.and_then(|metadata| metadata.modified()).ok()
+    };
+    let played = modified(&checkpoint).max(modified(&picture));
     let left_at = played
-        .and_then(|_| fs::read(persist::state_picture_path(&checkpoint)).ok())
+        .and_then(|_| fs::read(&picture).ok())
         .map(|bytes| Arc::new(gpui::Image::from_bytes(ImageFormat::Png, bytes)));
     Pictures {
         art,
@@ -2528,6 +2554,34 @@ fn thumbnail(game: &Game, pictures: &Pictures, side: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// How many save states a game has, for its menu: `states` in the slots
+/// the player chooses, and `script_states` in those only a script saves
+/// to.
+fn states_line(states: usize, script_states: usize) -> String {
+    match (states, script_states) {
+        (0, 0) => "None".to_owned(),
+        (states, 0) => format!("{states} of {STATE_SLOTS}"),
+        (0, scripts) => format!("{scripts} from scripts"),
+        (states, scripts) => format!("{states} of {STATE_SLOTS}, and {scripts} from scripts"),
+    }
+}
+
+/// What to tell the player of the games in `library` that its file cannot
+/// hold, which `told` does not have yet: each is said once, and `told`
+/// then has it.
+fn left_out_notices(library: &Library, told: &mut HashSet<PathBuf>) -> Vec<String> {
+    library
+        .left_out()
+        .filter(|game| told.insert(game.path.clone()))
+        .map(|game| {
+            format!(
+                "{} plays, but will not be in the library next time: its file's name is not valid Unicode. Rename the file to keep it.",
+                game.title
+            )
+        })
+        .collect()
+}
+
 /// What `game`'s files say of it: whether its ROM or folder is there, its
 /// size, when its battery save was written and how many save states it
 /// has.
@@ -2551,14 +2605,17 @@ fn read_facts(game: &Game) -> Facts {
     let saved = fs::metadata(files.backup())
         .and_then(|metadata| metadata.modified())
         .ok();
-    let states = (1..=STATE_SLOTS)
-        .filter(|&slot| files.state(slot, false).is_file())
-        .count();
+    let held = |slots: std::ops::RangeInclusive<u8>| {
+        slots
+            .filter(|&slot| files.state(slot, false).is_file())
+            .count()
+    };
     Facts {
         found: true,
         size,
         saved,
-        states,
+        states: held(1..=STATE_SLOTS),
+        script_states: held(STATE_SLOTS + 1..=LAST_FILE_SLOT),
         randomizable: randomizer::generation(&game.path).is_some(),
     }
 }
@@ -2633,6 +2690,29 @@ fn position(shown: &[&Game], selected: Option<&Path>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_game_the_library_file_cannot_hold_is_said_once() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/games/Pok\xE9mon Fan Game".to_vec(),
+        ));
+        let mut library = Library::default();
+        library.add(Game::rpg_maker(Path::new("/games/Uranium"), None));
+        let mut told = HashSet::new();
+        assert!(left_out_notices(&library, &mut told).is_empty());
+        library.add(Game::rpg_maker(&odd, Some("Fan Game".to_owned())));
+        assert_eq!(
+            left_out_notices(&library, &mut told),
+            [
+                "Fan Game plays, but will not be in the library next time: its file's name is not valid Unicode. Rename the file to keep it."
+            ]
+        );
+        // Every later save says nothing more of it.
+        assert!(left_out_notices(&library, &mut told).is_empty());
+    }
 
     #[test]
     fn the_game_menus_words_read_on_its_surface() {
@@ -2732,6 +2812,20 @@ mod tests {
         // Without a cache folder, the game still has where it was left.
         let pictures = pictures_on_disk(None, &game);
         assert!(pictures.art.is_none() && pictures.left_at.is_some());
+
+        // A DS game played only with a GBA cartridge in: that session's
+        // checkpoint has another name, and its picture is left here.
+        let info = rom_info::RomInfo {
+            platform: rom_info::Platform::Nds,
+            ..info
+        };
+        let slotted = Game::new(&dir.join("Platinum.nds"), &info);
+        assert!(pictures_on_disk(None, &slotted).played.is_none());
+        fs::write(dir.join("Platinum.Emerald.ss0"), b"state").expect("checkpoint");
+        fs::write(dir.join("Platinum.ss0.png"), png).expect("picture");
+        let pictures = pictures_on_disk(None, &slotted);
+        assert!(pictures.played.is_some(), "last played with the cartridge");
+        assert!(pictures.left_at.is_some());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -2798,6 +2892,16 @@ mod tests {
         assert!(facts.saved.is_some());
         assert_eq!(facts.states, 2);
         assert!(!facts.randomizable, "not a Pokémon game");
+        // States a script saved, in slots past the player's, count apart.
+        assert_eq!(facts.script_states, 0);
+        fs::write(dir.join("Golden Sun.ss5"), [0; 8]).expect("state");
+        fs::write(dir.join("Golden Sun.ss9"), [0; 8]).expect("state");
+        let facts = read_facts(&game);
+        assert_eq!((facts.states, facts.script_states), (2, 2));
+        assert_eq!(states_line(0, 0), "None");
+        assert_eq!(states_line(2, 0), "2 of 4");
+        assert_eq!(states_line(2, 2), "2 of 4, and 2 from scripts");
+        assert_eq!(states_line(0, 1), "1 from scripts");
 
         // FireRed's game code says the randomizer knows it.
         let mut fire_red = vec![0; 2048];

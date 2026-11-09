@@ -10,9 +10,9 @@
 //!   it needs at least two device pixels per console pixel to show.
 //! - **Pixel-art scalers** (Scale2x, Scale3x) round off the staircase edges
 //!   of sprites and text at two or three times the size. They stand in for
-//!   the Pixel Art upscaler on a Mac without Metal. They work on console
-//!   pixels, so they skip frames already enlarged by DS 3D upscaling,
-//!   whose 3D is smooth anyway.
+//!   the Rounded Pixels upscaler on a Mac without Metal. They work on
+//!   console pixels, so they skip frames already enlarged by DS 3D
+//!   upscaling, whose 3D is smooth anyway.
 //!
 //! Scale2x and Scale3x are written here from their published rules; the
 //! reference code is GPL, which the project does not reuse (PRD section 9).

@@ -10,4 +10,5 @@ Categories=Game;Emulator;
 Keywords=Game Boy;Game Boy Color;Game Boy Advance;GBA;Nintendo DS;NDS;3DS;homebrew;emulator;
 MimeType=application/x-gameboy-rom;application/x-gameboy-color-rom;application/x-gba-rom;application/x-nintendo-ds-rom;application/x-nintendo-3ds-rom;application/x-nintendo-3ds-executable;
 StartupWMClass=ds-emulator
+SingleMainWindow=true
 StartupNotify=true

@@ -433,7 +433,9 @@ impl SettingsWindow {
                 self.openrouter
                     .update(cx, |openrouter, cx| openrouter.disconnect(cx));
             }
-            Account::ManageKeys => cx.open_url(openrouter::KEYS_PAGE),
+            Account::ManageKeys => {
+                crate::links::open_web_url(cx, openrouter::KEYS_PAGE);
+            }
         }
     }
 
