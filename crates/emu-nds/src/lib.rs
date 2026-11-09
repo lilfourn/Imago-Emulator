@@ -73,6 +73,48 @@ pub const INFO: CoreInfo = CoreInfo {
 pub struct Nds {
     machine: Machine,
     screens: [Frame; 2],
+    bios: Bios,
+}
+
+/// The BIOS a session has: the emulated one, always, and the user's dumps
+/// if `Media` held both.
+///
+/// The session decides which a machine powers on and resets with: the
+/// dumps if it has them. A save state decides nothing, but it is of a
+/// machine that ran one way, part-way through whatever it was doing: a
+/// CPU may be inside a BIOS routine or an interrupt it will return from
+/// to an address in the image it had. So a loaded state runs with the
+/// images it was made with ([`Nds::install`]), and one made with dumps is
+/// refused where there are none ([`Nds::check_state`]).
+#[derive(Debug)]
+struct Bios {
+    /// The emulated BIOS's images, the ARM9's and the ARM7's, whose
+    /// system calls the machine catches and runs itself.
+    emulated: [Box<[u8]>; 2],
+    /// The user's dumps.
+    dumps: Option<[Box<[u8]>; 2]>,
+}
+
+impl Bios {
+    /// Whether the session emulates BIOS calls: it has no dumps.
+    fn emulated(&self) -> bool {
+        self.dumps.is_none()
+    }
+
+    /// The images a machine runs when BIOS calls are `emulated`, or from
+    /// the dumps: `None` for dumps the session does not have.
+    fn images(&self, emulated: bool) -> Option<[Box<[u8]>; 2]> {
+        if emulated {
+            Some(self.emulated.clone())
+        } else {
+            self.dumps.clone()
+        }
+    }
+
+    /// The images the session powers on and resets with.
+    fn session(&self) -> [Box<[u8]>; 2] {
+        self.dumps.as_ref().unwrap_or(&self.emulated).clone()
+    }
 }
 
 impl Nds {
@@ -81,7 +123,10 @@ impl Nds {
     /// GBA game and its save.
     ///
     /// The BIOS is emulated unless `media` holds both the ARM9 (4 KiB) and
-    /// ARM7 (16 KiB) BIOS dumps.
+    /// ARM7 (16 KiB) BIOS dumps. That holds for the session: at power-on
+    /// and at every reset. A save state made without dumps keeps its BIOS
+    /// calls emulated wherever it is loaded, and one made with dumps
+    /// loads only where there are dumps.
     ///
     /// # Errors
     ///
@@ -120,17 +165,18 @@ impl Nds {
                     .system_file(SystemFileKind::NdsBios7)
                     .filter(|bios| bios.len() == 0x4000),
             );
-        let hle_bios = dumps.is_none();
-        let (mut arm9_bios, arm7_bios) = dumps.map_or_else(
-            || (bios::arm9_image(), bios::arm7_image()),
-            |(arm9, arm7)| (arm9.into(), arm7.into()),
-        );
         let mut gba_slot = GbaSlot::new(media.second_slot.map(|cartridge| {
             GbaCartridge::new(cartridge.rom.into(), cartridge.backup, media.start_time)
         }));
-        if hle_bios && let Some(logo) = gba_slot.bios_logo() {
-            arm9_bios[gba_slot::BIOS_LOGO].copy_from_slice(&logo);
+        let mut emulated = [bios::arm9_image(), bios::arm7_image()];
+        if let Some(logo) = gba_slot.bios_logo() {
+            emulated[0][gba_slot::BIOS_LOGO].copy_from_slice(&logo);
         }
+        let bios = Bios {
+            emulated,
+            dumps: dumps.map(|(arm9, arm7)| [arm9.into(), arm7.into()]),
+        };
+        let [arm9_bios, arm7_bios] = bios.session();
         let mut hw = Hardware::new(arm9_bios, arm7_bios);
         hw.cart = Cart::new(media.rom.into(), media.backup);
         hw.gba_slot = gba_slot;
@@ -138,8 +184,9 @@ impl Nds {
         hw.wifi = Wifi::new(hw.spi.wifi_settings());
         hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
-            machine: Machine::boot(hw, hle_bios),
+            machine: Machine::boot(hw, bios.emulated()),
             screens: [Frame::new(SCREEN), Frame::new(SCREEN)],
+            bios,
         })
     }
 
@@ -276,21 +323,39 @@ impl Nds {
 
     /// Whether a saved `machine` is one the DS could have left and fits
     /// this session. Leaves it ready to install ([`Machine::settle`]).
+    ///
+    /// A state made with BIOS dumps does not fit a session without them:
+    /// its CPUs may be part-way through the BIOS's own code, which is not
+    /// here to run. (The other way round fits: see [`Nds::install`].)
     fn check_state(&self, machine: &mut Machine) -> Result<(), StateError> {
         machine.settle()?;
-        if machine.hw.gba_slot.is_occupied() == self.machine.hw.gba_slot.is_occupied() {
-            Ok(())
-        } else {
-            Err(StateError::Malformed(
-                "the state's GBA slot does not match this session's",
-            ))
-        }
+        payload::check(
+            machine.hw.gba_slot.is_occupied() == self.machine.hw.gba_slot.is_occupied(),
+            "the state's GBA slot does not match this session's",
+        )?;
+        payload::check(
+            machine.hle_bios || self.bios.dumps.is_some(),
+            "the state was made with BIOS dumps, which this session does not have: \
+             add the BIOS files to load it",
+        )
     }
 
     /// Replaces the machine with a saved one that [`Nds::check_state`]
     /// accepted, keeping the media and display settings.
+    ///
+    /// The machine runs with the BIOS images it was made with, whichever
+    /// the session powers on with, so the flag that says its BIOS calls
+    /// are emulated and the images it runs always go together: a state
+    /// made without dumps goes on with its calls emulated where there are
+    /// dumps too, until a reset.
     fn install(&mut self, mut machine: Machine) {
         machine.hw.take_media_from(&mut self.machine.hw);
+        if machine.hle_bios != self.machine.hle_bios
+            && let Some([arm9, arm7]) = self.bios.images(machine.hle_bios)
+        {
+            machine.hw.arm9_bios = arm9;
+            machine.hw.arm7_bios = arm7;
+        }
         machine.hw.take_display_from(&mut self.machine.hw);
         self.machine = machine;
         // The rendered 3D image is not saved.
@@ -370,11 +435,10 @@ impl Core for Nds {
 
     fn reset(&mut self) {
         // The cartridges (with their saves), firmware and clock carry over.
+        // The BIOS is the session's, whatever a loaded state ran with.
         let old = &mut self.machine.hw;
-        let mut hw = Hardware::new(
-            std::mem::take(&mut old.arm9_bios),
-            std::mem::take(&mut old.arm7_bios),
-        );
+        let [arm9_bios, arm7_bios] = self.bios.session();
+        let mut hw = Hardware::new(arm9_bios, arm7_bios);
         let now = old.scheduler.now();
         std::mem::swap(&mut hw.cart, &mut old.cart);
         std::mem::swap(&mut hw.spi, &mut old.spi);
@@ -384,7 +448,7 @@ impl Core for Nds {
         hw.rtc.restart_cycles(now);
         hw.gba_slot.restart_cycles(now);
         hw.take_display_from(old);
-        self.machine = Machine::boot(hw, self.machine.hle_bios);
+        self.machine = Machine::boot(hw, self.bios.emulated());
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
@@ -784,6 +848,117 @@ mod tests {
             ));
         }
         mutation::sweep(machines).assert_no_panics();
+    }
+
+    /// A cartridge whose ARM9 divides 100 by 7 with the BIOS (SWI 09h)
+    /// and stores the quotient at 0x02000000, then loops. The ARM7 loops.
+    fn rom_that_divides() -> Vec<u8> {
+        let mut rom = vec![0; 0x400];
+        let mut put = |offset: usize, value: u32| {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        for (header, at, base) in [(0x20, 0x200, 0x0200_4000), (0x30, 0x300, 0x0238_0000)] {
+            put(header, at as u32);
+            put(header + 4, base);
+            put(header + 8, base);
+            put(header + 12, 0x18);
+        }
+        let program = [
+            0xE3A0_0064, // MOV R0, #100
+            0xE3A0_1007, // MOV R1, #7
+            0xEF09_0000, // SWI 09h  (Div)
+            0xE3A0_2402, // MOV R2, #0x02000000
+            0xE582_0000, // STR R0, [R2]
+            0xEAFF_FFFE, // B .
+        ];
+        for (index, word) in program.into_iter().enumerate() {
+            put(0x200 + index * 4, word);
+        }
+        put(0x300, 0xEAFF_FFFE); // B .
+        rom
+    }
+
+    /// BIOS dumps that are not Nintendo's: every vector returns at once,
+    /// so a system call does nothing.
+    fn dumps() -> (Vec<u8>, Vec<u8>) {
+        let image = |size: usize| {
+            let mut image = vec![0; size];
+            for vector in (0..0x20).step_by(4) {
+                // MOVS PC, LR
+                image[vector..vector + 4].copy_from_slice(&0xE1B0_F00Eu32.to_le_bytes());
+            }
+            image
+        };
+        (image(0x1000), image(0x4000))
+    }
+
+    /// A DS playing `rom`, with `dumps` as its BIOS if given.
+    fn nds_with(rom: &[u8], dumps: Option<&(Vec<u8>, Vec<u8>)>) -> Nds {
+        let files: Vec<emu_core::SystemFile<'_>> = dumps
+            .iter()
+            .flat_map(|(arm9, arm7)| {
+                [
+                    (SystemFileKind::NdsBios9, arm9),
+                    (SystemFileKind::NdsBios7, arm7),
+                ]
+            })
+            .map(|(kind, data)| emu_core::SystemFile { kind, data })
+            .collect();
+        Nds::new(&Media {
+            system_files: &files,
+            ..Media::new(rom)
+        })
+        .expect("valid header")
+    }
+
+    /// The quotient [`rom_that_divides`] stored after one frame: 14 where
+    /// the BIOS call was emulated, 100 where [`dumps`] did nothing.
+    fn quotient(nds: &mut Nds) -> u32 {
+        nds.run_frame(&[Input::default()], &mut Vec::new());
+        u32::from_le_bytes([0, 1, 2, 3].map(|byte| nds.peek(0, 0x0200_0000 + byte).unwrap_or(0)))
+    }
+
+    /// The flag that says BIOS calls are emulated came from the state and
+    /// the images from the session: a state made without dumps kept
+    /// trapping calls over the user's BIOS, for good, and one made with
+    /// dumps ran the emulated BIOS's empty vectors.
+    #[test]
+    fn the_session_decides_the_bios_and_a_state_keeps_the_one_it_was_made_with() {
+        let rom = rom_that_divides();
+        let dumps = dumps();
+        let mut emulating = nds_with(&rom, None);
+        let mut with_dumps = nds_with(&rom, Some(&dumps));
+        // Each one's state at power-on, before the call.
+        let (mut emulated_state, mut dump_state) = (Vec::new(), Vec::new());
+        emulating.save_state(&mut emulated_state);
+        with_dumps.save_state(&mut dump_state);
+        assert_eq!(quotient(&mut emulating), 14);
+        assert_eq!(quotient(&mut with_dumps), 100);
+
+        // A state made without dumps loads where there are dumps, and its
+        // calls are still emulated, by the emulated BIOS's own images.
+        with_dumps.load_state(&emulated_state).expect("loads");
+        assert_eq!(quotient(&mut with_dumps), 14);
+        // The machine is still one whose calls are emulated, as a state
+        // saved from it will say.
+        assert!(with_dumps.machine.hle_bios);
+        // A reset goes back to the session's BIOS: the dumps.
+        with_dumps.reset();
+        assert!(!with_dumps.machine.hle_bios);
+        assert_eq!(quotient(&mut with_dumps), 100);
+        // And its own states still load.
+        with_dumps.load_state(&dump_state).expect("loads");
+        assert_eq!(quotient(&mut with_dumps), 100);
+
+        // A state made with dumps is refused where there are none, and
+        // says why; the session carries on as it was.
+        let refused = emulating.load_state(&dump_state);
+        let Err(StateError::Malformed(why)) = refused else {
+            panic!("{refused:?}");
+        };
+        assert!(why.contains("BIOS dumps"), "{why}");
+        emulating.reset();
+        assert_eq!(quotient(&mut emulating), 14);
     }
 
     /// A halfword through [`Core::peek`].

@@ -47,6 +47,9 @@ pub(crate) struct Machine {
     pub(crate) arm7: Cpu,
     pub(crate) hw: Hardware,
     /// System calls are emulated in Rust rather than run from BIOS dumps.
+    /// It goes with the BIOS images in `hw`, which states leave out: the
+    /// core gives a loaded machine the images its flag asks for
+    /// (`Nds::install`).
     pub(crate) hle_bios: bool,
     /// Emulated BIOS calls waiting for a game function they called to
     /// return, per CPU (ARM9, ARM7), the innermost last.
