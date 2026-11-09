@@ -26,7 +26,8 @@
 //! Battery saves are copied here once a second while they change, and on
 //! pausing, and written to disk on a thread of their own (see
 //! `save_writer.rs`). Should the emulation thread panic, it still writes
-//! them, and tells the UI the game has stopped.
+//! them, and tells the UI the game has stopped. They, the save states and
+//! the checkpoint are kept by [`saves::Saves`].
 //!
 //! Each game's checkpoint, a save state in slot [`CHECKPOINT`], keeps where
 //! the player left it, with a record of the saves the game had then: the
@@ -64,12 +65,14 @@ use crate::recorder::Recorder;
 use crate::refresh::Lock;
 use crate::rewind;
 use crate::rewind_thread::RewindThread;
-use crate::save_writer::SaveWriter;
 use crate::scripting::{self, Running};
 use crate::speed::{self, Speed};
 use crate::trace;
 use crate::turbo::Turbo;
-use crate::video;
+
+mod saves;
+
+use saves::{PickUp, Saves};
 
 /// How often dirty battery saves are written to disk.
 const BACKUP_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -156,11 +159,6 @@ impl Loaded {
     /// Each cartridge's own files, in the order of [`Loaded::rom_paths`].
     pub fn files(&self) -> &[GameFiles] {
         &self.files
-    }
-
-    /// The session's save state file in `slot`.
-    fn state_path(&self, slot: u8) -> PathBuf {
-        self.files[0].state(slot, self.core.info().players > 1)
     }
 }
 
@@ -612,9 +610,7 @@ impl Emulator {
             (_, audio) => audio,
         };
         let runner = Runner {
-            flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
-            backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
-            writer: SaveWriter::start(),
+            saves: Saves::new(&loaded),
             loaded,
             latches: vec![Latch::default(); players],
             turbos: vec![Turbo::default(); players],
@@ -757,13 +753,8 @@ struct Runner {
     /// When rewind last recorded a frame, if it has since the history was
     /// last cleared.
     recorded_at: Option<Instant>,
-    /// Per cartridge: the backup generation last handed to `writer`, or
-    /// `None` if the cartridge has no battery or its last write failed.
-    flushed_generations: Vec<Option<u64>>,
-    /// Per cartridge: its battery save file.
-    backup_paths: Vec<PathBuf>,
-    /// Writes the battery saves to disk.
-    writer: SaveWriter,
+    /// The game's battery saves, save states and checkpoint.
+    saves: Saves,
     events: async_channel::Sender<Event>,
     latest: Arc<Latest>,
     /// The next frame's screens, copied out of the core before they are
@@ -787,25 +778,6 @@ struct Debugging {
     pending: Option<Pending>,
     /// Why the emulation last stopped, until it runs on.
     stopped: Option<emu_core::debug::Stop>,
-}
-
-/// What came of picking up from a checkpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PickUp {
-    /// There is none.
-    Empty,
-    /// It was loaded.
-    Loaded,
-    /// A battery save changed after it was saved, so it was left alone.
-    SavesChanged,
-}
-
-/// Each of the first `cartridges` cartridges' backup generation in
-/// `core`, taken to be on disk already: 0 for one without a battery.
-fn generations(core: &dyn Core, cartridges: usize) -> Vec<Option<u64>> {
-    (0..cartridges)
-        .map(|cartridge| Some(core.backup_generation(cartridge).unwrap_or(0)))
-        .collect()
 }
 
 /// Copies `screens` into `frames`, into the buffers already there where
@@ -1000,16 +972,9 @@ impl Runner {
     /// Writes the battery saves that changed and waits for them. Returns
     /// whether every one is now on disk as the game has it.
     fn write_saves(&mut self) -> bool {
-        self.flush_backup();
-        self.writer.wait();
-        self.take_written();
-        // A failed write leaves its cartridge unflushed (see `take_written`).
-        (0..self.flushed_generations.len()).all(|cartridge| {
-            match self.loaded.core.backup_generation(cartridge) {
-                Some(generation) => self.flushed_generations[cartridge] == Some(generation),
-                None => true,
-            }
-        })
+        let written = self.saves.write_all(&*self.loaded.core);
+        self.say_saves();
+        written
     }
 
     /// After `panic` on this thread: saves what can still be saved, and
@@ -1085,7 +1050,7 @@ impl Runner {
                 self.debug.stopped = None;
                 self.notice("Reset");
             }
-            Command::SaveState(slot) => match self.save_state(slot) {
+            Command::SaveState(slot) => match self.saves.save_state(&*self.loaded.core, slot) {
                 Ok(()) => self.notice(format!("Saved state {slot}")),
                 Err(error) => self.notice(format!("Could not save state: {error:#}")),
             },
@@ -1106,7 +1071,7 @@ impl Runner {
                     *slot = cheats;
                 }
             }
-            Command::LoadState(slot) => match self.load_state(slot) {
+            Command::LoadState(slot) => match self.saves.load_state(&mut *self.loaded.core, slot) {
                 Ok(()) => {
                     self.jumped();
                     self.notice(format!("Loaded state {slot}"));
@@ -1508,196 +1473,30 @@ impl Runner {
         }
     }
 
-    fn save_state(&self, slot: u8) -> anyhow::Result<()> {
-        let info = self.loaded.core.info();
-        let mut payload = Vec::new();
-        self.loaded
-            .core
-            .try_save_state(&mut payload)
-            .map_err(anyhow::Error::msg)?;
-        let header = emu_state::Header {
-            system: info.system,
-            state_version: info.state_version,
-            rom_crc32: self.loaded.rom_crc32,
-        };
-        // At the screen's own size, whatever the 3D resolution.
-        let screen = video::shrink(&self.loaded.core.screens()[0], info.screens[0]);
-        let size = screen.size();
-        let rgb: Vec<u8> = screen
-            .pixels()
-            .iter()
-            .flat_map(|pixel| {
-                let [b, g, r, _] = pixel.to_le_bytes();
-                [r, g, b]
-            })
-            .collect();
-        let thumbnail = emu_state::Thumbnail {
-            width: size.width,
-            height: size.height,
-            rgb: &rgb,
-        };
-        let path = self.loaded.state_path(slot);
-        persist::write_atomic(
-            &path,
-            &emu_state::encode(&header, &payload, Some(thumbnail)),
-        )
-        .with_context(|| format!("cannot write {}", path.display()))
-    }
-
-    fn load_state(&mut self, slot: u8) -> anyhow::Result<()> {
-        let path = self.loaded.state_path(slot);
-        let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let emu_state::Decoded {
-            header, payload, ..
-        } = emu_state::decode(&bytes)?;
-        let info = self.loaded.core.info();
-        ensure!(
-            header.system == info.system,
-            "it is a {} state",
-            header.system
-        );
-        ensure!(
-            header.rom_crc32 == self.loaded.rom_crc32,
-            "it was saved from a different ROM"
-        );
-        ensure!(
-            header.state_version == info.state_version,
-            "it is state version {}, this build reads {}",
-            header.state_version,
-            info.state_version,
-        );
-        Ok(self.loaded.core.load_state(payload)?)
-    }
-
-    /// Writes the battery saves and waits for them, then saves a state to
-    /// `slot` and records beside it the saves on disk (see
-    /// [`Runner::saves`]), which `load_checkpoint` checks. Nothing is
-    /// saved unless every battery save was written, and the record comes
-    /// last: should the state not be written, the one before keeps the
-    /// record that matches it.
+    /// Saves a checkpoint in `slot` (see [`Saves::save_checkpoint`]).
     fn save_checkpoint(&mut self, slot: u8) -> anyhow::Result<()> {
-        // A record of older saves on disk would let a later start load
-        // this state over them once they could be written again.
-        ensure!(self.write_saves(), "the battery save could not be written");
-        self.save_state(slot)?;
-        let state = self.loaded.state_path(slot);
-        // The library's picture of where the game was left: the first
-        // screen, a DS's top one. It shows behind the game last played,
-        // and in place of box art libretro doesn't have.
-        // Not save data, so written without waiting for the disk.
-        if let Some(screen) = self.loaded.core.screens().first() {
-            let picture = persist::state_picture_path(&state);
-            let unfinished = picture.with_extension("png.tmp");
-            fs::write(&unfinished, capture::encode_png(screen))
-                .and_then(|()| fs::rename(&unfinished, &picture))
-                .ok();
-        }
-        let record = persist::saves_record_path(&state);
-        let saves =
-            persist::saves_fingerprint(&self.saves()).context("cannot read the game's saves")?;
-        persist::write_atomic(&record, saves.as_bytes())
-            .with_context(|| format!("cannot write {}", record.display()))
+        let saved = self.saves.save_checkpoint(&*self.loaded.core, slot);
+        self.say_saves();
+        saved
     }
 
-    /// Loads the state in `slot` if the saves on disk are those its record
-    /// says it was saved with. A state saved before records were kept is
-    /// loaded only if its battery saves are the same as the game's now,
-    /// and otherwise undone; for a game that saves only when asked, which
-    /// cannot be undone so, it is left alone.
+    /// Picks up the checkpoint in `slot` (see [`Saves::load_checkpoint`]).
     fn load_checkpoint(&mut self, slot: u8) -> anyhow::Result<PickUp> {
-        let state = self.loaded.state_path(slot);
-        if !state.exists() {
-            return Ok(PickUp::Empty);
-        }
-        let record = persist::saves_record_path(&state);
-        match fs::read_to_string(&record) {
-            Ok(recorded) => {
-                let saves = persist::saves_fingerprint(&self.saves())
-                    .context("cannot read the game's saves")?;
-                if recorded != saves {
-                    return Ok(PickUp::SavesChanged);
-                }
-                self.load_state(slot)?;
-                Ok(PickUp::Loaded)
-            }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && !self.loaded.core.saves_every_frame() =>
-            {
-                Ok(PickUp::Empty)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let started = self.backups();
-                let mut undo = Vec::new();
-                self.loaded.core.save_state(&mut undo);
-                self.load_state(slot)?;
-                if self.backups() == started {
-                    return Ok(PickUp::Loaded);
-                }
-                let undone = self.loaded.core.load_state(&undo);
-                // The battery saves are back as on disk: nothing to write.
-                self.flushed_generations = generations(&*self.loaded.core, self.backup_paths.len());
-                undone.context("cannot undo loading it")?;
-                Ok(PickUp::SavesChanged)
-            }
-            Err(error) => Err(error).with_context(|| format!("cannot read {}", record.display())),
-        }
-    }
-
-    /// The saves a checkpoint goes with: each cartridge's battery save,
-    /// and the saves an RPG Maker game makes itself.
-    fn saves(&self) -> Vec<PathBuf> {
-        let mut saves = self.backup_paths.clone();
-        saves.extend(self.loaded.own_saves.files());
-        saves
-    }
-
-    /// Each cartridge's battery save as it is now.
-    fn backups(&self) -> Vec<Vec<u8>> {
-        (0..self.backup_paths.len())
-            .map(|cartridge| {
-                let mut backup = Vec::new();
-                self.loaded.core.save_backup(cartridge, &mut backup);
-                backup
-            })
-            .collect()
+        self.saves.load_checkpoint(&mut *self.loaded.core, slot)
     }
 
     /// Hands each cartridge's battery save that changed since the last
-    /// flush to the writer, and retries any whose write failed.
+    /// flush to its writer, and retries any whose write failed.
     fn flush_backup(&mut self) {
-        self.take_written();
-        for cartridge in 0..self.flushed_generations.len() {
-            let Some(generation) = self.loaded.core.backup_generation(cartridge) else {
-                continue;
-            };
-            if self.flushed_generations[cartridge] == Some(generation) {
-                continue;
-            }
-            let mut backup = Vec::new();
-            self.loaded.core.save_backup(cartridge, &mut backup);
-            let path = self.backup_paths[cartridge].clone();
-            self.writer.write(cartridge, generation, path, backup);
-            self.flushed_generations[cartridge] = Some(generation);
-        }
+        self.saves.flush(&*self.loaded.core);
+        self.say_saves();
     }
 
-    /// Notes the battery save writes finished since last asked: a failed
-    /// one is said, and written again at the next flush unless a newer
-    /// one is on its way.
-    fn take_written(&mut self) {
-        for written in self.writer.finished() {
-            let Err(error) = written.result else {
-                continue;
-            };
-            self.notice(format!(
-                "Could not write {}: {error}",
-                written.path.display()
-            ));
-            let flushed = &mut self.flushed_generations[written.cartridge];
-            if *flushed == Some(written.generation) {
-                *flushed = None;
-            }
+    /// Tells the user what the saves have to say, such as a battery save
+    /// that could not be written.
+    fn say_saves(&mut self) {
+        for text in self.saves.take_said() {
+            self.notice(text);
         }
     }
 
