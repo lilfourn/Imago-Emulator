@@ -4291,9 +4291,11 @@ fn prepare(
 /// game or a new one is one of those, the old process has gone before the
 /// new one starts.
 fn stops_before_loading(system: System, files: &[GameFiles], paths: &[PathBuf]) -> bool {
+    // Named as a session would name them: an RPG Maker game's after its
+    // whole folder, dots and all.
     let saves: Vec<String> = paths
         .iter()
-        .map(|path| persist::backup_key(&GameFiles::of(path).backup()))
+        .map(|path| persist::backup_key(&emulator::files_of(path).backup()))
         .collect();
     let reopening = files
         .iter()
