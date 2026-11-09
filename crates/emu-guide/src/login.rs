@@ -8,7 +8,8 @@
 //! OpenRouter returns to the callback with no code, which ends the flow at
 //! once. Anything else the browser asks for, such as a favicon, gets a 404
 //! and the wait goes on; so does a request for the callback that a page
-//! makes in the background, which is not the browser coming back.
+//! makes in the background or in a frame, which is not the browser coming
+//! back.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -258,13 +259,14 @@ fn read_head(stream: &mut TcpStream) -> io::Result<String> {
 /// `None` unless the request is `GET /callback` and may be the browser
 /// coming back; then its `code`, `None` when it has none.
 ///
-/// OpenRouter sends the browser back by a navigation. A page the browser
-/// has open can also ask for the callback by itself, in the background,
-/// and a browser marks such a request with a `Sec-Fetch-Mode` that is not
-/// `navigate`: those are not the return, so they neither end the wait as
-/// declined nor spend its one exchange on a code of the page's making. A
-/// request without the header, as an older browser sends, is taken as
-/// before.
+/// OpenRouter sends the browser back by a navigation of the page itself.
+/// A page the browser has open can also ask for the callback by itself: in
+/// the background, which a browser marks with a `Sec-Fetch-Mode` that is
+/// not `navigate`, or in a frame it hides, which is a navigation but has a
+/// `Sec-Fetch-Dest` that is not `document`. Those are not the return, so
+/// they neither end the wait as declined nor spend its one exchange on a
+/// code of the page's making. A request without these headers, as an older
+/// browser sends, is taken as before.
 fn callback(head: &str) -> Option<Option<String>> {
     let mut lines = head.lines();
     let mut request = lines.next()?.split_whitespace();
@@ -272,14 +274,21 @@ fn callback(head: &str) -> Option<Option<String>> {
         return None;
     }
     let target = request.next()?;
-    let in_the_background = lines
+    // What each header must say, if the browser sends it.
+    let of_the_return = [
+        ("sec-fetch-mode", "navigate"),
+        ("sec-fetch-dest", "document"),
+    ];
+    let a_page_s_own = lines
         .take_while(|line| !line.is_empty())
         .filter_map(|line| line.split_once(':'))
-        .any(|(name, mode)| {
-            name.trim().eq_ignore_ascii_case("sec-fetch-mode")
-                && !mode.trim().eq_ignore_ascii_case("navigate")
+        .any(|(name, value)| {
+            of_the_return.iter().any(|(header, wanted)| {
+                name.trim().eq_ignore_ascii_case(header)
+                    && !value.trim().eq_ignore_ascii_case(wanted)
+            })
         });
-    if in_the_background {
+    if a_page_s_own {
         return None;
     }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -607,6 +616,51 @@ mod tests {
         assert!(!flow.is_finished(), "the wait goes on");
         // The browser coming back, a navigation, still ends it.
         let page = browse_with(port, "/callback", "Sec-Fetch-Mode: navigate\r\n");
+        assert!(page.contains("You declined access."), "{page}");
+        assert!(matches!(flow.join().unwrap().0, Err(LoginError::Declined)));
+        assert_eq!(store.load_with(None), None);
+    }
+
+    #[test]
+    fn a_page_s_hidden_frame_cannot_end_the_flow() {
+        // A frame in a page is loaded by a navigation too, and says what
+        // it is for: only the page itself is the browser coming back.
+        let asked = |dest: &str| {
+            format!(
+                "GET /callback?code=abc HTTP/1.1\r\nHost: localhost\r\n\
+                 Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: {dest}\r\n\r\n"
+            )
+        };
+        for dest in ["iframe", "frame", "embed", "object", "image", "empty"] {
+            assert_eq!(callback(&asked(dest)), None, "{dest}");
+        }
+        assert_eq!(callback(&asked("document")), Some(Some("abc".into())));
+        assert_eq!(
+            callback("GET /callback HTTP/1.1\r\nsec-fetch-dest:  IFRAME \r\n\r\n"),
+            None,
+            "however the header is written"
+        );
+        // A browser that sends neither header is taken as before.
+        assert_eq!(
+            callback("GET /callback?code=abc HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            Some(Some("abc".into()))
+        );
+
+        let store = store("frame");
+        let (url, _, flow) = start(Endpoints::at("http://127.0.0.1:9"), store.clone(), TIMEOUT);
+        let (port, _) = port_and_challenge(&url);
+        let frame = "Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: iframe\r\n";
+        let page = browse_with(port, "/callback", frame);
+        assert!(page.starts_with("HTTP/1.1 404"), "{page}");
+        let forged = browse_with(port, "/callback?code=forged", frame);
+        assert!(forged.starts_with("HTTP/1.1 404"), "{forged}");
+        assert!(!flow.is_finished(), "the wait goes on");
+        // The browser coming back, to the page itself, still ends it.
+        let page = browse_with(
+            port,
+            "/callback",
+            "Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n",
+        );
         assert!(page.contains("You declined access."), "{page}");
         assert!(matches!(flow.join().unwrap().0, Err(LoginError::Declined)));
         assert_eq!(store.load_with(None), None);
