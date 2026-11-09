@@ -210,7 +210,7 @@ impl Player {
         fs::remove_file(&self.output).ok();
         fs::remove_file(&self.errors).ok();
         let env = |name: &str, path: &Path| format!("{name}={}", path.display());
-        let mut open = Command::new("open");
+        let mut open = Command::new("/usr/bin/open");
         open.args(["-n", "-j", "-g", "--env", "SDL_MAC_BACKGROUND_APP=1"]);
         for (name, value) in link {
             open.arg("--env").arg(format!("{name}={value}"));
@@ -365,13 +365,13 @@ impl Player {
     pub fn stop(&self) {
         match self.pid {
             Some(pid) => {
-                Command::new("kill")
+                Command::new("/bin/kill")
                     .args(["-KILL", &pid.to_string()])
                     .status()
                     .ok();
             }
             None => {
-                Command::new("pkill")
+                Command::new("/usr/bin/pkill")
                     .arg("-KILL")
                     .arg("-f")
                     .arg(self.app.join("Contents/MacOS"))
@@ -401,12 +401,15 @@ impl Player {
         thread::spawn(move || {
             thread::sleep(QUIT_GRACE);
             let pid = pid.to_string();
-            let running = Command::new("kill")
+            let running = Command::new("/bin/kill")
                 .args(["-0", &pid])
                 .output()
                 .is_ok_and(|output| output.status.success());
             if running {
-                Command::new("kill").args(["-KILL", &pid]).status().ok();
+                Command::new("/bin/kill")
+                    .args(["-KILL", &pid])
+                    .status()
+                    .ok();
             }
         });
     }
@@ -466,16 +469,16 @@ fn copy_player(source: &Path, app: &Path, id: &str) -> Result<(), Error> {
     let copy = app.with_extension("new");
     fs::remove_dir_all(&copy).ok();
     // A clone takes no space on APFS; elsewhere, a copy.
-    let cloned = run(Command::new("cp").arg("-cR").arg(source).arg(&copy));
+    let cloned = run(Command::new("/bin/cp").arg("-cR").arg(source).arg(&copy));
     if cloned.is_err() {
         fs::remove_dir_all(&copy).ok();
-        run(Command::new("cp").arg("-R").arg(source).arg(&copy))?;
+        run(Command::new("/bin/cp").arg("-R").arg(source).arg(&copy))?;
     }
     let plist = copy.join("Contents/Info.plist");
     let identifier = format!("local.ds-emulator.player.{id}");
     let bundle_id = ("CFBundleIdentifier", "-string", identifier.as_str());
     for (key, kind, value) in PLIST_CHANGES.into_iter().chain([bundle_id]) {
-        run(Command::new("plutil")
+        run(Command::new("/usr/bin/plutil")
             .args(["-replace", key, kind, value])
             .arg(&plist))?;
     }
@@ -489,7 +492,7 @@ fn copy_player(source: &Path, app: &Path, id: &str) -> Result<(), Error> {
 /// Signs `app` for this Mac alone, as its contents changed.
 #[cfg(target_os = "macos")]
 fn sign(app: &Path) -> Result<(), Error> {
-    run(Command::new("codesign")
+    run(Command::new("/usr/bin/codesign")
         .args(["--force", "--sign", "-"])
         .arg(app))
 }
@@ -603,10 +606,14 @@ fn copy_program(source: &Path, folder: &Path) -> Result<PathBuf, Error> {
     Ok(program)
 }
 
-/// Runs `command`, failing with what it said if it fails.
+/// Runs `command`, one of macOS's own tools by its full path, failing with
+/// what it said if it fails.
 #[cfg(target_os = "macos")]
 fn run(command: &mut Command) -> Result<(), Error> {
-    let what = format!("running {}", command.get_program().to_string_lossy());
+    // By its name alone, as it was always said: "running cp".
+    let program = Path::new(command.get_program());
+    let name = program.file_name().unwrap_or(program.as_os_str());
+    let what = format!("running {}", name.to_string_lossy());
     let output = command.output().map_err(Error::io(what.clone()))?;
     if output.status.success() {
         return Ok(());

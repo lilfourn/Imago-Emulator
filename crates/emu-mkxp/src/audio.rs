@@ -140,7 +140,14 @@ fn open_pipe(pipe: &Path) -> io::Result<Opened> {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    let made = Command::new("mkfifo").arg(pipe).status()?;
+    // macOS's own, by its path, as the app runs every tool of the system's
+    // there; Linux's from `PATH`.
+    let mkfifo = if cfg!(target_os = "macos") {
+        "/usr/bin/mkfifo"
+    } else {
+        "mkfifo"
+    };
+    let made = Command::new(mkfifo).arg(pipe).status()?;
     if !made.success() {
         return Err(io::Error::other(format!(
             "mkfifo could not make {}",
