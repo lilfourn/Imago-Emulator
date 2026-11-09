@@ -114,7 +114,7 @@ impl fmt::Display for Error {
             Self::NotStarted(error) => f.write_str(&why_not_started("curl", error)),
             Self::Failed(why) => f.write_str(why),
             Self::Status(status) => write!(f, "the server answered with HTTP status {status}"),
-            Self::TooBig => f.write_str("it is bigger than it may be"),
+            Self::TooBig => f.write_str("it is too big"),
         }
     }
 }

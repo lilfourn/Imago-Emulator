@@ -809,8 +809,9 @@ fn write_capped(path: &Path, contents: impl Read, name: &Path, cap: u64) -> io::
 
 /// Moves the file at `from`, the game called `name`, to `path` once it is
 /// all on disk, so `path` is only ever the whole game; or copies it, if
-/// `path` is on another disk.
-fn move_capped(from: &Path, path: &Path, name: &Path) -> io::Result<()> {
+/// `path` is on another disk. It replaces a file at `path`, whose folder
+/// must be there.
+pub(crate) fn move_capped(from: &Path, path: &Path, name: &Path) -> io::Result<()> {
     // Opened for writing, as Windows syncs only a file open so.
     fs::OpenOptions::new().write(true).open(from)?.sync_all()?;
     match persist::rename(from, path) {

@@ -16,12 +16,16 @@
 //!
 //! The catalogs are kept in the cache folder and fetched again once a day.
 //! A game is installed into its own folder under the games folder, where
-//! its saves sit beside it. Downloads go through `curl`, as box art does.
+//! its saves sit beside it. Downloads go through `curl`, as box art does:
+//! from `https://` addresses only, so a game or a picture a catalog lists
+//! at any other is not offered, and each held to a size, a game to the
+//! most a cartridge of its system holds. A game is written to a file as
+//! it comes, as a 3DS one can be 4 GB.
 //! Everything here blocks; run it off the UI thread.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
@@ -509,6 +513,7 @@ fn universal_db_offer(entry: &Value) -> Option<Offer> {
         .flatten()
         .filter_map(|shot| text(&shot["url"]))
         .chain(text(&entry["image"]))
+        .filter(|url| downloadable(url))
         .collect();
     let description = text(&entry["long_description"])
         .or_else(|| text(&entry["description"]))
@@ -527,11 +532,17 @@ fn universal_db_offer(entry: &Value) -> Option<Offer> {
             .or_else(|| text(&entry["source"]))
             .or_else(|| strings(&entry["urls"]).into_iter().next()),
         added: text(&entry["created"]).unwrap_or_default(),
-        url: text(&download["url"])?,
+        url: text(&download["url"]).filter(|url| downloadable(url))?,
         file: file_name(file)?,
         screenshots,
         tested: false,
     })
+}
+
+/// Whether the app downloads from `url`, an address a catalog gave: only
+/// if it is an `https://` one, as [`boxart::fetch`] refuses any other.
+fn downloadable(url: &str) -> bool {
+    emu_os::fetch::Allow::Https.takes(url)
 }
 
 /// How good a choice the Universal-DB download called `name` is: a DS ROM
@@ -755,34 +766,47 @@ pub fn install_dir(games: &Path, offer: &Offer) -> PathBuf {
 
 /// Downloads `offer` into its [`install_dir`] in `games`, unpacking it if
 /// it comes as an archive, and returns its ROMs: for a 3DS game, only the
-/// best of those in its archive (see [`best_3ds_game`]).
+/// best of those in its archive (see [`best_3ds_game`]). The download is
+/// held to the most a cartridge of the game's system holds.
 ///
 /// # Errors
 ///
 /// Fails, with a message for the user, if the game cannot be downloaded,
 /// is gone, or holds no ROM the app plays.
 pub fn install(offer: &Offer, games: &Path) -> Result<Vec<PathBuf>, String> {
-    let bytes = match boxart::fetch(&offer.url, DOWNLOAD_SECONDS) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Err(format!("{} is no longer offered", offer.title)),
-        Err(error) => return Err(format!("Cannot get {}: {error:#}", offer.title)),
+    let max_bytes = match offer.platform {
+        Platform::N3ds => archive::MAX_3DS_GAME,
+        _ => archive::MAX_ROM,
     };
+    install_up_to(offer, games, max_bytes)
+}
+
+/// Installs `offer` as [`install`] does, if its download is at most
+/// `max_bytes`.
+fn install_up_to(offer: &Offer, games: &Path, max_bytes: u64) -> Result<Vec<PathBuf>, String> {
+    let keeping = |error: std::io::Error| format!("Cannot keep {}: {error}", offer.title);
+    // Downloaded into a file of a work folder as it comes, never into
+    // memory: a game can be 4 GB.
+    let scratch = WorkFolder::new("store").map_err(keeping)?;
+    let download = scratch.path().join(&offer.file);
+    match boxart::fetch_file(&offer.url, &download, DOWNLOAD_SECONDS, max_bytes) {
+        Ok(true) => {}
+        Ok(false) => return Err(format!("{} is no longer offered", offer.title)),
+        Err(error) => return Err(format!("Cannot get {}: {error:#}", offer.title)),
+    }
     let folder = install_dir(games, offer);
     let path = folder.join(&offer.file);
     // Some catalog entries are ZIP files named like the ROM inside.
-    let zipped = is_zip(&bytes) && !archive::is_archive(&path);
+    let zipped = !archive::is_archive(&path) && starts_as_zip(&download);
     if archive::is_archive(&path) || zipped {
-        let scratch = WorkFolder::new("store")
-            .map_err(|error| format!("Cannot keep {}: {error}", offer.title))?;
         let download = if zipped {
-            let zip = path.with_extension("zip");
-            scratch.path().join(zip.file_name().unwrap_or_default())
+            let zip = download.with_extension("zip");
+            fs::rename(&download, &zip).map_err(keeping)?;
+            zip
         } else {
-            scratch.path().join(&offer.file)
+            download
         };
-        let unpacked = boxart::write(&download, &bytes)
-            .map_err(|error| format!("Cannot keep {}: {error}", offer.title))
-            .and_then(|()| archive::unpack_to(&download, &folder));
+        let unpacked = archive::unpack_to(&download, &folder);
         drop(scratch);
         let games = unpacked.map_err(|_| format!("{} holds no game the app plays", offer.title))?;
         return Ok(match offer.platform {
@@ -793,8 +817,9 @@ pub fn install(offer: &Offer, games: &Path) -> Result<Vec<PathBuf>, String> {
     if emu_cores::system_for_path(&path).is_none() {
         return Err(format!("{} is not a game the app plays", offer.title));
     }
-    boxart::write(&path, &bytes)
-        .map_err(|error| format!("Cannot keep {}: {error}", offer.title))?;
+    fs::create_dir_all(&folder)
+        .and_then(|()| archive::move_capped(&download, &path, Path::new(&offer.file)))
+        .map_err(keeping)?;
     Ok(vec![path])
 }
 
@@ -826,6 +851,14 @@ fn is_zip(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK\x03\x04")
 }
 
+/// Whether the file at `path` is a ZIP file, by how it starts.
+fn starts_as_zip(path: &Path) -> bool {
+    let mut start = [0; 4];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut start))
+        .is_ok_and(|()| is_zip(&start))
+}
+
 /// Where the picture at `url` is kept, as a PNG, in the cache folder
 /// `cache`: named by a checksum of its URL.
 pub fn picture_path(cache: &Path, url: &str) -> PathBuf {
@@ -845,7 +878,8 @@ pub fn download_picture(cache: &Path, url: &str) -> anyhow::Result<Option<PathBu
     if boxart::is_png(&path) {
         return Ok(Some(path));
     }
-    let Some(png) = boxart::fetch(url, 60)?.as_deref().and_then(cover_png) else {
+    let picture = boxart::fetch_up_to(url, 60, boxart::MAX_PICTURE)?;
+    let Some(png) = picture.as_deref().and_then(cover_png) else {
         return Ok(None);
     };
     boxart::write(&path, &png)?;
@@ -1026,6 +1060,137 @@ mod tests {
             ludo.license.as_deref(),
             Some("GNU General Public License v3.0")
         );
+    }
+
+    #[test]
+    fn only_games_and_pictures_at_https_addresses_are_offered() {
+        let catalog = r#"[
+            {"slug": "plain", "title": "Plain", "systems": ["DS"], "categories": ["game"],
+             "downloads": {"plain.nds": {"url": "http://x/plain.nds"}}},
+            {"slug": "option", "title": "Option", "systems": ["DS"], "categories": ["game"],
+             "downloads": {"option.nds": {"url": "-o/tmp/option.nds"}}},
+            {"slug": "file", "title": "File", "systems": ["3DS"], "categories": ["game"],
+             "downloads": {"file.3dsx": {"url": "file:///etc/hosts"}}},
+            {"slug": "fine", "title": "Fine", "systems": ["DS"], "categories": ["game"],
+             "image": "http://x/fine.png",
+             "screenshots": [{"url": "ftp://x/1.png"}, {"url": "https://x/2.png"}],
+             "downloads": {"fine.nds": {"url": "https://x/fine.nds"}}}
+        ]"#;
+        let offers = read_offers(Source::UniversalDb, catalog, &HashMap::new()).expect("parses");
+        let slugs: Vec<&str> = offers.iter().map(|offer| offer.slug.as_str()).collect();
+        assert_eq!(slugs, ["fine"], "the app downloads over HTTPS alone");
+        assert_eq!(offers[0].url, "https://x/fine.nds");
+        assert_eq!(offers[0].screenshots, ["https://x/2.png"]);
+    }
+
+    /// An offer of the game called `file`, for `platform`, at `url`.
+    fn offer(url: String, file: &str, platform: Platform) -> Offer {
+        Offer {
+            source: Source::HomebrewHub,
+            slug: "test-game".to_owned(),
+            title: "Test Game".to_owned(),
+            developer: String::new(),
+            platform,
+            kind: Kind::Game,
+            description: String::new(),
+            tags: Vec::new(),
+            license: None,
+            website: None,
+            added: String::new(),
+            url,
+            file: file.to_owned(),
+            screenshots: Vec::new(),
+            tested: false,
+        }
+    }
+
+    /// What the stand-in for a catalog's file server answers: a game, a
+    /// ZIP of a game named as the ROM inside is, and a file that is no
+    /// game.
+    fn files(path: &str) -> (u16, Vec<u8>) {
+        match path {
+            "/game.gb" => (200, b"a Game Boy game".to_vec()),
+            "/zipped.gba" => {
+                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                zip.start_file("Inner.gba", zip::write::SimpleFileOptions::default())
+                    .expect("start");
+                std::io::Write::write_all(&mut zip, b"a GBA game").expect("write");
+                (200, zip.finish().expect("finish").into_inner())
+            }
+            "/notes.txt" => (200, b"notes".to_vec()),
+            _ => (404, b"<html>Not Found</html>".to_vec()),
+        }
+    }
+
+    #[test]
+    fn a_game_is_downloaded_straight_into_a_file_and_held_to_a_size() {
+        use std::sync::atomic::Ordering;
+
+        let server = boxart::stand_in::serve(files);
+        let games = std::env::temp_dir().join(format!("ds-emulator-games-{}", std::process::id()));
+        fs::remove_dir_all(&games).ok();
+        let folder = games.join("Store").join("hh").join("test-game");
+        let at = |path: &str| format!("{}{path}", server.site);
+
+        let rom = offer(at("/game.gb"), "game.gb", Platform::Gb);
+        let installed = install(&rom, &games).expect("installed");
+        assert_eq!(installed, [folder.join("game.gb")]);
+        assert_eq!(fs::read(&installed[0]).expect("kept"), b"a Game Boy game");
+        // Installed again, it replaces itself.
+        assert_eq!(install(&rom, &games), Ok(installed));
+        // A ZIP named like the ROM inside is unpacked.
+        let zipped = offer(at("/zipped.gba"), "zipped.gba", Platform::Gba);
+        let unpacked = install(&zipped, &games).expect("unpacked");
+        assert_eq!(unpacked, [folder.join("Inner.gba")]);
+        assert_eq!(fs::read(&unpacked[0]).expect("kept"), b"a GBA game");
+
+        let gone = offer(at("/gone.gb"), "gone.gb", Platform::Gb);
+        assert_eq!(
+            install(&gone, &games),
+            Err("Test Game is no longer offered".to_owned())
+        );
+        let notes = offer(at("/notes.txt"), "notes.txt", Platform::Gb);
+        assert_eq!(
+            install(&notes, &games),
+            Err("Test Game is not a game the app plays".to_owned())
+        );
+        // More than a cartridge holds is stopped, and nothing of it kept.
+        fs::remove_file(folder.join("game.gb")).expect("remove");
+        assert_eq!(
+            install_up_to(&rom, &games, 4),
+            Err(format!(
+                "Cannot get Test Game: cannot download {}: it is too big",
+                rom.url
+            ))
+        );
+        assert!(!folder.join("game.gb").exists());
+        assert_eq!(server.requests.load(Ordering::SeqCst), 6);
+        // An address that is not one never reaches curl.
+        for url in [
+            "-V",
+            "--output=/tmp/x",
+            "file:///etc/hosts",
+            "ftp://x/game.gb",
+        ] {
+            let option = offer(url.to_owned(), "game.gb", Platform::Gb);
+            assert_eq!(
+                install(&option, &games),
+                Err(format!(
+                    "Cannot get Test Game: cannot download {url}: its address is not an https:// one"
+                ))
+            );
+        }
+        assert!(!folder.join("game.gb").exists());
+        let work_folders = fs::read_dir(std::env::temp_dir())
+            .expect("temp")
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with(&format!("ds-emulator-store-{}-", std::process::id()))
+            })
+            .count();
+        assert_eq!(work_folders, 0, "the downloads are removed");
+        fs::remove_dir_all(&games).ok();
     }
 
     #[test]
