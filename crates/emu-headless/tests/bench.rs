@@ -79,6 +79,12 @@ fn without_time(text: &str) -> String {
 
 /// A save state of `rom` after `frames` frames, in its container.
 fn state_after(rom: &[u8], frames: u32) -> Vec<u8> {
+    state_with(rom, frames, System::Gb, 0)
+}
+
+/// As [`state_after`], with a header saying `system` made it, and a state
+/// version `newer` than the core's.
+fn state_with(rom: &[u8], frames: u32, system: System, newer: u16) -> Vec<u8> {
     let mut core = emu_cores::create(System::Gb, &Media::new(rom)).expect("the ROM loads");
     let mut audio = Vec::new();
     for _ in 0..frames {
@@ -88,8 +94,8 @@ fn state_after(rom: &[u8], frames: u32) -> Vec<u8> {
     core.save_state(&mut payload);
     let CoreInfo { state_version, .. } = core.info();
     let header = emu_state::Header {
-        system: System::Gb,
-        state_version,
+        system,
+        state_version: state_version + newer,
         rom_crc32: crc32fast::hash(rom),
     };
     emu_state::encode(&header, &payload, None)
@@ -178,4 +184,29 @@ fn a_state_for_another_rom_is_refused() {
     assert_eq!(output.status.code(), Some(1));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("saved with another ROM"), "{error}");
+}
+
+/// A state of another state version used to be handed to the core, which
+/// could refuse it as malformed or read it as a machine it never was.
+#[test]
+fn a_state_of_another_version_or_system_is_refused() {
+    let scratch = Scratch::new("version");
+    let bytes = counting_rom();
+    let rom = scratch.write("count.gb", &bytes);
+    let refusal = |state: Vec<u8>| {
+        let state = scratch.write("count.ss1", &state);
+        let output = headless(&["--state", &state, "--frames", "1", &rom]);
+        assert_eq!(output.status.code(), Some(1));
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let core = emu_cores::create(System::Gb, &Media::new(&bytes)).expect("the ROM loads");
+    let version = core.info().state_version;
+    let error = refusal(state_with(&bytes, 2, System::Gb, 1));
+    let expected = format!(
+        "it is state version {}, and this build reads version {version}",
+        version + 1
+    );
+    assert!(error.contains(&expected), "{error}");
+    let error = refusal(state_with(&bytes, 2, System::Gba, 0));
+    assert!(error.contains("it is a gba state, not a gb one"), "{error}");
 }

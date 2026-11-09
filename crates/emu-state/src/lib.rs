@@ -6,7 +6,8 @@
 //! which system, core state version and ROM it belongs to, an optional
 //! screenshot for slot pickers, and a checksum. Checking the header
 //! against the running game is the caller's job, so a frontend can choose
-//! to warn or refuse. [`mutation`] is for the cores' tests: it loads
+//! to warn or refuse: [`Header::check`] makes the comparison and words
+//! the [`Mismatch`]. [`mutation`] is for the cores' tests: it loads
 //! states that are wrong in one byte.
 //!
 //! Layout of version 2, all integers little-endian:
@@ -50,6 +51,71 @@ pub struct Header {
     pub state_version: u16,
     /// CRC-32 of the ROM that was running.
     pub rom_crc32: u32,
+}
+
+impl Header {
+    /// Checks that a state with this header goes with the game being
+    /// played, for which a state saved now would have the header
+    /// `playing`: the same system, the same ROM, and the state version
+    /// the core reads. A core's state is not self-describing, so one of
+    /// another version would be refused as malformed at best, and at
+    /// worst read as a machine it never was.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`Mismatch`] of the three, in that order.
+    pub fn check(&self, playing: &Self) -> Result<(), Mismatch> {
+        if self.system != playing.system {
+            return Err(Mismatch::System {
+                found: self.system,
+                playing: playing.system,
+            });
+        }
+        if self.rom_crc32 != playing.rom_crc32 {
+            return Err(Mismatch::Rom {
+                found: self.rom_crc32,
+                playing: playing.rom_crc32,
+            });
+        }
+        if self.state_version != playing.state_version {
+            return Err(Mismatch::StateVersion {
+                found: self.state_version,
+                reads: playing.state_version,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Why a save state does not go with the game being played. Each says so
+/// in words that follow "could not load the state:".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Mismatch {
+    /// The state is another system's.
+    #[error("it is a {found} state, not a {playing} one")]
+    System {
+        /// The system that wrote the state.
+        found: System,
+        /// The system being played.
+        playing: System,
+    },
+    /// The state was saved while another ROM was running.
+    #[error("it was saved with another ROM (CRC-32 {found:08x}, not {playing:08x})")]
+    Rom {
+        /// CRC-32 of the ROM the state was saved with.
+        found: u32,
+        /// CRC-32 of the ROM being played.
+        playing: u32,
+    },
+    /// The state was saved by a build whose core lays its state out
+    /// another way.
+    #[error("it is state version {found}, and this build reads version {reads}")]
+    StateVersion {
+        /// The state version in the header.
+        found: u16,
+        /// The state version the running core reads and writes.
+        reads: u16,
+    },
 }
 
 /// A small picture of the screen when the state was saved.
@@ -213,6 +279,51 @@ mod tests {
         assert_eq!(decoded.header, HEADER);
         assert_eq!(decoded.payload, b"machine state");
         assert_eq!(decoded.thumbnail, Some(thumbnail));
+    }
+
+    #[test]
+    fn a_header_is_checked_against_the_game_being_played() {
+        assert_eq!(HEADER.check(&HEADER), Ok(()));
+        let other_system = Header {
+            system: System::Nds,
+            ..HEADER
+        };
+        let other_rom = Header {
+            rom_crc32: 0x1234_5678,
+            ..HEADER
+        };
+        let other_version = Header {
+            state_version: 4,
+            ..HEADER
+        };
+        let mismatch = |state: &Header| state.check(&HEADER).map_err(|why| why.to_string());
+        assert_eq!(
+            mismatch(&other_system),
+            Err("it is a nds state, not a gba one".to_owned())
+        );
+        assert_eq!(
+            mismatch(&other_rom),
+            Err("it was saved with another ROM (CRC-32 12345678, not deadbeef)".to_owned())
+        );
+        assert_eq!(
+            mismatch(&other_version),
+            Err("it is state version 4, and this build reads version 3".to_owned())
+        );
+        // The first of them is the one reported: the system, then the ROM.
+        let all = Header {
+            system: System::Gb,
+            state_version: 9,
+            rom_crc32: 1,
+        };
+        assert!(matches!(all.check(&HEADER), Err(Mismatch::System { .. })));
+        let rom_and_version = Header {
+            system: System::Gba,
+            ..all
+        };
+        assert!(matches!(
+            rom_and_version.check(&HEADER),
+            Err(Mismatch::Rom { .. })
+        ));
     }
 
     #[test]
