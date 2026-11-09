@@ -51,21 +51,24 @@ pub struct RewindThread {
 
 impl RewindThread {
     /// Starts a worker keeping at most `budget_bytes` of history.
-    pub fn start(budget_bytes: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if the system will not start a thread.
+    pub fn start(budget_bytes: usize) -> std::io::Result<Self> {
         let (jobs, job_receiver) = mpsc::channel();
         let (reply_sender, replies) = mpsc::channel();
         let history = Rewind::new(budget_bytes);
         let worker = thread::Builder::new()
             .name("rewind".to_owned())
-            .spawn(move || work(history, &job_receiver, &reply_sender))
-            .expect("spawning the rewind thread");
-        Self {
+            .spawn(move || work(history, &job_receiver, &reply_sender))?;
+        Ok(Self {
             jobs: Some(jobs),
             replies,
             spares: Vec::new(),
             pending: 0,
             worker: Some(worker),
-        }
+        })
     }
 
     /// Records the state `save` writes into the buffer it is given, unless
@@ -179,7 +182,7 @@ mod tests {
 
     #[test]
     fn steps_back_through_the_states_recorded() {
-        let mut rewind = RewindThread::start(1 << 24);
+        let mut rewind = RewindThread::start(1 << 24).expect("the thread starts");
         let mut recorded = Vec::new();
         // Large states, sent as fast as possible, so the worker may fall
         // behind and some are skipped; what was recorded must come back.
@@ -197,7 +200,7 @@ mod tests {
 
     #[test]
     fn records_again_after_stepping_back() {
-        let mut rewind = RewindThread::start(1 << 20);
+        let mut rewind = RewindThread::start(1 << 20).expect("the thread starts");
         for frame in 0..5 {
             assert!(rewind.push_with(|out| out.extend_from_slice(&state(frame, 64))));
             // Give the worker time, so none is skipped.
@@ -215,7 +218,7 @@ mod tests {
 
     #[test]
     fn clearing_forgets_states_still_on_their_way() {
-        let mut rewind = RewindThread::start(1 << 20);
+        let mut rewind = RewindThread::start(1 << 20).expect("the thread starts");
         rewind.push_with(|out| out.extend_from_slice(&state(1, 64)));
         rewind.clear();
         assert_eq!(pop(&mut rewind), None);

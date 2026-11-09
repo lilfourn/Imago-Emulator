@@ -107,8 +107,12 @@ pub(super) struct Saves {
 impl Saves {
     /// The saves of the game in `loaded`, whose battery saves are taken to
     /// be on disk as its core has them.
-    pub(super) fn new(loaded: &Loaded) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if the thread that writes them cannot start.
+    pub(super) fn new(loaded: &Loaded) -> std::io::Result<Self> {
+        Ok(Self {
             states: loaded.states(),
             own_saves: loaded.own_saves.clone(),
             flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
@@ -117,12 +121,12 @@ impl Saves {
             backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
             jumps: 0,
             went_back: vec![None; loaded.rom_paths.len()],
-            writer: SaveWriter::start(),
+            writer: SaveWriter::start()?,
             unheard: 0,
             said: Vec::new(),
             warned: Vec::new(),
             last_failure: vec![None; loaded.rom_paths.len()],
-        }
+        })
     }
 
     /// What there is to tell the player since last asked, oldest first.
@@ -549,7 +553,7 @@ mod tests {
             live_sound: None,
             own_saves: OwnSaves::None,
         };
-        let saves = Saves::new(&loaded);
+        let saves = Saves::new(&loaded).expect("the thread starts");
         (loaded.core, saves)
     }
 

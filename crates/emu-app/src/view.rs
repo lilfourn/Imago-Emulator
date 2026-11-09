@@ -900,7 +900,18 @@ impl EmulatorView {
         let files = loaded.files().to_vec();
         let states = loaded.states();
         let own_saves = loaded.own_saves();
-        let emulator = Emulator::start(loaded, events, audio_sink);
+        let emulator = match Emulator::start(loaded, events, audio_sink) {
+            Ok(emulator) => emulator,
+            Err(error) => {
+                // No game runs now: the one before has stopped.
+                let notes = [Some(format!("Could not start {name}: {error}")), stopped];
+                let notice: Vec<String> = notes.into_iter().flatten().collect();
+                self.show_warning(notice.join(" · "), cx);
+                window.set_window_title("Imago Emulator");
+                self.library.update(cx, |library, cx| library.refresh(cx));
+                return;
+            }
+        };
         // As the window lays the game out now; drawing it corrects this if
         // its screens come out another size.
         let viewport = window.viewport_size();

@@ -771,11 +771,20 @@ pub struct Emulator {
 impl Emulator {
     /// Starts running `loaded` on a new thread. Events go to `events`;
     /// sound goes to `audio`, if there is an output device.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if the system will not start one of the game's
+    /// threads; the game is then dropped, having run nothing.
     pub fn start(
         loaded: Loaded,
         events: async_channel::Sender<Event>,
         audio: Option<AudioSink>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
+        // The threads that can fail to start come first, before anything
+        // is set going for them.
+        let saves = Saves::new(&loaded)?;
+        let rewind = RewindThread::start(REWIND_BUDGET_BYTES)?;
         let (commands, receiver) = mpsc::channel();
         let latest = Arc::new(Latest::default());
         let players = loaded.core.info().players.max(1);
@@ -789,7 +798,7 @@ impl Emulator {
             (_, audio) => audio,
         };
         let runner = Runner {
-            saves: Saves::new(&loaded),
+            saves,
             loaded,
             latches: vec![Latch::default(); players],
             turbos: vec![Turbo::default(); players],
@@ -802,7 +811,7 @@ impl Emulator {
             paused: false,
             speed: Speed::NORMAL,
             rewinding: false,
-            rewind: RewindThread::start(REWIND_BUDGET_BYTES),
+            rewind,
             lock,
             recorded_at: None,
             events,
@@ -822,13 +831,12 @@ impl Emulator {
                 if let Err(panic) = ran {
                     runner.stopped(&*panic);
                 }
-            })
-            .expect("spawning the emulation thread");
-        Self {
+            })?;
+        Ok(Self {
             commands: Some(commands),
             latest,
             thread: Some(thread),
-        }
+        })
     }
 
     /// Sends `command` to the emulation thread.

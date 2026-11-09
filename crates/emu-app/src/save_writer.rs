@@ -102,7 +102,11 @@ pub struct SaveWriter {
 
 impl SaveWriter {
     /// Starts the thread.
-    pub fn start() -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if the system will not start a thread.
+    pub fn start() -> io::Result<Self> {
         let (jobs, receiver) = mpsc::channel();
         let (report, written) = mpsc::channel();
         let thread = thread::Builder::new()
@@ -135,13 +139,12 @@ impl SaveWriter {
                         }
                     }
                 }
-            })
-            .expect("spawning the battery save thread");
-        Self {
+            })?;
+        Ok(Self {
             jobs: Some(jobs),
             written,
             thread: Some(thread),
-        }
+        })
     }
 
     /// Hands over cartridge `cartridge`'s battery save, `bytes` as of
@@ -219,7 +222,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("emu-app-writer-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
         let save = dir.join("game.sav");
-        let writer = SaveWriter::start();
+        let writer = SaveWriter::start().expect("the thread starts");
         writer.write(0, 1, save.clone(), b"first".to_vec());
         writer.write(0, 2, save.clone(), b"second".to_vec());
         writer.write(1, 7, dir.join("missing/other.sav"), b"lost".to_vec());
@@ -266,7 +269,7 @@ mod tests {
                 .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
                 .collect()
         };
-        let writer = SaveWriter::start();
+        let writer = SaveWriter::start().expect("the thread starts");
         writer.write(0, 1, save.clone(), b"hour 20".to_vec());
         writer.wait();
         assert_eq!(files_in(&dir), held(&[("game.sav", b"hour 20")]));
@@ -312,7 +315,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("emu-app-writer-owed-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
         let save = dir.join("game.sav");
-        let writer = SaveWriter::start();
+        let writer = SaveWriter::start().expect("the thread starts");
         // The folder is gone, as an unplugged drive's is.
         writer.write_after_jump(0, 1, save.clone(), b"hour 2".to_vec(), 1);
         writer.wait();
@@ -338,7 +341,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("emu-app-writer-drop-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
         let save = dir.join("game.sav");
-        let writer = SaveWriter::start();
+        let writer = SaveWriter::start().expect("the thread starts");
         writer.write(0, 1, save.clone(), vec![0x55; 64 << 10]);
         drop(writer);
         assert_eq!(fs::read(&save).expect("written").len(), 64 << 10);

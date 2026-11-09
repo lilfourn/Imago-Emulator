@@ -176,7 +176,10 @@ fn start(rom_path: PathBuf) -> (Emulator, async_channel::Receiver<Event>) {
         own_saves: OwnSaves::None,
     };
     let (events, receiver) = async_channel::unbounded();
-    (Emulator::start(loaded, events, None), receiver)
+    (
+        Emulator::start(loaded, events, None).expect("the threads start"),
+        receiver,
+    )
 }
 
 /// The count in the latest frame, read where it is published, as no
@@ -328,7 +331,10 @@ fn start_recorder() -> (Emulator, Seen) {
         own_saves: OwnSaves::None,
     };
     let (events, _) = async_channel::unbounded();
-    (Emulator::start(loaded, events, None), seen)
+    (
+        Emulator::start(loaded, events, None).expect("the threads start"),
+        seen,
+    )
 }
 
 /// Waits for the emulator to run `count` more frames.
@@ -590,7 +596,7 @@ fn button_cheats_see_the_frame_s_own_input() {
         own_saves: OwnSaves::None,
     };
     let (events, _events) = async_channel::unbounded();
-    let emulator = Emulator::start(loaded, events, None);
+    let emulator = Emulator::start(loaded, events, None).expect("the threads start");
     // CodeBreaker: if A is held, write 1.
     let cheats = emu_cheats::parse(System::Gba, "D0000020 0001\n32000000 0001\n").expect("valid");
     emulator.send(Command::SetCheats { player: 0, cheats });
@@ -625,7 +631,10 @@ fn start_game_boy(program: &[u8]) -> (Emulator, async_channel::Receiver<Event>) 
         own_saves: OwnSaves::None,
     };
     let (events, receiver) = async_channel::unbounded();
-    (Emulator::start(loaded, events, None), receiver)
+    (
+        Emulator::start(loaded, events, None).expect("the threads start"),
+        receiver,
+    )
 }
 
 fn debug(emulator: &Emulator, command: debugger::Command) {
@@ -791,7 +800,7 @@ fn cheat_lists_hand_their_rom_patches_to_the_core() {
         own_saves: OwnSaves::None,
     };
     let (events, _events) = async_channel::unbounded();
-    let emulator = Emulator::start(loaded, events, None);
+    let emulator = Emulator::start(loaded, events, None).expect("the threads start");
     for text in ["[Jump]\n3E1-23F\n", "[Jump] off\n3E1-23F\n"] {
         let cheats = emu_cheats::parse(System::Gb, text).expect("valid");
         emulator.send(Command::SetCheats { player: 0, cheats });
@@ -1360,7 +1369,10 @@ fn start_cart(
         own_saves: OwnSaves::None,
     };
     let (events, receiver) = async_channel::unbounded();
-    (Emulator::start(loaded, events, None), receiver)
+    (
+        Emulator::start(loaded, events, None).expect("the threads start"),
+        receiver,
+    )
 }
 
 /// Writes `value` at `address` in a [`Cart`], as its game would.
@@ -1587,7 +1599,12 @@ fn start_asked(
         own_saves: OwnSaves::RpgMaker(rpg_maker::SaveFolders::new(vec![dir.join("saves")])),
     };
     let (events, receiver) = async_channel::unbounded();
-    (Emulator::start(loaded, events, None), receiver, place, busy)
+    (
+        Emulator::start(loaded, events, None).expect("the threads start"),
+        receiver,
+        place,
+        busy,
+    )
 }
 
 /// Starts an [`Asked`] game at place 0 and picks up its checkpoint,
@@ -2138,7 +2155,7 @@ fn a_session_keeps_the_file_names_it_started_with() {
     let (dir, paths) = rom_dir("names-kept", &[("solo.gba", &gba_rom())]);
     let loaded = load(&paths, DmgColors::Grey).expect("loads");
     let (events, _events) = async_channel::unbounded();
-    let emulator = Emulator::start(loaded, events, None);
+    let emulator = Emulator::start(loaded, events, None).expect("the threads start");
     // A namesake arrives mid-game; this game's files stay as named.
     fs::write(dir.join("solo.nds"), nds_rom()).expect("written");
     emulator.send(Command::SaveCheckpoint(0));
