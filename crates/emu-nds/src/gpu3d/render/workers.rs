@@ -94,12 +94,17 @@ impl Workers {
     /// for each job or [`most_threads`], whichever is fewer. If no
     /// thread will start, runs them here instead. A job that panics takes
     /// its thread down with it, so jobs catch their own panics.
+    ///
+    /// Threads take the scheduling class of the thread that starts them,
+    /// the one running the core, which waits for their bands each frame.
     pub(crate) fn run(&mut self, jobs: Vec<Job>) {
         while self.threads.len() < jobs.len().min(self.most) {
             let shared = Arc::clone(&self.shared);
+            let class = emu_os::ThreadClass::current();
             let started = std::thread::Builder::new()
                 .name("3D renderer".into())
                 .spawn(move || {
+                    class.apply();
                     while let Some(job) = shared.next() {
                         job();
                     }

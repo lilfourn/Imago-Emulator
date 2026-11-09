@@ -10,6 +10,9 @@ publish.workspace = true
 emu-arm.workspace = true
 emu-core.workspace = true
 emu-gba-cart.workspace = true
+# The 3D renderer's threads take the scheduling class of the thread that
+# runs the core.
+emu-os.workspace = true
 emu-sched.workspace = true
 postcard.workspace = true
 serde.workspace = true

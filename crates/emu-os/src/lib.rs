@@ -18,11 +18,17 @@
 //! Setting `HOME` does that on macOS and Linux, but Windows finds its
 //! folders without it.
 //!
-//! [`process`] runs other programs, such as `curl`, alike on every system.
+//! [`process`] runs other programs, such as `curl`, alike on every system,
+//! and [`ThreadClass`] passes a thread's scheduling class to the threads
+//! that work for it.
 
 use std::path::{Path, PathBuf};
 
 pub mod process;
+#[allow(unsafe_code)]
+mod thread_class;
+
+pub use thread_class::ThreadClass;
 
 /// The environment variable that stands in for the home folder.
 pub const HOME_VARIABLE: &str = "DS_EMULATOR_HOME";
