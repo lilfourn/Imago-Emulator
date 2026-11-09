@@ -49,15 +49,40 @@ fn generations(core: &dyn Core, cartridges: usize) -> Vec<Option<u64>> {
         .collect()
 }
 
+/// Each of the first `cartridges` cartridges' battery save as `core` has
+/// it, taken to be on disk already: `None` for one without a battery.
+fn backups_on_disk(core: &dyn Core, cartridges: usize) -> Vec<Option<Vec<u8>>> {
+    (0..cartridges)
+        .map(|cartridge| {
+            core.backup_generation(cartridge)?;
+            let mut backup = Vec::new();
+            core.save_backup(cartridge, &mut backup);
+            Some(backup)
+        })
+        .collect()
+}
+
 /// A running game's battery saves, save states and checkpoint.
 pub(super) struct Saves {
     /// Where the session's save states are, and whose a file there is.
     states: StateFiles,
     /// Where an RPG Maker or 3DS game keeps the saves it makes itself.
     own_saves: OwnSaves,
-    /// Per cartridge: the backup generation last handed to `writer`, or
-    /// `None` if the cartridge has no battery or its last write failed.
+    /// Per cartridge: the backup generation whose save is on disk or on
+    /// its way there, or `None` if the cartridge has no battery or its
+    /// last write failed.
     flushed_generations: Vec<Option<u64>>,
+    /// Per cartridge: the backup generation of the save last handed to
+    /// `writer`, if one has been. It falls behind `flushed_generations`
+    /// when a save is not handed over for being the same as the last.
+    handed_generations: Vec<Option<u64>>,
+    /// Per cartridge: the save last handed to `writer`, or the one the
+    /// game started with, which is what the file holds; `None` once a
+    /// write has failed, or without a battery. A save the same as this is
+    /// not written again, whatever the core counted: loading a state, as
+    /// picking up a checkpoint does at every start, counts as a write
+    /// though it often changes nothing.
+    last_handed: Vec<Option<Vec<u8>>>,
     /// Per cartridge: its battery save file.
     backup_paths: Vec<PathBuf>,
     /// How many times the game has gone back to an earlier moment: once
@@ -87,6 +112,8 @@ impl Saves {
             states: loaded.states(),
             own_saves: loaded.own_saves.clone(),
             flushed_generations: generations(&*loaded.core, loaded.rom_paths.len()),
+            handed_generations: vec![None; loaded.rom_paths.len()],
+            last_handed: backups_on_disk(&*loaded.core, loaded.rom_paths.len()),
             backup_paths: loaded.files.iter().map(GameFiles::backup).collect(),
             jumps: 0,
             went_back: vec![None; loaded.rom_paths.len()],
@@ -329,6 +356,8 @@ impl Saves {
     /// handed over for the first time since the game went back to an
     /// earlier moment is handed over as such, whether the core counted a
     /// write or not, so the file it replaces is set aside if it differs.
+    /// A save whose bytes are those last handed over is on disk already,
+    /// and is not written again.
     pub(super) fn flush(&mut self, core: &dyn Core) {
         self.take_written();
         for cartridge in 0..self.flushed_generations.len() {
@@ -341,6 +370,12 @@ impl Saves {
             }
             let mut backup = Vec::new();
             core.save_backup(cartridge, &mut backup);
+            self.flushed_generations[cartridge] = Some(generation);
+            if self.last_handed[cartridge].as_deref() == Some(backup.as_slice()) {
+                continue;
+            }
+            self.last_handed[cartridge] = Some(backup.clone());
+            self.handed_generations[cartridge] = Some(generation);
             let path = self.backup_paths[cartridge].clone();
             match jump {
                 Some(jump) => {
@@ -350,7 +385,6 @@ impl Saves {
                 None => self.writer.write(cartridge, generation, path, backup),
             }
             self.unheard += 1;
-            self.flushed_generations[cartridge] = Some(generation);
         }
     }
 
@@ -393,9 +427,12 @@ impl Saves {
                 self.warned.push(warning.clone());
                 *last = Some(warning);
             }
-            let flushed = &mut self.flushed_generations[written.cartridge];
-            if *flushed == Some(written.generation) {
-                *flushed = None;
+            // The last handed over: nothing newer is on its way. Saves the
+            // same as it, not handed over since, are unwritten too.
+            if self.handed_generations[written.cartridge] == Some(written.generation) {
+                self.flushed_generations[written.cartridge] = None;
+                // What the file holds now is anyone's guess.
+                self.last_handed[written.cartridge] = None;
             }
         }
     }
@@ -536,6 +573,86 @@ mod tests {
         assert!(saves.write_all(&*core));
         assert_eq!(fs::read(&save).expect("written"), [7]);
         assert!(saves.take_said().is_empty());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_save_the_same_as_the_one_on_disk_is_not_written_again() {
+        let dir = empty_dir("unchanged");
+        let save = dir.join("game.sav");
+        // The game writes its save memory with what it already holds, as
+        // loading a state does: the core counts a write, and no file is
+        // made for it.
+        let (mut core, mut saves) = game(&dir, 7);
+        core.poke(0, 0, 7);
+        assert!(saves.write_all(&*core));
+        assert!(!save.exists());
+        // A save that differs is written, and then not again.
+        core.poke(0, 0, 8);
+        assert!(saves.write_all(&*core));
+        assert_eq!(fs::read(&save).expect("written"), [8]);
+        fs::remove_file(&save).expect("removed");
+        core.poke(0, 0, 8);
+        assert!(saves.write_all(&*core));
+        assert!(!save.exists());
+        // Going back to what the file last held is a change like any other.
+        core.poke(0, 0, 7);
+        assert!(saves.write_all(&*core));
+        assert_eq!(fs::read(&save).expect("written"), [7]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_save_skipped_as_unchanged_is_still_written_if_the_write_before_it_fails() {
+        let dir = empty_dir("unchanged-retry");
+        let gone = dir.join("gone");
+        let (mut core, mut saves) = game(&gone, 0);
+        // Keeps the writer busy, so the save's own write is still waiting
+        // when the game writes the same save again.
+        saves
+            .writer
+            .write(0, u64::MAX, dir.join("busy.bin"), vec![0x55; 32 << 20]);
+        core.poke(0, 0, 7);
+        saves.flush(&*core);
+        // The same bytes again, which are not handed over twice...
+        core.poke(0, 0, 7);
+        saves.flush(&*core);
+        // ...and the one write of them fails: the folder is gone.
+        assert!(!saves.write_all(&*core), "not on disk, and it says so");
+        // Back again, the save is written without the game saving anew.
+        fs::create_dir_all(&gone).expect("back");
+        assert!(saves.write_all(&*core));
+        assert_eq!(fs::read(gone.join("game.sav")).expect("written"), [7]);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn picking_up_a_checkpoint_leaves_the_battery_save_file_as_it_was() {
+        let dir = empty_dir("checkpoint-unwritten");
+        let save = dir.join("game.sav");
+        let (mut core, mut saves) = game(&dir, 0);
+        core.poke(0, 0, 1);
+        core.poke(0, 1, 7);
+        saves.save_checkpoint(&*core, 0).expect("left");
+        let written = fs::metadata(&save)
+            .and_then(|file| file.modified())
+            .expect("the save's time");
+        // Long enough for any file system to tell a second write apart.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // The next start picks the checkpoint up, which the core counts as
+        // a save written, though it holds the save on disk.
+        let (mut core, mut saves) = game(&dir, 1);
+        assert_eq!(
+            saves.load_checkpoint(&mut *core, 0).expect("picked up"),
+            PickUp::Loaded
+        );
+        assert!(saves.write_all(&*core));
+        let now = fs::metadata(&save)
+            .and_then(|file| file.modified())
+            .expect("the save's time");
+        assert_eq!(now, written, "the library says when the game last saved");
+        assert_eq!(fs::read(&save).expect("kept"), [1]);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
