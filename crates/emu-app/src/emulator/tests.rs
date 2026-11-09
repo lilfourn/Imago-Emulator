@@ -1944,8 +1944,9 @@ fn loading_a_state_never_loses_the_save_on_disk() {
     }
     emulator.send(Command::LoadState(1));
     wait_for_notice(&events, "Loaded state 1");
-    let said = wait_for_notice(&events, "Your save from before you loaded the state");
-    assert!(said.ends_with("is kept as game.sav.before-load"), "{said}");
+    // A warning, which stays up long enough to read where the save is.
+    let kept = "Your save from before you loaded the state is kept as game.sav.before-load";
+    wait_for_event(&events, &Event::Warning(kept.to_owned()));
     drop(emulator);
     assert_eq!(fs::read(&save).expect("the state's"), [2]);
     assert_eq!(

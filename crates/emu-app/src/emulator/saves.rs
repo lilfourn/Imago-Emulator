@@ -6,9 +6,9 @@
 //! thread of their own (see `save_writer.rs`). What there is to tell the
 //! player is kept until it is asked for: notices with [`Saves::take_said`],
 //! and warnings the player must not miss, such as a save that could not be
-//! written, with [`Saves::take_warned`]. A save that cannot be written is
-//! tried again at every flush, quietly: its warning is said again only
-//! when its words change.
+//! written or where a save was kept, with [`Saves::take_warned`]. A save
+//! that cannot be written is tried again at every flush, quietly: its
+//! warning is said again only when its words change.
 //!
 //! Loading a save state takes the game's save memory back with it, and
 //! the cores count that as a save written. So that the file on disk, which
@@ -453,10 +453,10 @@ impl Saves {
     }
 
     /// Notes the battery save writes finished since last asked: a save
-    /// kept from before a load is said, once, with where it is; a failed
-    /// write is warned of, unless the write before it failed with the
-    /// same words, and written again at the next flush unless a newer one
-    /// is on its way.
+    /// kept from before a load is warned of, once, with where it is; a
+    /// failed write is warned of, unless the write before it failed with
+    /// the same words, and written again at the next flush unless a newer
+    /// one is on its way.
     fn take_written(&mut self) {
         for written in self.writer.finished() {
             self.unheard = self.unheard.saturating_sub(1);
@@ -464,9 +464,11 @@ impl Saves {
                 Kept::Unneeded => {}
                 // The run of loads has kept its save.
                 Kept::Already => self.kept_in_run[written.cartridge] = true,
+                // A warning, which shows long enough to read: nothing else
+                // says where the save went.
                 Kept::New(kept) => {
                     self.kept_in_run[written.cartridge] = true;
-                    self.said.push(format!(
+                    self.warned.push(format!(
                         "Your save from before you loaded the state is kept as {}",
                         file_name(kept)
                     ));
@@ -824,13 +826,13 @@ mod tests {
         assert!(saves.write_all(&*core));
         let kept = held(&[("game.sav", 2), ("game.sav.before-load", 20)]);
         assert_eq!(saves_in(&dir), kept);
-        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.before-load")]);
+        assert_eq!(saves.take_warned(), [format!("{KEPT}game.sav.before-load")]);
 
         // The same slot again changes nothing, so nothing more is kept.
         saves.load_state(&mut *core, 1).expect("loaded");
         assert!(saves.write_all(&*core));
         assert_eq!(saves_in(&dir), kept);
-        assert!(saves.take_said().is_empty());
+        assert!(saves.take_warned().is_empty());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
@@ -852,7 +854,7 @@ mod tests {
         core.poke(0, 0, 3);
         assert!(saves.write_all(&*core));
         assert_eq!(saves_in(&dir), held(&[("game.sav", 3)]));
-        assert!(saves.take_said().is_empty());
+        assert!(saves.take_warned().is_empty());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
@@ -876,7 +878,7 @@ mod tests {
             core.poke(0, 0, 100 + turn);
             assert!(saves.write_all(&*core));
         }
-        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.before-load")]);
+        assert_eq!(saves.take_warned(), [format!("{KEPT}game.sav.before-load")]);
 
         // Eleven minutes after the last of them, a load starts a new run,
         // and keeps the save it finds.
@@ -889,7 +891,7 @@ mod tests {
             ("game.sav.before-load2", 20),
         ]);
         assert_eq!(saves_in(&dir), second);
-        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.before-load")]);
+        assert_eq!(saves.take_warned(), [format!("{KEPT}game.sav.before-load")]);
         // Nine minutes on is the same run again.
         core.poke(0, 0, 50);
         assert!(saves.write_all(&*core));
@@ -898,7 +900,7 @@ mod tests {
             .expect("loaded");
         assert!(saves.write_all(&*core));
         assert_eq!(saves_in(&dir), second);
-        assert!(saves.take_said().is_empty());
+        assert!(saves.take_warned().is_empty());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
@@ -932,7 +934,7 @@ mod tests {
                 ("game.sav.before-load3", 9),
             ])
         );
-        assert_eq!(saves.take_said().len(), 3);
+        assert_eq!(saves.take_warned().len(), 3);
         fs::remove_dir_all(&dir).expect("clean up");
 
         // Alternated within one run, only the first load keeps a save.
@@ -1006,7 +1008,7 @@ mod tests {
         core.load_state(&before).expect("a state of its own");
         assert!(saves.write_all(&*core));
         assert_eq!(saves_in(&dir), held(&[("game.sav", 1)]));
-        assert!(saves.take_said().is_empty());
+        assert!(saves.take_warned().is_empty());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
@@ -1063,7 +1065,7 @@ mod tests {
         assert_ne!(second, first, "the clock's time is kept up to date");
         assert_eq!(second[..0x8000], first[..0x8000]);
         assert_eq!(saves_in(&dir).len(), 1, "and no copy was kept");
-        assert!(saves.take_said().is_empty());
+        assert!(saves.take_warned().is_empty());
 
         // A state whose save memory differs is another matter, and though
         // it is of the same run of loads, none has kept the save yet.
@@ -1076,7 +1078,7 @@ mod tests {
             fs::read(dir.join("game.sav.before-load")).expect("kept"),
             second
         );
-        assert_eq!(saves.take_said(), [format!("{KEPT}game.sav.before-load")]);
+        assert_eq!(saves.take_warned(), [format!("{KEPT}game.sav.before-load")]);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
