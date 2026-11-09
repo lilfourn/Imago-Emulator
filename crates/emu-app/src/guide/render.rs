@@ -593,7 +593,9 @@ impl GuidePanel {
                 .id(("guide-read", turn * 100 + at))
                 .cursor_pointer()
                 .hover(|style| style.text_color(ink.text))
-                .on_click(move |_, _, cx| cx.open_url(&url))
+                .on_click(move |_, _, cx| {
+                    crate::links::open_web_url(cx, &url);
+                })
                 .into_any_element(),
             );
         }
@@ -1131,7 +1133,9 @@ impl GuidePanel {
                             .child(citation.excerpt.clone()),
                     )
                 })
-                .on_click(move |_, _, cx| cx.open_url(&url))
+                .on_click(move |_, _, cx| {
+                    crate::links::open_web_url(cx, &url);
+                })
                 .children(probe::part(format!("chip:source.{at}")))
         });
         let mut sheet_bg = ink.glass;
@@ -1215,7 +1219,7 @@ impl GuidePanel {
                     .child(icons::icon(icons::GLOBE, 13.0, 0).text_color(hsla([1.0; 3], 0.6)))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
-                        cx.open_url(&page);
+                        crate::links::open_web_url(cx, &page);
                     })
             });
             div()

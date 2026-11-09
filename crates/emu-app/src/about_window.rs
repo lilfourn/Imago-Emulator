@@ -210,7 +210,9 @@ impl gpui::Render for AboutWindow {
                     )
                     .child(
                         link("site", "imagoemulator.com")
-                            .on_click(|_, _, cx| cx.open_url(SITE))
+                            .on_click(|_, _, cx| {
+                                crate::links::open_web_url(cx, SITE);
+                            })
                             .children(probe::part("link:site")),
                     )
                     .children(files)

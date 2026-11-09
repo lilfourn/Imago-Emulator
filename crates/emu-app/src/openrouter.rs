@@ -226,7 +226,9 @@ impl OpenRouter {
         // Once cancelled, only a key that arrived anyway matters.
         let waiting = self.cancel.is_some();
         match event {
-            Event::Progress(Progress::Open(url)) if waiting => cx.open_url(&url),
+            Event::Progress(Progress::Open(url)) if waiting => {
+                crate::links::open_web_url(cx, &url);
+            }
             Event::Progress(Progress::Returned) if waiting => {
                 self.status = Status::Connecting { returned: true };
             }
