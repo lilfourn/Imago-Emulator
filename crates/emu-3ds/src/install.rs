@@ -507,17 +507,9 @@ pub(crate) fn without_window(command: &mut Command) -> &mut Command {
 }
 
 /// Takes the lock on installing into `data`, waiting for any other
-/// install to finish first. It is held until the file is dropped. The
-/// empty file is opened as it is, not emptied again: Windows may refuse to
-/// empty a file another process holds locked.
+/// install to finish first. It is held until the file is dropped.
 fn lock(data: &Path) -> io::Result<File> {
-    let file = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(data.join(LOCK_FILE))?;
-    file.lock()?;
-    Ok(file)
+    emu_os::lock::lock(&data.join(LOCK_FILE))
 }
 
 /// Removes the temporary folders of installs that never finished, as

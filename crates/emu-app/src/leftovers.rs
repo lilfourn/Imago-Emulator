@@ -93,11 +93,7 @@ impl WorkFolder {
         ));
         fs::remove_dir_all(&path).ok();
         fs::create_dir_all(&path)?;
-        let lock = File::create(path.join(LOCK)).and_then(|lock| {
-            lock.lock()?;
-            Ok(lock)
-        });
-        let lock = match lock {
+        let lock = match emu_os::lock::lock(&path.join(LOCK)) {
             Ok(lock) => lock,
             Err(error) => {
                 fs::remove_dir_all(&path).ok();
