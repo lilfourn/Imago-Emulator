@@ -431,6 +431,9 @@ impl Wifi {
         }
         self.catch_up_rx(now);
         self.now = now;
+        // Whatever the radio is doing, a state saved now loads.
+        #[cfg(test)]
+        assert!(self.in_range(now, 0), "a state of the radio now is refused");
     }
 
     // Interrupts.
