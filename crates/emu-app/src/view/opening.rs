@@ -11,7 +11,9 @@
 //! which writes its saves and its checkpoint, before the game that takes
 //! its place starts: once that one has loaded, so that a file that fails
 //! to load costs nothing, or before it loads at all when the two may not
-//! overlap (see [`stops_before_loading`]).
+//! overlap (see [`stops_before_loading`]). A game stopped first is
+//! opened again if the other then fails to load, so a wrong file never
+//! leaves the player with no game.
 
 // A part of the view, split off: it shares the view's names.
 use super::*;
@@ -23,6 +25,9 @@ pub(super) struct Load<L> {
     games: Vec<PathBuf>,
     /// What loads them. Dropping it gives the load up.
     task: L,
+    /// The games of the session that was stopped for this load, if one
+    /// was: they are opened again should it fail.
+    stopped: Option<Vec<PathBuf>>,
 }
 
 /// Where the window is with its game. `S` is the running game's session
@@ -78,9 +83,14 @@ impl<S, L> Game<S, L> {
     }
 
     /// `games` start loading with `task`, in place of any that were: that
-    /// load is given up. A game that runs keeps running.
-    pub(super) fn load(&mut self, games: Vec<PathBuf>, task: L) {
-        let load = Load { games, task };
+    /// load is given up. A game that runs keeps running. `stopped` are the
+    /// games of the session stopped to make way, if one was.
+    pub(super) fn load(&mut self, games: Vec<PathBuf>, task: L, stopped: Option<Vec<PathBuf>>) {
+        let load = Load {
+            games,
+            task,
+            stopped,
+        };
         *self = match std::mem::replace(self, Self::Idle) {
             Self::Idle | Self::Loading(_) => Self::Loading(load),
             Self::Running(session, _) => Self::Running(session, Some(load)),
@@ -89,12 +99,17 @@ impl<S, L> Game<S, L> {
     }
 
     /// The load under way has finished, with a game to start or without.
-    pub(super) fn loaded(&mut self) {
-        *self = match std::mem::replace(self, Self::Idle) {
-            Self::Idle | Self::Loading(_) => Self::Idle,
-            Self::Running(session, _) => Self::Running(session, None),
-            Self::Stopped(session, _) => Self::Stopped(session, None),
+    /// Returns the games of the session that was stopped for it, if one
+    /// was, to open again if it brought no game.
+    pub(super) fn loaded(&mut self) -> Option<Vec<PathBuf>> {
+        let (next, load) = match std::mem::replace(self, Self::Idle) {
+            Self::Idle => (Self::Idle, None),
+            Self::Loading(load) => (Self::Idle, Some(load)),
+            Self::Running(session, load) => (Self::Running(session, None), load),
+            Self::Stopped(session, load) => (Self::Stopped(session, None), load),
         };
+        *self = next;
+        load.and_then(|load| load.stopped)
     }
 
     /// `session` is the window's game from now on. The one before, if any,
@@ -159,10 +174,13 @@ impl EmulatorView {
         if self.game.loads(&paths) {
             return;
         }
-        let stops_first = self.game.session().is_some_and(|session| {
-            stops_before_loading(session.info.system, &session.files, &paths)
-        });
-        if stops_first {
+        let stops_first = self
+            .game
+            .session()
+            .filter(|session| stops_before_loading(session.info.system, &session.files, &paths));
+        // Its games, to open again should the new ones fail to load.
+        let stopped_games = stops_first.map(|session| session.rom_paths.clone());
+        if stopped_games.is_some() {
             self.save_checkpoint();
             let stopped = self.stop(window, cx);
             self.keep_for_start(stopped);
@@ -181,17 +199,46 @@ impl EmulatorView {
         let loading = cx.spawn_in(window, async move |this, cx| {
             let opened = open.await;
             this.update_in(cx, |this, window, cx| {
-                this.game.loaded();
+                let stopped = this.game.loaded();
                 match opened {
                     Ok(opened) => this.start(opened, &name, window, cx),
-                    // Long enough to read why, as for a game another copy
-                    // of the app has open.
-                    Err(error) => this.show_warning(format!("{error:#}"), cx),
+                    Err(error) => this.failed_to_open(format!("{error:#}"), stopped, window, cx),
                 }
             })
             .ok();
         });
-        self.game.load(games, loading);
+        self.game.load(games, loading, stopped_games);
+    }
+
+    /// Games failed to load, for the reason `why`. If the running game
+    /// was stopped for them (`stopped`, its games), it is opened again,
+    /// from the checkpoint it left as it stopped, and says why once it
+    /// runs: a wrong file chosen for Connect Second Console or Insert GBA
+    /// Cartridge leaves the game playing. Otherwise the reason shows as a
+    /// warning, long enough to read, as for a game another copy of the
+    /// app has open.
+    fn failed_to_open(
+        &mut self,
+        why: String,
+        stopped: Option<Vec<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match stopped {
+            Some(games) => {
+                self.keep_for_start(Some(why));
+                // No game runs now, so none is stopped for these: should
+                // they fail too, that is the end of it.
+                self.open(games, window, cx);
+            }
+            None => {
+                self.show_warning(why, cx);
+                if self.game.session().is_none() {
+                    // Not the name of a game that stopped for this one.
+                    window.set_window_title("Imago Emulator");
+                }
+            }
+        }
     }
 
     /// Unpacks the archives among `paths` and makes the game of a ROM-hack
@@ -404,14 +451,19 @@ impl EmulatorView {
             self.reload_cheats(),
             (!stranded.is_empty()).then(|| stranded.join(" · ")),
             stopped,
-            self.startup_notice.take(),
         ];
-        let notice: Vec<String> = notes.into_iter().flatten().collect();
-        match unwritable {
-            // First, and long enough to read: nothing of this game will
-            // be saved.
-            Some(why) => self.show_warning(format!("{why} · {}", notice.join(" · ")), cx),
-            None => self.show_notice(notice.join(" · "), cx),
+        let mut notice: Vec<String> = notes.into_iter().flatten().collect();
+        // What was kept for this start is worth the time to read: where
+        // Start Over put the old save, or why another game did not open.
+        let kept = self.startup_notice.take();
+        let warns = unwritable.is_some() || kept.is_some();
+        notice.extend(kept);
+        // First: nothing of this game will be saved.
+        let notice: Vec<String> = unwritable.into_iter().chain(notice).collect();
+        if warns {
+            self.show_warning(notice.join(" · "), cx);
+        } else {
+            self.show_notice(notice.join(" · "), cx);
         }
         if let Some(script) = self.startup_script.take() {
             self.run_script_file(script, cx);
@@ -676,12 +728,18 @@ mod tests {
             if self.game.loads(&games) {
                 return None;
             }
-            if stops_first && self.game.session().is_some() {
+            // A session's games are its name, as a file.
+            let stopped = self
+                .game
+                .session()
+                .filter(|_| stops_first)
+                .map(|session| vec![PathBuf::from(format!("{session}.gba"))]);
+            if stopped.is_some() {
                 self.stop();
             }
             self.loads += 1;
             self.log.push(format!("load {}", self.loads));
-            self.game.load(games, self.loads);
+            self.game.load(games, self.loads, stopped);
             Some(self.loads)
         }
 
@@ -693,14 +751,25 @@ mod tests {
                 self.log.push(format!("load {load} was given up"));
                 return;
             }
-            self.game.loaded();
+            let stopped = self.game.loaded();
             match loaded {
                 Some(name) => {
                     self.stop();
                     self.log.push(format!("run {name}"));
                     self.game.run(name.to_owned());
                 }
-                None => self.log.push(format!("load {load} failed")),
+                None => {
+                    self.log.push(format!("load {load} failed"));
+                    // As `failed_to_open` does.
+                    if let Some(games) = stopped {
+                        let games: Vec<String> = games
+                            .iter()
+                            .map(|game| game.to_string_lossy().into_owned())
+                            .collect();
+                        let games: Vec<&str> = games.iter().map(String::as_str).collect();
+                        self.open(&games, false);
+                    }
+                }
             }
         }
 
@@ -766,12 +835,52 @@ mod tests {
         assert_eq!(window.took(), ["stop omega", "load 2"]);
         window.finish(load, Some("alpha"));
         assert_eq!(window.took(), ["run alpha"]);
+    }
 
-        // Its load failing leaves no game running.
+    #[test]
+    fn a_game_stopped_for_one_that_fails_to_load_is_opened_again() {
+        let mut window = Window::new();
+        let load = window.open(&["platinum.gba"], false).expect("loads");
+        window.finish(load, Some("platinum"));
+        window.took();
+
+        // Insert GBA Cartridge, with a file that is no game: the DS game
+        // stopped to be opened with it, and comes back alone.
+        let load = window
+            .open(&["platinum.gba", "notes.txt"], true)
+            .expect("loads");
+        window.finish(load, None);
+        assert_eq!(
+            window.took(),
+            ["stop platinum", "load 2", "load 2 failed", "load 3"]
+        );
+        assert!(window.game.loads(&[PathBuf::from("platinum.gba")]));
+        window.finish(3, Some("platinum"));
+        assert_eq!(window.took(), ["run platinum"]);
+        assert!(matches!(window.game, Game::Running(_, None)));
+
+        // Should the game itself no longer load, that is the end of it:
+        // nothing was stopped for that load, so nothing is opened again.
         let load = window.open(&["broken.3ds"], true).expect("loads");
         window.finish(load, None);
-        assert_eq!(window.took(), ["stop alpha", "load 3", "load 3 failed"]);
+        assert_eq!(
+            window.took(),
+            ["stop platinum", "load 4", "load 4 failed", "load 5"]
+        );
+        window.finish(5, None);
+        assert_eq!(window.took(), ["load 5 failed"]);
         assert!(matches!(window.game, Game::Idle));
+
+        // A load that stops nothing leaves nothing to open again.
+        let load = window.open(&["ruby.gba"], false).expect("loads");
+        window.finish(load, Some("ruby"));
+        let load = window.open(&["notes.txt"], false).expect("loads");
+        window.finish(load, None);
+        assert_eq!(
+            window.took(),
+            ["load 6", "run ruby", "load 7", "load 7 failed"]
+        );
+        assert!(matches!(window.game, Game::Running(_, None)));
     }
 
     #[test]
