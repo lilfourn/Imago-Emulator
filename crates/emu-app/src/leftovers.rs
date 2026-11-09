@@ -11,7 +11,8 @@
 //! macOS any `tar` still unpacking into one is stopped. On quit, the app
 //! removes its own, and stops the programs it started to work in them
 //! (see [`WorkFolder::spawn`]). Files the app writes for a moment and keeps
-//! no lock on, such as a save's `….tmp`, are removed once they are old.
+//! no lock on, such as a save's `….tmp`, are removed once they are old,
+//! where they are in a folder of the app's own.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -389,11 +390,20 @@ pub(crate) fn remove_own_where(wanted: impl Fn(&Path) -> bool) {
 /// Removes what apps that are no longer running left behind: in the
 /// temporary folder, work folders and old unpacked patches; in each of
 /// `folders`, where games are written, games half written and old
-/// `….tmp` files. Says how many bytes that freed.
+/// `….tmp` files; and old `….tmp` files in the app's own folders
+/// ([`own_folders`]). Says how many bytes that freed.
+///
+/// A `….tmp` file beside a game somewhere else, in a folder of the
+/// user's ROMs, is not looked for: the app does not know those folders
+/// until a game in one is opened.
 ///
 /// Blocking file I/O; call it off the UI thread.
 pub fn remove_left_behind(folders: &[PathBuf]) -> u64 {
-    match emu_os::temp::work_dir() {
+    let own: u64 = own_folders(folders)
+        .iter()
+        .map(|folder| remove_old_temporaries(folder, OWN_DEPTH))
+        .sum();
+    own + match emu_os::temp::work_dir() {
         Ok(temp) => remove_left_behind_in(&temp, folders),
         // No folder of the user's own to look in: the games' alone.
         Err(_) => remove_unfinished_games(folders),
@@ -431,6 +441,53 @@ fn remove_unfinished_games(folders: &[PathBuf]) -> u64 {
         .iter()
         .map(|folder| remove_unused_files(folder, unfinished))
         .sum()
+}
+
+/// How many folders below one of the app's own a file is written through
+/// a temporary one: `Guide/<game>/`, `3DS/azahar-<version>/`,
+/// `store/pictures/`. Stray temporary files are looked for no deeper,
+/// where a core keeps files of its own.
+const OWN_DEPTH: u32 = 2;
+
+/// The folders the app keeps its own files in, written through a
+/// temporary file beside each ([`emu_os::file::write_atomic`]): settings,
+/// the library and bindings; Guide's key and chats, and the 3DS core; box
+/// art, the store's catalogs and pictures, and Guide's pictures in the
+/// cache; and the store's games, in `Store` in the games folder, whose
+/// saves sit beside them.
+fn own_folders(games: &[PathBuf]) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = [
+        emu_os::config_dir(),
+        emu_os::data_dir(),
+        emu_os::cache_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|folder| folder.join("ds-emulator"))
+    .chain(games.iter().map(|folder| folder.join("Store")))
+    .collect();
+    // macOS keeps settings and data in one folder.
+    folders.sort();
+    folders.dedup();
+    folders
+}
+
+/// Removes the `….tmp` files in `folder`, and in the folders up to `depth`
+/// below it, that have not changed for an hour, and says how many bytes
+/// that freed: what a crash left between writing a file and renaming it
+/// into place. Links are not followed.
+fn remove_old_temporaries(folder: &Path, depth: u32) -> u64 {
+    let mut freed = remove_unused_files(folder, |name| name.ends_with(".tmp"));
+    if depth > 0
+        && let Ok(entries) = fs::read_dir(folder)
+    {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                freed += remove_old_temporaries(&entry.path(), depth - 1);
+            }
+        }
+    }
+    freed
 }
 
 /// Removes the files in `folder` whose names `wanted` takes and that are
@@ -826,6 +883,63 @@ mod tests {
             assert!(!left.exists(), "removed at launch");
             fs::remove_dir_all(&temp).ok();
         }
+    }
+
+    #[test]
+    fn old_temporary_files_in_the_app_s_own_folders_are_removed() {
+        let temp = temp_dir("own-folders");
+        let old = Duration::from_secs(2 * 60 * 60);
+        // The app's data folder, as a crash between writing a file and
+        // renaming it into place leaves it.
+        let data = temp.join("ds-emulator");
+        let file = |path: &str, bytes: usize, aged: bool| {
+            let path = data.join(path);
+            fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+            fs::write(&path, vec![0; bytes]).expect("written");
+            if aged {
+                age(&path, old);
+            }
+            path
+        };
+        let removed = [
+            file("settings.toml.4242-7.tmp", 1, true),
+            // From a build that named them so.
+            file("library.toml.tmp", 2, true),
+            // It holds the key.
+            file("OpenRouter/auth.json.4242-0.tmp", 4, true),
+            file("Guide/Platinum/chat-1.json.4242-3.tmp", 8, true),
+            file(
+                "3DS/azahar-2126.2/azahar_libretro.dylib.4242-1.tmp",
+                16,
+                true,
+            ),
+            file("store/pictures/0000ABCD-12.png.4242-9.tmp", 32, true),
+        ];
+        let kept = [
+            file("settings.toml", 1, true),
+            file("OpenRouter/auth.json", 1, true),
+            file("Guide/Platinum/chat-1.json", 1, true),
+            // Being written now, by this app or another copy of it.
+            file("OpenRouter/auth.json.5151-0.tmp", 1, false),
+            // Deeper than the app writes: a core's own files.
+            file("3DS/Azahar/sdmc/title/save.tmp", 1, true),
+        ];
+        // A folder is no file, whatever its name.
+        fs::create_dir_all(data.join("Guide/Game.tmp")).expect("folder");
+        age(&data.join("Guide/Game.tmp"), old);
+
+        let freed = remove_old_temporaries(&data, 2);
+        assert_eq!(freed, 1 + 2 + 4 + 8 + 16 + 32);
+        for path in &removed {
+            assert!(!path.exists(), "{} is removed", path.display());
+        }
+        for path in &kept {
+            assert!(path.exists(), "{} is kept", path.display());
+        }
+        assert!(data.join("Guide/Game.tmp").is_dir());
+        // A folder that is not there is nothing to look in.
+        assert_eq!(remove_old_temporaries(&temp.join("missing"), 2), 0);
+        fs::remove_dir_all(&temp).ok();
     }
 
     #[test]

@@ -93,8 +93,13 @@ mod windows {
 /// The temporary file is this write's alone, `name.<process>-<n>.tmp`, so
 /// two writers of one file, in this app or in two copies of it, never
 /// write through each other's: the later rename wins, whole. A write that
-/// fails removes it; one cut short by a crash leaves it, named `….tmp`
-/// for the app to clear at a later launch.
+/// fails removes it. One cut short by a crash leaves it, with whatever of
+/// the file it holds. At a later launch the app removes those that are an
+/// hour old from its own folders (emu-app's `leftovers`): its settings,
+/// data and cache folders, to two folders deep, and the games it unpacked,
+/// patched or got from the store. One beside a game in a folder of the
+/// user's own ROMs stays until the user removes it: the app does not go
+/// looking through those.
 ///
 /// On macOS the folder is not synced after the rename: syncing there
 /// flushes the whole drive's cache, which is slow, and without it a power
