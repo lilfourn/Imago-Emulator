@@ -90,6 +90,12 @@ mod windows {
 /// file first, reach the disk, and only then is it renamed over `path`
 /// (with [`rename`], which on Windows waits out a virus scanner).
 ///
+/// The file that was at `path` is never written to: it is replaced, by
+/// the rename, with a new file. So another name for the old file, such as
+/// the hard link the app keeps of a battery save before a state load
+/// replaces it, goes on holding the old bytes. Callers rely on that; keep
+/// it so.
+///
 /// The temporary file is this write's alone, `name.<process>-<n>.tmp`, so
 /// two writers of one file, in this app or in two copies of it, never
 /// write through each other's: the later rename wins, whole. A write that
@@ -262,6 +268,25 @@ mod tests {
         let failed = write_atomic_with(&path, None, |_| Err(io::Error::other("disk full")));
         assert_eq!(failed.expect_err("fails").to_string(), "disk full");
         assert_eq!(fs::read(&path).expect("read back"), b"one two");
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn the_old_file_is_replaced_not_written_to() {
+        let dir = temp_dir("replaced");
+        let (save, copy) = (dir.join("game.sav"), dir.join("game.sav.before-state"));
+        fs::write(&save, b"the battery save").expect("write");
+        // A copy by hard link, as the app keeps of a save before a state
+        // load replaces it: one file under two names.
+        fs::hard_link(&save, &copy).expect("linked");
+        write_atomic(&save, b"what the state held").expect("written");
+        write_atomic_with(&save, None, |file| file.write_all(b"and again")).expect("written");
+        assert_eq!(fs::read(&save).expect("read"), b"and again");
+        assert_eq!(
+            fs::read(&copy).expect("read"),
+            b"the battery save",
+            "the copy is the old file, untouched"
+        );
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
