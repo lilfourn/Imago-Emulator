@@ -831,6 +831,23 @@ mod tests {
         assert_eq!(events.last(), Some(&Event::Finished(Finish::Stop)));
     }
 
+    #[test]
+    fn a_question_holding_a_delete_or_c1_character_is_still_sent() {
+        // Once in a chat, such a message goes with every later question.
+        let endpoints = fake::stream(
+            |request| {
+                let fine =
+                    request.json()["messages"][1]["content"] == "Where\u{7f} is Ralts\u{85}?";
+                (if fine { 200 } else { 400 }, recorded())
+            },
+            Duration::ZERO,
+        );
+        let mut request = request(None);
+        request.messages = vec![Message::user("Where\u{7f} is Ralts\u{85}?", Vec::new())];
+        let events = collect(&endpoints, &request, &Stop::new());
+        assert_eq!(events.last(), Some(&Event::Finished(Finish::Stop)));
+    }
+
     type Reply = fn(&fake::Request) -> (u16, Vec<String>);
 
     #[test]

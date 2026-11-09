@@ -99,14 +99,26 @@ pub fn config_header(header: &str) -> Option<String> {
     Some(format!("header = \"{quoted}\"\n"))
 }
 
-/// A `curl` config line sending `body` as the request's body, quoted as
-/// [`config_header`] quotes. `None` if `body` holds a control character,
-/// which compact JSON never does.
+/// A `curl` config line sending `body`, compact JSON, as the request's
+/// body, quoted as [`config_header`] quotes.
+///
+/// Compact JSON escapes the control characters below U+0020, but leaves
+/// DEL and the C1 controls (U+007F to U+009F) as they are, as JSON allows
+/// inside a string, which is the only place they can be. No such
+/// character may stand in a config line, so each becomes its JSON escape,
+/// `\u007f`: the server reads the same text. `None` if `body` holds one of
+/// the others, a line break say, which compact JSON never does.
 pub fn config_body(body: &str) -> Option<String> {
-    if body.chars().any(char::is_control) {
-        return None;
+    let mut quoted = String::with_capacity(body.len());
+    for c in body.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\u{7f}'..='\u{9f}' => quoted.push_str(&format!("\\\\u{:04x}", u32::from(c))),
+            c if c.is_control() => return None,
+            c => quoted.push(c),
+        }
     }
-    let quoted = body.replace('\\', "\\\\").replace('"', "\\\"");
     Some(format!("data-binary = \"{quoted}\"\n"))
 }
 
@@ -134,5 +146,36 @@ mod tests {
             Some("data-binary = \"{\\\"a\\\":\\\"b\\\\\\\"c\\\\\\\\n\\\"}\"\n")
         );
         assert_eq!(config_body("{\n}"), None);
+    }
+
+    #[test]
+    fn a_body_s_delete_and_c1_characters_are_escaped_not_refused() {
+        // As a message pasted from a terminal or an old document holds
+        // them: JSON leaves these as they are inside a string.
+        let message = "a\u{7f}b\u{80}c\u{85}d\u{9f}e";
+        let body = serde_json::json!({ "content": message }).to_string();
+        assert!(body.contains('\u{7f}'), "serde_json does not escape them");
+        let config = config_body(&body).expect("it can be sent");
+        assert_eq!(
+            config,
+            "data-binary = \"{\\\"content\\\":\\\"a\\\\u007fb\\\\u0080c\\\\u0085d\\\\u009fe\\\"}\"\n"
+        );
+        assert!(!config.trim_end().chars().any(char::is_control));
+        // What curl makes of the line is JSON for the same message.
+        let quoted = config
+            .strip_prefix("data-binary = \"")
+            .and_then(|rest| rest.strip_suffix("\"\n"))
+            .expect("one quoted line");
+        let mut sent = String::new();
+        let mut chars = quoted.chars();
+        while let Some(c) = chars.next() {
+            sent.push(if c == '\\' {
+                chars.next().expect("escaped")
+            } else {
+                c
+            });
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&sent).expect("JSON");
+        assert_eq!(parsed["content"], message);
     }
 }
