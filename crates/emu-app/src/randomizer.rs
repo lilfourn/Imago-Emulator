@@ -136,7 +136,9 @@ const LOCK_FILE: &str = "install.lock";
 /// How the temporary folders installs work in start.
 const TEMP_PREFIX: &str = ".install-";
 /// How long the download may take in all, in seconds.
-const DOWNLOAD_SECONDS: &str = "1200";
+const DOWNLOAD_SECONDS: u32 = 1200;
+/// The most the download may be: over twice the biggest, Linux's 51 MB.
+const MAX_DOWNLOAD: u64 = 128 << 20;
 
 /// Where the randomizer is kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Randomizer` on macOS.
@@ -313,49 +315,18 @@ fn place(prepared: &Path, target: &Path) -> io::Result<()> {
     crate::persist::rename(prepared, target)
 }
 
-/// Downloads `url` into the file `to` with curl: macOS's own, and
-/// elsewhere the one on `PATH`, which Windows 10 and later ship.
+/// Downloads `url` into the file `to` with curl, as [`emu_os::fetch`] does
+/// a big file: from an `https://` address only, giving up on one stalled
+/// for a minute and trying again twice after a passing failure.
 fn curl(url: &str, to: &Path) -> Result<(), String> {
-    let program = if cfg!(target_os = "macos") {
-        "/usr/bin/curl"
-    } else {
-        "curl"
+    let download = emu_os::fetch::Download {
+        url,
+        allow: emu_os::fetch::Allow::Https,
+        seconds: DOWNLOAD_SECONDS,
+        max_bytes: MAX_DOWNLOAD,
+        patient: true,
     };
-    let output = emu_os::process::command(program)
-        .args(["--silent", "--show-error", "--location"])
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (+https://imagoemulator.com)"
-            ),
-        ])
-        .args(["--connect-timeout", "10", "--max-time", DOWNLOAD_SECONDS])
-        // Gives up on a download stalled below 1 KB/s for a minute, and
-        // tries again twice after a passing failure.
-        .args([
-            "--speed-limit",
-            "1024",
-            "--speed-time",
-            "60",
-            "--retry",
-            "2",
-        ])
-        .arg("--output")
-        .arg(to)
-        .args(["--write-out", "%{http_code}"])
-        .arg(url)
-        .output()
-        .map_err(|error| emu_os::process::why_not_started("curl", &error))?;
-    // A transfer cut short can still say 200; only curl's own status tells.
-    if !output.status.success() {
-        return Err(reason(&output));
-    }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "200" => Ok(()),
-        status => Err(format!("the server answered with HTTP status {status}")),
-    }
+    download.to_file(to).map_err(|error| error.to_string())
 }
 
 /// The SHA-256 of the file at `path`, in lowercase hex.

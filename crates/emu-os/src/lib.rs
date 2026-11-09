@@ -18,13 +18,14 @@
 //! Setting `HOME` does that on macOS and Linux, but Windows finds its
 //! folders without it.
 //!
-//! [`process`] runs other programs, such as `curl`, alike on every system,
-//! [`file`] writes files whole or not at all, [`lock`] holds a lock file,
-//! and [`ThreadClass`] passes a thread's scheduling class to the threads
-//! that work for it.
+//! [`process`] runs other programs alike on every system, [`fetch`]
+//! downloads through `curl`, [`file`] writes files whole or not at all,
+//! [`lock`] holds a lock file, and [`ThreadClass`] passes a thread's
+//! scheduling class to the threads that work for it.
 
 use std::path::{Path, PathBuf};
 
+pub mod fetch;
 pub mod file;
 pub mod lock;
 pub mod process;

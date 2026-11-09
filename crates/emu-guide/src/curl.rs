@@ -4,8 +4,9 @@
 //! arguments, which any process can read.
 
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
+use emu_os::fetch::Allow;
 use emu_os::process::why_not_started;
 
 /// What a server answered: its status and body.
@@ -17,6 +18,21 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// Where Guide's requests may go: `https://` addresses, and in tests the
+/// stand-in server on this computer.
+pub const ALLOW: Allow = Allow::or_loopback_if(cfg!(test));
+
+/// `curl` for a request of Guide's to `url`, with what every request of
+/// the app's has ([`emu_os::fetch::curl`]), naming Guide as the part of
+/// the app that asks.
+///
+/// # Errors
+///
+/// If `url` is not an address Guide may ask ([`ALLOW`]).
+pub fn command(url: &str) -> Result<Command, emu_os::fetch::Error> {
+    emu_os::fetch::curl(url, Some("Guide"), ALLOW)
+}
+
 /// Runs `curl` with `args` against `url`, writing `stdin` to it, and
 /// returns what the server answered, whatever its status. Gives up after
 /// `max_seconds`.
@@ -24,28 +40,20 @@ pub struct Response {
 /// # Errors
 ///
 /// What went wrong, in `curl`'s words, if `curl` cannot run or the
-/// transfer fails: no connection, a timeout, a reply cut short.
+/// transfer fails: no connection, a timeout, a reply cut short; or that
+/// `url` is not an address Guide may ask.
 pub fn request(
     args: &[&str],
     stdin: &[u8],
     url: &str,
     max_seconds: u32,
 ) -> Result<Response, String> {
-    let mut child = emu_os::process::command("curl")
-        .args(["--silent", "--show-error", "--connect-timeout", "10"])
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (Guide; +https://imagoemulator.com)"
-            ),
-        ])
+    let mut child = command(url)
+        .map_err(|error| error.to_string())?
         .arg("--max-time")
         .arg(max_seconds.to_string())
         .args(["--output", "-", "--write-out", "\n%{http_code}"])
         .args(args)
-        .arg(url)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -407,26 +407,20 @@ fn attempt_once(
     stop: &Stop,
     on_event: &mut dyn FnMut(Event),
 ) -> Outcome {
-    let spawned = emu_os::process::command("curl")
-        .args(["--silent", "--show-error", "--no-buffer"])
-        .args(["--connect-timeout", "10"])
+    let mut command = match curl::command(&endpoints.chat_url()) {
+        Ok(command) => command,
+        Err(error) => return Outcome::Failed(ChatError::Unreachable(error.to_string())),
+    };
+    let spawned = command
+        .arg("--no-buffer")
         // Fails a stream that sends nothing, keep-alives included, for a
         // minute.
         .args(["--speed-limit", "1", "--speed-time"])
         .arg(IDLE_SECONDS.to_string())
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (Guide; +https://imagoemulator.com)"
-            ),
-        ])
         .args(["--header", "Content-Type: application/json"])
         .args(["--header", "HTTP-Referer: https://imagoemulator.com"])
         .args(["--header", "X-OpenRouter-Title: Imago Emulator"])
         .args(["--write-out", "\n%{http_code}\n", "--config", "-"])
-        .arg(endpoints.chat_url())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

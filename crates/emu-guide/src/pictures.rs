@@ -231,22 +231,12 @@ pub fn download(address: &str) -> Result<Vec<u8>, PictureError> {
     Ok(bytes)
 }
 
-/// What `address` answers, following redirects to HTTPS only.
+/// What `address` answers, following redirects, which as every request
+/// of the app's go to HTTPS only.
 fn get(address: &str) -> Result<Vec<u8>, PictureError> {
     let max = MAX_BYTES.to_string();
-    let reply = curl::request(
-        &[
-            "--location",
-            "--proto-redir",
-            "=https",
-            "--max-filesize",
-            &max,
-        ],
-        &[],
-        address,
-        20,
-    )
-    .map_err(PictureError::Network)?;
+    let reply = curl::request(&["--location", "--max-filesize", &max], &[], address, 20)
+        .map_err(PictureError::Network)?;
     match reply.status {
         200 => Ok(reply.body),
         status => Err(PictureError::Network(format!("HTTP {status}"))),
@@ -256,7 +246,7 @@ fn get(address: &str) -> Result<Vec<u8>, PictureError> {
 /// Whether the app may fetch `address`: HTTPS, or in tests the stand-in
 /// server.
 fn allowed(address: &str) -> bool {
-    address.starts_with("https://") || (cfg!(test) && address.starts_with("http://127.0.0.1:"))
+    curl::ALLOW.takes(address)
 }
 
 /// The first page in a PageImages answer, by search rank, with a picture

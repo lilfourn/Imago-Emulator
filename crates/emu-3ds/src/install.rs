@@ -200,7 +200,9 @@ const LOCK_FILE: &str = "install.lock";
 /// How the names of the temporary folders installs work in start.
 const TEMP_PREFIX: &str = ".install-";
 /// How long a download may take in all, in seconds. MoltenVK is 60 MB.
-const DOWNLOAD_SECONDS: &str = "1800";
+const DOWNLOAD_SECONDS: u32 = 1800;
+/// The most a download may be: twice MoltenVK, the biggest.
+const MAX_DOWNLOAD: u64 = 128 << 20;
 
 /// The installed parts in `data`, if all of them are there.
 #[must_use]
@@ -536,57 +538,27 @@ fn place(prepared: &Path, target: &Path) -> io::Result<()> {
     fs::rename(prepared, target)
 }
 
-/// curl: macOS's own, and elsewhere the one on `PATH`, which Windows 10
-/// and 11 have in System32 and Linux has as a package.
-const CURL: &str = if cfg!(target_os = "macos") {
-    "/usr/bin/curl"
-} else {
-    "curl"
-};
-
-/// Downloads `url` into the file `to` with curl.
+/// Downloads `url` into the file `to` with curl, as [`emu_os::fetch`] does
+/// a big file: from an `https://` address only, giving up on one stalled
+/// for a minute and trying again twice after a passing failure.
 fn curl(url: &str, to: &Path) -> Result<(), String> {
-    let output = without_window(&mut Command::new(CURL))
-        .args(["--silent", "--show-error", "--location"])
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (+https://imagoemulator.com)"
-            ),
-        ])
-        .args(["--connect-timeout", "10", "--max-time", DOWNLOAD_SECONDS])
-        // Gives up on a download stalled below 1 KB/s for a minute, and
-        // tries again twice after a passing failure.
-        .args([
-            "--speed-limit",
-            "1024",
-            "--speed-time",
-            "60",
-            "--retry",
-            "2",
-        ])
-        .arg("--output")
-        .arg(to)
-        .args(["--write-out", "%{http_code}"])
-        .arg(url)
-        .output()
-        .map_err(|error| match error.kind() {
+    let download = emu_os::fetch::Download {
+        url,
+        allow: emu_os::fetch::Allow::Https,
+        seconds: DOWNLOAD_SECONDS,
+        max_bytes: MAX_DOWNLOAD,
+        patient: true,
+    };
+    download.to_file(to).map_err(|error| match error {
+        emu_os::fetch::Error::NotStarted(error) => match error.kind() {
             // Every Mac has curl; a Linux system may not.
             io::ErrorKind::NotFound if !cfg!(target_os = "macos") => {
                 "curl, which downloads it, is not installed".to_owned()
             }
             _ => format!("could not run curl: {error}"),
-        })?;
-    // A transfer cut short can still say 200; only curl's own status tells.
-    if !output.status.success() {
-        return Err(reason(&output));
-    }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "200" => Ok(()),
-        status => Err(format!("the server answered with HTTP status {status}")),
-    }
+        },
+        error => error.to_string(),
+    })
 }
 
 /// Why the command that gave `output` failed: the last line it printed as

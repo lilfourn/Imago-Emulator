@@ -81,9 +81,12 @@ mod tests {
         assert!(try_lock(&path).expect("opened").is_none(), "held");
         assert_eq!(fs::read(&path).expect("read"), b"what its holder wrote");
         drop(held);
-        let free = try_lock(&path).expect("opened");
-        assert!(free.is_some(), "let go");
+        // Waited for, not tried: a program another test starts at this
+        // moment holds every open file for an instant, this one too.
+        drop(lock(&path).expect("let go"));
         assert_eq!(fs::read(&path).expect("read"), b"what its holder wrote");
+        let free = try_lock(&dir.join("other.lock")).expect("opened");
+        assert!(free.is_some(), "nobody holds a new one");
         // A folder that is not there holds no lock file to make.
         assert!(lock(&dir.join("missing").join("install.lock")).is_err());
         fs::remove_dir_all(&dir).expect("clean up");
