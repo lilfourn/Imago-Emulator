@@ -121,12 +121,21 @@ fn size(kind: Kind) -> usize {
     }
 }
 
-/// The smallest chip that holds a save of `length` bytes.
+/// The smallest chip that holds a save of `length` bytes. For a save
+/// longer than the largest chip there is, that is a flash chip that never
+/// was, of the next power of two: the game finds no save it knows in it,
+/// but the file, which is not one of this game's, is written back whole.
 fn from_save_size(length: usize) -> Option<Kind> {
     if length == 0 {
         return None;
     }
-    SIZES.into_iter().find(|&kind| size(kind) >= length)
+    let larger = Kind::Flash(length.next_power_of_two());
+    Some(
+        SIZES
+            .into_iter()
+            .find(|&kind| size(kind) >= length)
+            .unwrap_or(larger),
+    )
 }
 
 fn listed(rom: &[u8]) -> Option<Kind> {
@@ -146,8 +155,9 @@ fn listed(rom: &[u8]) -> Option<Kind> {
 /// instead the save fills the start of the chip and the rest reads as
 /// erased. melonDS also lets its game list win, but it truncates a save
 /// that is too big. Here a save too big for the listed chip gets the
-/// smallest chip that holds all of it, so no byte of the file is dropped
-/// when it is written back. Other games go by the save's size.
+/// smallest chip that holds all of it ([`from_save_size`]), whatever its
+/// length, so no byte of the file is dropped when it is written back.
+/// Other games go by the save's size.
 fn chip_kind(rom: &[u8], length: usize) -> Option<Kind> {
     match listed(rom) {
         Some(kind) if length <= size(kind) => Some(kind),
@@ -623,6 +633,28 @@ mod tests {
         let backup = Backup::new(&rom_with_code(b"ASME"), Some(&file));
         assert!(matches!(backup.chip, Chip::Eeprom(_)));
         assert_eq!(backup.data(), file, "not cut to the listed 8 KiB");
+    }
+
+    /// A save longer than the largest chip there is, 8 MiB, matched no
+    /// size: a game in the table had it cut to its listed chip, and any
+    /// other got a blank chip of a type not known yet, whose first write
+    /// replaced the file.
+    #[test]
+    fn a_save_longer_than_any_chip_is_kept_whole() {
+        let mut file = vec![0x34; 9 * 1024 * KIB];
+        file[0] = 0x12;
+        *file.last_mut().expect("not empty") = 0x56;
+        // A game not in the table, and one listed with an 8 KiB EEPROM.
+        for code in [b"ZZZE", b"ASME"] {
+            let backup = Backup::new(&rom_with_code(code), Some(&file));
+            assert!(
+                matches!(backup.chip, Chip::Flash(_)),
+                "a chip that holds it"
+            );
+            let data = backup.data();
+            assert_eq!(data.len(), 16 * 1024 * KIB);
+            assert!(data[..file.len()] == file[..], "every byte of the file");
+        }
     }
 
     #[test]
