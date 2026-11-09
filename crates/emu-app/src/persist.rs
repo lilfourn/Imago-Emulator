@@ -36,7 +36,9 @@
 //! replacing one ([`set_aside`]). Loading a save state over a different
 //! save keeps that save as `game.sav.before-load`, the newest of at most
 //! five ([`keep_before_load`]): the next one moves the others up to
-//! `game.sav.before-load2` and on, and the fifth goes.
+//! `game.sav.before-load2` and on, and the fifth goes. That copy is made
+//! beside the save, which is never moved: there is a `game.sav` at every
+//! moment, whatever fails next.
 
 use std::borrow::Cow;
 use std::fs::{self, File};
@@ -488,17 +490,68 @@ pub enum Kept {
     New(PathBuf),
 }
 
-/// Keeps the battery save at `path`, of a game for `system`, which is
-/// about to be replaced with `bytes` from a save state, if it holds
-/// another save ([`same_save`]) that is not kept already: it becomes
-/// `game.sav.before-load`, the saves kept before it each move up a number,
-/// and the fifth of them goes ([`before_load_path`]). So the newest five
-/// are kept, none of them twice.
+/// Makes `copy` hold what the file at `path` holds, leaving `path` as it
+/// is: a hard link, which takes no room and no time, or, where the file
+/// system has none (exFAT and FAT, as cards and sticks often are), a copy,
+/// which is on disk before this returns. Nothing at `copy` is replaced.
+///
+/// A hard link is the same file under a second name, so it keeps the old
+/// bytes only because `path` is next replaced whole, by a rename
+/// ([`write_atomic`]), never written in place.
 ///
 /// # Errors
 ///
-/// Returns the error if the file cannot be read, or the saves kept cannot
-/// be moved up; nothing must be written over `path` then.
+/// Returns the error if neither can be made, or there is a file at `copy`
+/// already. A copy cut short, as by a full disk, is removed.
+pub fn keep_copy(path: &Path, copy: &Path) -> io::Result<()> {
+    keep_copy_with(path, copy, |from, to| fs::hard_link(from, to))
+}
+
+/// Makes `copy` as [`keep_copy`] does, with `link` to make the hard link.
+fn keep_copy_with(
+    path: &Path,
+    copy: &Path,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match link(path, copy) {
+        Ok(()) => return Ok(()),
+        // Not for want of hard links: a copy would fare no better.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound
+            ) =>
+        {
+            return Err(error);
+        }
+        // Every system says "no hard links here" in words of its own.
+        Err(_) => {}
+    }
+    let mut from = File::open(path)?;
+    let mut to = File::create_new(copy)?;
+    let copied = io::copy(&mut from, &mut to).and_then(|_| to.sync_all());
+    drop(to);
+    if copied.is_err() {
+        fs::remove_file(copy).ok();
+    }
+    copied
+}
+
+/// Keeps the battery save at `path`, of a game for `system`, which is
+/// about to be replaced with `bytes` from a save state, if it holds
+/// another save ([`same_save`]) that is not kept already: a copy of it
+/// ([`keep_copy`]) becomes `game.sav.before-load`, the saves kept before it
+/// each move up a number, and the fifth of them goes
+/// ([`before_load_path`]). So the newest five are kept, none of them twice.
+///
+/// The save itself stays where it is, and the copy is made before any
+/// other is moved or dropped: whatever fails, here or in the write that
+/// follows, there is a `game.sav`, and no save kept is lost for nothing.
+///
+/// # Errors
+///
+/// Returns the error if the file cannot be read or copied, or the saves
+/// kept cannot be moved up; nothing must be written over `path` then.
 pub fn keep_before_load(path: &Path, bytes: &[u8], system: System) -> io::Result<Kept> {
     let there = match fs::read(path) {
         Ok(there) => there,
@@ -514,9 +567,18 @@ pub fn keep_before_load(path: &Path, bytes: &[u8], system: System) -> io::Result
     if kept_already {
         return Ok(Kept::Already);
     }
-    make_room_before_load(path)?;
+    // Under a name of its own until there is room for it.
+    let mut fresh = before_load_path(path, 1).into_os_string();
+    fresh.push(".new");
+    let fresh = PathBuf::from(fresh);
+    remove_if_present(&fresh)?;
+    keep_copy(path, &fresh)?;
     let newest = before_load_path(path, 1);
-    rename(path, &newest)?;
+    let placed = make_room_before_load(path).and_then(|()| rename(&fresh, &newest));
+    if let Err(error) = placed {
+        fs::remove_file(&fresh).ok();
+        return Err(error);
+    }
     Ok(Kept::New(newest))
 }
 
@@ -1060,11 +1122,54 @@ mod tests {
             Kept::New(dir.join("game.sav.before-load"))
         );
         assert_eq!(copies_in(&dir), copies(&[("game.sav.before-load", b"old")]));
+        // The save itself has not moved: it is replaced only by the write
+        // that follows, should that work.
+        assert_eq!(fs::read(&save).expect("still there"), b"old");
         // A save of which a copy is kept already is not kept twice.
         write_atomic(&save, b"old").expect("write");
         assert_eq!(keep(b"new").expect("kept already"), Kept::Already);
         assert_eq!(fs::read(&save).expect("left"), b"old");
         assert_eq!(copies_in(&dir), copies(&[("game.sav.before-load", b"old")]));
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_copy_is_a_hard_link_or_where_there_are_none_a_file_of_its_own() {
+        let dir = temp_dir("keep-copy");
+        let save = dir.join("game.sav");
+        write_atomic(&save, b"twenty hours").expect("write");
+        let linked = dir.join("linked");
+        keep_copy(&save, &linked).expect("kept");
+        assert_eq!(fs::read(&linked).expect("the copy"), b"twenty hours");
+        assert_eq!(fs::read(&save).expect("the save"), b"twenty hours");
+        // Replaced whole, as the app writes saves, the save leaves the
+        // copy as it was.
+        write_atomic(&save, b"two hours").expect("write");
+        assert_eq!(fs::read(&linked).expect("the copy"), b"twenty hours");
+
+        // On a file system without hard links it is copied.
+        let no_links = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
+        let copied = dir.join("copied");
+        keep_copy_with(&save, &copied, no_links).expect("kept");
+        assert_eq!(fs::read(&copied).expect("the copy"), b"two hours");
+        // It shares nothing with the save, even written in place.
+        fs::write(&save, b"overwritten").expect("write");
+        assert_eq!(fs::read(&copied).expect("the copy"), b"two hours");
+
+        // Neither replaces a file that is there, nor leaves one for a save
+        // that is not.
+        for kept in [&linked, &copied] {
+            let taken = keep_copy(&save, kept).expect_err("there already");
+            assert_eq!(taken.kind(), io::ErrorKind::AlreadyExists);
+            let taken = keep_copy_with(&save, kept, no_links).expect_err("there already");
+            assert_eq!(taken.kind(), io::ErrorKind::AlreadyExists);
+        }
+        assert_eq!(fs::read(&linked).expect("the copy"), b"twenty hours");
+        assert_eq!(fs::read(&copied).expect("the copy"), b"two hours");
+        let gone = dir.join("gone.sav");
+        assert!(keep_copy(&gone, &dir.join("of-gone")).is_err());
+        assert!(keep_copy_with(&gone, &dir.join("of-gone"), no_links).is_err());
+        assert!(!dir.join("of-gone").exists());
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

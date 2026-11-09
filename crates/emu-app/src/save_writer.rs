@@ -7,7 +7,9 @@
 //! it replaces, which may be the only copy of the player's latest save. So
 //! such a write first keeps the file, with [`persist::keep_before_load`],
 //! if it holds another save: once for each run of loads (see `saves.rs`),
-//! however many of them change the save.
+//! however many of them change the save. The file is copied, not moved, so
+//! a write that then fails, as on a full disk, leaves the save where it
+//! was.
 
 use std::collections::HashMap;
 use std::io;
@@ -75,6 +77,17 @@ impl Guard {
         bytes: &[u8],
         load: Option<(u64, System)>,
     ) -> (Kept, io::Result<()>) {
+        self.write_with(path, bytes, load, persist::write_atomic)
+    }
+
+    /// Writes as [`Guard::write`] does, with `write` to replace the file.
+    fn write_with(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        load: Option<(u64, System)>,
+        write: impl FnOnce(&Path, &[u8]) -> io::Result<()>,
+    ) -> (Kept, io::Result<()>) {
         let load = load.or(self.owed);
         let kept = match load {
             Some((run, system)) if self.kept_for != Some(run) => {
@@ -87,7 +100,7 @@ impl Guard {
                 if kept != Kept::Unneeded {
                     self.kept_for = load.map(|(run, _)| run);
                 }
-                (kept, persist::write_atomic(path, bytes))
+                (kept, write(path, bytes))
             }
             Err(error) => (Kept::Unneeded, Err(error)),
         };
@@ -367,6 +380,50 @@ mod tests {
                 ("game.sav.before-load2", b"hour 20"),
             ])
         );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_save_kept_before_a_write_that_fails_is_still_where_it_was() {
+        let dir = std::env::temp_dir().join(format!("emu-app-writer-full-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).expect("temp dir");
+        let save = dir.join("game.sav");
+        persist::write_atomic(&save, b"hour 20").expect("written");
+        // The disk is full: keeping the save takes no room and works, and
+        // the write of the state's save fails.
+        let full = |_: &Path, _: &[u8]| Err(io::Error::from(io::ErrorKind::StorageFull));
+        let mut guard = Guard::default();
+        let (kept, result) = guard.write_with(&save, b"hour 2", Some((1, System::Gba)), full);
+        assert_eq!(kept, Kept::New(dir.join("game.sav.before-load")));
+        assert!(result.is_err());
+        // The save is where it was, whole: a game started now loads it.
+        let unwritten = held(&[
+            ("game.sav", b"hour 20"),
+            ("game.sav.before-load", b"hour 20"),
+        ]);
+        assert_eq!(files_in(&dir), unwritten);
+        let (_, result) = guard.write_with(&save, b"hour 2", None, full);
+        assert!(result.is_err());
+        assert_eq!(files_in(&dir), unwritten, "nor does a failed retry move it");
+
+        // With room again, the retry writes, and keeps nothing twice.
+        let (kept, result) = guard.write(&save, b"hour 2", None);
+        assert_eq!(kept, Kept::Unneeded);
+        result.expect("written");
+        let written = held(&[
+            ("game.sav", b"hour 2"),
+            ("game.sav.before-load", b"hour 20"),
+        ]);
+        assert_eq!(files_in(&dir), written);
+
+        // Had the app been closed with the disk still full, the next
+        // session's load finds the save kept already.
+        persist::write_atomic(&save, b"hour 20").expect("as it was left");
+        let (kept, result) = Guard::default().write(&save, b"hour 2", Some((1, System::Gba)));
+        assert_eq!(kept, Kept::Already);
+        result.expect("written");
+        assert_eq!(files_in(&dir), written);
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
