@@ -1,29 +1,19 @@
 # What `cargo deny check advisories` holds the app's dependencies to. CI
 # runs it on every change (.github/workflows/ci.yml, "Advisories").
 #
-# Every RustSec advisory fails the check: a vulnerability, an unsound
-# crate, one that is no longer maintained. The ones ignored below are all
-# of the last kind, not vulnerabilities, and none can be moved off from
-# here: each comes through GPUI 0.2.2, at the one version GPUI or one of
-# its own dependencies asks for. Take one off this list when an update of
-# GPUI drops it, and never add a vulnerability here.
+# A known vulnerability in any crate, however deep, fails the check.
+#
+# A crate that is no longer maintained fails it only where the workspace
+# can do something about it: when a crate of this workspace depends on it
+# directly. The others, a dozen today (async-std, instant, paste,
+# pin-utils, proc-macro-error2, rustls-pemfile, rustybuzz, ttf-parser,
+# zbus_names, zvariant and zvariant_derive), come through GPUI 0.2.2 at
+# the one version it or its dependencies ask for. They go when GPUI is
+# updated, and a new such notice for a crate deep under GPUI must not
+# turn every pull request red.
+#
+# Nothing is ignored. Do not add a vulnerability to an `ignore` list here
+# without saying why it cannot reach the app.
 
 [advisories]
-ignore = [
-    # Under GPUI's HTTP client (gpui_http_client), which the app never
-    # calls: its own downloads go through curl (emu_os::fetch).
-    { id = "RUSTSEC-2025-0052", reason = "async-std, discontinued: zed-async-tar under gpui_http_client asks for it" },
-    { id = "RUSTSEC-2026-0441", reason = "pin-utils: only async-std, above, asks for it" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: zed-reqwest under gpui_http_client asks for it" },
-    # Under GPUI itself.
-    { id = "RUSTSEC-2024-0384", reason = "instant: fastrand 1.9, under futures-lite 1.13, which gpui_util asks for" },
-    { id = "RUSTSEC-2024-0436", reason = "paste, a macro used when building: metal 0.29 under GPUI, and the image crate's exr and rav1e" },
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2, a macro used when building: stacksafe-macro under GPUI" },
-    # GPUI's text and SVG drawing.
-    { id = "RUSTSEC-2026-0206", reason = "rustybuzz: cosmic-text 0.14 and usvg 0.45 under GPUI ask for it" },
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: fontdb, cosmic-text 0.14 and usvg 0.45 under GPUI ask for it" },
-    # GPUI's desktop portals and keyring on Linux (ashpd, oo7, zbus).
-    { id = "RUSTSEC-2026-0370", reason = "zvariant: zbus 5.19 under GPUI's ashpd and oo7 asks for it" },
-    { id = "RUSTSEC-2026-0371", reason = "zbus_names: zbus 5.19 under GPUI's ashpd and oo7 asks for it" },
-    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: zvariant, above, asks for it" },
-]
+unmaintained = "workspace"

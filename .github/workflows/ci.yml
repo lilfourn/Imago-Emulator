@@ -49,10 +49,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: scripts/determinism/check.sh
 
-  # RustSec's advisories against Cargo.lock: a dependency with a known
-  # vulnerability, or one newly unmaintained, fails the run. deny.toml
-  # lists the few that are ignored, and why. The action runs cargo-deny
-  # in a container of its own, so it needs an x86-64 Linux runner.
+  # RustSec's advisories against Cargo.lock: a known vulnerability in any
+  # dependency fails the run, and so does a crate the workspace depends on
+  # directly that is no longer maintained (deny.toml says why not the
+  # deeper ones). The action runs cargo-deny in a container of its own,
+  # so it needs an x86-64 Linux runner.
   advisories:
     name: Advisories
     runs-on: namespace-profile-default
