@@ -21,8 +21,9 @@
 //! [`process`] runs other programs alike on every system, [`fetch`]
 //! downloads through `curl`, [`install`] installs a pinned download,
 //! [`file`] writes files whole or not at all, [`lock`] holds a lock file,
-//! and [`ThreadClass`] passes a thread's scheduling class to the threads
-//! that work for it.
+//! [`temp`] says where what is kept only for a while goes, and
+//! [`ThreadClass`] passes a thread's scheduling class to the threads that
+//! work for it.
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,7 @@ pub mod file;
 pub mod install;
 pub mod lock;
 pub mod process;
+pub mod temp;
 #[allow(unsafe_code)]
 mod thread_class;
 

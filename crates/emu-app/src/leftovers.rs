@@ -1,7 +1,9 @@
 //! What the app writes for a while and then removes: the folders it
 //! unpacks archives, downloads and randomizes games into, in the temporary
-//! folder, and the games it is writing, as `….partial` files beside where
-//! they go. A big 3DS game makes either 4 GB, so none may be left behind.
+//! folder (on Linux, in a folder of the user's own inside it: see
+//! [`emu_os::temp`]), and the games it is writing, as `….partial` files
+//! beside where they go. A big 3DS game makes either 4 GB, so none may be
+//! left behind.
 //!
 //! Each is locked while the app works in it. The system lets go of a lock
 //! when its process ends, crashed or killed, so one that no running app
@@ -40,7 +42,7 @@ const WAIT: Duration = Duration::from_millis(20);
 const LOCK: &str = ".ds-emulator-lock";
 
 /// Where patches unpacked from archives are kept until their games are
-/// made, in the temporary folder.
+/// made, in the folder the work folders are in.
 pub const PATCHES: &str = "ds-emulator-patches";
 
 /// How the names of games being written end, locked while they are.
@@ -91,7 +93,7 @@ impl WorkFolder {
     /// A work folder for `kind` of work: `"unpack"`, `"store"` or
     /// `"randomize"`.
     pub fn new(kind: &str) -> io::Result<Self> {
-        Self::new_in(&std::env::temp_dir(), kind)
+        Self::new_in(&emu_os::temp::work_dir()?, kind)
     }
 
     /// A work folder for `kind` of work in the folder `temp`.
@@ -343,7 +345,11 @@ pub(crate) fn remove_own_where(wanted: impl Fn(&Path) -> bool) {
 ///
 /// Blocking file I/O; call it off the UI thread.
 pub fn remove_left_behind(folders: &[PathBuf]) -> u64 {
-    remove_left_behind_in(&std::env::temp_dir(), folders)
+    match emu_os::temp::work_dir() {
+        Ok(temp) => remove_left_behind_in(&temp, folders),
+        // No folder of the user's own to look in: the games' alone.
+        Err(_) => remove_unfinished_games(folders),
+    }
 }
 
 fn remove_left_behind_in(temp: &Path, folders: &[PathBuf]) -> u64 {
@@ -365,12 +371,18 @@ fn remove_left_behind_in(temp: &Path, folders: &[PathBuf]) -> u64 {
         }
     }
     freed += remove_unused_files(&temp.join(PATCHES), |_| true);
-    for folder in folders {
-        freed += remove_unused_files(folder, |name| {
-            name.ends_with(PARTIAL) || name.ends_with(".tmp")
-        });
-    }
-    freed
+    freed + remove_unfinished_games(folders)
+}
+
+/// Removes, in each of `folders`, where games are written, the games half
+/// written and old `….tmp` files that no running app is writing, and says
+/// how many bytes that freed.
+fn remove_unfinished_games(folders: &[PathBuf]) -> u64 {
+    let unfinished = |name: &str| name.ends_with(PARTIAL) || name.ends_with(".tmp");
+    folders
+        .iter()
+        .map(|folder| remove_unused_files(folder, unfinished))
+        .sum()
 }
 
 /// Removes the files in `folder` whose names `wanted` takes and that are

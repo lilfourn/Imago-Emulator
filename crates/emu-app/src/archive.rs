@@ -60,9 +60,10 @@ pub fn games_dir() -> Option<PathBuf> {
 }
 
 /// Where patches unpacked from archives are kept until their games are
-/// made.
-fn patches_dir() -> PathBuf {
-    std::env::temp_dir().join(leftovers::PATCHES)
+/// made: beside the work folders, in the temporary folder or, on Linux, a
+/// folder of the user's own inside it ([`emu_os::temp::work_dir`]).
+fn patches_dir() -> io::Result<PathBuf> {
+    Ok(emu_os::temp::work_dir()?.join(leftovers::PATCHES))
 }
 
 /// How often the files an unpacking program writes are measured while it
@@ -149,7 +150,9 @@ fn has_extension(path: &Path, extensions: &[&str]) -> bool {
 /// file cannot be written.
 pub fn unpack(archive: &Path, progress: &Progress) -> Result<Vec<PathBuf>, String> {
     let folder = games_dir().ok_or("There is no folder to unpack games into")?;
-    unpack_into(archive, &folder, &patches_dir(), progress)
+    let patches =
+        patches_dir().map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
+    unpack_into(archive, &folder, &patches, progress)
 }
 
 /// Unpacks the archive at `archive` as [`unpack`] does, but its games into
@@ -162,7 +165,7 @@ pub fn unpack(archive: &Path, progress: &Progress) -> Result<Vec<PathBuf>, Strin
 /// nothing to the user: that it is damaged or locked with a password, that
 /// the disk is full, or which program to install to unpack it.
 pub fn unpack_to(archive: &Path, folder: &Path) -> io::Result<Vec<PathBuf>> {
-    unpack_any(archive, folder, &patches_dir(), &Progress::default())
+    unpack_any(archive, folder, &patches_dir()?, &Progress::default())
 }
 
 fn unpack_into(
@@ -1116,7 +1119,7 @@ mod tests {
         );
         assert_eq!(fs::read(&unpacked[0]).expect("unpacked"), b"platinum");
         assert_eq!(progress.fraction(), Some(1.0));
-        let leftovers = fs::read_dir(std::env::temp_dir())
+        let leftovers = fs::read_dir(emu_os::temp::work_dir().expect("work folders"))
             .expect("temp")
             .flatten()
             .filter(|entry| {
@@ -1283,7 +1286,7 @@ mod tests {
             let archive = dir.join("Bomb.rar");
             fs::write(&archive, b"whatever the program makes of it").expect("written");
             let work_folders = || {
-                fs::read_dir(std::env::temp_dir())
+                fs::read_dir(emu_os::temp::work_dir().expect("work folders"))
                     .expect("temp")
                     .flatten()
                     .filter(|entry| {

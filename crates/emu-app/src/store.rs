@@ -1230,7 +1230,7 @@ mod tests {
             );
         }
         assert!(!folder.join("game.gb").exists());
-        let work_folders = fs::read_dir(std::env::temp_dir())
+        let work_folders = fs::read_dir(emu_os::temp::work_dir().expect("work folders"))
             .expect("temp")
             .flatten()
             .filter(|entry| {

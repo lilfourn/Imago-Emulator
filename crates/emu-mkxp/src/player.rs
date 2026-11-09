@@ -154,8 +154,11 @@ impl Player {
                 .map_err(Error::io(format!("writing {}", settings_path.display())))?;
             app
         };
-        // Sockets' paths are short, so these go in the temporary folder.
-        let temp = std::env::temp_dir();
+        // Sockets' paths are short, so these go in the temporary folder,
+        // or on Linux in the session's own folder for such things, which
+        // no other user can put a socket or a pipe of theirs in.
+        let temp = emu_os::temp::runtime_dir()
+            .map_err(Error::io("finding a folder for the game's link"))?;
         // Windows's pipes have names of their own, and this process's, as
         // two copies of the app each keep a player of their own.
         let sound_pipe = if cfg!(windows) {
