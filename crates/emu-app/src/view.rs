@@ -78,6 +78,10 @@ use crate::trace;
 use crate::video;
 use crate::window_chrome;
 
+mod opening;
+
+use opening::Game;
+
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
 /// How long a warning the player must not miss shows, such as a game
@@ -196,12 +200,10 @@ pub struct EmulatorView {
     title_hovered: bool,
     /// Games started so far, which numbers each for the debugger.
     sessions: u64,
-    session: Option<Session>,
+    /// The game: none, loading, running or stopped (see `opening.rs`).
+    game: Game<Session, Task<()>>,
     /// A script from the command line, to run with the first game.
     startup_script: Option<PathBuf>,
-    loading: Option<Task<()>>,
-    /// The games `loading` loads, until they start or fail to.
-    loading_games: Vec<PathBuf>,
     placements: Vec<Placement>,
     controls: Controls,
     /// Gamepad hotkey chords in progress.
@@ -577,7 +579,7 @@ impl EmulatorView {
             // corner (see `adding_card`), drawn anew as the library is, even
             // while the game is paused.
             cx.observe(&library, |this, _, cx| {
-                if this.session.is_some() {
+                if this.game.session().is_some() {
                     // The library may have just read the game Guide is about.
                     let game = this.guide_game(cx);
                     this.guide.update(cx, |guide, cx| guide.set_game(game, cx));
@@ -621,7 +623,7 @@ impl EmulatorView {
                 }
                 this.save_checkpoint();
                 this.record_play_time(cx);
-                this.session = None;
+                drop(this.game.end());
                 async {}
             }),
         ];
@@ -680,10 +682,8 @@ impl EmulatorView {
             app_menu: None,
             title_hovered: false,
             sessions: 0,
-            session: None,
+            game: Game::Idle,
             startup_script: script,
-            loading: None,
-            loading_games: Vec::new(),
             placements: Vec::new(),
             controls: Controls::default(),
             chords: Chords::default(),
@@ -769,281 +769,9 @@ impl EmulatorView {
         view
     }
 
-    /// Loads the ROMs off the UI thread, then starts them: one game, a DS
-    /// game with a GBA game in its slot, or two games joined by a link
-    /// cable, or an RPG Maker game from its folder.
-    fn open(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if paths
-            .iter()
-            .any(|path| archive::is_archive(path) || romhack::is_patch(path))
-        {
-            self.prepare_and_open(paths, window, cx);
-            return;
-        }
-        // Where 3DS games can't play yet, say so at once: not after a
-        // moment of "Downloading the 3DS core…", nor once the running game
-        // has stopped for it.
-        if let Some(why) = refused(&paths) {
-            self.show_notice(why, cx);
-            return;
-        }
-        // A game opened from the command line is the same game, in the
-        // library too, whatever folder it was opened from.
-        let paths: Vec<PathBuf> = paths.iter().map(|path| library::absolute(path)).collect();
-        // A second click while the game loads would start it twice.
-        if self.loading_games == paths {
-            return;
-        }
-        let stops_first = self.session.as_ref().is_some_and(|session| {
-            stops_before_loading(session.info.system, &session.files, &paths)
-        });
-        if stops_first {
-            self.save_checkpoint();
-            let stopped = self.stop(window, cx);
-            self.keep_for_start(stopped);
-        }
-        let name = paths
-            .iter()
-            .map(|path| file_name(path))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        self.show_notice(loading_notice(&paths, &name), cx);
-        let dmg_colors = self.dmg_colors;
-        self.loading_games.clone_from(&paths);
-        let open = cx
-            .background_executor()
-            .spawn(async move { emulator::open(&paths, dmg_colors) });
-        self.loading = Some(cx.spawn_in(window, async move |this, cx| {
-            let opened = open.await;
-            this.update_in(cx, |this, window, cx| {
-                this.loading_games.clear();
-                match opened {
-                    Ok(opened) => this.start(opened, &name, window, cx),
-                    // Long enough to read why, as for a game another copy
-                    // of the app has open.
-                    Err(error) => this.show_warning(format!("{error:#}"), cx),
-                }
-            })
-            .ok();
-        }));
-    }
-
-    /// Unpacks the archives among `paths` and makes the game of a ROM-hack
-    /// patch among them, off the UI thread, then opens the games in their
-    /// place (see [`prepare`]). Meanwhile the library shows the archive, or
-    /// else the patch, as a game being added. A patch whose game is not
-    /// found asks for it.
-    fn prepare_and_open(
-        &mut self,
-        paths: Vec<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let slow = paths
-            .iter()
-            .find(|path| archive::is_archive(path))
-            .or_else(|| paths.iter().find(|path| romhack::is_patch(path)))
-            .map_or_else(|| paths[0].clone(), |path| library::absolute(path));
-        let (key, progress) = self
-            .library
-            .update(cx, |library, cx| library.start_adding(&slow, cx));
-        let known = self.library.read(cx).checksums();
-        let prepare = cx
-            .background_executor()
-            .spawn(async move { prepare(paths, &known, &progress) });
-        cx.spawn_in(window, async move |this, cx| {
-            let prepared = prepare.await;
-            this.update_in(cx, |this, window, cx| {
-                this.library
-                    .update(cx, |library, cx| library.added(key, cx));
-                match prepared {
-                    Ok(paths) => this.open(paths, window, cx),
-                    Err(MakeError::NoBase(patch)) => this.choose_base(patch, window, cx),
-                    Err(MakeError::Failed(error)) => this.show_notice(error, cx),
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Asks for the game the patch at `patch` is for, then makes the
-    /// patched game from it and opens that.
-    fn choose_base(&mut self, patch: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_notice(format!("Choose the game {} patches", file_name(&patch)), cx);
-        self.prompt_for_file("Patch", window, cx, move |this, base, window, cx| {
-            this.prepare_and_open(vec![base, patch], window, cx);
-        });
-    }
-
-    /// Starts the game `opened`, called `name`, in place of any running.
-    fn start(&mut self, opened: Opened, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Opened {
-            loaded,
-            unwritable,
-            locks,
-        } = opened;
-        // Stop the previous game first so its battery save is flushed.
-        self.save_checkpoint();
-        let stopped = self.stop(window, cx);
-        let info = loaded.info();
-        let (audio_output, audio_sink, no_sound) = match audio::open(info.audio_sample_rate) {
-            Ok((output, sink)) => (Some(output), Some(sink), None),
-            Err(error) => (None, None, Some(format!("No sound: {error:#}"))),
-        };
-        let (events, receiver) = async_channel::unbounded();
-        let rom_paths = loaded.rom_paths().to_vec();
-        let played = rom_paths.clone();
-        self.library
-            .update(cx, |library, cx| library.add(played, cx));
-        let player_rom_paths = loaded.player_rom_paths().to_vec();
-        let files = loaded.files().to_vec();
-        let states = loaded.states();
-        let own_saves = loaded.own_saves();
-        let emulator = match Emulator::start(loaded, events, audio_sink) {
-            Ok(emulator) => emulator,
-            Err(error) => {
-                // No game runs now: the one before has stopped.
-                let notes = [Some(format!("Could not start {name}: {error}")), stopped];
-                let notice: Vec<String> = notes.into_iter().flatten().collect();
-                self.show_warning(notice.join(" · "), cx);
-                window.set_window_title("Imago Emulator");
-                self.library.update(cx, |library, cx| library.refresh(cx));
-                return;
-            }
-        };
-        // As the window lays the game out now; drawing it corrects this if
-        // its screens come out another size.
-        let viewport = window.viewport_size();
-        let placements = self.shown_layout().place_consoles(
-            info.screens,
-            consoles(&info),
-            (f32::from(viewport.width), f32::from(viewport.height)),
-        );
-        let render_scale = render_scale(
-            self.resolution_3d,
-            &info,
-            &placements,
-            window.scale_factor(),
-        );
-        emulator.send(Command::SetRenderScale(render_scale));
-        emulator.send(Command::SetTextureUpscaling(
-            self.picture.texture_upscaling(),
-        ));
-        // Pick up where the player left off, unless a battery save has
-        // changed since: the emulation thread checks.
-        emulator.send(Command::LoadCheckpoint(CHECKPOINT));
-        let stranded: Vec<String> = rom_paths
-            .iter()
-            .zip(&files)
-            .filter_map(|(rom, files)| {
-                let plain = persist::stranded_save(rom, files)?;
-                Some(format!(
-                    "{} is not loaded, as it may be another game's of the same name; rename it {} to play on from it",
-                    file_name(&plain),
-                    file_name(&files.backup()),
-                ))
-            })
-            .collect();
-        let task = cx.spawn({
-            let receiver = receiver.clone();
-            async move |this, cx| {
-                while let Ok(event) = receiver.recv().await {
-                    if this.update(cx, |this, cx| this.handle(event, cx)).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-        self.session = Some(Session {
-            _events: task,
-            events: receiver,
-            emulator,
-            info,
-            rom_paths,
-            player_rom_paths,
-            files,
-            states,
-            own_saves,
-            frames: Vec::new(),
-            sequence: 0,
-            cheat_texts: vec![None; info.players.max(1)],
-            bindings: Vec::new(),
-            correction: Correction::for_system(info.system),
-            recording: false,
-            images: Vec::new(),
-            upscaling: Vec::new(),
-            render_scale,
-            keeping: Keeping::new(render_scale),
-            ambient: None,
-            display: None,
-            taken_at: None,
-            fade_wake: None,
-            play: library::PlayClock::default(),
-            _locks: locks,
-            _audio: audio_output,
-        });
-        // The new emulator starts with nothing held; resend what is.
-        self.sent = HeldState::default();
-        self.sent_touch = None;
-        self.stylus = None;
-        self.cursor = None;
-        self.active_player = 0;
-        let bindings = self.reload_bindings();
-        self.sync_held();
-        self.sessions += 1;
-        let game = self.guide_game(cx);
-        self.guide.update(cx, |guide, cx| guide.set_game(game, cx));
-        if info.players > 1 {
-            // Linked consoles sit side by side; a DS's own two screens
-            // keep the chosen layout.
-            if consoles(&info) == 1 {
-                self.linked_side_by_side = true;
-            }
-            window.set_window_title(&format!("{name} — {} link", info.system.name()));
-        } else {
-            window.set_window_title(&format!("{name} — {}", info.system.name()));
-        }
-        let running = format!("Running {name}");
-        // Left on last time, so worth saying.
-        let pace = if self.controls.fast_forward_latched() {
-            Some(format!(
-                "fast-forward on ({})",
-                keys::shortcut(shortcut::FAST_FORWARD)
-            ))
-        } else if self.controls.slow_motion_latched() {
-            Some(format!(
-                "slow motion on ({})",
-                keys::shortcut(shortcut::SLOW_MOTION)
-            ))
-        } else {
-            None
-        };
-        let notes = [
-            Some(running),
-            no_sound,
-            pace,
-            bindings,
-            self.reload_cheats(),
-            (!stranded.is_empty()).then(|| stranded.join(" · ")),
-            stopped,
-            self.startup_notice.take(),
-        ];
-        let notice: Vec<String> = notes.into_iter().flatten().collect();
-        match unwritable {
-            // First, and long enough to read: nothing of this game will
-            // be saved.
-            Some(why) => self.show_warning(format!("{why} · {}", notice.join(" · ")), cx),
-            None => self.show_notice(notice.join(" · "), cx),
-        }
-        if let Some(script) = self.startup_script.take() {
-            self.run_script_file(script, cx);
-        }
-    }
-
     /// Asks for a Lua script, then runs it alongside the game.
     fn run_script(&mut self, _: &RunScript, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_none() {
+        if self.game.session().is_none() {
             self.show_notice("Open a game first, then run a script", cx);
             return;
         }
@@ -1088,7 +816,7 @@ impl EmulatorView {
             }
             None => Bindings::default(),
         };
-        let session = self.session.as_mut()?;
+        let session = self.game.session_mut()?;
         session.bindings = session
             .player_files()
             .iter()
@@ -1111,7 +839,7 @@ impl EmulatorView {
     /// Re-reads each player's cheat file and sends the ones that changed to
     /// the emulator. Returns a summary of the changes, if any.
     fn reload_cheats(&mut self) -> Option<String> {
-        let session = self.session.as_mut()?;
+        let session = self.game.session_mut()?;
         let paths: Vec<PathBuf> = session
             .player_files()
             .iter()
@@ -1165,37 +893,10 @@ impl EmulatorView {
         }
     }
 
-    /// Stops the game, if one runs, and closes its menu. Returns what the
-    /// emulation thread said as it stopped, such as a battery save it
-    /// could not write, for the caller to show.
-    fn stop(&mut self, window: &mut Window, cx: &mut App) -> Option<String> {
-        // A preview still loading belongs to the game stopping.
-        self.slot_preview_task = None;
-        self.linked_side_by_side = false;
-        self.menu = None;
-        self.record_play_time(cx);
-        if self.guide.read(cx).composer_focused(window, cx) {
-            window.focus(&self.focus);
-        }
-        self.guide.update(cx, |guide, cx| guide.set_game(None, cx));
-        let mut session = self.session.take()?;
-        let images = session.images.drain(..).flatten();
-        let ambient = session.ambient.take().map(|glow| glow.image);
-        for image in images.map(|(_, image)| image).chain(ambient) {
-            window.drop_image(image).ok();
-        }
-        let said: Vec<String> = session
-            .finish()
-            .into_iter()
-            .filter_map(checkpoint_notice)
-            .collect();
-        (!said.is_empty()).then(|| said.join(" · "))
-    }
-
     /// Adds the time the running game has been played to each player's
     /// game in the library.
     fn record_play_time(&mut self, cx: &mut App) {
-        let Some(session) = &mut self.session else {
+        let Some(session) = self.game.session_mut() else {
             return;
         };
         let played = session.play.take();
@@ -1207,18 +908,10 @@ impl EmulatorView {
             .update(cx, |library, cx| library.add_play_time(&paths, played, cx));
     }
 
-    /// Keeps `note` to show with the next game's start, after whatever
-    /// shows meanwhile.
-    fn keep_for_start(&mut self, note: Option<String>) {
-        let notes = [self.startup_notice.take(), note];
-        let notes: Vec<String> = notes.into_iter().flatten().collect();
-        self.startup_notice = (!notes.is_empty()).then(|| notes.join(" · "));
-    }
-
     fn handle(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Frame => {
-                if let Some(session) = &mut self.session {
+                if let Some(session) = self.game.session_mut() {
                     session.play.frame(Instant::now());
                 }
                 self.listen();
@@ -1234,7 +927,7 @@ impl EmulatorView {
             Event::Warning(text) => self.show_warning(text, cx),
             // Joins the game's starting notice, which may hold warnings.
             Event::PickedUp(loaded) => {
-                let own_save = self.session.as_ref().is_some_and(|session| {
+                let own_save = self.game.session().is_some_and(|session| {
                     matches!(session.info.system, System::RpgMaker | System::N3ds)
                 });
                 let picked = if loaded {
@@ -1254,13 +947,14 @@ impl EmulatorView {
                 }
             }
             Event::Recording(on) => {
-                if let Some(session) = &mut self.session {
+                if let Some(session) = self.game.session_mut() {
                     session.recording = on;
                 }
                 cx.notify();
             }
             // Kept up until another notice, as no more frames come.
             Event::Stopped(text) => {
+                self.game.halted();
                 self.show_notice(text, cx);
                 self.notice_timer = None;
                 self.library.update(cx, |library, cx| library.refresh(cx));
@@ -1303,7 +997,7 @@ impl EmulatorView {
     }
 
     fn send(&self, command: Command) {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.game.session() {
             session.emulator.send(command);
         }
     }
@@ -1342,7 +1036,7 @@ impl EmulatorView {
     /// menu, its cheats and Start Over that player's, so the player stays
     /// until it closes.
     fn switch_player(&mut self, player: usize, cx: &mut Context<Self>) {
-        let Some(players) = self.session.as_ref().map(|s| s.info.players) else {
+        let Some(players) = self.game.session().map(|s| s.info.players) else {
             return;
         };
         if players < 2 || player == self.active_player || player >= players || self.menu.is_some() {
@@ -1354,8 +1048,8 @@ impl EmulatorView {
         self.active_player = player;
         // Keyboard and gamepads now play the other player's game.
         if let Some(bindings) = self
-            .session
-            .as_ref()
+            .game
+            .session()
             .and_then(|session| session.bindings.get(player))
         {
             self.bindings = bindings.clone();
@@ -1416,7 +1110,7 @@ impl EmulatorView {
     /// The touchscreen of the console being played: its index and size.
     /// Each of two linked DSes has its own.
     fn touchscreen(&self) -> Option<(usize, ScreenSize)> {
-        let info = &self.session.as_ref()?.info;
+        let info = &self.game.session()?.info;
         let per_console = info.screens.len() / consoles(info);
         let screen = info.touch_screen? + self.active_player.min(consoles(info) - 1) * per_console;
         Some((screen, *info.screens.get(screen)?))
@@ -1425,7 +1119,7 @@ impl EmulatorView {
     /// Whether a touchscreen is drawn up into the top bar, where a press
     /// must touch it rather than drag the window.
     fn touchscreen_in_top_bar(&self) -> bool {
-        let Some(info) = self.session.as_ref().map(|session| &session.info) else {
+        let Some(info) = self.game.session().map(|session| &session.info) else {
             return false;
         };
         let Some(touch) = info.touch_screen else {
@@ -1470,7 +1164,7 @@ impl EmulatorView {
 
     /// Where keys go now.
     fn key_route(&self, window: &Window, cx: &App) -> Route {
-        if self.session.is_none() {
+        if self.game.session().is_none() {
             Route::Library
         } else if self.menu.is_some() || self.app_menu.is_some() {
             Route::Menu
@@ -1746,7 +1440,7 @@ impl EmulatorView {
         self.show_notice(format!("State slot {slot}"), cx);
         self.save_settings(cx);
         // The file Load State would read.
-        let Some(state) = self.session.as_ref().map(|s| s.states.to_read(slot)) else {
+        let Some(state) = self.game.session().map(|s| s.states.to_read(slot)) else {
             return;
         };
         let preview = cx
@@ -1795,7 +1489,7 @@ impl EmulatorView {
         }
         // In a multi-player session, clicking a screen takes control of it.
         let point = (f32::from(event.position.x), f32::from(event.position.y));
-        let clicked = self.session.as_ref().and_then(|session| {
+        let clicked = self.game.session().and_then(|session| {
             let placement = self.placements.iter().find(|p| p.rect.contains(point))?;
             Some(session.info.player_for_screen(placement.screen))
         });
@@ -1906,7 +1600,7 @@ impl EmulatorView {
 
     /// Shows the store in the library's place, unless a game is running.
     fn open_store(&mut self, cx: &mut Context<Self>) {
-        if self.session.is_some() {
+        if self.game.session().is_some() {
             let close = keys::shortcut(shortcut::CLOSE_GAME);
             self.show_notice(format!("Close the game with {close} to open the store"), cx);
             return;
@@ -1946,7 +1640,7 @@ impl EmulatorView {
 
     /// What Guide is told about the game the keyboard plays.
     fn guide_game(&self, cx: &App) -> Option<GuideGame> {
-        let session = self.session.as_ref()?;
+        let session = self.game.session()?;
         let player = self
             .active_player
             .min(session.player_rom_paths.len().saturating_sub(1));
@@ -1958,7 +1652,7 @@ impl EmulatorView {
     /// ⌘J: opens Guide with the caret in its composer, or closes it if
     /// the caret is there already.
     fn toggle_guide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_none() {
+        if self.game.session().is_none() {
             let guide = keys::shortcut(shortcut::GUIDE);
             self.show_notice(
                 format!("Open a game, then ask Guide about it ({guide})"),
@@ -1996,7 +1690,7 @@ impl EmulatorView {
     /// ⌥⌘S and the Screenshot button: the screens as the console drew
     /// them, into Guide's composer, whether the panel shows or not.
     fn screenshot_for_guide(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        let Some(session) = self.game.session() else {
             return;
         };
         if session.frames.is_empty() {
@@ -2043,7 +1737,7 @@ impl EmulatorView {
     /// Shows the pill that opens Guide while the pointer moves in the
     /// empty margin beside the screens, and hides it once it rests.
     fn show_guide_pill(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.guide_open || self.session.is_none() || self.menu.is_some() {
+        if self.guide_open || self.game.session().is_none() || self.menu.is_some() {
             return;
         }
         let x = f32::from(event.position.x);
@@ -2133,7 +1827,7 @@ impl EmulatorView {
 
     /// Pauses the game and opens the game menu over it.
     fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        let Some(session) = self.game.session() else {
             return;
         };
         if self.menu.is_some() {
@@ -2203,44 +1897,15 @@ impl EmulatorView {
         self.send(Command::SaveCheckpoint(CHECKPOINT));
     }
 
-    /// Erases the active player's progress, the session's checkpoint and
-    /// the battery save of the game the menu names, and starts the session
-    /// again. Other cartridges, such as a GBA game in a DS's slot or the
-    /// other player's game, keep theirs. The battery save is kept as
-    /// `game.sav.bak`, or `.bak2` and so on, never replacing an earlier
-    /// one, in case it was a mistake; so are the saves an RPG Maker or 3DS
-    /// game makes itself (see [`emulator::erase_progress`]).
-    fn start_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        let roms = session.rom_paths.clone();
-        let save = session.player_files_of(self.active_player).backup();
-        let states = session.states.clone();
-        let own_saves = session.own_saves.clone();
-        // Stopping writes the battery saves, and stops the player or helper
-        // a game's own saves are open in, so they are set aside after.
-        let stopped = self.stop(window, cx);
-        self.keep_for_start(stopped);
-        // Said once the game is running again, after the loading notice.
-        let said = match emulator::erase_progress(&states, &save, &own_saves) {
-            Ok(said) => said,
-            Err(error) => Some(format!("Cannot erase progress: {error}")),
-        };
-        self.keep_for_start(said);
-        self.open(roms, window, cx);
-        cx.notify();
-    }
-
     /// The active player's cheat file, while a game runs.
     fn cheat_file(&self) -> Option<PathBuf> {
-        let session = self.session.as_ref()?;
+        let session = self.game.session()?;
         Some(session.player_files_of(self.active_player).cheats())
     }
 
     /// The active player's cheats, as the game menu lists them.
     fn menu_cheats(&self) -> Vec<CheatRow> {
-        let (Some(session), Some(path)) = (&self.session, self.cheat_file()) else {
+        let (Some(session), Some(path)) = (self.game.session(), self.cheat_file()) else {
             return Vec::new();
         };
         let text = cheats::read(&path).unwrap_or_default();
@@ -2294,22 +1959,6 @@ impl EmulatorView {
             self.show_notice(message, cx);
         }
         self.refresh_menu_cheats(cx);
-    }
-
-    /// Stops the game, keeping its progress as its checkpoint, and goes
-    /// back to the library.
-    fn close_game(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_none() {
-            return;
-        }
-        self.save_checkpoint();
-        if let Some(said) = self.stop(window, cx) {
-            self.show_notice(said, cx);
-        }
-        // The game just left goes first, with where it was left.
-        self.library.update(cx, |library, cx| library.refresh(cx));
-        window.set_window_title("Imago Emulator");
-        cx.notify();
     }
 
     fn library_event(
@@ -2417,56 +2066,6 @@ impl EmulatorView {
         }
     }
 
-    /// Restarts the running game linked to a second one: by link cable
-    /// for the Game Boy and Game Boy Advance, over local wireless for the
-    /// DS.
-    fn connect_link_cable(
-        &mut self,
-        _: &ConnectLinkCable,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let first = self.session.as_ref().and_then(|session| {
-            let single = session.info.players == 1;
-            single.then(|| session.rom_paths[0].clone())
-        });
-        let Some(first) = first else {
-            self.show_notice("Open a game first, then connect a second console", cx);
-            return;
-        };
-        self.prompt_for_file("Connect", window, cx, move |this, second, window, cx| {
-            this.open(vec![first, second], window, cx);
-        });
-    }
-
-    /// Restarts the running DS game with a GBA game in its GBA slot,
-    /// replacing any already there.
-    fn insert_gba_cartridge(
-        &mut self,
-        _: &InsertGbaCartridge,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let game = self
-            .session
-            .as_ref()
-            .filter(|session| has_gba_slot(session.info.system))
-            .map(|session| session.rom_paths[0].clone());
-        let Some(game) = game else {
-            self.show_notice("Open a DS game first, then insert a GBA cartridge", cx);
-            return;
-        };
-        self.prompt_for_file("Insert", window, cx, move |this, cartridge, window, cx| {
-            this.open(vec![game, cartridge], window, cx);
-        });
-    }
-
-    fn drop_files(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = paths.paths().first() {
-            self.open(vec![path.clone()], window, cx);
-        }
-    }
-
     /// The layout the window shows: the user's, but with a linked game's
     /// consoles side by side until the user picks an arrangement.
     fn shown_layout(&self) -> Layout {
@@ -2543,7 +2142,7 @@ impl EmulatorView {
     /// next launch. The next draw sends the core the scale it comes to.
     fn set_resolution_3d(&mut self, resolution: Resolution3d, cx: &mut Context<Self>) {
         self.resolution_3d = resolution;
-        let system = self.session.as_ref().map(|session| session.info.system);
+        let system = self.game.session().map(|session| session.info.system);
         let three_d = matches!(system, Some(System::Nds | System::N3ds) | None);
         let mut message = match (resolution, system) {
             (Resolution3d::MatchDisplay, Some(system @ (System::Nds | System::N3ds))) => format!(
@@ -2685,7 +2284,7 @@ impl EmulatorView {
     /// and saves that for next launch.
     fn set_backdrop(&mut self, backdrop: Backdrop, cx: &mut Context<Self>) {
         self.backdrop = backdrop;
-        if let Some(session) = &mut self.session {
+        if let Some(session) = self.game.session_mut() {
             self.stale_images
                 .extend(session.ambient.take().map(|glow| glow.image));
         }
@@ -2755,7 +2354,7 @@ impl EmulatorView {
 
     /// Measures the speed since the last time, for the readout.
     fn update_readout(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        let Some(session) = self.game.session() else {
             self.speed_readout = None;
             return;
         };
@@ -2896,7 +2495,7 @@ impl EmulatorView {
 
     /// What the debugger window needs to know about the running game.
     pub fn debug_target(&self) -> Option<DebugTarget> {
-        let session = self.session.as_ref()?;
+        let session = self.game.session()?;
         Some(DebugTarget {
             session: self.sessions,
             system: session.info.system,
@@ -2948,7 +2547,7 @@ impl EmulatorView {
     /// ones replace them, which on a busy GPU can take a frame or two;
     /// a batch already on the GPU was made the old way, so it is dropped.
     fn rebuild_images(&mut self) {
-        if let Some(session) = &mut self.session {
+        if let Some(session) = self.game.session_mut() {
             for (key, _) in session.images.iter_mut().flatten() {
                 *key = key.stale();
             }
@@ -2978,7 +2577,7 @@ impl EmulatorView {
     /// launch.
     fn set_picture(&mut self, picture: Picture, cx: &mut Context<Self>) {
         self.picture = picture;
-        if let Some(session) = &self.session {
+        if let Some(session) = self.game.session() {
             session
                 .emulator
                 .send(Command::SetTextureUpscaling(picture.texture_upscaling()));
@@ -3371,13 +2970,13 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &OpenStore, _, cx| this.open_store(cx)))
             // The library's own: nothing while a game runs.
             .on_action(cx.listener(|this, _: &GameInfo, _, cx| {
-                if this.session.is_none() {
+                if this.game.session().is_none() {
                     this.library
                         .update(cx, |library, cx| library.toggle_chosen_menu(cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &RemoveFromLibrary, _, cx| {
-                if this.session.is_none() && this.app_menu.is_none() {
+                if this.game.session().is_none() && this.app_menu.is_none() {
                     this.library
                         .update(cx, |library, cx| library.remove_chosen(cx));
                 } else if !cfg!(target_os = "macos") {
@@ -3392,7 +2991,7 @@ impl Render for EmulatorView {
             .on_action(cx.listener(Self::run_script))
             .on_action(cx.listener(|this, _: &StopScript, _, _| this.send(Command::StopScript)))
             .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
-                let players = this.session.as_ref().map_or(1, |s| s.info.players);
+                let players = this.game.session().map_or(1, |s| s.info.players);
                 this.switch_player((this.active_player + 1) % players.max(1), cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePause, _, cx| {
@@ -3551,7 +3150,7 @@ impl Render for EmulatorView {
             .children(probe::begin());
         // Listening only while a DS runs leaves the menu item disabled
         // otherwise.
-        let system = self.session.as_ref().map(|session| session.info.system);
+        let system = self.game.session().map(|session| session.info.system);
         if system.is_some_and(has_gba_slot) {
             root = root.on_action(cx.listener(Self::insert_gba_cartridge));
         }
@@ -3574,7 +3173,7 @@ impl Render for EmulatorView {
         // white without a game.
         root = root.bg(rgb(if fullscreen {
             0x0000_0000
-        } else if self.session.is_some() {
+        } else if self.game.session().is_some() {
             STAGE
         } else {
             BACKGROUND
@@ -3589,7 +3188,7 @@ impl Render for EmulatorView {
         let shown = self.shown_layout();
         let mut upscaler_failed = None;
         let mut guide_width = None;
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.game.session_mut() {
             let consoles = consoles(&session.info);
             // Guide takes the margin beside the screens, or a column the
             // screens make room for when the margin is too narrow.
@@ -3769,7 +3368,7 @@ impl Render for EmulatorView {
         } else {
             controls_shown
         };
-        if shaded && self.session.is_some() {
+        if shaded && self.game.session().is_some() {
             root = root.child(top_bar_shade());
         }
         // Guide, drawn as its own cached view: game frames reuse its last
@@ -3792,14 +3391,14 @@ impl Render for EmulatorView {
         // of Guide's panel: the pill that opens Guide, then the recording
         // mark.
         let pill = (guide_width.is_none()
-            && self.session.is_some()
+            && self.game.session().is_some()
             && self.guide_pill.is_some()
             && self.menu.is_none())
         .then(|| self.guide_pill_element(cx))
         .flatten();
         let recording = self
-            .session
-            .as_ref()
+            .game
+            .session()
             .is_some_and(|session| session.recording)
             .then(recording_mark);
         if pill.is_some() || recording.is_some() {
@@ -3834,7 +3433,7 @@ impl Render for EmulatorView {
             }
         }
         if off_mac {
-            let tone = if self.session.is_some() {
+            let tone = if self.game.session().is_some() {
                 Tone::Stage
             } else {
                 Tone::Paper
@@ -3892,8 +3491,8 @@ impl Render for EmulatorView {
         // Over a game, which hides the library's tiles of games being
         // added, what is being added shows over any notice.
         let adding = self
-            .session
-            .as_ref()
+            .game
+            .session()
             .and_then(|_| self.library.read(cx).adding_status())
             .map(adding_card);
         // Only over a game: the last game's reading would otherwise stay
@@ -3902,7 +3501,7 @@ impl Render for EmulatorView {
         let speed = self
             .speed_readout
             .clone()
-            .filter(|_| self.show_fps && self.session.is_some() && self.menu.is_none())
+            .filter(|_| self.show_fps && self.game.session().is_some() && self.menu.is_none())
             .map(speed_readout);
         let notice = self.notice.as_ref().map(|notice| {
             let mut card = overlay_plate(div()).flex_col().gap_1();
@@ -4248,95 +3847,6 @@ fn consoles(info: &CoreInfo) -> usize {
     }
 }
 
-/// The games to open for `paths`, unpacking archives and making the game
-/// of a patch among them (see [`romhack::pair`]), from the one ROM with
-/// it or else the game among `known` (checksum and path) it names. Tells
-/// `progress` how far unpacking has got.
-///
-/// Blocking file I/O; call it off the UI thread.
-fn prepare(
-    paths: Vec<PathBuf>,
-    known: &[(u32, PathBuf)],
-    progress: &archive::Progress,
-) -> Result<Vec<PathBuf>, MakeError> {
-    let files = paths
-        .into_iter()
-        .map(|path| {
-            if archive::is_archive(&path) {
-                archive::unpack(&path, progress)
-            } else {
-                Ok(vec![path])
-            }
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(MakeError::Failed)?;
-    match romhack::pair(files).map_err(MakeError::Failed)? {
-        (roms, None) => Ok(roms),
-        (roms, Some(patch)) => {
-            let base = roms.first().map(PathBuf::as_path);
-            Ok(vec![romhack::make(&patch, base, known)?])
-        }
-    }
-}
-
-/// Whether the running game, one for `system` whose cartridges have
-/// `files`, must stop before the games at `paths` load, rather than once
-/// they have loaded.
-///
-/// Stopping writes the running game's battery saves, and reopening one of
-/// its games (to link it or insert a cartridge) must read those, not the
-/// copy on disk from up to a second ago. And a 3DS or RPG Maker game plays
-/// in a process of its own, on files only one process may have open: the
-/// emulated 3DS's NAND and SD card, a game's player. So when the running
-/// game or a new one is one of those, the old process has gone before the
-/// new one starts.
-fn stops_before_loading(system: System, files: &[GameFiles], paths: &[PathBuf]) -> bool {
-    // Named as a session would name them: an RPG Maker game's after its
-    // whole folder, dots and all.
-    let saves: Vec<String> = paths
-        .iter()
-        .map(|path| persist::backup_key(&emulator::files_of(path).backup()))
-        .collect();
-    let reopening = files
-        .iter()
-        .any(|files| saves.contains(&persist::backup_key(&files.backup())));
-    let apart = matches!(system, System::N3ds | System::RpgMaker)
-        || paths.iter().any(|path| {
-            emu_3ds::is_game(path) || emu_cores::rpg_maker::game_folder(path).is_some()
-        });
-    reopening || apart
-}
-
-/// Why the games at `paths` can't be played on this system, if they
-/// can't: 3DS games, until 3DS games play here (`emu_3ds::UNSUPPORTED`).
-fn refused(paths: &[PathBuf]) -> Option<&'static str> {
-    emu_3ds::UNSUPPORTED.filter(|_| paths.iter().any(|path| emu_3ds::is_game(path)))
-}
-
-/// What to say while the games at `paths`, called `name`, load: that the
-/// 3DS core, or off macOS mkxp-z for an RPG Maker game, is being downloaded
-/// first, the first time one is played, as that takes a while.
-fn loading_notice(paths: &[PathBuf], name: &str) -> String {
-    let downloading = matches!(paths, [path] if emu_3ds::is_game(path))
-        && emu_3ds::data_dir().is_some_and(|data| emu_3ds::install::installed(&data).is_none());
-    let rpg_maker = emu_cores::rpg_maker::data_dir().is_some_and(
-        |work| matches!(paths, [path] if emu_cores::rpg_maker::downloads_player(path, &work)),
-    );
-    if downloading {
-        format!(
-            "Downloading the 3DS core, about {} MB, the first time only, then loading {name}…",
-            emu_3ds::install::DOWNLOAD_MB
-        )
-    } else if rpg_maker {
-        format!(
-            "Downloading mkxp-z, the RPG Maker player, about {} MB, the first time only, then loading {name}…",
-            emu_cores::rpg_maker::install::DOWNLOAD_MB
-        )
-    } else {
-        format!("Loading {name}…")
-    }
-}
-
 /// What a file dialog asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Choose {
@@ -4530,62 +4040,6 @@ mod tests {
         let (stage, width) = guide_stage(true, &layout, &DS, 1, (800.0, 860.0));
         assert_eq!(width, Some(guide::COLUMN_WIDTH));
         assert_eq!(stage, (800.0 - guide::COLUMN_WIDTH, 860.0));
-    }
-
-    #[test]
-    fn a_game_that_plays_in_another_process_never_starts_beside_the_running_one() {
-        let dir = std::env::temp_dir().join(format!("emu-app-stops-first-{}", std::process::id()));
-        fs::remove_dir_all(&dir).ok();
-        // An RPG Maker game: a folder with its Game.ini and a player.
-        let fan_game = dir.join("Fan Game");
-        fs::create_dir_all(fan_game.join("Player.app")).expect("the player's folder");
-        fs::write(fan_game.join("Game.ini"), b"Title=Fan Game").expect("write");
-        fs::write(fan_game.join("Game.exe"), b"player").expect("write");
-        let files = |name: &str| vec![GameFiles::of(&dir.join(name))];
-        let paths = |name: &str| vec![dir.join(name)];
-
-        // A game on one of the app's own cores plays on until another has
-        // loaded, so a file that fails to load costs nothing.
-        assert!(!stops_before_loading(
-            System::Gba,
-            &files("ruby.gba"),
-            &paths("emerald.gba")
-        ));
-        // Reopened, as when it is linked or given a cartridge, it stops
-        // first, so its battery save is on disk to read.
-        assert!(stops_before_loading(
-            System::Gba,
-            &files("ruby.gba"),
-            &[dir.join("ruby.gba"), dir.join("sapphire.gba")]
-        ));
-        // Two 3DS games would share the emulated console's SD card.
-        assert!(stops_before_loading(
-            System::N3ds,
-            &files("omega.3ds"),
-            &paths("alpha.3ds")
-        ));
-        // Whichever of the two plays in another process.
-        assert!(stops_before_loading(
-            System::N3ds,
-            &files("omega.3ds"),
-            &paths("emerald.gba")
-        ));
-        assert!(stops_before_loading(
-            System::Gba,
-            &files("ruby.gba"),
-            &paths("alpha.cia")
-        ));
-        assert!(stops_before_loading(
-            System::RpgMaker,
-            &[GameFiles::of_folder(&fan_game)],
-            &paths("emerald.gba")
-        ));
-        assert!(stops_before_loading(
-            System::Gba,
-            &files("ruby.gba"),
-            std::slice::from_ref(&fan_game)
-        ));
-        fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]
