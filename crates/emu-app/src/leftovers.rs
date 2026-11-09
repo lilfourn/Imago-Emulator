@@ -299,9 +299,11 @@ fn numbered(path: &Path, number: u32) -> PathBuf {
     if number == 1 {
         return path.to_owned();
     }
-    let name = path.as_os_str().to_string_lossy();
-    let stem = name.strip_suffix(PARTIAL).unwrap_or(&name);
-    PathBuf::from(format!("{stem}.{number}{PARTIAL}"))
+    // Without its `.partial`, and as the system spells it: a game's name
+    // need not be Unicode.
+    let mut name = path.with_extension("").into_os_string();
+    name.push(format!(".{number}{PARTIAL}"));
+    PathBuf::from(name)
 }
 
 impl Drop for Unfinished {
