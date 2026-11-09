@@ -487,8 +487,9 @@ fn homebrew_hub_offer(entry: &Value) -> Option<Offer> {
 }
 
 /// A Universal-DB entry, if it is a DS or 3DS game with a game, or an
-/// archive of one, to download. An entry for both systems is offered once:
-/// as a DS game if it has a DS build, else as a 3DS game.
+/// archive of one, to download from an `https://` address. An entry for
+/// both systems is offered once: as a DS game if it has a DS build to be
+/// had, else as a 3DS game.
 fn universal_db_offer(entry: &Value) -> Option<Offer> {
     let systems = strings(&entry["systems"]);
     let categories = strings(&entry["categories"]);
@@ -499,9 +500,12 @@ fn universal_db_offer(entry: &Value) -> Option<Offer> {
     let for_3ds = systems.iter().any(|system| system == "3DS");
     let slug = entry["slug"].as_str()?;
     let downloads = entry["downloads"].as_object()?;
+    // The best of the downloads the app can have: those at an `https://`
+    // address. An entry is left out only if it has none.
     let best = |score: &dyn Fn(&str) -> Option<i32>| {
         downloads
             .iter()
+            .filter(|(_, download)| text(&download["url"]).is_some_and(|url| downloadable(&url)))
             .filter(|(name, _)| score(name).is_some())
             // The first of the best, as `max_by_key` would give the last.
             .rev()
@@ -542,7 +546,7 @@ fn universal_db_offer(entry: &Value) -> Option<Offer> {
             .chain(strings(&entry["urls"]))
             .find(|link| is_web_link(link)),
         added: text(&entry["created"]).unwrap_or_default(),
-        url: text(&download["url"]).filter(|url| downloadable(url))?,
+        url: text(&download["url"])?,
         file: file_name(file)?,
         screenshots,
         tested: false,
@@ -1113,6 +1117,44 @@ mod tests {
         assert_eq!(slugs, ["fine"], "the app downloads over HTTPS alone");
         assert_eq!(offers[0].url, "https://x/fine.nds");
         assert_eq!(offers[0].screenshots, ["https://x/2.png"]);
+    }
+
+    #[test]
+    fn a_game_is_offered_by_the_best_of_its_https_downloads() {
+        // The ROM would be chosen over the archive, and the DS build over
+        // the 3DS one, but neither is at an address the app downloads from.
+        let catalog = r#"[
+            {"slug": "mixed", "title": "Mixed", "systems": ["DS"], "categories": ["game"],
+             "downloads": {"mixed.nds": {"url": "http://x/mixed.nds"},
+                           "mixed.zip": {"url": "https://x/mixed.zip"},
+                           "mixed_fat.zip": {"url": "https://x/mixed_fat.zip"}}},
+            {"slug": "both", "title": "Both", "systems": ["DS", "3DS"], "categories": ["game"],
+             "downloads": {"both.nds": {"url": "ftp://x/both.nds"},
+                           "both.cia": {"url": "https://x/both.cia"}}},
+            {"slug": "none", "title": "None", "systems": ["3DS"], "categories": ["game"],
+             "downloads": {"none.3dsx": {"url": "http://x/none.3dsx"},
+                           "none.cia": {"url": "http://x/none.cia"}}}
+        ]"#;
+        let offers = read_offers(Source::UniversalDb, catalog, &HashMap::new()).expect("parses");
+        let slugs: Vec<&str> = offers.iter().map(|offer| offer.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["mixed", "both"],
+            "not the one with no such download"
+        );
+        let mixed = by_slug(&offers, "mixed");
+        assert_eq!(
+            (mixed.file.as_str(), mixed.url.as_str()),
+            ("mixed.zip", "https://x/mixed.zip"),
+            "the best of those it can download"
+        );
+        let both = by_slug(&offers, "both");
+        assert_eq!(
+            both.platform,
+            Platform::N3ds,
+            "its 3DS build is the one to be had"
+        );
+        assert_eq!(both.url, "https://x/both.cia");
     }
 
     /// An offer of the game called `file`, for `platform`, at `url`.
