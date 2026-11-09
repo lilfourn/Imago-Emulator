@@ -258,7 +258,13 @@ fn load_state_file(
             decoded.header.system
         );
     }
-    let rom_crc32 = crc32fast::hash(&fs::read(rom)?);
+    // The app names a 3DS game, which can be gigabytes, by its first MiB
+    // and length, as states made in the app say.
+    let rom_crc32 = if system == System::N3ds {
+        emu_3ds::header::identity(rom)?
+    } else {
+        crc32fast::hash(&fs::read(rom)?)
+    };
     if decoded.header.rom_crc32 != rom_crc32 {
         bail!(
             "it was saved with another ROM (CRC-32 {:08x}, not {rom_crc32:08x})",

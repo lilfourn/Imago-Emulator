@@ -32,6 +32,14 @@ const BOTTOM_AT: (u32, u32) = (40, 240);
 /// about 250 frames a second there, so 4× keeps room for a heavy game at
 /// full speed; 8× (44 MB a frame) would not keep 60.
 const MAX_SCALE: u32 = 4;
+
+/// The most bytes a frame's two screens take at [`MAX_SCALE`], the size
+/// of the memory the helper leaves them in (`shared_pixels`, on Unix).
+#[cfg(unix)]
+pub(crate) fn most_pixel_bytes() -> usize {
+    let (top, bottom) = screen_sizes(PICTURE.0 * MAX_SCALE);
+    (top.0 * top.1 + bottom.0 * bottom.1) as usize * 4
+}
 /// How many frames a game may take to show its first.
 const STARTUP_FRAMES: usize = 10;
 /// Why `.3dsx` homebrew has no save states on the GPU. Azahar's core
@@ -447,6 +455,20 @@ pub(crate) fn interactive_thread() {
     }
 }
 
+/// The memory the app shares for the screens' pixels, if it named one
+/// and it opens; the frames go through the link otherwise.
+#[cfg(unix)]
+fn shared_pixels() -> Option<crate::shared_pixels::SharedPixels> {
+    let name = std::env::var(crate::shared_pixels::ENV).ok()?;
+    match crate::shared_pixels::SharedPixels::open(&name, most_pixel_bytes()) {
+        Ok(pixels) => Some(pixels),
+        Err(error) => {
+            eprintln!("3DS helper: frames go through the link: {error}");
+            None
+        }
+    }
+}
+
 /// Loads the game and answers the app's requests until it says to quit
 /// or goes.
 fn serve(core: &Path, moltenvk: Option<&Path>, game: &Path, data: &Path) -> io::Result<()> {
@@ -600,6 +622,10 @@ struct Session {
     picture: Picture,
     frame: Vec<u8>,
     sound: Vec<u8>,
+    /// Where the screens' pixels go instead of the link, when the app
+    /// shares the memory (`shared_pixels`).
+    #[cfg(unix)]
+    pixels: Option<crate::shared_pixels::SharedPixels>,
     /// Why this game cannot have save states, if it cannot.
     no_states: Option<&'static str>,
 }
@@ -676,6 +702,8 @@ impl Session {
             picture: Picture::default(),
             frame: Vec::new(),
             sound: Vec::new(),
+            #[cfg(unix)]
+            pixels: shared_pixels(),
             no_states: (renderer == Renderer::Vulkan && !has_title_id(game))
                 .then_some(NO_HOMEBREW_STATES),
         };
@@ -736,20 +764,39 @@ impl Session {
         Ok(drew)
     }
 
-    /// Sends the last frame's screens and sound.
+    /// Sends the last frame's screens and sound: the pixels in the shared
+    /// memory if there is room, else through the link.
     fn send_frame(&mut self, out: &mut impl Write) -> io::Result<()> {
         let audio = std::mem::take(&mut shared().audio);
-        let (top, bottom) = split(&self.picture, &mut self.frame);
+        let (top, bottom) = picture_screens(&self.picture);
+        let length = (top.pixel_count() + bottom.pixel_count()) * 4;
+        #[cfg(unix)]
+        let in_memory = self
+            .pixels
+            .as_mut()
+            .map(crate::shared_pixels::SharedPixels::bytes_mut)
+            .and_then(|bytes| bytes.get_mut(..length));
+        #[cfg(not(unix))]
+        let in_memory: Option<&mut [u8]> = None;
+        let inline = in_memory.is_none();
+        match in_memory {
+            Some(bytes) => split_into(&self.picture, top, bottom, bytes),
+            None => {
+                self.frame.resize(length, 0);
+                split_into(&self.picture, top, bottom, &mut self.frame);
+            }
+        }
         let samples = audio.len() / 2;
         self.sound.clear();
         self.sound
             .extend(audio.iter().flat_map(|sample| sample.to_le_bytes()));
+        let pixels: &[u8] = if inline { &self.frame } else { &[] };
         let result = link::write_message(
             out,
             link::FRAME,
             &[
-                &link::frame_head(top, bottom, samples),
-                &self.frame,
+                &link::frame_head(top, bottom, samples, inline),
+                pixels,
                 &self.sound,
             ],
         );
@@ -860,66 +907,72 @@ fn refusal_from(shared: &Shared, otherwise: &str) -> String {
         .unwrap_or_else(|| otherwise.to_owned())
 }
 
-/// Cuts `picture`, the core's two screens top over bottom, into the
-/// [`link`]'s pixels: the top screen's rows, then the bottom's, written
-/// into `bytes`. Returns the two screens' sizes.
-fn split(picture: &Picture, bytes: &mut Vec<u8>) -> (ScreenSize, ScreenSize) {
-    let scale = (picture.width / PICTURE.0).max(1);
-    let (width, height) = (PICTURE.0 * scale, PICTURE.1 * scale);
-    let top = (width, height / 2);
-    let bottom = ((PICTURE.0 - 2 * BOTTOM_AT.0) * scale, height / 2);
-    bytes.clear();
-    bytes.reserve((top.0 * top.1 + bottom.0 * bottom.1) as usize * 4);
-    let row = |y: u32, from: u32, count: u32, bytes: &mut Vec<u8>| {
-        let start = (y * picture.width + from) as usize;
-        let pixels = picture.pixels.get(start..start + count as usize);
-        match pixels {
-            Some(pixels) => extend_pixels(bytes, pixels),
-            // A picture of an unexpected size: black rather than garbage.
-            None => bytes.extend(std::iter::repeat_n(0, count as usize * 4)),
-        }
-    };
-    let fits = picture.width == width && picture.height == height;
-    for y in 0..top.1 {
-        if fits {
-            row(y, 0, top.0, bytes);
-        } else {
-            bytes.extend(std::iter::repeat_n(0, top.0 as usize * 4));
-        }
-    }
-    for y in 0..bottom.1 {
-        if fits {
-            row(
-                BOTTOM_AT.1 * scale + y,
-                BOTTOM_AT.0 * scale,
-                bottom.0,
-                bytes,
-            );
-        } else {
-            bytes.extend(std::iter::repeat_n(0, bottom.0 as usize * 4));
-        }
-    }
+/// The sizes of the top and bottom screens in a picture `width` pixels
+/// across, a whole multiple of [`PICTURE`]'s (the height follows).
+fn screen_sizes(width: u32) -> ((u32, u32), (u32, u32)) {
+    let scale = (width / PICTURE.0).max(1);
+    (
+        (PICTURE.0 * scale, PICTURE.1 * scale / 2),
+        ((PICTURE.0 - 2 * BOTTOM_AT.0) * scale, PICTURE.1 * scale / 2),
+    )
+}
+
+/// The two screens' sizes in `picture`.
+fn picture_screens(picture: &Picture) -> (ScreenSize, ScreenSize) {
     let size = |(width, height): (u32, u32)| {
         ScreenSize::new(
             u16::try_from(width).unwrap_or(u16::MAX),
             u16::try_from(height).unwrap_or(u16::MAX),
         )
     };
+    let (top, bottom) = screen_sizes(picture.width);
     (size(top), size(bottom))
 }
 
-/// Appends `pixels` to `bytes`, little-endian, as the link has them.
-fn extend_pixels(bytes: &mut Vec<u8>, pixels: &[u32]) {
-    #[cfg(target_endian = "little")]
-    {
-        // SAFETY: a u32 slice is readable as four times as many bytes,
-        // which on a little-endian host are each pixel's bytes in order.
-        let raw =
-            unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), pixels.len() * 4) };
-        bytes.extend_from_slice(raw);
+/// Cuts `picture`, the core's two screens top over bottom, into the
+/// [`link`]'s pixels: the top screen's rows, then the bottom's, written
+/// into `bytes`. Returns the two screens' sizes.
+#[cfg(test)]
+fn split(picture: &Picture, bytes: &mut Vec<u8>) -> (ScreenSize, ScreenSize) {
+    let (top, bottom) = picture_screens(picture);
+    bytes.clear();
+    bytes.resize((top.pixel_count() + bottom.pixel_count()) * 4, 0);
+    split_into(picture, top, bottom, bytes);
+    (top, bottom)
+}
+
+/// Writes the [`link`]'s pixels of `picture`, whose screens are `top` and
+/// `bottom` ([`picture_screens`]), into `bytes`, which holds exactly
+/// them: the top screen's rows, then the bottom's.
+fn split_into(picture: &Picture, top: ScreenSize, bottom: ScreenSize, bytes: &mut [u8]) {
+    let scale = (picture.width / PICTURE.0).max(1);
+    let fits = picture.width == PICTURE.0 * scale && picture.height == PICTURE.1 * scale;
+    let (top_bytes, bottom_bytes) = bytes.split_at_mut(top.pixel_count() * 4);
+    let rows = |bytes: &mut [u8], size: ScreenSize, from: (u32, u32)| {
+        let across = usize::from(size.width);
+        for (y, out) in bytes.chunks_exact_mut(across * 4).enumerate() {
+            let start = (from.1 as usize + y) * picture.width as usize + from.0 as usize;
+            match picture.pixels.get(start..start + across).filter(|_| fits) {
+                Some(pixels) => copy_pixels(out, pixels),
+                // A picture of an unexpected size: black rather than garbage.
+                None => out.fill(0),
+            }
+        }
+    };
+    rows(top_bytes, top, (0, 0));
+    rows(
+        bottom_bytes,
+        bottom,
+        (BOTTOM_AT.0 * scale, BOTTOM_AT.1 * scale),
+    );
+}
+
+/// Writes `pixels` into `bytes`, which holds exactly them, little-endian,
+/// as the link has them.
+fn copy_pixels(bytes: &mut [u8], pixels: &[u32]) {
+    for (out, pixel) in bytes.chunks_exact_mut(4).zip(pixels) {
+        out.copy_from_slice(&pixel.to_le_bytes());
     }
-    #[cfg(not(target_endian = "little"))]
-    bytes.extend(pixels.iter().flat_map(|pixel| pixel.to_le_bytes()));
 }
 
 /// Where a touch at `point` on the bottom screen, in native pixels, is on
