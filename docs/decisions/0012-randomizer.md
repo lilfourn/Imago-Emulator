@@ -96,3 +96,9 @@ Facts that shaped the choice:
   errors, so both are read for the reason.
 - Quitting the app during a run leaves FVX to finish on its own; its work
   folder is cleared by the next run once it is an hour old.
+
+## Update, 2026-11-10: one installer
+
+FVX's download is `emu_os::install` over `emu_os::fetch`, shared with the
+3DS core's and the RPG Maker player's (see decision 0011's update of the
+same day).

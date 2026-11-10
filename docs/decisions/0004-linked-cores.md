@@ -45,3 +45,9 @@ things differ from the Game Boy pair:
   instead of waiting for the slice to end. A normal-mode transfer at 2 MHz
   lasts only 64 cycles.
 - Player 0 is the multi-player parent.
+
+## Addendum, 2026-11-10: what the pairs share
+
+What the three pairs do alike (mixing sound, numbering CPUs for the
+debugger, finding a save's cartridge, checking a state's two clocks) is
+`emu_core::pair`. The slice loop and the link stay each system's.

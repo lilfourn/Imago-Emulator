@@ -24,10 +24,10 @@ How the workspace fits together. The *why* behind the big choices lives in
 
 | Crate | One job |
 |---|---|
-| `emu-core` | The contract between cores and frontends: the `Core` trait and plain-data types. No dependencies beyond `thiserror`. |
+| `emu-core` | The contract between cores and frontends: the `Core` trait and plain-data types. Also what the cores share that is not hardware: the drawing behind the debugger's pictures (`debug::draw`), the video formats the GBA and the DS's 2D engines have in common, decoded for those pictures (`debug::gba_video`), and what every linked pair does the same way (`pair`). No dependencies beyond `thiserror`. |
 | `emu-sched` | A priority queue of cycle-timestamped events. |
-| `emu-state` | The save-state container format. |
-| `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. Also its disassembler and a bus wrapper for watchpoints. |
+| `emu-state` | The save-state container format; the checked reading and writing of a core's state bytes (`payload`); and test support that loads wrong states (`mutation`). |
+| `emu-arm` | One ARM interpreter, generic over the CPU model: the ARM7TDMI (ARMv4T) for the GBA and the DS's ARM7, and the ARM946E-S (ARMv5TE, CP15, TCM) for the DS's ARM9. Also its disassembler, a bus wrapper for watchpoints, and the BIOS routines the GBA and the DS have in common, for their emulated BIOSes (`bios`): BitUnPack, the Diff unfilters and the decompressors, which reach memory only through the bus. One of the two Huffman routines there is the GBA's alone, kept beside the DS's so that what differs between them is said in one place. |
 | `emu-psg` | The Game Boy family's four-channel sound generator, shared by the GB and GBA cores; each system mixes it. |
 | `emu-gba-cart` | The GBA cartridge: ROM, SRAM, Flash and EEPROM saves, and the GPIO clock. Shared by the GBA core and the DS's GBA slot ([decision 0006](decisions/0006-gba-slot.md)); depends only on `serde`. |
 | `emu-gb` | Game Boy: SM83, PPU, APU, timer, cartridges, and the Game Boy Color's palettes for games made for the original Game Boy (SameBoy's table, MIT). Ticks every component on each bus access ([decision 0002](decisions/0002-game-boy-timing.md)). |
@@ -40,17 +40,20 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
 | `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
 | `emu-guide` | Guide, the chat about the game being played ([PRD](PRD-game-chat.md)): connecting an OpenRouter account by OAuth PKCE through the browser and a loopback port, as Imago does; the key in a 0600 file, with `OPENROUTER_API_KEY` over it; OpenRouter's API through `curl`, the key and the request on its standard input; answers streamed as server-sent events; the source map (`sources.toml`) and the system prompt; Markdown parsed block by block as it streams; answers' pictures found by page title on the game's wiki and kept in the cache ([decision 0015](decisions/0015-guide-pictures-from-wikis.md)); each game's chats and screenshots on disk. Knows no window. The panel itself is `emu-app`'s `guide` module, drawn as a cached view beside the screens ([decision 0014](decisions/0014-guide-through-openrouter.md)). |
+| `emu-os` | What differs by system, for the app and the runners: the folders the app keeps its files in; running other programs (`process`); downloads through curl, the one place it is started (`fetch`); downloads checked against a pinned digest before they are put in place (`install`); lock files (`lock`); atomic writes (`file`); and where temporary files go (`temp`). |
 | `emu-headless` | Runs a core without a window, or an RPG Maker game in a hidden player of its own; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
 
 Rules that keep this shape:
 
-- Cores depend on `emu-core`, never on each other or on a frontend.
-- Sharing stops at self-contained chips: the CPU (`emu-arm`), the
-  scheduler, the GB/GBA sound generator (`emu-psg`, the same silicon in
-  both), and the GBA cartridge (`emu-gba-cart`, the same cartridge in a GBA
-  or a DS's GBA slot). Shared system code would tangle timing fixes across
-  systems.
+- Cores depend on `emu-core`, and on `emu-state` for the checked reading
+  and writing of their own state bytes, never on each other or on a
+  frontend.
+- Sharing stops at self-contained chips: the CPU (`emu-arm`), with the
+  BIOS routines both ARM consoles' BIOSes hold, the scheduler, the GB/GBA
+  sound generator (`emu-psg`, the same silicon in both), and the GBA
+  cartridge (`emu-gba-cart`, the same cartridge in a GBA or a DS's GBA
+  slot). Shared system code would tangle timing fixes across systems.
 - GPUI types never leave `emu-app`. If GPUI is replaced, only that crate
   changes.
 
@@ -114,6 +117,10 @@ pub trait Core: Send {
   in a few hundred milliseconds, so it has no rewind either, and its
   checkpoint is asked for only as the player leaves
   (`checkpoints_while_playing` is false).
+- **A state is checked as it is read**: `load_state` never panics or
+  hangs on any bytes. A state that is not one this machine could have
+  left, or that has bytes left over, is refused with a `StateError`
+  (`emu_state::payload`).
 - **ROM patches** are configuration, like the ROM itself: a core keeps the
   set it was last given, applies it to every ROM read, leaves it out of
   save states and keeps it through `load_state` and `reset`.
@@ -211,6 +218,19 @@ pub trait Debugger {
 - Dropping the `Emulator` handle closes its command channel. The thread
   finishes the frame, flushes the battery save, and is joined. The view
   drops it on app quit for the same reason.
+- The emulation thread is `emulator.rs`; its battery saves, save states
+  and checkpoints are `emulator/saves.rs`. Opening, closing and starting
+  a game over is the view's `view/opening.rs`.
+- The battery-save writer, the rewind history and the recorder each run
+  on a `Worker` (`worker.rs`): a thread that does the jobs handed to it
+  in order, and is joined when its owner drops it.
+- An `Event` says what happened by its kind (`StateSaved`, `StateLoaded`,
+  `Failed`, `Notice`, `Warning`); the window never tells one from another
+  by its words.
+- The window (`view.rs`) keeps its input in `view/input.rs` (`GameInput`,
+  which returns the commands to send) and its picture pipeline in
+  `view/screens.rs`. The library's view is `library_view.rs` (state and
+  events), `library_view/draw.rs` and `library_view/files.rs`.
 - Frame pacing is a sleep to the next deadline, taken in naps of three
   quarters of the time left, because macOS wakes a thread up to a quarter
   of its sleep late (`speed::sleep_until`). Fast-forward (2× unless the
@@ -437,8 +457,11 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | File | Location | Format |
 |---|---|---|
 | Battery save | next to the ROM, `game.sav` | Raw backup bytes in the de facto layout for the system |
-| Save state | next to the ROM, `game.ss1`; an RPG Maker game's next to its folder, `Game.ss1` | `emu-state` container |
+| Save state | next to the ROM, `game.ss1`; an RPG Maker game's next to its folder, `Game.ss1`. A DS game with a GBA cartridge in its slot names its states after both, `game.emerald.ss1`, and leaves its left-off picture at `game.ss0.png` too, for the library | `emu-state` container |
 | Checkpoint: where the player left off, picked up when the game starts | slot 0 of the save states, `game.ss0`, with `game.ss0.saves` beside it | `emu-state` container; the record has a line per save the checkpoint goes with, each battery save and an RPG Maker game's own save files, or a 3DS game's save data and extdata: the file's name and the CRC-32 of its bytes, or `none`. A checkpoint is picked up only while they are unchanged |
+| Save from before a state was loaded | next to the save, `game.sav.before-load`, then `game.sav.before-load2` to `game.sav.before-load5` | The battery save as it was before a save state with a different save was loaded: the newest five, none twice, at most one for each run of loads less than ten minutes apart. A hard link where the file system has them, else a copy |
+| Set-aside save or state | next to it, `game.sav.bak`, `game.ss1.bak`, then `.bak2` and so on | The file as it was, renamed rather than replaced: by Start Over, or by saving a state over another session's. Never rotated |
+| Game lock | `~/Library/Application Support/ds-emulator/Locks/<save's name>-<checksum>.lock` | An empty file, locked for as long as the game runs, so a second copy of the app is refused the game, see `GameLock` in `emu-app/src/persist.rs` |
 | Cheats | next to the ROM, `game.cht` | Plain text, see the `emu-cheats` crate docs |
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
 | One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
@@ -457,18 +480,34 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | The 3DS core and MoltenVK | `~/Library/Application Support/ds-emulator/3DS/azahar-<version>/`, `…/3DS/moltenvk-<version>/` | Azahar's libretro core and MoltenVK as their releases ship them, with their licences, see `emu-3ds/src/install.rs` |
 | The emulated 3DS's own files | `~/Library/Application Support/ds-emulator/3DS/Azahar/` | Azahar's NAND, SD card (where 3DS games keep their own saves, in `title/<id>/data/` and `extdata/<id>/`) and shader caches; the helper's log is `3DS/helper.log`, and `3DS/helper.lock` keeps a second helper off these files until the first has quit |
 
-Writes go to `name.tmp` first and are renamed over the target, except
-recordings, which are written as they go and indexed when they stop.
+Writes go to `name.<pid>-<n>.tmp` first and are renamed over the target
+(`emu_os::file`), except recordings, which are written as they go and
+indexed when they stop. A temporary file is removed if its write fails.
 Games unpacked or patched go to `name.partial` instead, locked while
-they are written. A `.7z` or `.rar` is unpacked into
-`$TMPDIR/ds-emulator-unpack-<pid>-<n>/`, and a store download into
-`$TMPDIR/ds-emulator-store-<pid>-<n>/`, each locked by a
-`.ds-emulator-lock` file inside while in use. The unpacked game is
-moved, not copied, into `Games/`. The app removes its own on quit. At
-launch, it removes any folder or `.partial` that no running app holds,
-killing any `tar` still writing into it. It also removes `.tmp` files in
-`Games/` and `Hacks/`, and patches in `$TMPDIR/ds-emulator-patches/`,
-once they are an hour old. See `emu-app/src/leftovers.rs`.
+they are written.
+
+Work folders are `ds-emulator-unpack-<pid>-<n>/` for a `.7z` or `.rar`,
+`ds-emulator-store-<pid>-<n>/` for a store download, which is written
+there as it comes, and `ds-emulator-randomize-<pid>-<n>/`; patches go to
+`ds-emulator-patches/`. They are in `$TMPDIR` on macOS and Windows, and
+in `$TMPDIR/ds-emulator-<uid>/` on Linux, a folder only the user can
+read (`ds-emulator/tmp` in the cache folder if that name is taken); see
+`emu_os::temp`. Each is locked by a `.ds-emulator-lock` file inside
+while in use. The unpacked game is moved, not copied, into `Games/`.
+
+A program unpacking an archive is stopped once it has written twice
+what the archive lists plus 16 MiB (32 GiB at most; 8 GiB if the archive
+lists nothing), 100,000 files and folders, or folders 64 deep.
+
+The app removes its own work folders on quit. On macOS and Linux it
+removes a folder itself, however deep it goes, by descriptors and
+following no link, so nothing in an archive leads the removal out of the
+folder. At launch, it removes any folder or `.partial` that no running
+app holds, once any program still working in the folder is stopped and
+gone. It also removes a `.tmp` file a crash left in the app's own
+settings, data and cache folders and its games folders once it is an
+hour old (not one in a ROM folder elsewhere), and patches in
+`ds-emulator-patches/` of the same age. See `emu-app/src/leftovers.rs`.
 
 ## Save-state container
 
@@ -492,8 +531,9 @@ checksum):
 | 28 + *n* | 3*wh* | thumbnail, RGB, row-major |
 | end − 4 | 4 | CRC-32 of everything before it |
 
-The app refuses a state from another system, another ROM, or another core
-state version, and says which.
+The app and `emu-headless --state` refuse a state from another system,
+another ROM, or another core state version, and say which
+(`Header::check`).
 
 ## Scheduling inside a core
 
@@ -517,6 +557,7 @@ order). A core's main loop:
 | Core speed | `emu-headless --time`, from a game's checkpoint with `--state`; before and after a change, with `--digest` to show it changed nothing | by hand |
 | ROM-hack patches | `emu-patch/tests/formats.rs` applies patches made by Floating IPS and xdelta3 from made-up ROMs; `scripts/make-patch-fixtures.sh` makes them again | `cargo test` |
 | Scripts | `emu-script` unit tests against a test core; `emu-headless/tests/script.rs` runs a script twice on a ROM it builds and diffs the output | `cargo test` |
+| Wrong states | `a_wrong_state_is_refused_or_runs` in each core; the `#[ignore]`d `every_wrong_state_is_refused_or_runs` for whole machines | `cargo test`; `cargo test -p emu-nds --lib every_wrong_state -- --ignored` |
 | Test ROMs | `tests/test_roms.rs` in `emu-gb`, `emu-gba` and `emu-nds`, each suite with a passing list (TOOL-2) | `cargo test`, in CI (the mGBA suite only locally) |
 | Trace diffing | trace logger vs. mGBA/SameBoy/melonDS (TOOL-3) | by hand while debugging |
 | Pokémon checkpoints | your own dumps, by hand | at each milestone |

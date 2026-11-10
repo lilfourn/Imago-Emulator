@@ -87,3 +87,12 @@ systems.
 - Changing cartridges restarts the DS, losing unsaved progress.
 - Pal Park itself is unverified: there are no GBA dumps in this project.
   Synthetic ROMs cover the bus, ownership, Flash and SRAM behaviour.
+
+## Update, 2026-11-10: states are named after both games
+
+Decision 4 said state names stay per player. For the slot they no longer
+do: a DS game played with a cartridge names its states after both,
+`game.emerald.ss1`, so the DS game played alone keeps its own states,
+and so does each cartridge it is played with. A state left under the old
+shared name still loads. The session's left-off picture is written at
+`game.ss0.png` too, where the library looks for the DS game's.

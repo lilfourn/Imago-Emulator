@@ -422,9 +422,10 @@ connects with a button and never pastes a key
 A file, not the Keychain:
 
 - It is Imago's choice.
-- The app is ad hoc signed, so a Keychain item's access list would name
-  a code hash that changes with every build, and macOS would ask for
-  permission after each rebuild.
+- A build from source is ad hoc signed, so a Keychain item's access list
+  would name a code hash that changes with every build, and macOS would
+  ask for permission after each rebuild. Public builds are signed with a
+  Developer ID; the key stays a file there too (see `key.rs`).
 - A 0600 file is readable by the user's own processes. So is the
   Keychain through `security` once allowed. The key is OpenRouter's,
   scoped by its own limits.
