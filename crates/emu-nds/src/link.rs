@@ -17,6 +17,7 @@ use emu_core::debug::{
     CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome,
     ScheduledEvent, Stops,
 };
+use emu_core::pair::{self, Uneven};
 use emu_core::{
     Core, CoreInfo, Debugger, Frame, Input, LoadError, Media, MemoryRegion, ScreenSize, StateError,
     StereoSample,
@@ -201,12 +202,7 @@ impl Linked {
         }
         self.present();
         let [first, second] = &sounds;
-        let mix = |a: i16, b: i16| ((i32::from(a) + i32::from(b)) / 2) as i16;
-        audio.extend((0..first.len().max(second.len())).map(|index| {
-            let a = first.get(index).copied().unwrap_or_default();
-            let b = second.get(index).copied().unwrap_or_default();
-            [mix(a[0], b[0]), mix(a[1], b[1])]
-        }));
+        pair::mix(first, second, Uneven::AgainstSilence, audio);
     }
 
     /// The console CPU `cpu` belongs to: 0 and 1 are the first console's
