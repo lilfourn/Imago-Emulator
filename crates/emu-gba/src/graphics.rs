@@ -8,18 +8,14 @@
 //! [`Frame`] and lines of notes. Everything is decoded here from VRAM, OAM,
 //! palette RAM and the registers, the way the renderer decodes them.
 
+use emu_core::debug::draw::{
+    BACKGROUND, blank, fill_checker, fill_rect, outline_wrapping, set_pixel,
+};
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
-use emu_core::{Frame, ScreenSize, rgb};
+use emu_core::{Frame, rgb};
 
 use crate::ppu::{Ppu, color};
 
-/// Fills the parts of a picture that show nothing.
-const BACKGROUND: u32 = rgb(0x20, 0x20, 0x20);
-/// The visible screen's outline on a map: magenta stands out from most
-/// game palettes.
-const OUTLINE: u32 = rgb(0xFF, 0x00, 0xFF);
-/// The two squares of the checkerboard behind transparent sprite pixels.
-const CHECKER: [u32; 2] = [rgb(0x40, 0x40, 0x40), rgb(0x58, 0x58, 0x58)];
 /// Sprite cells alternate between these, so cells stand apart without
 /// gaps.
 const CELL_SHADES: [u32; 2] = [BACKGROUND, rgb(0x2C, 0x2C, 0x2C)];
@@ -773,71 +769,11 @@ fn sprite_note(index: usize, sprite: Sprite, hidden: bool) -> String {
     note
 }
 
-// ----- Drawing -----------------------------------------------------------
-
-/// A `width`×`height` picture filled with [`BACKGROUND`].
-fn blank(width: usize, height: usize) -> Frame {
-    let mut frame = Frame::new(ScreenSize::new(width as u16, height as u16));
-    frame.pixels_mut().fill(BACKGROUND);
-    frame
-}
-
-/// Sets the pixel at (`x`, `y`) if it is inside the picture.
-fn set_pixel(frame: &mut Frame, x: usize, y: usize, color: u32) {
-    let size = frame.size();
-    let (width, height) = (usize::from(size.width), usize::from(size.height));
-    if x < width && y < height {
-        frame.pixels_mut()[y * width + x] = color;
-    }
-}
-
-/// Fills the `width`×`height` rectangle from (`left`, `top`) with `color`.
-fn fill_rect(
-    frame: &mut Frame,
-    (left, top): (usize, usize),
-    (width, height): (usize, usize),
-    color: u32,
-) {
-    for y in top..top + height {
-        for x in left..left + width {
-            set_pixel(frame, x, y, color);
-        }
-    }
-}
-
-/// Fills the `width`×`height` rectangle from (`left`, `top`) with a
-/// checkerboard of 4-pixel squares, the usual picture of "transparent".
-fn fill_checker(frame: &mut Frame, (left, top): (usize, usize), (width, height): (usize, usize)) {
-    for y in 0..height {
-        for x in 0..width {
-            set_pixel(frame, left + x, top + y, CHECKER[(x / 4 + y / 4) % 2]);
-        }
-    }
-}
-
-/// Outlines the `width`×`height` rectangle from (`left`, `top`) with
-/// 1-pixel [`OUTLINE`] lines, wrapping around the picture's edges as the
-/// screen wraps around the map.
-fn outline_wrapping(
-    frame: &mut Frame,
-    (left, top): (usize, usize),
-    (width, height): (usize, usize),
-) {
-    let size = frame.size();
-    let (wrap_x, wrap_y) = (usize::from(size.width), usize::from(size.height));
-    let (right, bottom) = (left + width - 1, top + height - 1);
-    for x in left..=right {
-        set_pixel(frame, x % wrap_x, top % wrap_y, OUTLINE);
-        set_pixel(frame, x % wrap_x, bottom % wrap_y, OUTLINE);
-    }
-    for y in top..=bottom {
-        set_pixel(frame, left % wrap_x, y % wrap_y, OUTLINE);
-        set_pixel(frame, right % wrap_x, y % wrap_y, OUTLINE);
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use emu_core::ScreenSize;
+    use emu_core::debug::draw::{CHECKER, OUTLINE};
+
     use super::*;
 
     const RED: u16 = 0x001F;
