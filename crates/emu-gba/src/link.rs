@@ -8,11 +8,8 @@
 //! the transfer's length in its own time. See
 //! `docs/decisions/0004-linked-cores.md`.
 
-use emu_core::debug::{
-    CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome,
-    ScheduledEvent, Stop, Stops,
-};
-use emu_core::pair::{self, Uneven};
+use emu_core::debug::{RunOutcome, Stop, Stops};
+use emu_core::pair::{self, Pair, Uneven};
 use emu_core::{
     Core, CoreInfo, Debugger, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
     StateError, StereoSample,
@@ -147,11 +144,6 @@ impl Linked {
             stop: None,
         }
     }
-
-    /// The console CPU `cpu` (also its player number) is in.
-    fn player(&self, cpu: usize) -> &Gba {
-        &self.players[cpu.min(1)]
-    }
 }
 
 /// Delivers a transfer `from` started to `to`, and `to`'s side back.
@@ -279,53 +271,19 @@ impl Core for Linked {
 }
 
 /// CPU `i` is player `i`'s; each is debugged as a lone console's.
-impl Debugger for Linked {
-    fn cpus(&self) -> Vec<CpuInfo> {
-        (0..self.players.len())
-            .map(|player| CpuInfo {
-                name: "ARM7TDMI",
-                player,
-            })
-            .collect()
+impl Pair for Linked {
+    type Console = Gba;
+    const CPUS_EACH: usize = 1;
+
+    fn consoles(&self) -> &[Gba; 2] {
+        &self.players
     }
 
-    fn registers(&self, cpu: usize) -> Vec<Register> {
-        self.player(cpu).registers(0)
+    fn consoles_mut(&mut self) -> &mut [Gba; 2] {
+        &mut self.players
     }
 
-    fn status(&self, cpu: usize) -> String {
-        self.player(cpu).status(0)
-    }
-
-    fn pc(&self, cpu: usize) -> u32 {
-        self.player(cpu).pc(0)
-    }
-
-    fn read(&self, cpu: usize, address: u32) -> Option<u8> {
-        self.player(cpu).read(0, address)
-    }
-
-    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool {
-        Debugger::write(&mut self.players[cpu.min(1)], 0, address, value)
-    }
-
-    fn disassemble(&self, cpu: usize, address: u32) -> Instruction {
-        self.player(cpu).disassemble(0, address)
-    }
-
-    fn io_registers(&self, cpu: usize) -> Vec<IoRegister> {
-        self.player(cpu).io_registers(0)
-    }
-
-    fn events(&self, cpu: usize) -> Vec<ScheduledEvent> {
-        self.player(cpu).events(0)
-    }
-
-    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics> {
-        self.player(cpu).graphics(0, request)
-    }
-
-    fn run_until(
+    fn run_pair_until(
         &mut self,
         inputs: &[Input],
         audio: &mut Vec<StereoSample>,

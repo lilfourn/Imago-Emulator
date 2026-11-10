@@ -4,10 +4,124 @@
 //! How the two run together (the slices of time each console gets, and
 //! what crosses the link between them) is each system's own and stays in
 //! its crate. The plumbing around that is the same for every system and
-//! is here: mixing the two consoles' sound into one stream, and checking
-//! that a saved pair's two clocks belong together.
+//! is here: mixing the two consoles' sound into one stream, checking that
+//! a saved pair's two clocks belong together, and sending what a debugger
+//! asks about a CPU to the console that CPU is in ([`Pair`]).
 
-use crate::{StateError, StereoSample};
+use crate::debug::{
+    CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome,
+    ScheduledEvent, Stops,
+};
+use crate::{Debugger, Input, StateError, StereoSample};
+
+/// Two consoles run as one core, for the debugger: a core that implements
+/// this is a [`Debugger`] whose CPUs are player 0's console's and then
+/// player 1's, each debugged as that console's own.
+///
+/// So with [`CPUS_EACH`](Self::CPUS_EACH) CPUs a console, the pair's CPU
+/// `n` is CPU `n % CPUS_EACH` of console `n / CPUS_EACH`, and a number
+/// past the last CPU is taken as one of player 1's.
+pub trait Pair {
+    /// One of the two consoles.
+    type Console: Debugger;
+
+    /// How many CPUs each console has: 1, or 2 for the DS's ARM9 and ARM7.
+    const CPUS_EACH: usize;
+
+    /// The two consoles, player 0's first.
+    fn consoles(&self) -> &[Self::Console; 2];
+
+    /// The two consoles, to change one.
+    fn consoles_mut(&mut self) -> &mut [Self::Console; 2];
+
+    /// [`Debugger::run_until`] for the pair: runs the rest of the frame on
+    /// both consoles, with the pair's own slices, until it ends or one of
+    /// `stops` applies. `stops` and the stop returned number CPUs as the
+    /// pair does.
+    fn run_pair_until(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        stops: &Stops,
+    ) -> RunOutcome;
+}
+
+/// Which console the pair's CPU `cpu` is in, and its number there.
+fn route<P: Pair + ?Sized>(cpu: usize) -> (usize, usize) {
+    ((cpu / P::CPUS_EACH).min(1), cpu % P::CPUS_EACH)
+}
+
+/// The console the pair's CPU `cpu` is in, and its number there.
+fn console<P: Pair + ?Sized>(pair: &P, cpu: usize) -> (&P::Console, usize) {
+    let (player, cpu) = route::<P>(cpu);
+    (&pair.consoles()[player], cpu)
+}
+
+impl<P: Pair> Debugger for P {
+    fn cpus(&self) -> Vec<CpuInfo> {
+        let mut cpus = Vec::new();
+        for (player, console) in self.consoles().iter().enumerate() {
+            for cpu in console.cpus() {
+                cpus.push(CpuInfo { player, ..cpu });
+            }
+        }
+        cpus
+    }
+
+    fn registers(&self, cpu: usize) -> Vec<Register> {
+        let (console, cpu) = console(self, cpu);
+        console.registers(cpu)
+    }
+
+    fn status(&self, cpu: usize) -> String {
+        let (console, cpu) = console(self, cpu);
+        console.status(cpu)
+    }
+
+    fn pc(&self, cpu: usize) -> u32 {
+        let (console, cpu) = console(self, cpu);
+        console.pc(cpu)
+    }
+
+    fn read(&self, cpu: usize, address: u32) -> Option<u8> {
+        let (console, cpu) = console(self, cpu);
+        console.read(cpu, address)
+    }
+
+    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool {
+        let (player, cpu) = route::<P>(cpu);
+        self.consoles_mut()[player].write(cpu, address, value)
+    }
+
+    fn disassemble(&self, cpu: usize, address: u32) -> Instruction {
+        let (console, cpu) = console(self, cpu);
+        console.disassemble(cpu, address)
+    }
+
+    fn io_registers(&self, cpu: usize) -> Vec<IoRegister> {
+        let (console, cpu) = console(self, cpu);
+        console.io_registers(cpu)
+    }
+
+    fn events(&self, cpu: usize) -> Vec<ScheduledEvent> {
+        let (console, cpu) = console(self, cpu);
+        console.events(cpu)
+    }
+
+    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics> {
+        let (console, cpu) = console(self, cpu);
+        console.graphics(cpu, request)
+    }
+
+    fn run_until(
+        &mut self,
+        inputs: &[Input],
+        audio: &mut Vec<StereoSample>,
+        stops: &Stops,
+    ) -> RunOutcome {
+        self.run_pair_until(inputs, audio, stops)
+    }
+}
 
 /// The furthest apart the two clocks of a pair's save state may be, in
 /// the consoles' own cycles. Running slice by slice leaves them no more
@@ -68,6 +182,154 @@ pub fn mix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A console that answers with its own name and the CPU number it was
+    /// asked about, and remembers what was written to it.
+    #[derive(Default)]
+    struct Fake {
+        name: &'static str,
+        cpus: usize,
+        written: Vec<(usize, u32, u8)>,
+    }
+
+    impl Debugger for Fake {
+        fn cpus(&self) -> Vec<CpuInfo> {
+            let name = self.name;
+            vec![CpuInfo { name, player: 0 }; self.cpus]
+        }
+
+        fn registers(&self, cpu: usize) -> Vec<Register> {
+            vec![Register {
+                name: self.name,
+                value: cpu as u32,
+                bits: 32,
+            }]
+        }
+
+        fn status(&self, cpu: usize) -> String {
+            format!("{} {cpu}", self.name)
+        }
+
+        fn pc(&self, cpu: usize) -> u32 {
+            cpu as u32
+        }
+
+        fn read(&self, cpu: usize, address: u32) -> Option<u8> {
+            (address == 0).then_some(cpu as u8)
+        }
+
+        fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool {
+            self.written.push((cpu, address, value));
+            true
+        }
+
+        fn disassemble(&self, cpu: usize, address: u32) -> Instruction {
+            Instruction {
+                address,
+                bytes: Vec::new(),
+                text: format!("{} {cpu}", self.name),
+                call: false,
+            }
+        }
+
+        fn events(&self, cpu: usize) -> Vec<ScheduledEvent> {
+            vec![ScheduledEvent {
+                cycles: cpu as i64,
+                name: self.name.to_string(),
+            }]
+        }
+
+        fn run_until(&mut self, _: &[Input], _: &mut Vec<StereoSample>, _: &Stops) -> RunOutcome {
+            unreachable!("a pair runs its consoles itself")
+        }
+    }
+
+    /// Two [`Fake`]s with `EACH` CPUs each.
+    struct Two<const EACH: usize>([Fake; 2]);
+
+    impl<const EACH: usize> Two<EACH> {
+        fn new() -> Self {
+            Self(["first", "second"].map(|name| Fake {
+                name,
+                cpus: EACH,
+                written: Vec::new(),
+            }))
+        }
+    }
+
+    impl<const EACH: usize> Pair for Two<EACH> {
+        type Console = Fake;
+        const CPUS_EACH: usize = EACH;
+
+        fn consoles(&self) -> &[Fake; 2] {
+            &self.0
+        }
+
+        fn consoles_mut(&mut self) -> &mut [Fake; 2] {
+            &mut self.0
+        }
+
+        fn run_pair_until(
+            &mut self,
+            _: &[Input],
+            _: &mut Vec<StereoSample>,
+            stops: &Stops,
+        ) -> RunOutcome {
+            RunOutcome {
+                frame_done: stops.is_empty(),
+                stop: None,
+            }
+        }
+    }
+
+    #[test]
+    fn a_pairs_cpus_are_the_first_consoles_then_the_seconds() {
+        let cpus = |cpus: Vec<CpuInfo>| -> Vec<(&str, usize)> {
+            cpus.iter().map(|cpu| (cpu.name, cpu.player)).collect()
+        };
+        assert_eq!(cpus(Two::<1>::new().cpus()), [("first", 0), ("second", 1)]);
+        assert_eq!(
+            cpus(Two::<2>::new().cpus()),
+            [("first", 0), ("first", 0), ("second", 1), ("second", 1)]
+        );
+    }
+
+    #[test]
+    fn what_a_debugger_asks_about_a_cpu_goes_to_its_console_under_its_own_number() {
+        // One CPU a console: CPU n is player n's CPU 0, and anything past
+        // the end is player 1's.
+        let one = Two::<1>::new();
+        assert_eq!(one.status(0), "first 0");
+        assert_eq!(one.status(1), "second 0");
+        assert_eq!(one.status(7), "second 0");
+
+        // Two CPUs a console, as on the DS.
+        let mut two = Two::<2>::new();
+        assert_eq!(two.status(1), "first 1");
+        assert_eq!(two.status(2), "second 0");
+        assert_eq!(two.status(3), "second 1");
+        assert_eq!(two.status(5), "second 1", "past the end");
+        assert_eq!(two.registers(3)[0].value, 1);
+        assert_eq!(two.pc(3), 1);
+        assert_eq!(two.read(3, 0), Some(1));
+        assert_eq!(two.disassemble(2, 8).text, "second 0");
+        assert_eq!(two.events(1)[0].cycles, 1);
+        assert_eq!(two.events(2)[0].name, "second");
+        assert!(two.io_registers(3).is_empty());
+        assert!(two.graphics(3, &GraphicsRequest::default()).is_none());
+
+        assert!(two.write(3, 0x10, 0xAB));
+        assert!(two.write(0, 0x20, 0xCD));
+        assert_eq!(two.0[0].written, [(0, 0x20, 0xCD)]);
+        assert_eq!(two.0[1].written, [(1, 0x10, 0xAB)]);
+    }
+
+    #[test]
+    fn a_pairs_run_until_is_its_own() {
+        let mut pair = Two::<1>::new();
+        let outcome = pair.run_until(&[], &mut Vec::new(), &Stops::default());
+        assert!(outcome.frame_done);
+    }
 
     #[test]
     fn a_pairs_clocks_may_be_a_little_apart_either_way() {

@@ -13,11 +13,8 @@
 //! finishes. While neither radio has power, each console runs a whole
 //! frame at a time instead.
 
-use emu_core::debug::{
-    CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome,
-    ScheduledEvent, Stops,
-};
-use emu_core::pair::{self, Uneven};
+use emu_core::debug::{RunOutcome, Stops};
+use emu_core::pair::{self, Pair, Uneven};
 use emu_core::{
     Core, CoreInfo, Debugger, Frame, Input, LoadError, Media, MemoryRegion, ScreenSize, StateError,
     StereoSample,
@@ -200,12 +197,6 @@ impl Linked {
         pair::mix(first, second, Uneven::AgainstSilence, audio);
     }
 
-    /// The console CPU `cpu` belongs to: 0 and 1 are the first console's
-    /// ARM9 and ARM7, 2 and 3 the second's.
-    fn player(&self, cpu: usize) -> &Nds {
-        &self.players[(cpu / 2).min(1)]
-    }
-
     /// Player `player`'s console (0 or 1), for debugging tools.
     #[must_use]
     pub fn console(&self, player: usize) -> &Nds {
@@ -295,54 +286,19 @@ impl Core for Linked {
 
 /// CPUs 0 and 1 are player 0's ARM9 and ARM7, 2 and 3 player 1's; each is
 /// debugged as a lone console's.
-impl Debugger for Linked {
-    fn cpus(&self) -> Vec<CpuInfo> {
-        let mut cpus = Vec::new();
-        for (player, nds) in self.players.iter().enumerate() {
-            for cpu in nds.cpus() {
-                cpus.push(CpuInfo { player, ..cpu });
-            }
-        }
-        cpus
+impl Pair for Linked {
+    type Console = Nds;
+    const CPUS_EACH: usize = 2;
+
+    fn consoles(&self) -> &[Nds; 2] {
+        &self.players
     }
 
-    fn registers(&self, cpu: usize) -> Vec<Register> {
-        self.player(cpu).registers(cpu % 2)
+    fn consoles_mut(&mut self) -> &mut [Nds; 2] {
+        &mut self.players
     }
 
-    fn status(&self, cpu: usize) -> String {
-        self.player(cpu).status(cpu % 2)
-    }
-
-    fn pc(&self, cpu: usize) -> u32 {
-        self.player(cpu).pc(cpu % 2)
-    }
-
-    fn read(&self, cpu: usize, address: u32) -> Option<u8> {
-        self.player(cpu).read(cpu % 2, address)
-    }
-
-    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool {
-        Debugger::write(&mut self.players[(cpu / 2).min(1)], cpu % 2, address, value)
-    }
-
-    fn disassemble(&self, cpu: usize, address: u32) -> Instruction {
-        self.player(cpu).disassemble(cpu % 2, address)
-    }
-
-    fn io_registers(&self, cpu: usize) -> Vec<IoRegister> {
-        self.player(cpu).io_registers(cpu % 2)
-    }
-
-    fn events(&self, cpu: usize) -> Vec<ScheduledEvent> {
-        self.player(cpu).events(cpu % 2)
-    }
-
-    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics> {
-        self.player(cpu).graphics(cpu % 2, request)
-    }
-
-    fn run_until(
+    fn run_pair_until(
         &mut self,
         inputs: &[Input],
         audio: &mut Vec<StereoSample>,
