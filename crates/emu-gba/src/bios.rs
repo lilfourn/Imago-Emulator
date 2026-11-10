@@ -986,6 +986,36 @@ mod tests {
         assert_eq!(written(&mut bus, words), 0);
     }
 
+    /// The Vram function writes halfwords, so the first byte of each
+    /// waits for the second. A reference of distance 1 made while one
+    /// waits copies that byte, as if it were written already: "Q", then
+    /// three bytes from distance 1, is "QQQQ". (The DS's function reads
+    /// what the destination held before instead. GBATEK says only that
+    /// these functions need a distance above 1, not what a GBA does with
+    /// 1, so each console keeps what it did.)
+    #[test]
+    fn halfword_lz77_at_distance_1_copies_the_byte_that_is_waiting() {
+        let mut bus = ram_bus();
+        bus.write_32(0x0200_0100, 0xE3E2_E1E0, Access::NONSEQUENTIAL);
+        // Header: type 0x10, 4 bytes. Flags 0b0100_0000: a literal, then
+        // a reference of length 3 at distance 1.
+        bus.write_32(0x0200_0000, 0x0000_0410, Access::NONSEQUENTIAL);
+        bus.write_32(0x0200_0004, 0x0000_5140, Access::NONSEQUENTIAL);
+        lz77(&mut bus, 0x0200_0000, 0x0200_0100, true);
+        assert_eq!(bus.read_32(0x0200_0100, Access::NONSEQUENTIAL), 0x5151_5151);
+
+        // From further back the bytes are read from memory, and a byte at
+        // a time nothing waits: "XYZ", then three from distance 2.
+        bus.write_32(0x0200_0010, 0x0000_0610, Access::NONSEQUENTIAL);
+        bus.write_32(0x0200_0014, 0x5A59_5810, Access::NONSEQUENTIAL);
+        bus.write_16(0x0200_0018, 0x0100, Access::NONSEQUENTIAL);
+        for halfwords in [true, false] {
+            lz77(&mut bus, 0x0200_0010, 0x0200_0200, halfwords);
+            assert_eq!(bus.read_32(0x0200_0200, Access::NONSEQUENTIAL), 0x595A_5958);
+            assert_eq!(bus.read_16(0x0200_0204, Access::NONSEQUENTIAL), 0x595A);
+        }
+    }
+
     /// The call a game makes, through the machine: data whose header
     /// names 5-bit symbols, which never returned.
     #[test]
