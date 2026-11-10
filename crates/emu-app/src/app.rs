@@ -1347,6 +1347,109 @@ f10  ->  (ds_emulator::ShowAppMenu)
     }
 
     #[test]
+    fn each_choice_in_the_menus_carries_what_its_item_always_chose() {
+        let items = items_of(&menus(MenuChecks::default()));
+        let carries = |path: &str, chosen: &dyn Action| {
+            let (_, action) = items
+                .iter()
+                .find(|(at, _)| at == path)
+                .unwrap_or_else(|| panic!("no menu item {path}"));
+            assert!(action.partial_eq(chosen), "{path}");
+        };
+        // As each item's own action, and its handler, had it before the
+        // actions carried their choice.
+        carries("View > Screens Stacked", &Arrange(Arrangement::Vertical));
+        carries(
+            "View > Screens Side by Side",
+            &Arrange(Arrangement::Horizontal),
+        );
+        carries("View > One Screen", &Arrange(Arrangement::Single));
+        carries(
+            "View > One Large, Both Small",
+            &Arrange(Arrangement::Hybrid),
+        );
+        let speed = |times| Speed::Times(speed::Rate::new(times).expect("a speed"));
+        let speeds = "Emulation > Fast-Forward Speed";
+        carries(&format!("{speeds} > ✓ 2×"), &SetFastForward(speed(2.0)));
+        carries(
+            &format!("{speeds} > \u{2003}3×"),
+            &SetFastForward(speed(3.0)),
+        );
+        carries(
+            &format!("{speeds} > \u{2003}4×"),
+            &SetFastForward(speed(4.0)),
+        );
+        carries(
+            &format!("{speeds} > \u{2003}Unlimited"),
+            &SetFastForward(Speed::Unlimited),
+        );
+        let resolutions = "View > 3D Resolution";
+        carries(
+            &format!("{resolutions} > Match Display"),
+            &SetResolution3d(Resolution3d::MatchDisplay),
+        );
+        carries(
+            &format!("{resolutions} > Native (1×)"),
+            &SetResolution3d(Resolution3d::Times(1)),
+        );
+        for times in [2, 3, 4, 6, 8] {
+            carries(
+                &format!("{resolutions} > {times}×"),
+                &SetResolution3d(Resolution3d::Times(times)),
+            );
+        }
+        for (title, picture) in [
+            ("Auto", Picture::Auto),
+            ("Sharp Pixels", Picture::SharpPixels),
+            ("Smooth", Picture::Smooth),
+            ("Rounded Pixels", Picture::RoundedPixels),
+            ("LCD Grid", Picture::LcdGrid),
+            ("Scanlines", Picture::Scanlines),
+        ] {
+            carries(&format!("View > Picture > {title}"), &SetPicture(picture));
+        }
+        let game_boy = "View > Original Game Boy Games";
+        carries(
+            &format!("{game_boy} > In Grey, as on a Game Boy"),
+            &SetDmgColors(DmgColors::Grey),
+        );
+        carries(
+            &format!("{game_boy} > In Colour, as on a Game Boy Color"),
+            &SetDmgColors(DmgColors::ByTitle),
+        );
+        // Each is its own choice: no two items carry the same.
+        for (at, (path, action)) in items.iter().enumerate() {
+            for (other, same) in &items[at + 1..] {
+                assert!(!action.partial_eq(same.as_ref()), "{path} and {other}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_gamepad_hotkey_runs_what_a_shortcut_and_a_menu_item_run() {
+        let bound = bindings();
+        let items = items_of(&menus(MenuChecks::default()));
+        for (shortcut, name) in crate::bindings::SHORTCUTS {
+            let action = hotkey_action(shortcut);
+            assert!(
+                bound
+                    .iter()
+                    .any(|binding| binding.action().partial_eq(action.as_ref())),
+                "{name} has a shortcut"
+            );
+            // AppKit puts Enter Full Screen in macOS's View menu itself.
+            let apples_own = cfg!(target_os = "macos") && shortcut == Shortcut::FullScreen;
+            assert!(
+                apples_own
+                    || items
+                        .iter()
+                        .any(|(_, item)| item.partial_eq(action.as_ref())),
+                "{name} has a menu item"
+            );
+        }
+    }
+
+    #[test]
     fn the_menus_checks_follow_what_is_chosen_and_change_nothing_else() {
         let default = menus_written(&menus(MenuChecks::default()), &bindings());
         let other = menus_written(
