@@ -229,49 +229,150 @@ impl Drop for WorkFolder {
 }
 
 /// Removes the work folder at `path` with everything in it, as far as it
-/// can.
+/// can. What is in it came out of an archive, which may hold anything:
 ///
-/// What is in it came out of an archive, and an archive can hold a folder
-/// that nobody may open or write in (mode 000, say). Unpacked so, nothing
-/// under it can be listed or removed, and the work folder, with up to a
-/// game in it, would be left for good: now, at quit and at every later
-/// launch. So if it cannot be removed as it is, each folder in it is
-/// first made its owner's to read, write and search. Windows has no such
-/// bits.
-fn remove_folder(path: &Path) {
-    let removed = fs::remove_dir_all(path);
+/// - Folders thousands deep, deeper than a path can name (`tar` makes
+///   them by changing folder as it goes). The standard library's removal
+///   calls itself once for each folder down, with a folder held open at
+///   each, and so overflows a small thread's stack, which ends the app,
+///   or runs out of open files. On macOS and Linux the app therefore
+///   removes the folder itself ([`remove_tree`]), by a list and by short
+///   paths. Windows's own removal is a loop over a list already, takes a
+///   path of any length and removes read-only files, so it stays.
+/// - Folders nobody may open or write in (mode 000, say), under which
+///   nothing could be listed or removed: each is first made its owner's.
+///
+/// Whatever cannot be removed is left, and the rest still removed: this
+/// never fails and never ends the app, when work is done, at quit, or at
+/// a later launch.
+pub(crate) fn remove_folder(path: &Path) {
     #[cfg(unix)]
-    if removed.is_err() {
-        open_folders(path);
+    remove_tree(path);
+    #[cfg(not(unix))]
+    {
         fs::remove_dir_all(path).ok();
     }
-    // Windows: there is nothing more to try.
-    #[cfg(not(unix))]
-    let _ = removed;
 }
 
-/// Makes the folder at `path`, and each folder under it, its owner's to
-/// read, write and search. Links are not followed.
+/// The most folders one removal empties: far more than an archive of
+/// games unpacks to. It only keeps a removal from going on for ever after
+/// a program that is still writing into the folder.
 #[cfg(unix)]
-fn open_folders(path: &Path) {
+const MAX_REMOVED_FOLDERS: u64 = 10_000_000;
+
+/// How the names of folders moved up into a work folder to be removed
+/// start, followed by a number.
+#[cfg(unix)]
+const REMOVING: &str = ".ds-emulator-removing-";
+
+/// How many times over a folder is gone through to remove it. Once does
+/// it, unless reading a folder while removing what is in it passed over
+/// something, which a system may do.
+#[cfg(unix)]
+const REMOVAL_PASSES: u32 = 8;
+
+/// Removes the folder at `root` with everything in it, as far as it can,
+/// however deep it goes and whatever its folders' permissions.
+///
+/// It keeps a list of folders to empty, each of them directly in `root`.
+/// A folder is emptied by removing its files and moving each folder in it
+/// up into `root`, under a name of the app's, to be emptied in its turn;
+/// then it is empty, and removed. So every path used is short, a folder a
+/// thousand down is reached in a thousand steps of one, and nothing calls
+/// itself. A folder that cannot be moved or removed is skipped, and what
+/// can be is still removed.
+#[cfg(unix)]
+fn remove_tree(root: &Path) {
+    match fs::symlink_metadata(root) {
+        Ok(found) if found.is_dir() => {}
+        // A file or a link by the name: it alone, as a folder would be.
+        Ok(_) => {
+            fs::remove_file(root).ok();
+            return;
+        }
+        Err(_) => return,
+    }
+    make_own(root);
+    let mut moved_up = 0u64;
+    let mut emptied = 0u64;
+    for _ in 0..REMOVAL_PASSES {
+        // What is directly in `root`: its files go, its folders are listed.
+        let mut removed = false;
+        let mut folders = Vec::new();
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    folders.push(entry.path());
+                } else {
+                    removed |= fs::remove_file(entry.path()).is_ok();
+                }
+            }
+        }
+        while let Some(folder) = folders.pop() {
+            emptied += 1;
+            if emptied > MAX_REMOVED_FOLDERS {
+                return;
+            }
+            make_own(&folder);
+            if let Ok(entries) = fs::read_dir(&folder) {
+                for entry in entries.flatten() {
+                    let inner = entry.path();
+                    if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        removed |= fs::remove_file(&inner).is_ok();
+                        continue;
+                    }
+                    // Its own to write in, as moving a folder to another
+                    // changes what is in it: where `..` leads.
+                    make_own(&inner);
+                    if let Some(up) = move_up(&inner, root, &mut moved_up) {
+                        folders.push(up);
+                    }
+                }
+            }
+            removed |= fs::remove_dir(&folder).is_ok();
+        }
+        // Gone, or nothing of what is left can be removed.
+        if fs::remove_dir(root).is_ok() || !removed {
+            return;
+        }
+    }
+}
+
+/// Moves the folder `inner` up into `root` under a name not taken there,
+/// and returns where it is now; `None` if it cannot be moved.
+#[cfg(unix)]
+fn move_up(inner: &Path, root: &Path, moved_up: &mut u64) -> Option<PathBuf> {
+    // A name may be taken by what an earlier removal, cut short, left.
+    for _ in 0..1000 {
+        let up = root.join(format!("{REMOVING}{moved_up}"));
+        *moved_up += 1;
+        match fs::rename(inner, &up) {
+            Ok(()) => return Some(up),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::DirectoryNotEmpty
+                        | io::ErrorKind::AlreadyExists
+                        | io::ErrorKind::NotADirectory
+                ) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Makes the folder at `path` its owner's to read, write and search, if
+/// it is not: an archive can hold one that nobody may open. A link is not
+/// followed.
+#[cfg(unix)]
+fn make_own(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     let Ok(found) = fs::symlink_metadata(path) else {
         return;
     };
-    if !found.is_dir() {
-        return;
-    }
     let mode = found.permissions().mode();
-    if mode & 0o700 != 0o700 {
+    if found.is_dir() && mode & 0o700 != 0o700 {
         fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700)).ok();
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            open_folders(&entry.path());
-        }
     }
 }
 
@@ -573,6 +674,47 @@ fn stop_tar_left_unpacking_into(path: &Path) {
         .ok();
 }
 
+/// For tests: a chain of `levels` folders at `dir/name`, each called
+/// `name` and holding the next, with the five bytes of `Game.gb` in the
+/// innermost. Returns the outermost.
+///
+/// It is built from the bottom up, each step by a short path: the
+/// innermost folder is made first, then each new folder is made beside
+/// the chain so far and the chain renamed into it. So it can be deeper
+/// than any path can name, which no `create_dir_all` could make, and
+/// which is how `tar` leaves one, changing folder as it goes.
+#[cfg(test)]
+pub(crate) fn deep_tree(dir: &Path, levels: usize, name: &str) -> PathBuf {
+    let mut chain = dir.join("level-0");
+    fs::create_dir_all(&chain).expect("innermost");
+    fs::write(chain.join("Game.gb"), b"12345").expect("game");
+    for level in 1..levels {
+        let outer = dir.join(format!("level-{level}"));
+        fs::create_dir(&outer).expect("outer");
+        fs::rename(&chain, outer.join(name)).expect("moved in");
+        chain = outer;
+    }
+    let top = dir.join(name);
+    fs::rename(&chain, &top).expect("named");
+    top
+}
+
+/// For tests: runs `work` on a thread with a 256 KiB stack, as small as
+/// any the app's work runs on (macOS gives a background worker 512 KiB),
+/// and returns what it gave. A walk that calls itself once for each
+/// folder overflows it a few dozen folders down, which ends the process.
+#[cfg(test)]
+pub(crate) fn on_a_small_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn_scoped(scope, work)
+            .expect("a thread")
+            .join()
+            .expect("no panic")
+    })
+}
+
 /// Sets when the file or folder at `path` last changed, for tests that
 /// make what they leave look old. A folder is opened as macOS and Linux
 /// open one, but Windows opens one only to change its times, and only
@@ -596,7 +738,16 @@ pub fn set_modified(path: &Path, time: std::time::SystemTime) -> io::Result<()> 
     file.set_modified(time)
 }
 
+/// The most files and folders [`size`] looks at: what it gives is only
+/// said in a log, and a launch should not wait on millions.
+const MAX_SIZED: u64 = 1_000_000;
+
 /// How many bytes the file, or the files in the folder, at `path` take.
+///
+/// It keeps a list of the folders still to look in and calls nothing for
+/// each folder down: what an unpacking cut short left can be thousands of
+/// folders deep, and this runs at every launch. A folder too deep for a
+/// path to name, or that cannot be read, counts for nothing.
 fn size(path: &Path) -> u64 {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return 0;
@@ -604,9 +755,27 @@ fn size(path: &Path) -> u64 {
     if !metadata.is_dir() {
         return metadata.len();
     }
-    fs::read_dir(path).map_or(0, |entries| {
-        entries.flatten().map(|entry| size(&entry.path())).sum()
-    })
+    let mut bytes = 0;
+    let mut looked_at = 0u64;
+    let mut folders = vec![path.to_owned()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            looked_at += 1;
+            if looked_at > MAX_SIZED {
+                return bytes;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => folders.push(entry.path()),
+                // A link's own size, not what it leads to.
+                Ok(_) => bytes += entry.metadata().map_or(0, |metadata| metadata.len()),
+                Err(_) => {}
+            }
+        }
+    }
+    bytes
 }
 
 #[cfg(test)]
@@ -941,6 +1110,81 @@ mod tests {
         // A folder that is not there is nothing to look in.
         assert_eq!(remove_old_temporaries(&temp.join("missing"), 2), 0);
         fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    fn a_work_folder_is_measured_and_removed_however_deep_it_goes() {
+        let temp = temp_dir("deep");
+        // 300 folders down: within what a path can name, and far past
+        // where a walk that calls itself runs out of stack.
+        let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+        let path = folder.path().to_owned();
+        deep_tree(&path, 300, "d");
+        assert_eq!(
+            on_a_small_stack(|| size(&path)),
+            5,
+            "the game at the bottom"
+        );
+        on_a_small_stack(|| drop(folder));
+        assert!(!path.exists(), "removed when done");
+        remove_folder(&temp);
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: a path there may be 32,767 characters, and its own removal is a loop"
+    )]
+    fn a_tree_deeper_than_a_path_can_name_is_removed() {
+        let temp = temp_dir("deeper");
+        // 1,500 folders of ten letters each: 16,500 bytes to the bottom,
+        // where a path may be 1,024 on macOS and 4,096 on Linux.
+        let fill = |work: &Path| {
+            deep_tree(work, 1_500, "a-folder-b");
+            fs::write(work.join("Game.3ds"), [0; 100]).expect("game");
+            // What a removal cut short left, under the names it moves
+            // folders up to: a folder with something in it, and a file.
+            let taken = work.join(".ds-emulator-removing-0");
+            fs::create_dir_all(taken.join("inner")).expect("folders");
+            fs::write(taken.join("inner").join("Game.cia"), [0; 10]).expect("game");
+            fs::write(work.join(".ds-emulator-removing-1"), [0; 10]).expect("file");
+        };
+        // When the work is done, or stopped.
+        let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+        let path = folder.path().to_owned();
+        fill(&path);
+        on_a_small_stack(|| drop(folder));
+        assert!(!path.exists(), "removed when done");
+        // When the app quits.
+        let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+        let path = folder.path().to_owned();
+        fill(&path);
+        std::mem::forget(folder);
+        on_a_small_stack(|| remove_own_where(|held| held == path));
+        assert!(!path.exists(), "removed on quit");
+        remove_folder(&temp);
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: a path there may be 32,767 characters, and its own removal is a loop"
+    )]
+    fn the_launch_clean_up_survives_whatever_a_crashed_unpack_left() {
+        let temp = temp_dir("crashed");
+        // As the app left it when it was ended part way: its lock free,
+        // and in it folders 3,000 down, deeper than a path can name.
+        let left = temp.join("ds-emulator-unpack-1-0");
+        fs::create_dir_all(&left).expect("folder");
+        fs::write(left.join(LOCK), b"").expect("lock");
+        fs::write(left.join("Game.3ds"), [0; 1000]).expect("game");
+        deep_tree(&left, 3_000, "a-folder-b");
+        let freed = on_a_small_stack(|| remove_left_behind_in(&temp, &[]));
+        assert!(freed >= 1000, "what could be measured: {freed}");
+        assert!(!left.exists(), "removed at launch");
+        // And again, as at every later launch: nothing to trip on.
+        assert_eq!(on_a_small_stack(|| remove_left_behind_in(&temp, &[])), 0);
+        remove_folder(&temp);
     }
 
     #[test]
