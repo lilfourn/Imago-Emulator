@@ -1,0 +1,22 @@
+# What `cargo deny check advisories` holds the app's dependencies to. CI
+# runs it on every change (.github/workflows/ci.yml, "Advisories").
+#
+# A known vulnerability in any crate, however deep, fails the check, and
+# so does a crate known to be unsound: cargo-deny would by default look
+# for those only among the workspace's own dependencies.
+#
+# A crate that is no longer maintained fails it only where the workspace
+# can do something about it: when a crate of this workspace depends on it
+# directly. The others, a dozen today (async-std, instant, paste,
+# pin-utils, proc-macro-error2, rustls-pemfile, rustybuzz, ttf-parser,
+# zbus_names, zvariant and zvariant_derive), come through GPUI 0.2.2 at
+# the one version it or its dependencies ask for. They go when GPUI is
+# updated, and a new such notice for a crate deep under GPUI must not
+# turn every pull request red.
+#
+# Nothing is ignored. Do not add a vulnerability to an `ignore` list here
+# without saying why it cannot reach the app.
+
+[advisories]
+unmaintained = "workspace"
+unsound = "all"

@@ -3,9 +3,10 @@
 //! Anything secret goes on `curl`'s standard input, never in its
 //! arguments, which any process can read.
 
-use std::io::Write;
-use std::process::Stdio;
+use std::io::{Read as _, Write};
+use std::process::{Command, Stdio};
 
+use emu_os::fetch::Allow;
 use emu_os::process::why_not_started;
 
 /// What a server answered: its status and body.
@@ -17,35 +18,55 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// curl's exit status for an answer bigger than `--max-filesize`.
+const CURL_TOO_BIG: i32 = 63;
+/// How much may follow an answer on curl's output: a line break and the
+/// server's status.
+const STATUS_ROOM: u64 = 16;
+/// What is said of an answer bigger than it may be.
+const TOO_BIG: &str = "the answer is too big";
+
+/// Where Guide's requests may go: `https://` addresses, and in tests the
+/// stand-in server on this computer.
+pub const ALLOW: Allow = Allow::or_loopback_if(cfg!(test));
+
+/// `curl` for a request of Guide's to `url`, with what every request of
+/// the app's has ([`emu_os::fetch::curl`]), naming Guide as the part of
+/// the app that asks.
+///
+/// # Errors
+///
+/// If `url` is not an address Guide may ask ([`ALLOW`]).
+pub fn command(url: &str) -> Result<Command, emu_os::fetch::Error> {
+    emu_os::fetch::curl(url, Some("Guide"), ALLOW)
+}
+
 /// Runs `curl` with `args` against `url`, writing `stdin` to it, and
 /// returns what the server answered, whatever its status. Gives up after
-/// `max_seconds`.
+/// `max_seconds`, and on an answer of more than `max_bytes`: curl is told
+/// that limit, and no more than it is read here either, as a curl before
+/// 8.4 does not stop an answer whose length the server does not give.
 ///
 /// # Errors
 ///
 /// What went wrong, in `curl`'s words, if `curl` cannot run or the
-/// transfer fails: no connection, a timeout, a reply cut short.
+/// transfer fails: no connection, a timeout, a reply cut short; or that
+/// `url` is not an address Guide may ask, or the answer is too big.
 pub fn request(
     args: &[&str],
     stdin: &[u8],
     url: &str,
     max_seconds: u32,
+    max_bytes: u64,
 ) -> Result<Response, String> {
-    let mut child = emu_os::process::command("curl")
-        .args(["--silent", "--show-error", "--connect-timeout", "10"])
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (Guide; +https://imagoemulator.com)"
-            ),
-        ])
+    let mut child = command(url)
+        .map_err(|error| error.to_string())?
         .arg("--max-time")
         .arg(max_seconds.to_string())
+        .arg("--max-filesize")
+        .arg(max_bytes.to_string())
         .args(["--output", "-", "--write-out", "\n%{http_code}"])
         .args(args)
-        .arg(url)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -58,9 +79,28 @@ pub fn request(
             .write_all(stdin)
             .map_err(|error| format!("curl didn't take the request: {error}"))?;
     }
+    // The answer, read no further than it may be and the status after it.
+    let most = max_bytes.saturating_add(STATUS_ROOM);
+    let mut body = Vec::new();
+    if let Some(answer) = child.stdout.take() {
+        let read = answer.take(most.saturating_add(1)).read_to_end(&mut body);
+        if read.is_err() || body.len() as u64 > most {
+            // Stopped, not left to send the rest.
+            child.kill().ok();
+            child.wait().ok();
+            return Err(match read {
+                Err(error) => format!("curl's answer couldn't be read: {error}"),
+                Ok(_) => TOO_BIG.to_owned(),
+            });
+        }
+    }
+    // What is left to read is what it printed as errors, which is short.
     let output = child
         .wait_with_output()
         .map_err(|error| format!("curl didn't finish: {error}"))?;
+    if output.status.code() == Some(CURL_TOO_BIG) {
+        return Err(TOO_BIG.to_owned());
+    }
     if !output.status.success() {
         let why = String::from_utf8_lossy(&output.stderr);
         let why = why.trim().trim_start_matches("curl: ");
@@ -70,10 +110,12 @@ pub fn request(
             why.to_owned()
         });
     }
-    let mut body = output.stdout;
     let split = body.iter().rposition(|&byte| byte == b'\n').unwrap_or(0);
     let status = String::from_utf8_lossy(&body[split..]).trim().parse();
     body.truncate(split);
+    if body.len() as u64 > max_bytes {
+        return Err(TOO_BIG.to_owned());
+    }
     match status {
         Ok(status) => Ok(Response { status, body }),
         Err(_) => Err("curl gave no status".to_owned()),
@@ -91,14 +133,26 @@ pub fn config_header(header: &str) -> Option<String> {
     Some(format!("header = \"{quoted}\"\n"))
 }
 
-/// A `curl` config line sending `body` as the request's body, quoted as
-/// [`config_header`] quotes. `None` if `body` holds a control character,
-/// which compact JSON never does.
+/// A `curl` config line sending `body`, compact JSON, as the request's
+/// body, quoted as [`config_header`] quotes.
+///
+/// Compact JSON escapes the control characters below U+0020, but leaves
+/// DEL and the C1 controls (U+007F to U+009F) as they are, as JSON allows
+/// inside a string, which is the only place they can be. No such
+/// character may stand in a config line, so each becomes its JSON escape,
+/// `\u007f`: the server reads the same text. `None` if `body` holds one of
+/// the others, a line break say, which compact JSON never does.
 pub fn config_body(body: &str) -> Option<String> {
-    if body.chars().any(char::is_control) {
-        return None;
+    let mut quoted = String::with_capacity(body.len());
+    for c in body.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\u{7f}'..='\u{9f}' => quoted.push_str(&format!("\\\\u{:04x}", u32::from(c))),
+            c if c.is_control() => return None,
+            c => quoted.push(c),
+        }
     }
-    let quoted = body.replace('\\', "\\\\").replace('"', "\\\"");
     Some(format!("data-binary = \"{quoted}\"\n"))
 }
 
@@ -120,11 +174,69 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_is_read_no_further_than_it_may_be() {
+        use std::time::Duration;
+
+        // A server that does not say how long its answer is, and sends
+        // 3 MiB of it.
+        let endpoints =
+            crate::fake::stream(|_| (200, vec!["x".repeat(1 << 20); 3]), Duration::ZERO);
+        let url = endpoints.chat_url();
+        // curl is told the limit too, and a new one holds to it. An older
+        // one does not when the server gives no length: here curl is told
+        // a far higher one, as if it were such a curl.
+        let unlimited = ["--max-filesize", "1000000000"];
+        // Its length alone, not megabytes of it, should this fail.
+        let asked = |args: &[&str], max_bytes: u64| {
+            request(args, &[], &url, 20, max_bytes).map(|reply| (reply.status, reply.body.len()))
+        };
+        assert_eq!(
+            asked(&unlimited, 1 << 20),
+            Err("the answer is too big".to_owned())
+        );
+        // Held by curl itself, it reads the same.
+        assert_eq!(asked(&[], 1 << 20), Err("the answer is too big".to_owned()));
+        // Up to its limit, an answer comes whole.
+        assert_eq!(asked(&[], 3 << 20), Ok((200, 3 << 20)));
+    }
+
+    #[test]
     fn config_bodies_are_quoted_the_same_way() {
         assert_eq!(
             config_body(r#"{"a":"b\"c\\n"}"#).as_deref(),
             Some("data-binary = \"{\\\"a\\\":\\\"b\\\\\\\"c\\\\\\\\n\\\"}\"\n")
         );
         assert_eq!(config_body("{\n}"), None);
+    }
+
+    #[test]
+    fn a_body_s_delete_and_c1_characters_are_escaped_not_refused() {
+        // As a message pasted from a terminal or an old document holds
+        // them: JSON leaves these as they are inside a string.
+        let message = "a\u{7f}b\u{80}c\u{85}d\u{9f}e";
+        let body = serde_json::json!({ "content": message }).to_string();
+        assert!(body.contains('\u{7f}'), "serde_json does not escape them");
+        let config = config_body(&body).expect("it can be sent");
+        assert_eq!(
+            config,
+            "data-binary = \"{\\\"content\\\":\\\"a\\\\u007fb\\\\u0080c\\\\u0085d\\\\u009fe\\\"}\"\n"
+        );
+        assert!(!config.trim_end().chars().any(char::is_control));
+        // What curl makes of the line is JSON for the same message.
+        let quoted = config
+            .strip_prefix("data-binary = \"")
+            .and_then(|rest| rest.strip_suffix("\"\n"))
+            .expect("one quoted line");
+        let mut sent = String::new();
+        let mut chars = quoted.chars();
+        while let Some(c) = chars.next() {
+            sent.push(if c == '\\' {
+                chars.next().expect("escaped")
+            } else {
+                c
+            });
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&sent).expect("JSON");
+        assert_eq!(parsed["content"], message);
     }
 }

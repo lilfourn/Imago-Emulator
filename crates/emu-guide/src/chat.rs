@@ -407,26 +407,20 @@ fn attempt_once(
     stop: &Stop,
     on_event: &mut dyn FnMut(Event),
 ) -> Outcome {
-    let spawned = emu_os::process::command("curl")
-        .args(["--silent", "--show-error", "--no-buffer"])
-        .args(["--connect-timeout", "10"])
+    let mut command = match curl::command(&endpoints.chat_url()) {
+        Ok(command) => command,
+        Err(error) => return Outcome::Failed(ChatError::Unreachable(error.to_string())),
+    };
+    let spawned = command
+        .arg("--no-buffer")
         // Fails a stream that sends nothing, keep-alives included, for a
         // minute.
         .args(["--speed-limit", "1", "--speed-time"])
         .arg(IDLE_SECONDS.to_string())
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (Guide; +https://imagoemulator.com)"
-            ),
-        ])
         .args(["--header", "Content-Type: application/json"])
         .args(["--header", "HTTP-Referer: https://imagoemulator.com"])
         .args(["--header", "X-OpenRouter-Title: Imago Emulator"])
         .args(["--write-out", "\n%{http_code}\n", "--config", "-"])
-        .arg(endpoints.chat_url())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -834,6 +828,23 @@ mod tests {
             Duration::ZERO,
         );
         let events = collect(&endpoints, &request(None), &Stop::new());
+        assert_eq!(events.last(), Some(&Event::Finished(Finish::Stop)));
+    }
+
+    #[test]
+    fn a_question_holding_a_delete_or_c1_character_is_still_sent() {
+        // Once in a chat, such a message goes with every later question.
+        let endpoints = fake::stream(
+            |request| {
+                let fine =
+                    request.json()["messages"][1]["content"] == "Where\u{7f} is Ralts\u{85}?";
+                (if fine { 200 } else { 400 }, recorded())
+            },
+            Duration::ZERO,
+        );
+        let mut request = request(None);
+        request.messages = vec![Message::user("Where\u{7f} is Ralts\u{85}?", Vec::new())];
+        let events = collect(&endpoints, &request, &Stop::new());
         assert_eq!(events.last(), Some(&Event::Finished(Finish::Stop)));
     }
 

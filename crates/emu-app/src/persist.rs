@@ -42,9 +42,11 @@
 
 use std::borrow::Cow;
 use std::fs::{self, File};
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use emu_core::System;
 
@@ -350,11 +352,22 @@ pub struct GameLock {
     _file: File,
 }
 
+/// How long [`GameLock::take`] keeps asking for a lock that is held before
+/// it says so. A program this app starts holds a copy of every file the
+/// app has open, a running game's lock among them, from the moment it is
+/// made until it turns into the program it was started as. A game closed
+/// and opened again inside that moment finds its own lock still held, by
+/// no one who is playing it. The moment is far shorter than this.
+const LOCK_LET_GO_WITHIN: Duration = Duration::from_millis(250);
+
+/// How long [`GameLock::take`] waits between asking twice.
+const LOCK_ASKED_EVERY: Duration = Duration::from_millis(5);
+
 impl GameLock {
     /// Takes the lock on the game whose battery save is `save`, with its
     /// lock file in `folder`, which is made if it is not there. Returns
     /// `None` if another copy of the app, or another game running in this
-    /// one, holds it.
+    /// one, holds it and keeps it for [`LOCK_LET_GO_WITHIN`].
     ///
     /// # Errors
     ///
@@ -378,10 +391,16 @@ impl GameLock {
             .truncate(false)
             .write(true)
             .open(folder.join(name))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(fs::TryLockError::WouldBlock) => Ok(None),
-            Err(fs::TryLockError::Error(error)) => Err(error),
+        let asked = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Some(Self { _file: file })),
+                Err(fs::TryLockError::WouldBlock) if asked.elapsed() < LOCK_LET_GO_WITHIN => {
+                    thread::sleep(LOCK_ASKED_EVERY);
+                }
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(error)) => return Err(error),
+            }
         }
     }
 }
@@ -784,110 +803,11 @@ fn is_windows_device(stem: &str) -> bool {
         })
 }
 
-/// Renames the file or folder at `from` to `to`, replacing a file there,
-/// as [`fs::rename`] does.
-///
-/// On Windows that can fail for a moment while another program, such as a
-/// virus scanner or the search indexer, has either file open, so it is
-/// tried again for about a second. A read-only file at `to` is made
-/// writable first, as macOS and Linux replace one anyway.
-pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        windows::rename(from, to)
-    }
-    #[cfg(not(windows))]
-    {
-        fs::rename(from, to)
-    }
-}
-
-#[cfg(windows)]
-mod windows {
-    use std::fs;
-    use std::io;
-    use std::path::Path;
-    use std::thread;
-    use std::time::Duration;
-
-    /// How many times a rename is tried.
-    const TRIES: u32 = 10;
-    /// How long to wait after a rename fails, at first and at most: in all,
-    /// about a second.
-    const FIRST_WAIT: Duration = Duration::from_millis(10);
-    const LONGEST_WAIT: Duration = Duration::from_millis(200);
-
-    /// Windows's `ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION` and
-    /// `ERROR_LOCK_VIOLATION`: another program has the file open.
-    const IN_USE: [i32; 3] = [5, 32, 33];
-
-    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
-        let mut wait = FIRST_WAIT;
-        for _ in 1..TRIES {
-            match fs::rename(from, to) {
-                Err(error)
-                    if error
-                        .raw_os_error()
-                        .is_some_and(|code| IN_USE.contains(&code)) =>
-                {
-                    if error.kind() == io::ErrorKind::PermissionDenied {
-                        make_writable(to);
-                    }
-                    thread::sleep(wait);
-                    wait = (wait * 2).min(LONGEST_WAIT);
-                }
-                done => return done,
-            }
-        }
-        fs::rename(from, to)
-    }
-
-    /// Clears the read-only flag of the file at `path`, if it has one.
-    #[allow(
-        clippy::permissions_set_readonly_false,
-        reason = "Windows: this clears the file's read-only flag, nothing more"
-    )]
-    fn make_writable(path: &Path) {
-        if let Ok(metadata) = fs::metadata(path)
-            && metadata.is_file()
-            && metadata.permissions().readonly()
-        {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            fs::set_permissions(path, permissions).ok();
-        }
-    }
-}
-
-/// Replaces `path` with `bytes` so that a crash or power cut mid-write
-/// never leaves a half-written file: the bytes go to a sibling temporary
-/// file first, reach the disk, and only then is it renamed over `path`
-/// (with [`rename`], which on Windows waits out a virus scanner).
-///
-/// On macOS the folder is not synced after the rename: syncing there
-/// flushes the whole drive's cache, which is slow, and without it a power
-/// cut can at worst undo the rename, leaving the old file whole. Windows
-/// can't open a folder to sync it, and NTFS journals the rename itself.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    let mut file = File::create(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    rename(&temporary, path)?;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let folder = match path.parent() {
-            Some(folder) if !folder.as_os_str().is_empty() => folder,
-            _ => Path::new("."),
-        };
-        // Best effort: not every file system can sync a folder.
-        File::open(folder).and_then(|folder| folder.sync_all()).ok();
-    }
-    Ok(())
-}
+/// Renames a file or folder, on Windows waiting out a program that has
+/// it open for a moment, and replaces a file so that a crash mid-write
+/// never leaves half of one: `emu_os`'s, which Guide and the 3DS games'
+/// crates use too.
+pub use emu_os::file::{rename, write_atomic};
 
 #[cfg(test)]
 mod tests {
@@ -1475,6 +1395,68 @@ mod tests {
         // A lock folder that cannot be made is an error, not a held game.
         fs::write(dir.join("file"), b"in the way").expect("write");
         assert!(GameLock::take(&dir.join("file/Locks"), &save).is_err());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_lock_let_go_a_moment_after_it_is_asked_for_is_taken() {
+        let dir = temp_dir("game-lock-moment");
+        let locks = dir.join("data/Locks");
+        let save = dir.join("games/Pokemon.sav");
+        // As a program the app has just started holds its copy of the
+        // lock for a moment after the game is closed.
+        let held = GameLock::take(&locks, &save)
+            .expect("usable")
+            .expect("free");
+        let holder = thread::spawn(move || {
+            thread::sleep(LOCK_LET_GO_WITHIN / 5);
+            drop(held);
+        });
+        assert!(GameLock::take(&locks, &save).expect("usable").is_some());
+        holder.join().expect("let go");
+
+        // One that is kept is still refused, after the wait and no more.
+        let held = GameLock::take(&locks, &save).expect("usable");
+        assert!(held.is_some());
+        let asked = Instant::now();
+        assert!(GameLock::take(&locks, &save).expect("usable").is_none());
+        assert!(asked.elapsed() >= LOCK_LET_GO_WITHIN);
+        assert!(asked.elapsed() < LOCK_LET_GO_WITHIN * 20);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The case itself: before the lock waited, a few openings in every
+    /// hundred were refused here.
+    #[cfg(unix)]
+    #[test]
+    fn a_game_closed_while_programs_start_opens_again_at_once() {
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = temp_dir("game-lock-programs");
+        let locks = dir.join("data/Locks");
+        let save = dir.join("games/Pokemon.sav");
+        let done = Arc::new(AtomicBool::new(false));
+        let starters: Vec<_> = (0..2)
+            .map(|_| {
+                let done = Arc::clone(&done);
+                thread::spawn(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        Command::new("true").status().expect("started");
+                    }
+                })
+            })
+            .collect();
+        // Each is let go as the next line asks for it again.
+        let refused = (0..500)
+            .filter(|_| GameLock::take(&locks, &save).expect("usable").is_none())
+            .count();
+        done.store(true, Ordering::Relaxed);
+        for starter in starters {
+            starter.join().expect("stopped");
+        }
+        assert_eq!(refused, 0, "of 500 openings");
         fs::remove_dir_all(&dir).expect("clean up");
     }
 

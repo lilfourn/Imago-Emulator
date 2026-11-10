@@ -20,16 +20,18 @@
 //! its licence out of it, and renames the folder into place, so the
 //! release's folder is always complete. A lock file keeps two installs,
 //! from two games opened together or the app and emu-headless, from
-//! racing: the second waits for the first and then finds its build.
+//! racing: the second waits for the first and then finds its build. The
+//! lock, the temporary folder, the check and the rename are
+//! [`emu_os::install`]'s, which the 3DS core and the randomizer install by
+//! too.
 //!
 //! Everything here blocks.
 
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-use sha2::{Digest, Sha256};
+use emu_os::install::{self as pinned, Install, Pinned};
 
 /// Why mkxp-z could not be installed.
 #[derive(Debug, thiserror::Error)]
@@ -140,12 +142,10 @@ pub const DOWNLOAD_MB: u32 = match PIN {
 
 /// The licence the artifacts hold, kept beside the program.
 const LICENSE: &str = "LICENSE.txt";
-/// The file in the players' folder an install holds locked.
-const LOCK_FILE: &str = "install.lock";
-/// How the names of the temporary folders installs work in start.
-const TEMP_PREFIX: &str = ".install-";
 /// How long the download may take in all, in seconds.
-const DOWNLOAD_SECONDS: &str = "1800";
+const DOWNLOAD_SECONDS: u32 = 1800;
+/// The most the download may be: three times the biggest build.
+const MAX_DOWNLOAD: u64 = 64 << 20;
 
 /// The hosted mkxp-z installed in `players`, the players' folder, if it is.
 #[must_use]
@@ -167,8 +167,7 @@ pub fn ensure(players: &Path) -> Result<PathBuf, InstallError> {
     pin.ensure(players, &curl)
 }
 
-/// Fetches the file at a URL into a path, or says why it could not.
-pub type Fetch<'f> = &'f dyn Fn(&str, &Path) -> Result<(), String>;
+pub use emu_os::install::Fetch;
 
 impl Pin<'_> {
     /// Where the program is, or would be, in `players`.
@@ -192,64 +191,46 @@ impl Pin<'_> {
         if let Some(program) = self.installed(players) {
             return Ok(program);
         }
-        fs::create_dir_all(players)?;
-        let lock = File::create(players.join(LOCK_FILE))?;
-        lock.lock()?;
+        let install = Install::begin(players)?;
         // Another install may have finished while this one waited.
         if let Some(program) = self.installed(players) {
             return Ok(program);
         }
-        clear_unfinished(players);
-        let temp = players.join(format!("{TEMP_PREFIX}{}", std::process::id()));
-        fs::create_dir(&temp)?;
-        let result = self.install(players, &temp, fetch);
-        // What is left behind is cleared by the next install.
-        fs::remove_dir_all(&temp).ok();
-        result
+        let temp = install.temp()?;
+        self.install(players, temp.path(), fetch)
     }
 
     /// Downloads into `temp`, then puts the program and its licence in
-    /// their folder in `players`.
+    /// their folder in `players`. Nothing is unpacked from a download that
+    /// is not the one pinned, in size and in SHA-256: it is deleted.
     fn install(
         &self,
         players: &Path,
         temp: &Path,
         fetch: Fetch<'_>,
     ) -> Result<PathBuf, InstallError> {
-        let file = self.url.rsplit_once('/').map_or(self.url, |(_, name)| name);
+        let pinned = Pinned {
+            url: self.url,
+            sha256: self.sha256,
+            size: Some(self.size),
+        };
+        let file = pinned.file_name();
         let archive = temp.join(file);
-        fetch(self.url, &archive).map_err(InstallError::Download)?;
-        self.verify(&archive, file)?;
+        pinned
+            .download(&archive, fetch)
+            .map_err(|error| match error {
+                pinned::Error::Download(why) => InstallError::Download(why),
+                pinned::Error::NotPinned(differs) => InstallError::NotPinned {
+                    file: file.to_owned(),
+                    why: differs.to_string(),
+                },
+                pinned::Error::Io(error) => InstallError::Io(error),
+            })?;
         let unpacked = temp.join(self.folder);
         fs::create_dir(&unpacked)?;
         unpack(&archive, &unpacked, self.program)?;
-        let target = players.join(self.folder);
-        match fs::remove_dir_all(&target) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
-        }
-        fs::rename(&unpacked, &target)?;
+        pinned::place(&unpacked, &players.join(self.folder))?;
         Ok(self.program_path(players))
-    }
-
-    /// Checks that `archive`, the download called `file`, is the one
-    /// pinned, deleting it if not.
-    fn verify(&self, archive: &Path, file: &str) -> Result<(), InstallError> {
-        let size = fs::metadata(archive)?.len();
-        let why = if size == self.size {
-            let found = sha256(archive)?;
-            if found == self.sha256 {
-                return Ok(());
-            }
-            format!("its SHA-256 is {found}")
-        } else {
-            format!("it is {size} bytes, not {}", self.size)
-        };
-        fs::remove_file(archive).ok();
-        Err(InstallError::NotPinned {
-            file: file.to_owned(),
-            why,
-        })
     }
 }
 
@@ -279,86 +260,24 @@ fn unpack(archive: &Path, into: &Path, program: &str) -> Result<(), InstallError
     Ok(())
 }
 
-/// Removes what installs that stopped part way left in `players`.
-fn clear_unfinished(players: &Path) {
-    let Ok(entries) = fs::read_dir(players) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
-            fs::remove_dir_all(entry.path()).ok();
-        }
-    }
-}
-
-/// Downloads `url` into the file `to` with curl from `PATH`, which Windows
-/// 10 and 11 have in System32 and Linux has as a package.
+/// Downloads `url` into the file `to` with curl, as [`emu_os::fetch`] does
+/// a big file: from an `https://` address only, giving up on one stalled
+/// for a minute and trying again twice after a passing failure.
 fn curl(url: &str, to: &Path) -> Result<(), String> {
-    let mut command = Command::new("curl");
-    // The app is a windowed program on Windows, where curl would otherwise
-    // flash up a console window: CREATE_NO_WINDOW.
-    #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
-    let output = command
-        .args(["--silent", "--show-error", "--location"])
-        .args([
-            "--user-agent",
-            concat!("ds-emulator/", env!("CARGO_PKG_VERSION")),
-        ])
-        .args(["--connect-timeout", "10", "--max-time", DOWNLOAD_SECONDS])
-        // Gives up on a download stalled below 1 KB/s for a minute, and
-        // tries again twice after a passing failure.
-        .args([
-            "--speed-limit",
-            "1024",
-            "--speed-time",
-            "60",
-            "--retry",
-            "2",
-        ])
-        .arg("--output")
-        .arg(to)
-        .args(["--write-out", "%{http_code}"])
-        .arg(url)
-        .output()
-        .map_err(|error| match error.kind() {
+    let download = emu_os::fetch::Download {
+        url,
+        allow: emu_os::fetch::Allow::or_loopback_if(cfg!(test)),
+        seconds: DOWNLOAD_SECONDS,
+        max_bytes: MAX_DOWNLOAD,
+        patient: true,
+    };
+    download.to_file(to).map_err(|error| match error {
+        emu_os::fetch::Error::NotStarted(error) => match error.kind() {
             io::ErrorKind::NotFound => "curl, which downloads it, is not installed".to_owned(),
             _ => format!("could not run curl: {error}"),
-        })?;
-    // A transfer cut short can still say 200; only curl's own status tells.
-    if !output.status.success() {
-        return Err(reason(&output));
-    }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "200" => Ok(()),
-        status => Err(format!("the server answered with HTTP status {status}")),
-    }
-}
-
-/// Why the command that gave `output` failed: the last line it printed as
-/// an error, or else its exit status.
-fn reason(output: &Output) -> String {
-    let errors = String::from_utf8_lossy(&output.stderr);
-    errors
-        .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())
-        .map_or_else(|| output.status.to_string(), str::to_owned)
-}
-
-/// The SHA-256 of the file at `path`, in lowercase hex, read a piece at a
-/// time.
-fn sha256(path: &Path) -> io::Result<String> {
-    let mut hasher = Sha256::new();
-    let mut file = File::open(path)?;
-    let mut chunk = vec![0; 1 << 16];
-    loop {
-        match file.read(&mut chunk)? {
-            0 => break,
-            read => hasher.update(&chunk[..read]),
-        }
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+        },
+        error => error.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -389,7 +308,8 @@ mod tests {
     }
 
     fn digest(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+        use sha2::Digest as _;
+        format!("{:x}", sha2::Sha256::digest(bytes))
     }
 
     #[test]
@@ -487,6 +407,79 @@ mod tests {
             fs::read_dir(&players).expect("players").count(),
             1,
             "the lock only"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_install_lock_is_opened_as_it_is_not_emptied() {
+        let dir = crate::tests::temp_dir("install-lock");
+        let players = dir.join("mkxp-z");
+        fs::create_dir_all(&players).expect("players");
+        // Windows may refuse to empty a file another process holds locked,
+        // so an install must not: what is in the file shows whether it did.
+        fs::write(players.join("install.lock"), b"held by another install").expect("lock");
+        let bytes = artifact("mkxp-z.x86_64");
+        let sha256 = digest(&bytes);
+        let pin = Pin {
+            url: "https://example.com/mkxp-z.zip",
+            sha256: &sha256,
+            size: bytes.len() as u64,
+            folder: "mkxp-z-test",
+            program: "mkxp-z.x86_64",
+        };
+        let fetch = |_: &str, to: &Path| fs::write(to, &bytes).map_err(|e| e.to_string());
+        pin.ensure(&players, &fetch).expect("installed");
+        assert_eq!(
+            fs::read(players.join("install.lock")).expect("lock"),
+            b"held by another install"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_download_names_the_app_as_every_download_does() {
+        use std::io::Read as _;
+        use std::net::TcpListener;
+
+        // A stand-in server on this computer that answers with the user
+        // agent it was sent.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+        let url = format!(
+            "http://{}/mkxp-z.zip",
+            listener.local_addr().expect("address")
+        );
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut head = Vec::new();
+                let mut chunk = [0; 1024];
+                while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(read) if read > 0 => head.extend_from_slice(&chunk[..read]),
+                        _ => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let agent = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("User-Agent: "))
+                    .unwrap_or_default();
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{agent}",
+                    agent.len()
+                );
+                stream.write_all(answer.as_bytes()).ok();
+            }
+        });
+        let dir = crate::tests::temp_dir("install-agent");
+        let to = dir.join("mkxp-z.zip");
+        curl(&url, &to).expect("downloaded");
+        assert_eq!(
+            fs::read_to_string(&to).expect("downloaded"),
+            format!(
+                "ImagoEmulator/{} (+https://imagoemulator.com)",
+                env!("CARGO_PKG_VERSION")
+            )
         );
         fs::remove_dir_all(&dir).ok();
     }

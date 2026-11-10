@@ -11,6 +11,12 @@
 //! got is told through a [`Progress`], as a big 3DS game takes most of a
 //! minute. What an unpacking cut short leaves is removed (see
 //! [`crate::leftovers`]).
+//!
+//! Nothing unpacks without a limit. The app stops reading a game past the
+//! most a cartridge of its system holds. A program that unpacks an
+//! archive writes all of it, wanted or not, so it is stopped once it has
+//! written more than what the archive lists allows (see [`unpack_with`]);
+//! each game it unpacked is then held to its cartridge's size, as any is.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -35,6 +41,28 @@ pub const MAX_ROM: u64 = 512 << 20;
 /// The most a 3DS game unpacks to: a 3DS cartridge holds at most 4 GiB.
 pub const MAX_3DS_GAME: u64 = 4 << 30;
 
+/// The most a program that unpacks a whole archive may write, whatever
+/// the archive lists: eight of the biggest games. An archive may hold
+/// several, or one twice, as a `.3ds` and as a `.cia`.
+const MAX_UNPACKED: u64 = 32 << 30;
+
+/// The most it may write unpacking an archive that cannot be listed: the
+/// biggest game twice over.
+const MAX_UNLISTED: u64 = 2 * MAX_3DS_GAME;
+
+/// How much more than twice what an archive lists a program may write
+/// unpacking it: a listing can leave small things out.
+const UNLISTED: u64 = 16 << 20;
+
+/// The most files and folders a program may unpack from an archive: far
+/// more than any archive of games holds.
+const MAX_ENTRIES: u64 = 100_000;
+
+/// How many folders down a program may unpack: far deeper than any
+/// archive of games goes. An archive of a few KB can hold folders
+/// thousands deep.
+const MAX_DEPTH: u32 = 64;
+
 /// The archives games come in, by extension.
 const ARCHIVES: [&str; 3] = ["zip", "7z", "rar"];
 
@@ -45,9 +73,10 @@ pub fn games_dir() -> Option<PathBuf> {
 }
 
 /// Where patches unpacked from archives are kept until their games are
-/// made.
-fn patches_dir() -> PathBuf {
-    std::env::temp_dir().join(leftovers::PATCHES)
+/// made: beside the work folders, in the temporary folder or, on Linux, a
+/// folder of the user's own inside it ([`emu_os::temp::work_dir`]).
+fn patches_dir() -> io::Result<PathBuf> {
+    Ok(emu_os::temp::work_dir()?.join(leftovers::PATCHES))
 }
 
 /// How often the files an unpacking program writes are measured while it
@@ -134,17 +163,22 @@ fn has_extension(path: &Path, extensions: &[&str]) -> bool {
 /// file cannot be written.
 pub fn unpack(archive: &Path, progress: &Progress) -> Result<Vec<PathBuf>, String> {
     let folder = games_dir().ok_or("There is no folder to unpack games into")?;
-    unpack_into(archive, &folder, &patches_dir(), progress)
+    let patches =
+        patches_dir().map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
+    unpack_into(archive, &folder, &patches, progress)
 }
 
 /// Unpacks the archive at `archive` as [`unpack`] does, but its games into
-/// `folder`.
+/// `folder`, for an archive the user did not choose, such as a download
+/// of the store's: it returns the games, none if the archive holds none.
 ///
 /// # Errors
 ///
-/// As [`unpack`].
-pub fn unpack_to(archive: &Path, folder: &Path) -> Result<Vec<PathBuf>, String> {
-    unpack_into(archive, folder, &patches_dir(), &Progress::default())
+/// Why the archive cannot be unpacked, without its path, which says
+/// nothing to the user: that it is damaged or locked with a password, that
+/// the disk is full, or which program to install to unpack it.
+pub fn unpack_to(archive: &Path, folder: &Path) -> io::Result<Vec<PathBuf>> {
+    unpack_any(archive, folder, &patches_dir()?, &Progress::default())
 }
 
 fn unpack_into(
@@ -153,15 +187,8 @@ fn unpack_into(
     patches: &Path,
     progress: &Progress,
 ) -> Result<Vec<PathBuf>, String> {
-    let unpacked = if has_extension(archive, &["zip"]) {
-        unpack_zip(archive, folder, patches, progress)
-    } else if has_extension(archive, &["7z"]) && !cfg!(target_os = "macos") {
-        unpack_7z_or_else(archive, folder, patches, progress)
-    } else {
-        unpack_with_programs(archive, folder, patches, progress)
-    };
-    let games =
-        unpacked.map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
+    let games = unpack_any(archive, folder, patches, progress)
+        .map_err(|error| format!("Cannot unpack {}: {error}", archive.display()))?;
     if games.is_empty() {
         return Err(format!(
             "{} holds no .gb, .gbc, .gba, .nds or .3ds game, or patch for one",
@@ -169,6 +196,23 @@ fn unpack_into(
         ));
     }
     Ok(games)
+}
+
+/// Unpacks the games and patches in the archive at `archive`, whichever
+/// kind it is, and returns where each is now: none if it holds none.
+fn unpack_any(
+    archive: &Path,
+    folder: &Path,
+    patches: &Path,
+    progress: &Progress,
+) -> io::Result<Vec<PathBuf>> {
+    if has_extension(archive, &["zip"]) {
+        unpack_zip(archive, folder, patches, progress)
+    } else if has_extension(archive, &["7z"]) && !cfg!(target_os = "macos") {
+        unpack_7z_or_else(archive, folder, patches, progress)
+    } else {
+        unpack_with_programs(archive, folder, patches, progress)
+    }
 }
 
 /// Whether to unpack the file `inner` from an archive: a game or a patch,
@@ -250,8 +294,14 @@ fn unpack_7z_or_else(
             if unpackers(archive).is_empty() {
                 return Err(io::Error::other(format!("{error}. {}", none_installed())));
             }
-            // What the program says is no better than why the app can't.
-            unpack_with_programs(archive, folder, patches, progress).map_err(|_| error)
+            // What the program says is no better than why the app can't,
+            // unless the app stopped it for unpacking too much.
+            unpack_with_programs(archive, folder, patches, progress).map_err(
+                |program| match program.kind() {
+                    io::ErrorKind::FileTooLarge => program,
+                    _ => error,
+                },
+            )
         }
         unpacked => unpacked,
     }
@@ -615,6 +665,8 @@ fn unpack_with_programs(
     for unpacker in &unpackers {
         match unpack_with(unpacker, archive, folder, patches, progress) {
             Ok(games) => return Ok(games),
+            // Another program would only write as much again.
+            Err(error) if error.kind() == io::ErrorKind::FileTooLarge => return Err(error),
             Err(error) => {
                 first_failure.get_or_insert(error);
             }
@@ -641,6 +693,15 @@ fn unpack_with_programs(
 /// order. How far it has got is the size of what it has written so far,
 /// out of the size of what the archive lists. On macOS `unpacker` is the
 /// system's own `/usr/bin/tar`, libarchive's `bsdtar`, which reads both.
+///
+/// The program unpacks the whole archive, so it is held to a size as it
+/// runs ([`unpacked_cap`]), to a number of files and folders
+/// ([`MAX_ENTRIES`]) and to how deep its folders go ([`MAX_DEPTH`]): one
+/// that writes more than what the archive lists allows, or more files
+/// than any archive of games holds, or folders deeper, is stopped, and
+/// what it wrote removed. What an archive lists is never a reason not to
+/// start: it may hold several games, each of which is held to its own
+/// cartridge's size once unpacked.
 fn unpack_with(
     unpacker: &Unpacker,
     archive: &Path,
@@ -648,9 +709,24 @@ fn unpack_with(
     patches: &Path,
     progress: &Progress,
 ) -> io::Result<Vec<PathBuf>> {
+    unpack_held(unpacker, archive, folder, patches, progress, MAX_ENTRIES)
+}
+
+/// Unpacks as [`unpack_with`] does, with the program held to
+/// `most_entries` files and folders.
+fn unpack_held(
+    unpacker: &Unpacker,
+    archive: &Path,
+    folder: &Path,
+    patches: &Path,
+    progress: &Progress,
+    most_entries: u64,
+) -> io::Result<Vec<PathBuf>> {
+    let listed = unpacker.listed_size(archive);
+    let most = unpacked_cap(listed);
     let work = WorkFolder::new("unpack")?;
     let scratch = work.path();
-    progress.start(unpacker.listed_size(archive));
+    progress.start(listed);
     let mut command = unpacker.unpack(archive, scratch);
     command
         .stdin(Stdio::null())
@@ -669,11 +745,26 @@ fn unpack_with(
         }
         said
     });
+    // What it has unpacked so far, or why that is too much.
+    let measured = || {
+        let unpacked = Unpacked::under(scratch, most_entries);
+        if unpacked.bytes > most {
+            Err(unpacked_too_much(listed))
+        } else if unpacked.entries > most_entries {
+            Err(unpacked_too_many(most_entries))
+        } else if unpacked.depth > MAX_DEPTH {
+            Err(unpacked_too_deep())
+        } else {
+            Ok(unpacked.bytes)
+        }
+    };
     let status = loop {
         match program.try_wait()? {
             Some(status) => break status,
             None => {
-                progress.set(folder_size(scratch));
+                // Failing here returns, which stops the program and then
+                // removes the folder.
+                progress.set(measured()?);
                 thread::sleep(MEASURE_EVERY);
             }
         }
@@ -682,9 +773,9 @@ fn unpack_with(
     if !status.success() {
         return Err(io::Error::other(unpacker.reason(&said, status)));
     }
-    progress.set(folder_size(scratch));
-    let mut files = Vec::new();
-    find_files(scratch, scratch, &mut files)?;
+    // One that unpacked too much between two measurings, and ended.
+    progress.set(measured()?);
+    let mut files = find_files(scratch)?;
     files.sort();
     let mut games = Vec::new();
     for inner in files.iter().filter(|inner| wanted(inner)) {
@@ -709,6 +800,119 @@ fn unpack_with(
     Ok(games)
 }
 
+/// The most a program may write unpacking an archive that lists `listed`
+/// bytes of files, or 0 if it could not be listed: twice what it lists and
+/// [`UNLISTED`] more, as a listing is no promise, and never more than
+/// [`MAX_UNPACKED`]; or [`MAX_UNLISTED`] for one that lists nothing.
+fn unpacked_cap(listed: u64) -> u64 {
+    match listed {
+        0 => MAX_UNLISTED,
+        listed => listed
+            .saturating_mul(2)
+            .saturating_add(UNLISTED)
+            .min(MAX_UNPACKED),
+    }
+}
+
+/// What a program has unpacked into its work folder so far.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Unpacked {
+    /// The size of its files, in bytes.
+    bytes: u64,
+    /// How many files, folders and anything else there are.
+    entries: u64,
+    /// How many folders down the deepest folder looked in is: 1 for a
+    /// folder in the work folder.
+    depth: u32,
+}
+
+impl Unpacked {
+    /// What is under `folder`, without following links. Once it has
+    /// counted more than `most_entries`, or come to a folder more than
+    /// [`MAX_DEPTH`] down, it looks no further: either is enough to stop
+    /// the program, and an archive of millions of empty files is not
+    /// walked whole at every measuring. What cannot be read counts for
+    /// nothing.
+    ///
+    /// It keeps a list of the folders still to look in, and calls nothing
+    /// for each folder down: this runs on a thread with a small stack,
+    /// which folders a hundred deep would overflow, ending the app.
+    fn under(folder: &Path, most_entries: u64) -> Self {
+        let mut unpacked = Self::default();
+        let mut folders = vec![(folder.to_owned(), 0)];
+        while let Some((folder, depth)) = folders.pop() {
+            unpacked.depth = unpacked.depth.max(depth);
+            if depth > MAX_DEPTH {
+                return unpacked;
+            }
+            let Ok(entries) = fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if unpacked.entries > most_entries {
+                    return unpacked;
+                }
+                unpacked.entries += 1;
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => folders.push((entry.path(), depth + 1)),
+                    Ok(kind) if kind.is_file() => {
+                        unpacked.bytes += entry.metadata().map_or(0, |metadata| metadata.len());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        unpacked
+    }
+}
+
+/// Why the program unpacking an archive was stopped, said of the archive:
+/// its folders went more than [`MAX_DEPTH`] down. As for one that wrote
+/// too much, no other program is tried after it.
+fn unpacked_too_deep() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!("it holds folders more than {MAX_DEPTH} deep"),
+    )
+}
+
+/// Why the program unpacking an archive was stopped, said of the archive:
+/// it had unpacked more than `most` files and folders. As for one that
+/// wrote too much, no other program is tried after it.
+fn unpacked_too_many(most: u64) -> io::Error {
+    // 100000 as 100,000.
+    let digits = most.to_string();
+    let mut grouped = String::new();
+    for (place, digit) in digits.chars().enumerate() {
+        if place > 0 && (digits.len() - place).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!("it unpacks to more than {grouped} files and folders"),
+    )
+}
+
+/// Why the program unpacking an archive that lists `listed` bytes was
+/// stopped, said of the archive: it was writing more than
+/// [`unpacked_cap`] lets it. No other program is tried after it
+/// ([`io::ErrorKind::FileTooLarge`]): it would write as much again.
+fn unpacked_too_much(listed: u64) -> io::Error {
+    let said = if listed == 0 {
+        format!(
+            "it unpacks to more than {} GB, and does not list what it holds",
+            MAX_UNLISTED >> 30
+        )
+    } else if unpacked_cap(listed) == MAX_UNPACKED {
+        format!("it unpacks to more than {} GB", MAX_UNPACKED >> 30)
+    } else {
+        "it unpacks to more than twice what it lists".to_owned()
+    };
+    io::Error::new(io::ErrorKind::FileTooLarge, said)
+}
+
 /// The size of the files `tar -tv` lists in `listed`. Each file's line
 /// reads like `ls -l`'s, its size the fifth word:
 /// `-rw-r--r--  0 0      0  2147483648 Dec 25  1996 Game.3ds`.
@@ -729,36 +933,48 @@ fn listed_values(listed: &str, label: &str) -> u64 {
 }
 
 /// The size of the files under `folder`, without following links. What
-/// cannot be read counts for nothing.
+/// cannot be read counts for nothing. It keeps a list of the folders
+/// still to look in, so folders however deep cannot overflow the stack.
 pub fn folder_size(folder: &Path) -> u64 {
-    let Ok(entries) = fs::read_dir(folder) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| match entry.file_type() {
-            Ok(kind) if kind.is_dir() => folder_size(&entry.path()),
-            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |metadata| metadata.len()),
-            _ => 0,
-        })
-        .sum()
-}
-
-/// Adds the files under `folder`, a folder in `root`, to `files`, as
-/// paths within `root`. Links are not followed.
-fn find_files(root: &Path, folder: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in fs::read_dir(folder)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            find_files(root, &entry.path(), files)?;
-        } else if kind.is_file()
-            && let Ok(inner) = entry.path().strip_prefix(root)
-        {
-            files.push(inner.to_owned());
+    let mut bytes = 0;
+    let mut folders = vec![folder.to_owned()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => folders.push(entry.path()),
+                Ok(kind) if kind.is_file() => {
+                    bytes += entry.metadata().map_or(0, |metadata| metadata.len());
+                }
+                _ => {}
+            }
         }
     }
-    Ok(())
+    bytes
+}
+
+/// The files under the folder `root`, as paths within it. Links are not
+/// followed. As [`folder_size`], it keeps a list of the folders still to
+/// look in.
+fn find_files(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut folders = vec![root.to_owned()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                folders.push(entry.path());
+            } else if kind.is_file()
+                && let Ok(inner) = entry.path().strip_prefix(root)
+            {
+                files.push(inner.to_owned());
+            }
+        }
+    }
+    Ok(files)
 }
 
 /// All of `file`, a patch called `name`, unless it is too big to be one.
@@ -773,7 +989,10 @@ fn read_capped(file: &mut impl Read, name: &Path) -> io::Result<Vec<u8>> {
 
 /// Why the file called `name` is not unpacked.
 fn too_big(name: &Path) -> io::Error {
-    io::Error::other(format!("{} is too big to be a game", name.display()))
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!("{} is too big to be a game", name.display()),
+    )
 }
 
 /// The CRC-32 of the file at `path`, read a piece at a time.
@@ -809,8 +1028,9 @@ fn write_capped(path: &Path, contents: impl Read, name: &Path, cap: u64) -> io::
 
 /// Moves the file at `from`, the game called `name`, to `path` once it is
 /// all on disk, so `path` is only ever the whole game; or copies it, if
-/// `path` is on another disk.
-fn move_capped(from: &Path, path: &Path, name: &Path) -> io::Result<()> {
+/// `path` is on another disk. It replaces a file at `path`, whose folder
+/// must be there.
+pub(crate) fn move_capped(from: &Path, path: &Path, name: &Path) -> io::Result<()> {
     // Opened for writing, as Windows syncs only a file open so.
     fs::OpenOptions::new().write(true).open(from)?.sync_all()?;
     match persist::rename(from, path) {
@@ -1037,7 +1257,7 @@ mod tests {
         );
         assert_eq!(fs::read(&unpacked[0]).expect("unpacked"), b"platinum");
         assert_eq!(progress.fraction(), Some(1.0));
-        let leftovers = fs::read_dir(std::env::temp_dir())
+        let leftovers = fs::read_dir(emu_os::temp::work_dir().expect("work folders"))
             .expect("temp")
             .flatten()
             .filter(|entry| {
@@ -1167,6 +1387,301 @@ mod tests {
         }
         assert!(!games.exists());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stand-in for `tar`, in `dir`: a shell script that lists a `Game.gb`
+    /// of `listed` bytes in any archive, and unpacks one of `megabytes`
+    /// MiB from it, 64 KiB at a time over some seconds for a big one,
+    /// noting that it was asked to (`asked-to-unpack`) and, once it has
+    /// written it all, that it did (`unpacked-it-all`).
+    ///
+    /// Like `tar` it is one process as it unpacks: it writes with the
+    /// shell's own `printf` and waits by counting, so that stopping it
+    /// stops every write. A program of its own started for each piece
+    /// could outlive it, and write into the folder as it is removed.
+    #[cfg(unix)]
+    fn fake_tar(dir: &Path, listed: u64, megabytes: u32) -> Unpacker {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n\
+             -tvf) echo '-rw-r--r--  0 0      0  {listed} Dec 25  1996 Game.gb' ;;\n\
+             -xf) : > '{asked}'\n\
+             piece=$(head -c 65536 /dev/zero | tr '\\0' x); i=0\n\
+             while [ $i -lt {pieces} ]; do\n\
+             printf %s \"$piece\" >> \"$4/Game.gb\"; i=$((i+1))\n\
+             wait=0; while [ $wait -lt 300 ]; do wait=$((wait+1)); done\n\
+             done\n\
+             : > '{done}' ;;\nesac\n",
+            asked = dir.join("asked-to-unpack").display(),
+            pieces = megabytes * 16,
+            done = dir.join("unpacked-it-all").display()
+        );
+        let program = dir.join("tar");
+        fs::write(&program, script).expect("script");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("mode");
+        Unpacker::Tar(program)
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for an unpacking program is a shell script"
+    )]
+    fn a_program_that_unpacks_more_than_a_game_is_stopped() {
+        #[cfg(unix)]
+        {
+            let _scratch = scratch_lock();
+            let dir = temp_dir("unpack-bomb");
+            let (games, patches) = (dir.join("Games"), dir.join("Patches"));
+            let archive = dir.join("Bomb.rar");
+            fs::write(&archive, b"whatever the program makes of it").expect("written");
+            let work_folders = || {
+                fs::read_dir(emu_os::temp::work_dir().expect("work folders"))
+                    .expect("temp")
+                    .flatten()
+                    .filter(|entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        name.starts_with(&format!("ds-emulator-unpack-{}-", std::process::id()))
+                    })
+                    .count()
+            };
+            // It lists five bytes and would write 400 MiB, over some
+            // seconds: it may write 16 MiB.
+            let tar = fake_tar(&dir, 5, 400);
+            let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
+            let error = unpacked.expect_err("too big");
+            assert_eq!(
+                error.to_string(),
+                "it unpacks to more than twice what it lists"
+            );
+            assert!(dir.join("asked-to-unpack").exists(), "it was started");
+            assert!(
+                !dir.join("unpacked-it-all").exists(),
+                "and stopped while it ran, not found too big once it was done"
+            );
+            assert!(!games.exists(), "nothing of it is kept");
+            assert_eq!(work_folders(), 0, "what it wrote is removed");
+            // What it lists, it may unpack.
+            let tar = fake_tar(&dir, 3 << 20, 3);
+            let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
+            assert_eq!(unpacked.expect("unpacks"), [games.join("Game.gb")]);
+            assert!(dir.join("unpacked-it-all").exists(), "left to finish");
+            assert_eq!(
+                fs::metadata(games.join("Game.gb")).expect("kept").len(),
+                3 << 20
+            );
+            assert_eq!(work_folders(), 0);
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for an unpacking program is a shell script"
+    )]
+    fn an_archive_of_several_big_games_is_unpacked_whatever_it_lists() {
+        #[cfg(unix)]
+        {
+            let _scratch = scratch_lock();
+            let dir = temp_dir("unpack-several");
+            let (games, patches) = (dir.join("Games"), dir.join("Patches"));
+            let archive = dir.join("Three games.rar");
+            fs::write(&archive, b"whatever the program makes of it").expect("written");
+            // It lists 9 GiB, as three 3 GiB 3DS games are, or a 4 GiB one
+            // as both a `.3ds` and a `.cia`. Each game is held to its own
+            // cartridge's size once unpacked; what the archive lists in all
+            // is no reason not to start. (The stand-in writes one MiB.)
+            let tar = fake_tar(&dir, 9 << 30, 1);
+            let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
+            assert_eq!(unpacked.expect("unpacks"), [games.join("Game.gb")]);
+            assert!(dir.join("asked-to-unpack").exists(), "the program ran");
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for an unpacking program is a shell script"
+    )]
+    fn a_program_that_unpacks_too_many_files_is_stopped() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let _scratch = scratch_lock();
+            let dir = temp_dir("unpack-many");
+            let (games, patches) = (dir.join("Games"), dir.join("Patches"));
+            let archive = dir.join("Many.rar");
+            fs::write(&archive, b"whatever the program makes of it").expect("written");
+            // A stand-in for `tar` that lists nothing and unpacks 200,000
+            // empty files: not a byte, so the limit on size never stops
+            // it. It notes when it is done. One process, as `fake_tar` is.
+            let done = dir.join("unpacked-them-all");
+            let script = format!(
+                "#!/bin/sh\ncase \"$1\" in\n\
+                 -xf) i=0\n\
+                 while [ $i -lt 200000 ]; do : > \"$4/$i\"; i=$((i+1)); done\n\
+                 : > '{}' ;;\nesac\n",
+                done.display()
+            );
+            let program = dir.join("tar");
+            fs::write(&program, script).expect("script");
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("mode");
+            let tar = Unpacker::Tar(program);
+            // Held to a thousand files and folders here, to be quick.
+            let progress = Progress::default();
+            let unpacked = unpack_held(&tar, &archive, &games, &patches, &progress, 1_000);
+            let error = unpacked.expect_err("too many");
+            assert_eq!(
+                error.to_string(),
+                "it unpacks to more than 1,000 files and folders"
+            );
+            assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+            assert!(!done.exists(), "stopped while it ran");
+            assert!(!games.exists());
+            assert_eq!(MAX_ENTRIES, 100_000);
+            assert_eq!(
+                unpacked_too_many(MAX_ENTRIES).to_string(),
+                "it unpacks to more than 100,000 files and folders"
+            );
+            // Measuring looks no further than it must: three files and a
+            // folder of two, of which one more than the two allowed.
+            let folder = dir.join("measured");
+            fs::create_dir_all(folder.join("inner")).expect("folders");
+            for file in ["a", "b", "inner/c", "inner/d"] {
+                fs::write(folder.join(file), b"12345").expect("file");
+            }
+            let all = Unpacked::under(&folder, 100);
+            assert_eq!(
+                all,
+                Unpacked {
+                    bytes: 20,
+                    entries: 5,
+                    depth: 1
+                }
+            );
+            assert_eq!(Unpacked::under(&folder, 2).entries, 3);
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for an unpacking program is a shell script"
+    )]
+    fn a_program_that_unpacks_folders_too_deep_is_stopped() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let _scratch = scratch_lock();
+            let dir = temp_dir("unpack-deep");
+            let (games, patches) = (dir.join("Games"), dir.join("Patches"));
+            let archive = dir.join("Deep.rar");
+            fs::write(&archive, b"whatever the program makes of it").expect("written");
+            // A stand-in for `tar` that unpacks folders `levels` deep, a
+            // game in the innermost, then counts for `counts` turns and
+            // notes that it was left to finish. The folders are made ready
+            // beside it and moved into the work folder in one step: made
+            // there one by one, each `mkdir` is a program of its own, and
+            // one that outlived the stand-in would write into the work
+            // folder as it is removed.
+            let stand_in = |levels: usize, counts: u32| {
+                let staged = dir.join(format!("staged-{levels}"));
+                fs::create_dir(&staged).expect("staged");
+                let top = crate::leftovers::deep_tree(&staged, levels, "d");
+                let done = dir.join(format!("unpacked-{levels}"));
+                let script = format!(
+                    "#!/bin/sh\ncase \"$1\" in\n\
+                     -xf) mv '{}' \"$4/d\"\n\
+                     wait=0; while [ $wait -lt {counts} ]; do wait=$((wait+1)); done\n\
+                     : > '{}' ;;\nesac\n",
+                    top.display(),
+                    done.display()
+                );
+                let program = dir.join(format!("tar-{levels}"));
+                fs::write(&program, script).expect("script");
+                fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("mode");
+                (Unpacker::Tar(program), done)
+            };
+            let work_folders = || {
+                fs::read_dir(emu_os::temp::work_dir().expect("work folders"))
+                    .expect("temp")
+                    .flatten()
+                    .filter(|entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        name.starts_with(&format!("ds-emulator-unpack-{}-", std::process::id()))
+                    })
+                    .count()
+            };
+            // 65 folders down is one too many, and it would go on for
+            // seconds yet.
+            let (tar, done) = stand_in(65, 3_000_000);
+            let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
+            let error = unpacked.expect_err("too deep");
+            assert_eq!(error.to_string(), "it holds folders more than 64 deep");
+            assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+            assert!(!done.exists(), "stopped while it ran");
+            assert!(!games.exists(), "nothing of it is kept");
+            assert_eq!(work_folders(), 0, "what it unpacked is removed");
+            // 64 down is as deep as it may go, and its game is found.
+            let (tar, done) = stand_in(64, 0);
+            let unpacked = unpack_with(&tar, &archive, &games, &patches, &Progress::default());
+            assert_eq!(unpacked.expect("unpacks"), [games.join("Game.gb")]);
+            assert!(done.exists(), "left to finish");
+            assert_eq!(work_folders(), 0);
+            crate::leftovers::remove_folder(&dir);
+        }
+    }
+
+    #[test]
+    fn what_a_program_unpacked_is_walked_however_deep_it_goes() {
+        use crate::leftovers::{deep_tree, on_a_small_stack};
+
+        let dir = temp_dir("unpack-walks");
+        // 300 folders down: far past where a walk that calls itself once
+        // for each folder runs out of a small thread's stack.
+        let top = deep_tree(&dir, 300, "d");
+        // Measuring looks no further than a folder too deep to keep.
+        let measured = on_a_small_stack(|| Unpacked::under(&top, 1_000_000));
+        assert_eq!(measured.depth, MAX_DEPTH + 1, "{measured:?}");
+        assert_eq!(measured.bytes, 0, "the game is deeper than it looked");
+        assert_eq!(
+            on_a_small_stack(|| folder_size(&top)),
+            5,
+            "the game's bytes"
+        );
+        let files = on_a_small_stack(|| find_files(&top)).expect("found");
+        assert_eq!(files.len(), 1, "the game at the bottom");
+        assert_eq!(files[0].components().count(), 300);
+        assert_eq!(files[0].file_name(), Some("Game.gb".as_ref()));
+        crate::leftovers::remove_folder(&dir);
+    }
+
+    #[test]
+    fn a_program_may_write_twice_what_its_archive_lists_and_no_more_than_32_gib() {
+        assert_eq!(unpacked_cap(5), 10 + (16 << 20));
+        assert_eq!(unpacked_cap(3 << 30), (6 << 30) + (16 << 20));
+        assert_eq!(unpacked_cap(9 << 30), (18 << 30) + (16 << 20));
+        assert_eq!(unpacked_cap(20 << 30), 32 << 30);
+        assert_eq!(unpacked_cap(u64::MAX), 32 << 30);
+        assert_eq!(unpacked_cap(0), 8 << 30, "one that cannot be listed");
+        // Said of the archive, as it is the archive that is too much.
+        let said = |listed: u64| unpacked_too_much(listed).to_string();
+        assert_eq!(said(5), "it unpacks to more than twice what it lists");
+        assert_eq!(said(20 << 30), "it unpacks to more than 32 GB");
+        assert_eq!(
+            said(0),
+            "it unpacks to more than 8 GB, and does not list what it holds"
+        );
+        assert_eq!(
+            unpacked_too_much(5).kind(),
+            io::ErrorKind::FileTooLarge,
+            "no other program is tried after it"
+        );
     }
 
     #[test]

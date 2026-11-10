@@ -1,6 +1,6 @@
 [package]
 name = "emu-os"
-description = "The folders the app keeps its data, settings and caches in, on each system, and how it runs other programs."
+description = "The folders the app keeps its data, settings and caches in, on each system, and how it runs other programs, downloads and installs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,13 @@ publish.workspace = true
 
 [dependencies]
 dirs.workspace = true
+# Checks downloads against the digests pinned in the crates that install
+# them; the version those crates already use.
+sha2 = "0.10"
 
-# Reads and sets threads' quality of service.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Reads and sets threads' quality of service on macOS, and on Linux says
+# which user the app runs as, to tell its own folder in /tmp.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
 
 [lints]

@@ -12,6 +12,7 @@
 
 use std::fmt::Display;
 use std::fs;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
 use crate::archive;
@@ -80,7 +81,7 @@ fn make_into(
     folder: &Path,
 ) -> Result<PathBuf, MakeError> {
     let patch_name = file_name(patch);
-    let bytes = fs::read(patch)
+    let bytes = read_capped(patch, "it is too big to be a patch")
         .map_err(|error| MakeError::Failed(format!("Cannot read {}: {error}", patch.display())))?;
     let base = match base {
         Some(base) => base.to_owned(),
@@ -108,7 +109,8 @@ fn make_into(
     else {
         return Err(failed(&"it is not a .gb, .gbc, .gba or .nds game"));
     };
-    let source = fs::read(&base).map_err(|error| failed(&error))?;
+    let source =
+        read_capped(&base, "it is too big to be a game").map_err(|error| failed(&error))?;
     let rom = emu_patch::apply(&bytes, &source, archive::MAX_ROM as usize)
         .map_err(|error| failed(&error))?;
     let name = format!("{}.{}", stem(patch), extension.to_string_lossy());
@@ -119,6 +121,26 @@ fn make_into(
         rom.as_slice(),
     )
     .map_err(|error| failed(&error))
+}
+
+/// All of the file at `path`, a patch or the game it patches, unless it is
+/// bigger than a cartridge holds ([`archive::MAX_ROM`]), which neither is:
+/// then it fails with `too_big`, and nothing of it is read into memory.
+/// Archives hold patches to the same size.
+fn read_capped(path: &Path, too_big: &str) -> io::Result<Vec<u8>> {
+    if fs::metadata(path)?.len() > archive::MAX_ROM {
+        return Err(io::Error::other(too_big));
+    }
+    // Held to it as it is read too: what is not a plain file has no size
+    // to ask for.
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(archive::MAX_ROM + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > archive::MAX_ROM {
+        return Err(io::Error::other(too_big));
+    }
+    Ok(bytes)
 }
 
 /// What to open from the files the user opened together, each path's
@@ -295,6 +317,42 @@ mod tests {
             make_into(&ips_patch, None, &known, &hacks),
             Err(MakeError::NoBase(ips_patch.clone()))
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_patch_or_a_game_too_big_to_be_one_is_not_read() {
+        let dir = temp_dir("romhack-too-big");
+        let (hacks, base, patch) = (
+            dir.join("Hacks"),
+            dir.join("Game.gba"),
+            dir.join("Hack.ips"),
+        );
+        // As long as it says, with nothing written: a byte more than a
+        // cartridge holds.
+        let too_big = |path: &Path| {
+            fs::File::create(path)
+                .and_then(|file| file.set_len(archive::MAX_ROM + 1))
+                .expect("made")
+        };
+        fs::write(&base, b"original").expect("base");
+        too_big(&patch);
+        assert_eq!(
+            make_into(&patch, Some(&base), &[], &hacks),
+            Err(MakeError::Failed(format!(
+                "Cannot read {}: it is too big to be a patch",
+                patch.display()
+            )))
+        );
+        fs::write(&patch, ips(b"HACK")).expect("patch");
+        too_big(&base);
+        assert_eq!(
+            make_into(&patch, Some(&base), &[], &hacks),
+            Err(MakeError::Failed(
+                "Cannot patch Game.gba with Hack.ips: it is too big to be a game".to_owned()
+            ))
+        );
+        assert!(!hacks.exists());
         fs::remove_dir_all(&dir).ok();
     }
 

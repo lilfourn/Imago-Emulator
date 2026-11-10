@@ -23,16 +23,16 @@ use std::fs::{self, File};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, SystemTime};
+use std::process::{Command, Output, Stdio};
+use std::time::SystemTime;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use sha2::{Digest, Sha256};
+use emu_os::install::{Fetch, Install, Pinned};
 use zip::ZipArchive;
 
 use crate::archive;
+use crate::leftovers::WorkFolder;
 use crate::romhack;
 
 /// The FVX release the app runs.
@@ -131,12 +131,10 @@ const JAVA: &str = if cfg!(windows) {
 /// Linux: the zips keep no permissions. Windows runs programs by their
 /// name.
 const EXECUTABLES: [&str; 3] = ["java/bin/java", "java/bin/keytool", "java/lib/jspawnhelper"];
-/// The file in the data folder an install holds locked.
-const LOCK_FILE: &str = "install.lock";
-/// How the temporary folders installs work in start.
-const TEMP_PREFIX: &str = ".install-";
 /// How long the download may take in all, in seconds.
-const DOWNLOAD_SECONDS: &str = "1200";
+const DOWNLOAD_SECONDS: u32 = 1200;
+/// The most the download may be: over twice the biggest, Linux's 51 MB.
+const MAX_DOWNLOAD: u64 = 128 << 20;
 
 /// Where the randomizer is kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Randomizer` on macOS.
@@ -186,44 +184,42 @@ pub fn ensure(data: &Path) -> Result<Randomizer, String> {
     }
 }
 
-/// Fetches the file at a URL into a path, or says why it could not.
-type Fetch<'f> = &'f dyn Fn(&str, &Path) -> Result<(), String>;
-
 /// Installs `pin` into `data`, getting it with `fetch`, once no other
 /// install is under way. The download is checked, unpacked into a
 /// temporary folder and renamed into place, so the randomizer's folder is
-/// always whole.
+/// always whole: all as [`emu_os::install`] does it, for the 3DS core and
+/// mkxp-z too.
 fn install(data: &Path, pin: Download<'_>, fetch: Fetch<'_>) -> Result<Randomizer, String> {
     let failed = |error: io::Error| format!("Cannot install the randomizer: {error}");
-    fs::create_dir_all(data).map_err(failed)?;
-    let _lock = lock(data).map_err(failed)?;
+    let install = lock(data).map_err(failed)?;
     // Another install may have finished while this one waited.
     if let Some(randomizer) = installed(data) {
         return Ok(randomizer);
     }
-    clear_unfinished(data);
-    let temp = data.join(format!("{TEMP_PREFIX}{}", std::process::id()));
-    fs::create_dir(&temp).map_err(failed)?;
-    let result = unpack_download(&temp, pin, fetch).and_then(|unpacked| {
-        place(&unpacked, &data.join(FOLDER)).map_err(failed)?;
-        installed(data).ok_or_else(|| "The randomizer did not install whole".to_owned())
-    });
-    // What is left behind is cleared by the next install.
-    fs::remove_dir_all(&temp).ok();
-    result
+    let temp = install.temp().map_err(failed)?;
+    let unpacked = unpack_download(temp.path(), pin, fetch)?;
+    emu_os::install::place(&unpacked, &data.join(FOLDER)).map_err(failed)?;
+    installed(data).ok_or_else(|| "The randomizer did not install whole".to_owned())
 }
 
 /// Downloads `pin` into `temp`, checks it and unpacks it there, with its
-/// programs executable. Returns the unpacked folder.
+/// programs executable. Returns the unpacked folder. Nothing is unpacked
+/// from a download that does not have the pinned SHA-256: it is deleted.
 fn unpack_download(temp: &Path, pin: Download<'_>, fetch: Fetch<'_>) -> Result<PathBuf, String> {
     let zip = temp.join("randomizer.zip");
-    fetch(pin.url, &zip).map_err(|why| format!("Cannot download the randomizer: {why}"))?;
-    let found = sha256(&zip).map_err(|error| format!("Cannot read the download: {error}"))?;
-    if found != pin.sha256 {
-        return Err(format!(
-            "The randomizer's download is not the file expected (its SHA-256 is {found})"
-        ));
-    }
+    let pinned = Pinned {
+        url: pin.url,
+        sha256: pin.sha256,
+        // Only about how big it is is written here; the digest is the check.
+        size: None,
+    };
+    pinned.download(&zip, fetch).map_err(|error| match error {
+        emu_os::install::Error::Download(why) => format!("Cannot download the randomizer: {why}"),
+        emu_os::install::Error::NotPinned(differs) => {
+            format!("The randomizer's download is not the file expected ({differs})")
+        }
+        emu_os::install::Error::Io(error) => format!("Cannot read the download: {error}"),
+    })?;
     let unpacked = temp.join(FOLDER);
     unzip(&zip, &unpacked).map_err(|why| format!("Cannot unpack the randomizer: {why}"))?;
     for needed in [JAR, JAVA] {
@@ -281,88 +277,25 @@ fn make_executable(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Takes the lock on installing into `data`, waiting for any other
-/// install to finish first. It is held until the file is dropped.
-fn lock(data: &Path) -> io::Result<File> {
-    let file = File::create(data.join(LOCK_FILE))?;
-    file.lock()?;
-    Ok(file)
+/// Takes the lock on installing into `data`, which is made if it is not
+/// there, waiting for any other install to finish first. It is held until
+/// the install is dropped.
+fn lock(data: &Path) -> io::Result<Install> {
+    Install::begin(data)
 }
 
-/// Removes the temporary folders of installs that never finished. Only
-/// called holding the lock, so none of them is in use.
-fn clear_unfinished(data: &Path) {
-    let Ok(entries) = fs::read_dir(data) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
-            fs::remove_dir_all(entry.path()).ok();
-        }
-    }
-}
-
-/// Moves the folder `prepared` to `target`, replacing whatever an earlier,
-/// broken install left there.
-fn place(prepared: &Path, target: &Path) -> io::Result<()> {
-    match fs::remove_dir_all(target) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    // A virus scanner may still have the programs just unpacked open.
-    crate::persist::rename(prepared, target)
-}
-
-/// Downloads `url` into the file `to` with curl: macOS's own, and
-/// elsewhere the one on `PATH`, which Windows 10 and later ship.
+/// Downloads `url` into the file `to` with curl, as [`emu_os::fetch`] does
+/// a big file: from an `https://` address only, giving up on one stalled
+/// for a minute and trying again twice after a passing failure.
 fn curl(url: &str, to: &Path) -> Result<(), String> {
-    let program = if cfg!(target_os = "macos") {
-        "/usr/bin/curl"
-    } else {
-        "curl"
+    let download = emu_os::fetch::Download {
+        url,
+        allow: emu_os::fetch::Allow::Https,
+        seconds: DOWNLOAD_SECONDS,
+        max_bytes: MAX_DOWNLOAD,
+        patient: true,
     };
-    let output = emu_os::process::command(program)
-        .args(["--silent", "--show-error", "--location"])
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (+https://imagoemulator.com)"
-            ),
-        ])
-        .args(["--connect-timeout", "10", "--max-time", DOWNLOAD_SECONDS])
-        // Gives up on a download stalled below 1 KB/s for a minute, and
-        // tries again twice after a passing failure.
-        .args([
-            "--speed-limit",
-            "1024",
-            "--speed-time",
-            "60",
-            "--retry",
-            "2",
-        ])
-        .arg("--output")
-        .arg(to)
-        .args(["--write-out", "%{http_code}"])
-        .arg(url)
-        .output()
-        .map_err(|error| emu_os::process::why_not_started("curl", &error))?;
-    // A transfer cut short can still say 200; only curl's own status tells.
-    if !output.status.success() {
-        return Err(reason(&output));
-    }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "200" => Ok(()),
-        status => Err(format!("the server answered with HTTP status {status}")),
-    }
-}
-
-/// The SHA-256 of the file at `path`, in lowercase hex.
-fn sha256(path: &Path) -> io::Result<String> {
-    let mut hasher = Sha256::new();
-    io::copy(&mut File::open(path)?, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    download.to_file(to).map_err(|error| error.to_string())
 }
 
 /// Why the program that gave `output` failed: the last line it printed as
@@ -549,9 +482,6 @@ pub fn new_seed() -> u32 {
 /// for both Game Boy generations, `gba` and `nds`.
 const WRITTEN: [&str; 3] = ["gbc", "gba", "nds"];
 
-/// Runs so far, which tells their work folders apart.
-static RUNS: AtomicU32 = AtomicU32::new(0);
-
 /// A game the randomizer made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Made {
@@ -579,42 +509,16 @@ pub fn randomize(
     seed: u32,
     hacks: &Path,
 ) -> Result<Made, String> {
-    let temp = std::env::temp_dir();
-    clear_stale_work(&temp);
-    let work = temp.join(format!(
-        "{WORK_PREFIX}{}-{}",
-        std::process::id(),
-        RUNS.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::remove_dir_all(&work).ok();
-    fs::create_dir_all(&work).map_err(|error| format!("Cannot randomize: {error}"))?;
-    let made = randomize_in(randomizer, base, title, settings, seed, hacks, &work);
-    fs::remove_dir_all(&work).ok();
-    made
+    // In a work folder of the app's, removed when this is done, or at the
+    // next launch if the app quits meanwhile.
+    let work =
+        WorkFolder::new("randomize").map_err(|error| format!("Cannot randomize: {error}"))?;
+    randomize_in(randomizer, base, title, settings, seed, hacks, &work)
 }
 
-/// How the names of the runs' work folders start, in the temporary folder.
-const WORK_PREFIX: &str = "ds-emulator-randomize-";
-/// How old a work folder must be to be one a run left behind, as when the
-/// app quit during it: runs take seconds.
-const STALE_WORK: Duration = Duration::from_secs(60 * 60);
-
-/// Removes the work folders, in `temp`, of runs that never finished.
-fn clear_stale_work(temp: &Path) {
-    let Ok(entries) = fs::read_dir(temp) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > STALE_WORK));
-        if stale && entry.file_name().to_string_lossy().starts_with(WORK_PREFIX) {
-            fs::remove_dir_all(entry.path()).ok();
-        }
-    }
-}
-
+/// Randomizes as [`randomize`] does, in the work folder `work`. The
+/// randomizer's Java is the folder's worker, so it is stopped if the app
+/// quits while it runs.
 fn randomize_in(
     randomizer: &Randomizer,
     base: &Path,
@@ -622,10 +526,11 @@ fn randomize_in(
     settings: &str,
     seed: u32,
     hacks: &Path,
-    work: &Path,
+    work: &WorkFolder,
 ) -> Result<Made, String> {
     // On Windows it opens no console window.
-    let output = emu_os::process::command(randomizer.java())
+    let mut java = emu_os::process::command(randomizer.java());
+    java
         // What FVX's own launcher gives it, which the 3DS games need.
         .arg("-Xmx4608M")
         // No Dock icon, nor any window.
@@ -637,7 +542,7 @@ fn randomize_in(
         .arg(base)
         // FVX adds the extension it gives the game's generation.
         .arg("-o")
-        .arg(work.join("randomized"))
+        .arg(work.path().join("randomized"))
         .args(["-S", settings, "-z", &seed.to_string(), "-l"])
         // It reads its name lists from its own `data` folder.
         .current_dir(&randomizer.folder)
@@ -645,9 +550,14 @@ fn randomize_in(
         .env_remove("JAVA_TOOL_OPTIONS")
         .env_remove("JDK_JAVA_OPTIONS")
         .env_remove("_JAVA_OPTIONS")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = work
+        .spawn(&mut java)
+        .and_then(|java| java.output())
         .map_err(|error| format!("Cannot run the randomizer: {error}"))?;
-    let rom = fs::read_dir(work)
+    let rom = fs::read_dir(work.path())
         .map_err(|error| format!("Cannot randomize: {error}"))?
         .flatten()
         .map(|entry| entry.path())
@@ -758,7 +668,9 @@ fn file_title(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emu_os::install::{TEMP_PREFIX, sha256};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     /// A fresh, empty folder for `test`.
     fn temp_dir(test: &str) -> PathBuf {
@@ -1061,6 +973,29 @@ mod tests {
     }
 
     #[test]
+    fn the_install_lock_is_opened_as_it_is_not_emptied() {
+        let dir = temp_dir("install-lock");
+        let zip = fvx_zip(&dir);
+        let sha = sha256(&zip).expect("sha");
+        let url = zip.to_string_lossy();
+        let pin = Download {
+            url: &url,
+            sha256: &sha,
+            megabytes: 1,
+        };
+        let data = dir.join("Randomizer");
+        // Windows may refuse to empty a file another process holds locked,
+        // so an install must not: what is in the file shows whether it did.
+        write(&data.join("install.lock"), b"held by another install");
+        install(&data, pin, &copy).expect("install");
+        assert_eq!(
+            fs::read(data.join("install.lock")).expect("lock"),
+            b"held by another install"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_second_install_waits_for_the_first() {
         let data = temp_dir("lock");
         let first = lock(&data).expect("lock");
@@ -1267,23 +1202,48 @@ echo "Randomized successfully!"
     }
 
     #[test]
-    fn work_folders_left_by_runs_that_never_finished_are_cleared() {
-        let temp = temp_dir("stale");
-        let old = SystemTime::now() - 2 * STALE_WORK;
-        let stale = temp.join(format!("{WORK_PREFIX}1-0"));
-        let running = temp.join(format!("{WORK_PREFIX}2-0"));
-        let other = temp.join("someone-elses-folder");
-        for folder in [&stale, &running, &other] {
-            write(&folder.join("randomized.nds"), b"ROM");
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script; randomizes_for_real runs FVX itself"
+    )]
+    fn quitting_stops_the_randomizer_and_removes_its_work_folder() {
+        use std::sync::mpsc;
+
+        let dir = temp_dir("quit");
+        // A randomizer that says it has started and then takes a minute.
+        // Like one the app starts, it ignores being asked to stop.
+        let started = dir.join("started");
+        let script = format!(
+            "#!/bin/sh\ntrap '' TERM\n: > '{}'\nexec sleep 60\n",
+            started.display()
+        );
+        let randomizer = fake_randomizer(&dir, &script);
+        let base = dir.join("Red.gb");
+        write(&base, b"RED");
+        let hacks = dir.join("Hacks");
+        let work = WorkFolder::new_in(&dir, "randomize").expect("work folder");
+        let folder = work.path().to_owned();
+        let (done, ended) = mpsc::channel();
+        let run = thread::spawn(move || {
+            let made = randomize_in(&randomizer, &base, "Red", "428", 1, &hacks, &work);
+            // As if the app quit: the folder is not dropped.
+            std::mem::forget(work);
+            done.send(made).ok();
+        });
+        let waiting = Instant::now();
+        while !started.exists() {
+            assert!(waiting.elapsed() < Duration::from_secs(20), "it starts");
+            thread::sleep(Duration::from_millis(10));
         }
-        for folder in [&stale, &other] {
-            crate::leftovers::set_modified(folder, old).expect("age the folder");
-        }
-        clear_stale_work(&temp);
-        assert!(!stale.exists(), "an hour old: left behind");
-        assert!(running.exists(), "a run under way keeps its folder");
-        assert!(other.exists(), "not the randomizer's");
-        fs::remove_dir_all(&temp).ok();
+        // Only this test's, as other tests randomize meanwhile.
+        crate::leftovers::remove_own_where(|path| path.starts_with(&dir));
+        let made = ended
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the randomizer is stopped, not waited a minute for");
+        assert!(made.is_err(), "{made:?}");
+        assert!(!folder.exists(), "its work folder is removed");
+        run.join().expect("no panic");
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// Downloads FVX for real (41 MB) into `DS_EMULATOR_RANDOMIZER_DATA`,

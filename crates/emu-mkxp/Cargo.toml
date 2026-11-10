@@ -9,7 +9,8 @@ publish.workspace = true
 [dependencies]
 crc32fast.workspace = true
 emu-core.workspace = true
-# The app's data folder, where the players are kept.
+# The app's data folder, where the players are kept, and the download and
+# install of the hosted mkxp-z.
 emu-os.workspace = true
 # The TCP link's token and the private X display's cookie.
 getrandom = "0.3"
@@ -17,9 +18,6 @@ getrandom = "0.3"
 libc = "0.2"
 # The game's mkxp.json, read and written again for the hidden player.
 serde_json = "1"
-# Checks the hosted mkxp-z it downloads; already used by emu-app and
-# emu-3ds.
-sha2 = "0.10"
 thiserror.workspace = true
 # Unpacks the hosted mkxp-z, upstream's zipped CI artifact; as emu-app
 # reads zips.
@@ -36,6 +34,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+# The digests of the stand-ins the install tests download; emu-os checks
+# the real one.
+sha2 = "0.10"
 
 [lints]
 workspace = true

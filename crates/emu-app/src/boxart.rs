@@ -1,7 +1,8 @@
 //! Box art for the library: each game's No-Intro name from libretro's game
 //! databases, and its box art from thumbnails.libretro.com, both kept in
 //! the cache folder. Downloads go through `curl`, which macOS and Windows
-//! have, and Linux systems nearly always do.
+//! have, and Linux systems nearly always do, as [`emu_os::fetch`] runs it:
+//! from `https://` addresses only, and each held to a size.
 //!
 //! A game gets a picture whenever libretro has one: its box art by its
 //! No-Intro name or by its title among the pictures libretro lists, or
@@ -22,8 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context as _, anyhow, bail};
-use emu_os::process::why_not_started;
+use anyhow::{Context as _, bail};
+use emu_os::fetch::{Allow, Download};
 
 use crate::app_icon;
 use crate::game_db::{self, GameDb};
@@ -45,6 +46,15 @@ const TITLE_SCREENS: &str = "Named_Titles";
 /// How many times bigger than its 32 pixels a DS icon is saved, so it
 /// stays sharp when the library scales it up.
 const ICON_SCALE: u32 = 4;
+
+/// Where downloads may come from: `https://` addresses, and in tests a
+/// stand-in server on this computer.
+const ALLOW: Allow = Allow::or_loopback_if(cfg!(test));
+/// The most a game database, a list of pictures or a store catalog may be.
+/// The biggest are about 2 MB.
+pub const MAX_PAGE: u64 = 32 << 20;
+/// The most a picture may be.
+pub const MAX_PICTURE: u64 = 16 << 20;
 
 /// Where downloaded databases, box art and DS icons are kept, e.g.
 /// `~/Library/Caches/ds-emulator` on macOS.
@@ -407,14 +417,14 @@ pub fn databases_for(platform: Platform) -> &'static [Platform] {
 fn picture(platform: Platform, folder: &str, file: &str) -> anyhow::Result<Option<Vec<u8>>> {
     let system = platform.libretro_name();
     let url = format!("{THUMBNAILS}/{}/{folder}/{}", encode(system), encode(file));
-    let bytes = download(&url).or_else(|error| {
+    let bytes = fetch_up_to(&url, 60, MAX_PICTURE).or_else(|error| {
         let repository = system.replace(' ', "_");
         let mirror = format!(
             "{MIRROR}/{}/master/{folder}/{}",
             encode(&repository),
             encode(file)
         );
-        download(&mirror).map_err(|_| error)
+        fetch_up_to(&mirror, 60, MAX_PICTURE).map_err(|_| error)
     })?;
     match bytes {
         Some(bytes) if !bytes.starts_with(PNG_SIGNATURE) => bail!("{url} is not a PNG"),
@@ -469,55 +479,73 @@ pub fn save_icon(cache: &Path, crc32: u32, pixels: &[u8]) -> io::Result<PathBuf>
     Ok(path)
 }
 
-/// Downloads `url`, whole: its bytes, or `None` if the server answered
-/// 404.
+/// Downloads `url`, a game database, whole: its bytes, or `None` if the
+/// server answered 404.
 ///
 /// # Errors
 ///
-/// Fails if `curl` cannot run or stops short, as when the connection
-/// drops or times out part-way, or the server cannot be reached or
-/// answers with an error other than 404.
+/// As [`fetch`].
 fn download(url: &str) -> anyhow::Result<Option<Vec<u8>>> {
     fetch(url, 60)
 }
 
-/// Downloads `url` as [`download`] does, giving up after `max_seconds`.
+/// Downloads `url`, a page of at most [`MAX_PAGE`] bytes, whole, giving up
+/// after `max_seconds`: its bytes, or `None` if the server answered 404.
 ///
 /// # Errors
 ///
-/// As [`download`].
+/// Fails if `url` is not an `https://` address, `curl` cannot run or
+/// stops short, as when the connection drops or times out part-way, the
+/// server cannot be reached or answers with an error other than 404, or
+/// the download is too big.
 pub fn fetch(url: &str, max_seconds: u32) -> anyhow::Result<Option<Vec<u8>>> {
-    let output = emu_os::process::command("curl")
-        .args(["--silent", "--show-error", "--location", "--compressed"])
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (+https://imagoemulator.com)"
-            ),
-        ])
-        .args(["--connect-timeout", "10", "--max-time"])
-        .arg(max_seconds.to_string())
-        .args(["--output", "-", "--write-out", "\n%{http_code}"])
-        .arg(url)
-        .output()
-        .map_err(|error| anyhow!(why_not_started("curl", &error)))?;
-    let mut body = output.stdout;
-    let split = body.iter().rposition(|&b| b == b'\n').unwrap_or(0);
-    let status = String::from_utf8_lossy(&body[split..]).trim().to_owned();
-    // A transfer cut short still says 200; only curl's own status tells.
-    if !output.status.success() {
-        let why = String::from_utf8_lossy(&output.stderr);
-        bail!("cannot download {url}: {}", why.trim());
+    fetch_up_to(url, max_seconds, MAX_PAGE)
+}
+
+/// Downloads `url` as [`fetch`] does, if it is at most `max_bytes`.
+///
+/// # Errors
+///
+/// As [`fetch`].
+pub fn fetch_up_to(url: &str, max_seconds: u32, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
+    found(url, download_of(url, max_seconds, max_bytes).bytes())
+}
+
+/// Downloads `url` into the file `to`, written as it comes, if it is at
+/// most `max_bytes`: a game can be far too big to hold in memory. Whether
+/// it was there to download: not if the server answered 404. A download
+/// that fails leaves no file.
+///
+/// # Errors
+///
+/// As [`fetch`].
+pub fn fetch_file(url: &str, to: &Path, max_seconds: u32, max_bytes: u64) -> anyhow::Result<bool> {
+    let downloaded = download_of(url, max_seconds, max_bytes).to_file(to);
+    Ok(found(url, downloaded)?.is_some())
+}
+
+/// The download of `url`, as the library and the store make one.
+fn download_of(url: &str, seconds: u32, max_bytes: u64) -> Download<'_> {
+    Download {
+        url,
+        allow: ALLOW,
+        seconds,
+        max_bytes,
+        patient: false,
     }
-    match status.as_str() {
-        "200" => {
-            body.truncate(split);
-            Ok(Some(body))
-        }
-        "404" => Ok(None),
-        _ => bail!("cannot download {url}: HTTP status {status:?}"),
+}
+
+/// What was `downloaded` from `url`, or `None` if the server answered 404,
+/// or why it did not come, in words for the user.
+fn found<T>(url: &str, downloaded: Result<T, emu_os::fetch::Error>) -> anyhow::Result<Option<T>> {
+    use emu_os::fetch::Error;
+    match downloaded {
+        Ok(found) => Ok(Some(found)),
+        Err(Error::Status(status)) if status == "404" => Ok(None),
+        Err(Error::Status(status)) => bail!("cannot download {url}: HTTP status {status:?}"),
+        // curl isn't installed, whatever the address.
+        Err(error @ Error::NotStarted(_)) => bail!("{error}"),
+        Err(error) => bail!("cannot download {url}: {error}"),
     }
 }
 
@@ -542,10 +570,120 @@ pub fn encode(text: &str) -> String {
         .collect()
 }
 
+/// A stand-in server on this computer, for tests of downloads.
+#[cfg(test)]
+pub(crate) mod stand_in {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    /// Where the server is, such as `http://127.0.0.1:50123`, and how many
+    /// requests it has had.
+    pub(crate) struct Server {
+        pub(crate) site: String,
+        pub(crate) requests: Arc<AtomicUsize>,
+    }
+
+    /// Serves on a loopback port, answering each request with the status
+    /// and body `reply` makes of its path. A body comes without a length,
+    /// ended by the connection's close, as a server may send one.
+    pub(crate) fn serve(reply: fn(&str) -> (u16, Vec<u8>)) -> Server {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+        let site = format!("http://{}", listener.local_addr().expect("address"));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&requests);
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                thread::spawn(move || {
+                    let mut head = Vec::new();
+                    let mut chunk = [0; 1024];
+                    while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(read) if read > 0 => head.extend_from_slice(&chunk[..read]),
+                            _ => return,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&head).into_owned();
+                    let path = head.split_whitespace().nth(1).unwrap_or_default();
+                    let (status, body) = reply(path);
+                    let mut answer =
+                        format!("HTTP/1.1 {status} X\r\nconnection: close\r\n\r\n").into_bytes();
+                    answer.extend(body);
+                    // curl hangs up on a download it stops.
+                    stream.write_all(&answer).ok();
+                });
+            }
+        });
+        Server { site, requests }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rom_info::RomInfo;
+
+    #[test]
+    fn an_address_that_reads_as_an_option_never_reaches_curl() {
+        // As a catalog could give a game's or a picture's address.
+        for url in ["-V", "--output=/tmp/x", "file:///etc/hosts"] {
+            let error = fetch(url, 5).expect_err("refused");
+            assert_eq!(
+                format!("{error:#}"),
+                format!("cannot download {url}: its address is not an https:// one")
+            );
+            let to =
+                std::env::temp_dir().join(format!("ds-emulator-refused-{}", std::process::id()));
+            assert!(fetch_file(url, &to, 5, MAX_PAGE).is_err(), "{url}");
+            assert!(!to.exists(), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_download_bigger_than_it_may_be_is_stopped() {
+        let server = stand_in::serve(|path| match path {
+            "/endless.json" => (200, vec![b'x'; MAX_PAGE as usize + (1 << 20)]),
+            "/catalog.json" => (200, b"[]".to_vec()),
+            _ => (404, b"<html>Not Found</html>".to_vec()),
+        });
+        let url = format!("{}/endless.json", server.site);
+        // Its length alone, not megabytes of it, should this fail.
+        let fetched = fetch(&url, 30).map(|bytes| bytes.map(|bytes| bytes.len()));
+        let error = fetched.expect_err("too big");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("cannot download {url}: it is too big")
+        );
+        // A picture is held to less, and a file to what its caller says.
+        let fetched =
+            fetch_up_to(&url, 30, MAX_PICTURE).map(|bytes| bytes.map(|bytes| bytes.len()));
+        assert!(fetched.is_err());
+        let dir = std::env::temp_dir().join(format!("ds-emulator-capped-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("folder");
+        let to = dir.join("game.gb");
+        let error = fetch_file(&url, &to, 30, 1 << 20).expect_err("too big");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("cannot download {url}: it is too big")
+        );
+        assert!(!to.exists(), "nothing of it is kept");
+        // What fits comes, and what is gone is said to be.
+        let catalog = format!("{}/catalog.json", server.site);
+        assert_eq!(
+            fetch(&catalog, 30).expect("fetched").as_deref(),
+            Some(&b"[]"[..])
+        );
+        assert!(fetch_file(&catalog, &to, 30, 2).expect("fetched"));
+        assert_eq!(fs::read(&to).expect("kept"), b"[]");
+        let gone = format!("{}/gone.json", server.site);
+        assert_eq!(fetch(&gone, 30).expect("answered"), None);
+        assert!(!fetch_file(&gone, &to, 30, 100).expect("answered"));
+        assert!(!to.exists(), "the server's page is not kept as the file");
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn encodes_names_for_urls() {

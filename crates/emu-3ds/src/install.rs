@@ -15,7 +15,9 @@
 //! into place, so a part's folder holding its library is always complete.
 //! A lock file keeps two installs, from two games opened together or the
 //! app and the headless runner, from racing: the second waits for the
-//! first and then finds its parts.
+//! first and then finds its parts. The lock, the temporary folder, the
+//! check and the rename are [`emu_os::install`]'s, which mkxp-z and the
+//! randomizer install by too.
 //!
 //! A part may come with a fix for a bug in it, which [`ensure`] applies to
 //! the installed library, one already installed too: the core for Apple
@@ -28,12 +30,12 @@
 //!
 //! Everything here blocks.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sha2::{Digest, Sha256};
+use emu_os::install::{self as pinned, Fetch, Install, Mismatch, Pinned};
 
 use crate::jit_fix::{self, Fix};
 
@@ -195,12 +197,10 @@ const PINS: Option<Pins<'static>> = if cfg!(target_os = "macos") {
     None
 };
 
-/// The file in the data folder an install holds locked.
-const LOCK_FILE: &str = "install.lock";
-/// How the names of the temporary folders installs work in start.
-const TEMP_PREFIX: &str = ".install-";
 /// How long a download may take in all, in seconds. MoltenVK is 60 MB.
-const DOWNLOAD_SECONDS: &str = "1800";
+const DOWNLOAD_SECONDS: u32 = 1800;
+/// The most a download may be: twice MoltenVK, the biggest.
+const MAX_DOWNLOAD: u64 = 128 << 20;
 
 /// The installed parts in `data`, if all of them are there.
 #[must_use]
@@ -241,9 +241,6 @@ fn pins() -> Result<Pins<'static>, InstallError> {
     }))
 }
 
-/// Fetches the file at a URL into a path, or says why it could not.
-type Fetch<'f> = &'f dyn Fn(&str, &Path) -> Result<(), String>;
-
 /// The parts an install puts in place.
 #[derive(Debug, Clone, Copy)]
 struct Pins<'a> {
@@ -281,22 +278,17 @@ impl Pins<'_> {
     /// Installs whichever parts `data` is missing, getting each with
     /// `fetch`, once no other install is under way.
     fn install(&self, data: &Path, fetch: Fetch<'_>) -> Result<Parts, InstallError> {
-        fs::create_dir_all(data)?;
-        let _lock = lock(data)?;
+        let install = lock(data)?;
         // Another install may have finished while this one waited.
         if let Some(parts) = self.installed(data) {
             return Ok(parts);
         }
-        clear_unfinished(data);
-        let temp = data.join(format!("{TEMP_PREFIX}{}", std::process::id()));
-        fs::create_dir(&temp)?;
-        let result = std::iter::once(self.core)
+        let temp = install.temp()?;
+        std::iter::once(self.core)
             .chain(self.moltenvk)
             .filter(|part| !part.library_path(data).is_file())
-            .try_for_each(|part| part.install(data, &temp, fetch));
-        // What is left behind is cleared by the next install.
-        fs::remove_dir_all(&temp).ok();
-        result.map(|()| self.parts(data))
+            .try_for_each(|part| part.install(data, temp.path(), fetch))?;
+        Ok(self.parts(data))
     }
 }
 
@@ -355,7 +347,7 @@ impl Download<'_> {
         fs::remove_file(&archive)?;
         let prepared = temp.join(self.folder);
         self.prepare(&unpacked, &prepared)?;
-        place(&prepared, &data.join(self.folder))?;
+        pinned::place(&prepared, &data.join(self.folder))?;
         Ok(())
     }
 
@@ -377,18 +369,29 @@ impl Download<'_> {
 
     /// Checks that `archive` has the pinned digest, deleting it if not.
     fn verify(&self, archive: &Path) -> Result<(), InstallError> {
-        let found = sha256(archive)?;
-        if found == self.sha256 {
-            return Ok(());
-        }
-        fs::remove_file(archive)?;
-        Err(InstallError::Digest {
-            what: self.what.to_owned(),
-            file: archive
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            found,
+        let pinned = Pinned {
+            url: self.url,
+            sha256: self.sha256,
+            // Said to the player before an install; the digest is the check.
+            size: None,
+        };
+        pinned.verify(archive).map_err(|error| match error {
+            pinned::Error::NotPinned(differs) => InstallError::Digest {
+                what: self.what.to_owned(),
+                file: archive
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                found: match differs {
+                    Mismatch::Digest { found } => found,
+                    size @ Mismatch::Size { .. } => size.to_string(),
+                },
+            },
+            pinned::Error::Download(why) => InstallError::Download {
+                what: self.what.to_owned(),
+                why,
+            },
+            pinned::Error::Io(error) => InstallError::Io(error),
         })
     }
 
@@ -479,7 +482,7 @@ fn unzip(archive: &Path, into: &Path) -> Result<(), String> {
 /// keeps every name inside `into`.
 #[cfg(not(target_os = "macos"))]
 fn unzip(archive: &Path, into: &Path) -> Result<(), String> {
-    let file = File::open(archive).map_err(|error| error.to_string())?;
+    let file = fs::File::open(archive).map_err(|error| error.to_string())?;
     zip::ZipArchive::new(file)
         .and_then(|mut zip| zip.extract(into))
         .map_err(|error| error.to_string())
@@ -506,95 +509,34 @@ pub(crate) fn without_window(command: &mut Command) -> &mut Command {
     command
 }
 
-/// Takes the lock on installing into `data`, waiting for any other
-/// install to finish first. It is held until the file is dropped. The
-/// empty file is opened as it is, not emptied again: Windows may refuse to
-/// empty a file another process holds locked.
-fn lock(data: &Path) -> io::Result<File> {
-    let file = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(data.join(LOCK_FILE))?;
-    file.lock()?;
-    Ok(file)
+/// Takes the lock on installing into `data`, which is made if it is not
+/// there, waiting for any other install to finish first. It is held until
+/// the install is dropped.
+fn lock(data: &Path) -> io::Result<Install> {
+    Install::begin(data)
 }
 
-/// Removes the temporary folders of installs that never finished, as
-/// when the app quit during one. Only called holding the lock, so none of
-/// them is in use.
-fn clear_unfinished(data: &Path) {
-    let Ok(entries) = fs::read_dir(data) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
-            fs::remove_dir_all(entry.path()).ok();
-        }
-    }
-}
-
-/// Moves the folder `prepared` to `target`, replacing whatever an earlier,
-/// broken install left there.
-fn place(prepared: &Path, target: &Path) -> io::Result<()> {
-    match fs::remove_dir_all(target) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    fs::rename(prepared, target)
-}
-
-/// curl: macOS's own, and elsewhere the one on `PATH`, which Windows 10
-/// and 11 have in System32 and Linux has as a package.
-const CURL: &str = if cfg!(target_os = "macos") {
-    "/usr/bin/curl"
-} else {
-    "curl"
-};
-
-/// Downloads `url` into the file `to` with curl.
+/// Downloads `url` into the file `to` with curl, as [`emu_os::fetch`] does
+/// a big file: from an `https://` address only, giving up on one stalled
+/// for a minute and trying again twice after a passing failure.
 fn curl(url: &str, to: &Path) -> Result<(), String> {
-    let output = without_window(&mut Command::new(CURL))
-        .args(["--silent", "--show-error", "--location"])
-        .args([
-            "--user-agent",
-            concat!(
-                "ImagoEmulator/",
-                env!("CARGO_PKG_VERSION"),
-                " (+https://imagoemulator.com)"
-            ),
-        ])
-        .args(["--connect-timeout", "10", "--max-time", DOWNLOAD_SECONDS])
-        // Gives up on a download stalled below 1 KB/s for a minute, and
-        // tries again twice after a passing failure.
-        .args([
-            "--speed-limit",
-            "1024",
-            "--speed-time",
-            "60",
-            "--retry",
-            "2",
-        ])
-        .arg("--output")
-        .arg(to)
-        .args(["--write-out", "%{http_code}"])
-        .arg(url)
-        .output()
-        .map_err(|error| match error.kind() {
+    let download = emu_os::fetch::Download {
+        url,
+        allow: emu_os::fetch::Allow::Https,
+        seconds: DOWNLOAD_SECONDS,
+        max_bytes: MAX_DOWNLOAD,
+        patient: true,
+    };
+    download.to_file(to).map_err(|error| match error {
+        emu_os::fetch::Error::NotStarted(error) => match error.kind() {
             // Every Mac has curl; a Linux system may not.
             io::ErrorKind::NotFound if !cfg!(target_os = "macos") => {
                 "curl, which downloads it, is not installed".to_owned()
             }
             _ => format!("could not run curl: {error}"),
-        })?;
-    // A transfer cut short can still say 200; only curl's own status tells.
-    if !output.status.success() {
-        return Err(reason(&output));
-    }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "200" => Ok(()),
-        status => Err(format!("the server answered with HTTP status {status}")),
-    }
+        },
+        error => error.to_string(),
+    })
 }
 
 /// Why the command that gave `output` failed: the last line it printed as
@@ -608,14 +550,6 @@ fn reason(output: &Output) -> String {
         .map_or_else(|| output.status.to_string(), str::to_owned)
 }
 
-/// The SHA-256 of the file at `path`, in lowercase hex, read a piece at a
-/// time.
-fn sha256(path: &Path) -> io::Result<String> {
-    let mut hasher = Sha256::new();
-    io::copy(&mut File::open(path)?, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 /// The last part of the `/`-separated `path`.
 fn file_name(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, name)| name)
@@ -624,6 +558,8 @@ fn file_name(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emu_os::install::{TEMP_PREFIX, sha256};
+    use std::fs::File;
     use std::io::Write as _;
     use std::thread;
     use std::time::{Duration, Instant};

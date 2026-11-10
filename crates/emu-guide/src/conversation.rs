@@ -206,11 +206,7 @@ impl ChatStore {
         fs::create_dir_all(&folder)?;
         let path = self.chat_file(game, &chat.id);
         let text = serde_json::to_vec_pretty(chat).map_err(io::Error::other)?;
-        let temporary = path.with_extension("json.part");
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(&text)?;
-        file.sync_data()?;
-        fs::rename(&temporary, &path)
+        emu_os::file::write_atomic(&path, &text)
     }
 
     /// Keeps a screenshot for `chat`, returning its file name.
