@@ -1,10 +1,13 @@
 //! The BIOS routines the Game Boy Advance and the Nintendo DS have in
-//! common, for the cores' emulated BIOSes (GBATEK, "BIOS Decompression
-//! Functions"). No Nintendo code is used.
+//! common, for the cores' emulated BIOSes: BitUnPack, the Diff unfilters
+//! and the LZ77, run-length and Huffman decompressors (GBATEK, "BIOS
+//! Decompression Functions"). No Nintendo code is used.
 //!
-//! A routine reaches memory only through the [`Bus`] it is given, an
-//! access at a time and in a fixed order, so a console that counts time by
-//! bus accesses (the GBA) spends the same time whichever core calls it.
+//! They are here because both ARM cores already depend on this crate and
+//! the routines need nothing but its [`Bus`]. A routine reaches memory
+//! only through the bus it is given, an access at a time and in a fixed
+//! order, so a console that counts time by bus accesses (the GBA) spends
+//! what it always did.
 //!
 //! The decoders ([`Lz77`], [`RunLength`], [`Huffman`]) take their
 //! compressed data one byte or word at a time and keep all of their
@@ -12,7 +15,24 @@
 //! any two units: the DS's ReadByCallback functions get each unit from a
 //! function of the game's, and a save state may be made in between. These
 //! types are part of a DS save state, so their fields, and the order of
-//! them, are that state's layout.
+//! them, are that state's layout. The functions that read their data
+//! straight from memory ([`lz77`], [`run_length`]) run the same decoders
+//! to the end.
+//!
+//! # How long a call can take
+//!
+//! A call runs to its end in one step of the emulation thread, where the
+//! real BIOS spends CPU time with interrupts still served. So nothing
+//! here loops on a number the game supplies without a bound. Each routine
+//! has one, and this is where it is set:
+//!
+//! | Routine | What bounds it |
+//! |---|---|
+//! | [`bit_unpack`] | Its 16-bit length: 65,535 bytes at most, eight units from each. |
+//! | [`diff_unfilter`] | The header's 24-bit length: one unit read for each written. |
+//! | [`lz77`], [`run_length`] | The header's 24-bit length ([`read_normal`]): a decoder takes at most three bytes before it produces one. |
+//! | [`huffman`] | A bitstream word for each byte of the 24-bit length and [`HUFFMAN_SLACK_WORDS`] more; sooner if a walk leaves the tree. |
+//! | A decoder fed by the game ([`Lz77::feed`], [`RunLength::feed`], [`Huffman::feed`]) | One unit: at most 18 bytes copied, 130 written, or 32 bits followed. The game's own code runs before the next. |
 
 use serde::{Deserialize, Serialize};
 

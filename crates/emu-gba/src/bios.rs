@@ -10,18 +10,21 @@
 //!
 //! A call runs to its end in one step of the emulation thread, where the
 //! real BIOS spends CPU time with interrupts still served. So no function
-//! here loops on a number the game supplies without a bound, and each
-//! bound is one the real function has: CpuSet's 21-bit count, BitUnPack's
-//! 16-bit length, a decompressor's 24-bit length (each turn of its loop
-//! produces at least a byte). The two without one of their own stop at a
-//! limit set here: the affine functions' count at [`AFFINE_SETS_MAX`],
-//! and Huffman's bitstream at a word for each byte it unpacks to (see
-//! [`huffman`]). Addresses wrap around the 32-bit bus, as the CPU's own
-//! do.
+//! here loops on a number the game supplies without a bound. CpuSet's is
+//! its 21-bit count, and the affine functions, which have none of their
+//! own, stop at [`AFFINE_SETS_MAX`]. BitUnPack, the Diff unfilters and the
+//! decompressors are [`emu_arm::bios`]'s, the DS's too, and that module
+//! says what bounds each. Addresses wrap around the 32-bit bus, as the
+//! CPU's own do.
+//!
+//! The shared functions reach memory only through the bus, in the order
+//! this BIOS's own did, so a call takes the time on the bus it always
+//! took. CpuSet and CpuFastSet stay here: this BIOS does not align the
+//! addresses it is given, and the DS's does.
 
 use std::f64::consts::PI;
 
-use emu_arm::bios::{self, WaitingByte, bit_unpack, diff_unfilter, run_length};
+use emu_arm::bios::{self, WaitingByte, bit_unpack, diff_unfilter, huffman, run_length};
 use emu_arm::{Access, Bus as _, Cpu, Mode, psr};
 
 use crate::bus::Bus;
@@ -629,75 +632,6 @@ fn lz77(bus: &mut Bus, source: u32, destination: u32, halfwords: bool) {
     bios::lz77(bus, source, destination, halfwords, WaitingByte::Copied);
 }
 
-/// Bitstream words HuffUnComp follows beyond one for each byte it has to
-/// write: room for the longest codes a tree can hold (256 bits) in data
-/// of a few bytes.
-const HUFFMAN_SLACK_WORDS: u32 = 64;
-
-/// HuffUnComp: GBATEK's Huffman format, whose symbols are 4 or 8 bits.
-/// Any size that fills the 32-bit words it writes exactly is decoded (1
-/// and 2 bits too); data that names another size, which never fills a
-/// word, is left alone.
-///
-/// A node's children lie after it, so a walk only moves on through the
-/// tree. One that leaves the tree (the size byte says where it ends) can
-/// reach no symbol the data holds, and ends the call.
-///
-/// The bitstream followed is at most a word for each byte to write, and
-/// [`HUFFMAN_SLACK_WORDS`] more. That is four times what the bytes take
-/// unpacked, and a Huffman code is at worst as long as fixed-width
-/// symbols; without it, a stream of a tree's longest codes for the
-/// longest length would keep one call going for minutes.
-fn huffman(bus: &mut Bus, mut source: u32, mut destination: u32) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let symbol_bits = header & 0xF;
-    if !matches!(symbol_bits, 1 | 2 | 4 | 8) {
-        return;
-    }
-    let mut remaining = header >> 8;
-    let tree_size = u32::from(bus.read_8(source.wrapping_add(4), Access::NONSEQUENTIAL));
-    let root = source.wrapping_add(5);
-    // The nodes' bytes, from the root to the bitstream.
-    let tree_length = tree_size * 2 + 1;
-    source = root.wrapping_add(tree_length);
-    let mut node = root;
-    let mut node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
-    let mut out = 0u32;
-    let mut out_bits = 0;
-    let mut words = remaining + HUFFMAN_SLACK_WORDS;
-    while remaining > 0 && words > 0 {
-        words -= 1;
-        let bits = bus.read_32(source, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(4);
-        for bit in (0..32).rev() {
-            let right = bits & (1 << bit) != 0;
-            let next = (node & !1).wrapping_add((node_value & 0x3F) * 2 + 2 + u32::from(right));
-            if next.wrapping_sub(root) >= tree_length {
-                return;
-            }
-            let terminal = node_value & if right { 0x40 } else { 0x80 } != 0;
-            node = next;
-            node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
-            if terminal {
-                out |= node_value << out_bits;
-                out_bits += symbol_bits;
-                node = root;
-                node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
-                if out_bits >= 32 {
-                    bus.write_32(destination, out, Access::NONSEQUENTIAL);
-                    destination = destination.wrapping_add(4);
-                    out = 0;
-                    out_bits = 0;
-                    remaining = remaining.saturating_sub(4);
-                    if remaining == 0 {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// MidiKey2Freq: the sample rate that plays a wave at a MIDI key.
 fn midi_key_to_frequency(bus: &mut Bus, wave: u32, key: u8, fine: u8) -> u32 {
     let base = f64::from(bus.read_32(wave.wrapping_add(4), Access::NONSEQUENTIAL));
@@ -707,6 +641,8 @@ fn midi_key_to_frequency(bus: &mut Bus, wave: u32, key: u8, fine: u8) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use emu_arm::bios::HUFFMAN_SLACK_WORDS;
+
     use super::*;
 
     fn ram_bus() -> Bus {

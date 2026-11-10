@@ -18,13 +18,13 @@
 //!
 //! A call runs to its end in one step of the emulation thread, where the
 //! real BIOS spends CPU time with interrupts still served. So no function
-//! here loops on a number the game supplies without a bound, and each
-//! bound is one the real function has: CpuSet's 21-bit count, BitUnPack's
-//! 16-bit length, a decompressor's 24-bit length (each unit it is fed
-//! leads to at least a byte). GetCRC16, whose length is a whole register,
-//! stops at [`CRC16_LENGTH_MAX`]. The ReadByCallback functions do a
-//! unit's work between two of the game's own calls. Addresses wrap around
-//! the 32-bit bus, as the CPU's own do.
+//! here loops on a number the game supplies without a bound. CpuSet's is
+//! its 21-bit count, and GetCRC16, whose length is a whole register,
+//! stops at [`CRC16_LENGTH_MAX`]. BitUnPack, the Diff unfilters and the
+//! decompressors are [`emu_arm::bios`]'s, the GBA's too, and that module
+//! says what bounds each; the ReadByCallback functions do a unit's work
+//! between two of the game's own calls. Addresses wrap around the 32-bit
+//! bus, as the CPU's own do.
 
 mod callback;
 mod decompress;
