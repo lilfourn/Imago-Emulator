@@ -71,7 +71,7 @@ use crate::romhack::{self, MakeError};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
-use crate::speed::{self, Pace, Speed, Speeds};
+use crate::speed::{self, Pace, Speed};
 use crate::store_view::pulse;
 use crate::theme::{BACKGROUND, INSET, STAGE};
 use crate::trace;
@@ -127,44 +127,34 @@ pub struct EmulatorView {
     /// The bindings in force: the user's, with the active player's game's
     /// own laid over them.
     bindings: Bindings,
-    layout: Layout,
+    /// The settings in force, as the settings file keeps them: the
+    /// layout, the speeds, the picture and the rest. Fast-forward and
+    /// slow motion being left on are `controls`' to say, not this
+    /// value's (see [`EmulatorView::settings`]).
+    settings: Settings,
     /// Whether a linked game shows its consoles side by side whatever
-    /// `layout`, the user's own, says; until it stops or the user picks
-    /// an arrangement.
+    /// the settings' layout, the user's own, says; until it stops or the
+    /// user picks an arrangement.
     linked_side_by_side: bool,
     /// Warnings from startup kept for the game it opens, whose loading
     /// notices would hide them.
     startup_notice: Option<String>,
-    /// Where the window is, to open it there next launch.
-    window_place: Option<WindowPlace>,
     /// Saves the window's place once it has stopped moving.
     place_save: Option<Task<()>>,
     /// Where the layout is saved for next launch, if there is a config
     /// folder.
     settings_path: Option<PathBuf>,
-    /// How fast fast-forward and slow motion run, from the settings file.
-    speeds: Speeds,
-    /// How many times its own resolution DS and 3DS 3D is drawn at.
-    resolution_3d: Resolution3d,
     /// The computer's microphone, while the user has it on: off at every
     /// launch.
     microphone: Option<(Microphone, Loudness)>,
     /// How loud the microphone was when the emulation thread was last
     /// told.
     heard: u8,
-    /// Show GBC and GBA colours as their screens did.
-    color_correction: bool,
-    /// How the screens look: upscaled, as sharp pixels, or shaded.
-    picture: Picture,
     /// The GPU half of the upscaler, started when a picture first needs it.
     upscaler: Upscaler,
     /// Draws again once the upscaler finishes screens it took too long
     /// over to wait for.
     upscale_wake: Option<Task<()>>,
-    /// What fills the window around the screens.
-    backdrop: Backdrop,
-    /// Whether the speed readout shows in the window's corner.
-    show_fps: bool,
     /// What the speed readout says, once it has measured.
     speed_readout: Option<SharedString>,
     /// Measures the speed for the readout, with the number from
@@ -172,12 +162,6 @@ pub struct EmulatorView {
     fps_meter: Option<(u64, Meter)>,
     /// Updates the readout while it shows.
     readout_task: Option<Task<()>>,
-    /// How games made for the original Game Boy are shown, from the next
-    /// game opened.
-    dmg_colors: emu_core::DmgColors,
-    /// Whether the window shows its close, minimise and zoom buttons and
-    /// the bar they sit in.
-    window_controls: bool,
     /// Whether the buttons were last shown or hidden, once they have been.
     shown_controls: Option<bool>,
     /// The debugger window, once opened.
@@ -223,7 +207,6 @@ pub struct EmulatorView {
     stylus: Option<(usize, TouchPoint)>,
     /// The player keyboard and gamepads control, in multi-player sessions.
     active_player: usize,
-    state_slot: u8,
     notice: Option<SharedString>,
     /// Whether the notice shown is a warning, which shows for longer, and
     /// so does what joins it.
@@ -245,10 +228,6 @@ pub struct EmulatorView {
     guide_pill_hide: Option<Task<()>>,
     /// Whether the pointer is on the pill, which keeps it and lights it.
     guide_pill_hovered: bool,
-    /// How hard Guide's model thinks, from the settings.
-    guide_thinking: emu_guide::chat::Effort,
-    /// Whether Guide looks answers up, from the settings.
-    guide_lookups: bool,
     _gamepad: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -651,27 +630,18 @@ impl EmulatorView {
         let mut view = Self {
             focus,
             bindings: Bindings::default(),
-            layout: Layout::default(),
+            settings: Settings::default(),
             linked_side_by_side: false,
             startup_notice: None,
-            window_place: None,
             place_save: None,
             settings_path,
-            speeds: Speeds::default(),
-            resolution_3d: Settings::default().resolution_3d,
             microphone: None,
             heard: 0,
-            color_correction: true,
-            picture: Picture::default(),
             upscaler: Upscaler::Idle,
             upscale_wake: None,
-            backdrop: Backdrop::default(),
-            show_fps: false,
             speed_readout: None,
             fps_meter: None,
             readout_task: None,
-            dmg_colors: Settings::default().dmg_colors,
-            window_controls: Settings::default().window_controls,
             shown_controls: None,
             debugger: None,
             settings_window: None,
@@ -693,7 +663,6 @@ impl EmulatorView {
             sent_touch: None,
             stylus: None,
             active_player: 0,
-            state_slot: 1,
             notice: None,
             notice_is_warning: false,
             notice_timer: None,
@@ -705,8 +674,6 @@ impl EmulatorView {
             guide_pill: None,
             guide_pill_hide: None,
             guide_pill_hovered: false,
-            guide_thinking: Settings::default().guide_thinking,
-            guide_lookups: Settings::default().guide_lookups,
             _gamepad: gamepad_task,
             _subscriptions: subscriptions,
         };
@@ -718,19 +685,7 @@ impl EmulatorView {
         }
         match loaded_settings {
             Some(Ok(settings)) => {
-                view.layout = settings.layout;
-                view.speeds = settings.speed;
-                view.resolution_3d = settings.resolution_3d;
-                view.picture = settings.picture;
-                view.backdrop = settings.backdrop;
-                view.show_fps = settings.show_fps;
-                view.dmg_colors = settings.dmg_colors;
-                view.window_controls = settings.window_controls;
-                view.color_correction = settings.color_correction;
-                view.state_slot = settings.state_slot;
-                view.window_place = settings.window_place;
-                view.guide_thinking = settings.guide_thinking;
-                view.guide_lookups = settings.guide_lookups;
+                view.settings = settings;
                 if settings.fast_forward_on {
                     view.controls.toggle_fast_forward();
                 }
@@ -759,7 +714,7 @@ impl EmulatorView {
         }
         view.tell_guide_settings(cx);
         view.refresh_menus(cx);
-        if view.show_fps {
+        if view.settings.show_fps {
             view.start_readout(cx);
         }
         view.start_upscaler(cx);
@@ -1087,7 +1042,7 @@ impl EmulatorView {
             self.send_turbo();
         }
         if state.pace != self.sent.pace {
-            self.send(Command::SetSpeed(self.speeds.speed(state.pace)));
+            self.send(Command::SetSpeed(self.settings.speed.speed(state.pace)));
         }
         if state.rewind != self.sent.rewind {
             self.send(Command::SetRewind(state.rewind));
@@ -1363,7 +1318,7 @@ impl EmulatorView {
         let Some((_, size)) = self.touchscreen() else {
             return;
         };
-        let (dx, dy) = self.layout.rotation.unturn_vector(motion);
+        let (dx, dy) = self.settings.layout.rotation.unturn_vector(motion);
         self.cursor
             .get_or_insert_with(|| Cursor::centre(size))
             .move_by((dx * cursor::SPEED, dy * cursor::SPEED), size);
@@ -1420,10 +1375,10 @@ impl EmulatorView {
                 .and_then(|display| display.uuid().ok())
                 .map(|uuid| uuid.as_u128()),
         };
-        if self.window_place == Some(place) {
+        if self.settings.window_place == Some(place) {
             return;
         }
-        self.window_place = Some(place);
+        self.settings.window_place = Some(place);
         let timer = cx.background_executor().timer(PLACE_SAVE_DELAY);
         self.place_save = Some(cx.spawn(async move |this, cx| {
             timer.await;
@@ -1438,8 +1393,8 @@ impl EmulatorView {
     /// Moves to the next or previous save-state slot, and saves that for
     /// next launch.
     fn change_state_slot(&mut self, forward: bool, cx: &mut Context<Self>) {
-        self.state_slot = next_slot(self.state_slot, forward);
-        let slot = self.state_slot;
+        self.settings.state_slot = next_slot(self.settings.state_slot, forward);
+        let slot = self.settings.state_slot;
         self.show_notice(format!("State slot {slot}"), cx);
         self.save_settings(cx);
         // The file Load State would read.
@@ -2075,10 +2030,10 @@ impl EmulatorView {
         if self.linked_side_by_side {
             Layout {
                 arrangement: Arrangement::Horizontal,
-                ..self.layout
+                ..self.settings.layout
             }
         } else {
-            self.layout
+            self.settings.layout
         }
     }
 
@@ -2088,7 +2043,7 @@ impl EmulatorView {
         self.set_layout(
             Layout {
                 arrangement,
-                ..self.layout
+                ..self.settings.layout
             },
             cx,
         );
@@ -2097,8 +2052,8 @@ impl EmulatorView {
     fn swap_screens(&mut self, cx: &mut Context<Self>) {
         self.set_layout(
             Layout {
-                swapped: !self.layout.swapped,
-                ..self.layout
+                swapped: !self.settings.layout.swapped,
+                ..self.settings.layout
             },
             cx,
         );
@@ -2115,14 +2070,14 @@ impl EmulatorView {
         self.set_layout(
             Layout {
                 rotation,
-                ..self.layout
+                ..self.settings.layout
             },
             cx,
         );
     }
 
     fn change_gap(&mut self, cx: &mut Context<Self>) {
-        let gap = layout::next_gap(self.layout.gap);
+        let gap = layout::next_gap(self.settings.layout.gap);
         let message = if gap <= 0.0 {
             "No gap between screens".to_owned()
         } else if gap == layout::HINGE_GAP {
@@ -2131,12 +2086,18 @@ impl EmulatorView {
             format!("Screen gap {gap} px")
         };
         self.show_notice(message, cx);
-        self.set_layout(Layout { gap, ..self.layout }, cx);
+        self.set_layout(
+            Layout {
+                gap,
+                ..self.settings.layout
+            },
+            cx,
+        );
     }
 
     /// Switches to `layout` and saves it for next launch.
     fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        self.layout = layout;
+        self.settings.layout = layout;
         cx.notify();
         self.save_settings(cx);
     }
@@ -2144,7 +2105,7 @@ impl EmulatorView {
     /// Draws DS and 3DS 3D at `resolution` from now on, and saves that for
     /// next launch. The next draw sends the core the scale it comes to.
     fn set_resolution_3d(&mut self, resolution: Resolution3d, cx: &mut Context<Self>) {
-        self.resolution_3d = resolution;
+        self.settings.resolution_3d = resolution;
         let system = self.game.session().map(|session| session.info.system);
         let three_d = matches!(system, Some(System::Nds | System::N3ds) | None);
         let mut message = match (resolution, system) {
@@ -2198,24 +2159,13 @@ impl EmulatorView {
         }
     }
 
-    /// The settings in force.
+    /// The settings in force, to save or to show: the ones held, with
+    /// fast-forward and slow motion as `controls` has them latched now.
     pub fn settings(&self) -> Settings {
         Settings {
-            layout: self.layout,
-            speed: self.speeds,
             fast_forward_on: self.controls.fast_forward_latched(),
             slow_motion_on: self.controls.slow_motion_latched(),
-            resolution_3d: self.resolution_3d,
-            picture: self.picture,
-            backdrop: self.backdrop,
-            show_fps: self.show_fps,
-            color_correction: self.color_correction,
-            state_slot: self.state_slot,
-            dmg_colors: self.dmg_colors,
-            window_controls: self.window_controls,
-            window_place: self.window_place,
-            guide_thinking: self.guide_thinking,
-            guide_lookups: self.guide_lookups,
+            ..self.settings
         }
     }
 
@@ -2239,7 +2189,7 @@ impl EmulatorView {
             // from the menu; any other change keeps it, and keeps the
             // user's own arrangement for after.
             let arrangement = if settings.layout.arrangement == shown.arrangement {
-                self.layout.arrangement
+                self.settings.layout.arrangement
             } else {
                 self.linked_side_by_side = false;
                 settings.layout.arrangement
@@ -2252,23 +2202,23 @@ impl EmulatorView {
                 cx,
             );
         }
-        if settings.resolution_3d != self.resolution_3d {
+        if settings.resolution_3d != self.settings.resolution_3d {
             self.set_resolution_3d(settings.resolution_3d, cx);
         }
-        if settings.picture != self.picture {
+        if settings.picture != self.settings.picture {
             self.set_picture(settings.picture, cx);
         }
-        if settings.backdrop != self.backdrop {
+        if settings.backdrop != self.settings.backdrop {
             self.set_backdrop(settings.backdrop, cx);
         }
-        if settings.window_controls != self.window_controls {
+        if settings.window_controls != self.settings.window_controls {
             self.set_window_controls(settings.window_controls, cx);
         }
         if (settings.guide_thinking, settings.guide_lookups)
-            != (self.guide_thinking, self.guide_lookups)
+            != (self.settings.guide_thinking, self.settings.guide_lookups)
         {
-            self.guide_thinking = settings.guide_thinking;
-            self.guide_lookups = settings.guide_lookups;
+            self.settings.guide_thinking = settings.guide_thinking;
+            self.settings.guide_lookups = settings.guide_lookups;
             self.tell_guide_settings(cx);
             self.save_settings(cx);
         }
@@ -2276,7 +2226,7 @@ impl EmulatorView {
 
     /// Hands Guide's settings to its panel.
     fn tell_guide_settings(&self, cx: &mut App) {
-        let (effort, lookups) = (self.guide_thinking, self.guide_lookups);
+        let (effort, lookups) = (self.settings.guide_thinking, self.settings.guide_lookups);
         self.guide.update(cx, |guide, _| {
             guide.effort = effort;
             guide.lookups = lookups;
@@ -2286,7 +2236,7 @@ impl EmulatorView {
     /// Fills the window around the screens with `backdrop` from now on,
     /// and saves that for next launch.
     fn set_backdrop(&mut self, backdrop: Backdrop, cx: &mut Context<Self>) {
-        self.backdrop = backdrop;
+        self.settings.backdrop = backdrop;
         if let Some(session) = self.game.session_mut() {
             self.stale_images
                 .extend(session.ambient.take().map(|glow| glow.image));
@@ -2298,7 +2248,7 @@ impl EmulatorView {
     /// Shows or hides the window's close, minimise and zoom buttons and the
     /// bar they sit in, and saves that for next launch.
     fn set_window_controls(&mut self, shown: bool, cx: &mut Context<Self>) {
-        self.window_controls = shown;
+        self.settings.window_controls = shown;
         cx.notify();
         self.save_settings(cx);
     }
@@ -2318,7 +2268,7 @@ impl EmulatorView {
     /// Runs fast-forward at `speed` from now on, at once if it is on,
     /// and saves that for next launch.
     fn set_fast_forward(&mut self, speed: Speed, cx: &mut Context<Self>) {
-        self.speeds.fast_forward = speed;
+        self.settings.speed.fast_forward = speed;
         if self.sent.pace == Pace::FastForward {
             self.send(Command::SetSpeed(speed));
         }
@@ -2329,8 +2279,8 @@ impl EmulatorView {
 
     /// Shows or hides the speed readout, and saves that for next launch.
     fn toggle_fps(&mut self, cx: &mut Context<Self>) {
-        self.show_fps = !self.show_fps;
-        if self.show_fps {
+        self.settings.show_fps = !self.settings.show_fps;
+        if self.settings.show_fps {
             self.start_readout(cx);
         } else {
             self.readout_task = None;
@@ -2385,8 +2335,8 @@ impl EmulatorView {
     /// What the menus show checked now.
     fn menu_checks(&self) -> MenuChecks {
         MenuChecks {
-            fast_forward: self.speeds.fast_forward,
-            show_fps: self.show_fps,
+            fast_forward: self.settings.speed.fast_forward,
+            show_fps: self.settings.show_fps,
         }
     }
 
@@ -2564,7 +2514,7 @@ impl EmulatorView {
     /// next one opened, and saves that for next launch. A game already
     /// running keeps its console until it is opened again.
     fn set_dmg_colors(&mut self, colors: emu_core::DmgColors, cx: &mut Context<Self>) {
-        self.dmg_colors = colors;
+        self.settings.dmg_colors = colors;
         let shown = match colors {
             emu_core::DmgColors::Grey => "in grey, as on a Game Boy",
             _ => "in colour, as on a Game Boy Color",
@@ -2579,7 +2529,7 @@ impl EmulatorView {
     /// Shows the screens as `picture` from now on, and saves that for next
     /// launch.
     fn set_picture(&mut self, picture: Picture, cx: &mut Context<Self>) {
-        self.picture = picture;
+        self.settings.picture = picture;
         if let Some(session) = self.game.session() {
             session
                 .emulator
@@ -2596,7 +2546,7 @@ impl EmulatorView {
     /// about 130 ms, which the first upscaled frame would otherwise wait
     /// for; screens are drawn as sharp pixels until it is ready.
     fn start_upscaler(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.upscaler, Upscaler::Idle) || !self.picture.upscales() {
+        if !matches!(self.upscaler, Upscaler::Idle) || !self.settings.picture.upscales() {
             return;
         }
         let started = cx.background_executor().spawn(async { GpuDevice::start() });
@@ -2619,10 +2569,10 @@ impl EmulatorView {
 
     /// Turns colour correction on or off, and saves that for next launch.
     fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
-        self.color_correction = !self.color_correction;
+        self.settings.color_correction = !self.settings.color_correction;
         self.rebuild_images();
         self.show_notice(
-            if self.color_correction {
+            if self.settings.color_correction {
                 "Colour correction on"
             } else {
                 "Colour correction off"
@@ -2951,7 +2901,7 @@ impl Render for EmulatorView {
         trace::event("render", &[]);
         // Full screen shows its own bar on hover, buttons and all.
         let fullscreen = window.is_fullscreen();
-        let show_controls = self.window_controls || fullscreen;
+        let show_controls = self.settings.window_controls || fullscreen;
         if self.shown_controls != Some(show_controls) {
             window_chrome::set_controls_visible(window, show_controls);
             self.shown_controls = Some(show_controls);
@@ -3006,11 +2956,11 @@ impl Render for EmulatorView {
                 this.send(Command::Reset);
             }))
             .on_action(cx.listener(|this, _: &SaveState, _, _| {
-                this.send(Command::SaveState(this.state_slot));
+                this.send(Command::SaveState(this.settings.state_slot));
             }))
             .on_action(cx.listener(|this, _: &LoadState, _, cx| {
                 this.leave_menu(cx);
-                this.send(Command::LoadState(this.state_slot));
+                this.send(Command::LoadState(this.settings.state_slot));
             }))
             .on_action(
                 cx.listener(|this, _: &NextStateSlot, _, cx| this.change_state_slot(true, cx)),
@@ -3036,10 +2986,10 @@ impl Render for EmulatorView {
             }))
             .on_action(cx.listener(|this, _: &SwapScreens, _, cx| this.swap_screens(cx)))
             .on_action(cx.listener(|this, _: &RotateClockwise, _, cx| {
-                this.rotate(this.layout.rotation.clockwise(), cx);
+                this.rotate(this.settings.layout.rotation.clockwise(), cx);
             }))
             .on_action(cx.listener(|this, _: &RotateAnticlockwise, _, cx| {
-                this.rotate(this.layout.rotation.anticlockwise(), cx);
+                this.rotate(this.settings.layout.rotation.anticlockwise(), cx);
             }))
             .on_action(cx.listener(|this, _: &NextScreenGap, _, cx| this.change_gap(cx)))
             .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
@@ -3064,7 +3014,7 @@ impl Render for EmulatorView {
                 this.show_randomizer(None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleWindowControls, _, cx| {
-                this.set_window_controls(!this.window_controls, cx);
+                this.set_window_controls(!this.settings.window_controls, cx);
             }))
             .on_action(cx.listener(|this, _: &Resolution3dMatchDisplay, _, cx| {
                 this.set_resolution_3d(Resolution3d::MatchDisplay, cx);
@@ -3213,13 +3163,13 @@ impl Render for EmulatorView {
             // 3D as large as the screens are now shown, for Match Display,
             // as long as the game keeps the speed asked for.
             let mut scale = render_scale(
-                self.resolution_3d,
+                self.settings.resolution_3d,
                 &session.info,
                 &self.placements,
                 scale_factor,
             );
-            if self.resolution_3d == Resolution3d::MatchDisplay {
-                scale = session.keep_speed(scale, self.speeds.speed(self.sent.pace));
+            if self.settings.resolution_3d == Resolution3d::MatchDisplay {
+                scale = session.keep_speed(scale, self.settings.speed.speed(self.sent.pace));
             }
             if scale != session.render_scale {
                 trace::event("scale", &[u64::from(scale)]);
@@ -3248,8 +3198,8 @@ impl Render for EmulatorView {
             (upscaler_failed, upscaling) = session.refresh_images(
                 &self.placements,
                 scale_factor,
-                self.color_correction,
-                self.picture,
+                self.settings.color_correction,
+                self.settings.picture,
                 &mut self.upscaler,
                 window,
             );
@@ -3281,8 +3231,9 @@ impl Render for EmulatorView {
                 let made = trace::micros(refreshing.elapsed());
                 trace::event("drawn", &[session.sequence, made]);
             }
-            if self.backdrop == Backdrop::Ambient {
-                if session.refresh_ambient(&self.placements, self.color_correction, window) {
+            if self.settings.backdrop == Backdrop::Ambient {
+                if session.refresh_ambient(&self.placements, self.settings.color_correction, window)
+                {
                     // New frames draw the fade on as they come, so the
                     // window redraws no more often than the game. Once they
                     // stop, as when paused, it draws the rest itself.
@@ -3308,7 +3259,7 @@ impl Render for EmulatorView {
                         let correction = session
                             .correction
                             .as_ref()
-                            .filter(|_| self.color_correction);
+                            .filter(|_| self.settings.color_correction);
                         ambient::picture(&session.frames, &self.placements, correction)
                             .map(|picture| picture.colors().to_vec())
                     }
@@ -3361,7 +3312,7 @@ impl Render for EmulatorView {
         // macOS, hidden with them, and shown again as the pointer comes
         // into the bar; in full screen only the menu's.
         let off_mac = !cfg!(target_os = "macos");
-        let controls_shown = self.window_controls && !fullscreen;
+        let controls_shown = self.settings.window_controls && !fullscreen;
         let chrome_shown =
             off_mac && (controls_shown || self.title_hovered || self.app_menu.is_some());
         let shaded = if off_mac {
@@ -3502,7 +3453,9 @@ impl Render for EmulatorView {
         let speed = self
             .speed_readout
             .clone()
-            .filter(|_| self.show_fps && self.game.session().is_some() && self.menu.is_none())
+            .filter(|_| {
+                self.settings.show_fps && self.game.session().is_some() && self.menu.is_none()
+            })
             .map(speed_readout);
         let notice = self.notice.as_ref().map(|notice| {
             let mut card = overlay_plate(div()).flex_col().gap_1();

@@ -192,7 +192,7 @@ impl EmulatorView {
             .collect::<Vec<_>>()
             .join(" + ");
         self.show_notice(loading_notice(&paths, &name), cx);
-        let dmg_colors = self.dmg_colors;
+        let dmg_colors = self.settings.dmg_colors;
         let games = paths.clone();
         let open = cx
             .background_executor()
@@ -346,14 +346,14 @@ impl EmulatorView {
             (f32::from(viewport.width), f32::from(viewport.height)),
         );
         let render_scale = render_scale(
-            self.resolution_3d,
+            self.settings.resolution_3d,
             &info,
             &placements,
             window.scale_factor(),
         );
         emulator.send(Command::SetRenderScale(render_scale));
         emulator.send(Command::SetTextureUpscaling(
-            self.picture.texture_upscaling(),
+            self.settings.picture.texture_upscaling(),
         ));
         // Pick up where the player left off, unless a battery save has
         // changed since: the emulation thread checks.
