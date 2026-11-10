@@ -85,14 +85,41 @@ impl Output {
     }
 
     /// The byte `distance` back from the next one, read from the
-    /// destination as the BIOS reads it. A byte still waiting to be written
-    /// as half of a halfword is not there yet, so a distance of 1 reads
-    /// whatever the destination held before: GBATEK's caution that the
-    /// "Vram" LZ77 functions need Disp of at least 1.
-    fn earlier<B: Bus>(&self, bus: &mut B, distance: u32) -> u8 {
+    /// destination as the BIOS reads it, except where `waiting` says a
+    /// byte still waiting to be written as half of a halfword is taken
+    /// without a read.
+    fn earlier<B: Bus>(&self, bus: &mut B, distance: u32, waiting: WaitingByte) -> u8 {
+        if waiting == WaitingByte::Copied
+            && self.width == 2
+            && self.pending_bytes == 1
+            && distance == 1
+        {
+            return self.pending as u8;
+        }
         let next = self.destination.wrapping_add(self.pending_bytes);
         bus.read_8(next.wrapping_sub(distance), Access::NONSEQUENTIAL)
     }
+}
+
+/// What an LZ77 reference of distance 1 copies when the byte before it
+/// has not been written yet: the "Vram" functions write halfwords, so the
+/// first byte of each waits for the second.
+///
+/// GBATEK cautions that those functions need a Disp of at least 1, which
+/// is a distance of at least 2 here (the distance is Disp + 1), and does
+/// not say what a console does with less. The two emulated BIOSes were
+/// written differently, and neither has been checked against a console,
+/// so each keeps what it did. Data packed for these functions as GBATEK
+/// asks has no such reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingByte {
+    /// The waiting byte itself, as if it were written already, without a
+    /// read of memory: the GBA's LZ77UnCompVram.
+    Copied,
+    /// Whatever the destination held before, read from memory, since the
+    /// waiting byte is not there yet: the DS's
+    /// LZ77UnCompReadByCallbackWrite16bit.
+    NotThereYet,
 }
 
 /// LZ77: a flag byte, then eight blocks, each a literal byte or (flag bit
@@ -109,8 +136,10 @@ pub struct Lz77 {
 }
 
 impl Lz77 {
-    /// Takes the next byte of compressed data.
-    pub fn feed<B: Bus>(&mut self, byte: u8, out: &mut Output, bus: &mut B) {
+    /// Takes the next byte of compressed data. `waiting` is the console's
+    /// answer for a reference of distance 1 into a halfword not yet
+    /// written.
+    pub fn feed<B: Bus>(&mut self, byte: u8, out: &mut Output, bus: &mut B, waiting: WaitingByte) {
         if self.blocks == 0 {
             self.flags = byte;
             self.blocks = 8;
@@ -129,7 +158,7 @@ impl Lz77 {
                 if out.done() {
                     break;
                 }
-                let byte = out.earlier(bus, distance);
+                let byte = out.earlier(bus, distance, waiting);
                 out.push(bus, byte);
             }
         }
@@ -268,6 +297,62 @@ impl Huffman {
             self.node = self.tree.wrapping_add(1);
         }
     }
+}
+
+/// Runs a function that reads its data straight from memory: the 4-byte
+/// header at `source`, then a byte at a time to `feed` (which holds the
+/// decoder) until the header's length has been written to `destination`,
+/// `width` bytes at a time.
+///
+/// It ends because the length is 24 bits and no decoder takes more than
+/// a few bytes without producing one: LZ77 takes a flag byte for every
+/// eight blocks and at most two bytes a block, run-length a flag byte and
+/// at most one byte a run.
+pub fn read_normal<B: Bus>(
+    bus: &mut B,
+    mut source: u32,
+    destination: u32,
+    width: u32,
+    mut feed: impl FnMut(u8, &mut Output, &mut B),
+) {
+    let header = bus.read_32(source, Access::NONSEQUENTIAL);
+    source = source.wrapping_add(4);
+    let mut out = Output::new(destination, width, header >> 8);
+    while !out.done() {
+        let byte = bus.read_8(source, Access::NONSEQUENTIAL);
+        source = source.wrapping_add(1);
+        feed(byte, &mut out, bus);
+    }
+}
+
+/// The LZ77UnComp functions that read from memory: writes the data at
+/// `source` to `destination` a byte at a time or, with `halfwords`, two
+/// (the "Vram" function, which never writes an odd last byte). `waiting`
+/// is the console's answer for a reference of distance 1 into a halfword
+/// not yet written.
+pub fn lz77<B: Bus>(
+    bus: &mut B,
+    source: u32,
+    destination: u32,
+    halfwords: bool,
+    waiting: WaitingByte,
+) {
+    let mut decoder = Lz77::default();
+    let width = if halfwords { 2 } else { 1 };
+    read_normal(bus, source, destination, width, |byte, out, bus| {
+        decoder.feed(byte, out, bus, waiting);
+    });
+}
+
+/// The RLUnComp functions that read from memory: writes the data at
+/// `source` to `destination` a byte at a time or, with `halfwords`, two
+/// (the "Vram" function, which never writes an odd last byte).
+pub fn run_length<B: Bus>(bus: &mut B, source: u32, destination: u32, halfwords: bool) {
+    let mut decoder = RunLength::default();
+    let width = if halfwords { 2 } else { 1 };
+    read_normal(bus, source, destination, width, |byte, out, bus| {
+        decoder.feed(byte, out, bus);
+    });
 }
 
 /// BitUnPack: widens the packed pixels at `source` to `destination`,
@@ -488,5 +573,117 @@ mod tests {
         // 0xFFFF, then 0xFFFF + 2 wrapped.
         assert_eq!(&ram.bytes[0x200..0x206], &[0xFF, 0xFF, 1, 0, 0xEE, 0xEE]);
         assert_eq!(ram.accesses.len(), 1 + 2 + 2);
+    }
+
+    #[test]
+    fn lz77_copies_literals_and_references_a_byte_or_two_at_a_time() {
+        // Header: type 0x10, 7 bytes. "A", "B", then 5 from distance 2.
+        let data = [0x10, 7, 0, 0, 0b0010_0000, b'A', b'B', 0x20, 0x01];
+        for waiting in [WaitingByte::Copied, WaitingByte::NotThereYet] {
+            let mut bytes = Ram::with(0x100, &data);
+            bytes.bytes[0x200..0x208].fill(0xEE);
+            lz77(&mut bytes, 0x100, 0x200, false, waiting);
+            assert_eq!(&bytes.bytes[0x200..0x208], b"ABABABA\xEE");
+
+            // Two at a time, the odd seventh byte is never written.
+            let mut halfwords = Ram::with(0x100, &data);
+            halfwords.bytes[0x200..0x208].fill(0xEE);
+            lz77(&mut halfwords, 0x100, 0x200, true, waiting);
+            assert_eq!(&halfwords.bytes[0x200..0x208], b"ABABAB\xEE\xEE");
+        }
+    }
+
+    /// "Q", then three bytes from distance 1, two bytes at a time over
+    /// E0 E1 E2 E3: the first and third are asked for while a byte waits.
+    fn lz77_from_distance_1(waiting: WaitingByte) -> Ram {
+        let data = [0x10, 4, 0, 0, 0b0100_0000, b'Q', 0x00, 0x00];
+        let mut ram = Ram::with(0x100, &data);
+        ram.bytes[0x200..0x204].copy_from_slice(&[0xE0, 0xE1, 0xE2, 0xE3]);
+        lz77(&mut ram, 0x100, 0x200, true, waiting);
+        ram
+    }
+
+    #[test]
+    fn a_gbas_lz77_copies_a_waiting_byte_from_distance_1_without_reading_memory() {
+        let ram = lz77_from_distance_1(WaitingByte::Copied);
+        assert_eq!(&ram.bytes[0x200..0x204], b"QQQQ");
+        // The header and four bytes of data, then one read of memory, for
+        // the second of the three, which no byte was waiting before.
+        let reads = [0x100, 0x104, 0x105, 0x106, 0x107, 0x201];
+        let read = |made: &Made| match *made {
+            Made::Read { address, .. } => Some(address),
+            Made::Write { .. } => None,
+        };
+        assert_eq!(
+            ram.accesses.iter().filter_map(read).collect::<Vec<_>>(),
+            reads
+        );
+    }
+
+    #[test]
+    fn a_dss_lz77_reads_what_memory_held_from_distance_1_while_a_byte_waits() {
+        let ram = lz77_from_distance_1(WaitingByte::NotThereYet);
+        // Old E0 ("Q" is waiting), the E0 just written, then old E2.
+        assert_eq!(&ram.bytes[0x200..0x204], &[b'Q', 0xE0, 0xE0, 0xE2]);
+        let back = |address| Made::Read { address, bytes: 1 };
+        for address in [0x200, 0x201, 0x202] {
+            assert!(ram.accesses.contains(&back(address)), "{address:#X}");
+        }
+    }
+
+    #[test]
+    fn a_byte_at_a_time_nothing_waits_so_the_consoles_agree_at_distance_1() {
+        // "A", then five from distance 1.
+        let data = [0x10, 6, 0, 0, 0b0100_0000, b'A', 0x20, 0x00];
+        let unpack = |waiting| {
+            let mut ram = Ram::with(0x100, &data);
+            lz77(&mut ram, 0x100, 0x200, false, waiting);
+            (ram.bytes, ram.accesses)
+        };
+        let copied = unpack(WaitingByte::Copied);
+        assert_eq!(&copied.0[0x200..0x206], b"AAAAAA");
+        assert!(copied == unpack(WaitingByte::NotThereYet));
+    }
+
+    #[test]
+    fn run_length_copies_literals_and_runs_a_byte_or_two_at_a_time() {
+        // Header: type 0x30, 9 bytes. "ab", then "z" seven times.
+        let data = [0x30, 9, 0, 0, 0x01, b'a', b'b', 0x84, b'z'];
+        let mut bytes = Ram::with(0x100, &data);
+        run_length(&mut bytes, 0x100, 0x201, false);
+        assert_eq!(&bytes.bytes[0x200..0x20B], b"\0abzzzzzzz\0");
+
+        let mut halfwords = Ram::with(0x100, &data);
+        halfwords.bytes[0x200..0x20A].fill(0xEE);
+        run_length(&mut halfwords, 0x100, 0x200, true);
+        assert_eq!(&halfwords.bytes[0x200..0x20A], b"abzzzzzz\xEE\xEE");
+    }
+
+    #[test]
+    fn a_function_reads_no_more_than_its_data_takes() {
+        // Nothing to write: only the header is read.
+        let mut empty = Ram::with(0x100, &[0x30, 0, 0, 0, 0xFF]);
+        run_length(&mut empty, 0x100, 0x200, false);
+        assert_eq!(
+            empty.accesses,
+            [Made::Read {
+                address: 0x100,
+                bytes: 4
+            }]
+        );
+
+        // A run longer than the length stops at the length, and a literal
+        // stretch cut short by it reads no further.
+        let mut run = Ram::with(0x100, &[0x30, 2, 0, 0, 0xFF, b'r']);
+        run_length(&mut run, 0x100, 0x200, false);
+        assert_eq!(&run.bytes[0x200..0x203], b"rr\0");
+        let mut literals = Ram::with(0x100, &[0x30, 2, 0, 0, 0x7F, b'x', b'y', b'z']);
+        run_length(&mut literals, 0x100, 0x200, false);
+        assert_eq!(&literals.bytes[0x200..0x203], b"xy\0");
+        let last_read = literals.accesses.iter().rev().find_map(|made| match *made {
+            Made::Read { address, .. } => Some(address),
+            Made::Write { .. } => None,
+        });
+        assert_eq!(last_read, Some(0x106), "the byte after is not read");
     }
 }

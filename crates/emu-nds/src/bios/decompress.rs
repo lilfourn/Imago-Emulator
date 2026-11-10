@@ -7,10 +7,17 @@
 //! per unit, so a decoder keeps all of its progress in itself and can stop
 //! between any two units (see `callback.rs`).
 
-use emu_arm::{Access, Bus};
+use emu_arm::Bus;
 use serde::{Deserialize, Serialize};
 
+use emu_arm::bios::WaitingByte;
 pub(crate) use emu_arm::bios::{Huffman, Lz77, Output, RunLength};
+
+/// What the DS's LZ77 copies from distance 1 while the byte before waits
+/// to be written as half of a halfword: what the destination held, since
+/// that byte is not in memory yet (GBATEK's caution that the "Vram" LZ77
+/// functions need Disp of at least 1).
+const WAITING_BYTE: WaitingByte = WaitingByte::NotThereYet;
 
 /// What a decoder takes next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +57,7 @@ impl Decoder {
     /// a word, as [`Decoder::wants`] said.
     pub(crate) fn feed<B: Bus>(&mut self, value: u32, out: &mut Output, bus: &mut B) {
         match self {
-            Self::Lz77(lz77) => lz77.feed(value as u8, out, bus),
+            Self::Lz77(lz77) => lz77.feed(value as u8, out, bus, WAITING_BYTE),
             Self::RunLength(run_length) => run_length.feed(value as u8, out, bus),
             Self::Huffman(huffman) if huffman.copying_tree() => {
                 huffman.copy_tree(value as u8, bus);
@@ -64,18 +71,13 @@ impl Decoder {
 /// at `source`, written a byte at a time to `destination`.
 pub(crate) fn read_normal<B: Bus>(
     bus: &mut B,
-    mut source: u32,
+    source: u32,
     destination: u32,
     mut decoder: Decoder,
 ) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    source = source.wrapping_add(4);
-    let mut out = Output::new(destination, 1, header >> 8);
-    while !out.done() {
-        let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(1);
-        decoder.feed(u32::from(byte), &mut out, bus);
-    }
+    emu_arm::bios::read_normal(bus, source, destination, 1, |byte, out, bus| {
+        decoder.feed(u32::from(byte), out, bus);
+    });
 }
 
 #[cfg(test)]
