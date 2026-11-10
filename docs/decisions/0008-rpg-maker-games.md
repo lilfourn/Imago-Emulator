@@ -391,3 +391,8 @@ communicate, and it neither links nor modifies mkxp-z. The bridge script
 is a game script that mkxp-z interprets, as it interprets any game's.
 Nothing from this repository is in `lilfourn/imago-mkxp-z`.
 
+## Update, 2026-11-10: one installer
+
+The player's download is `emu_os::install` over `emu_os::fetch`, shared
+with the 3DS core's and the randomizer's (see decision 0011's update of
+the same day).

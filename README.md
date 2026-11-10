@@ -348,11 +348,15 @@ turbo_a = ["South"]
 b = ["West"]
 ```
 
-Battery saves (`game.sav`), save states (`game.ss1` to `game.ss4`),
-cheats (`game.cht`) and the game's own bindings (`game.bindings.toml`) live
-next to the ROM. A linked pair keeps each game's `.sav`, `.cht` and
-bindings, and saves its states next to the first ROM as `game.ls1` to
-`game.ls4`. GBA `.sav` files hold the raw save memory, as in mGBA.
+Battery saves (`game.sav`), save states (`game.ss1` to `game.ss4` from the
+menus; a script may also use `game.ss5` to `game.ss9`), cheats
+(`game.cht`) and the game's own bindings (`game.bindings.toml`) live next
+to the ROM. Loading a state made with a different in-game save keeps the
+save it replaces as `game.sav.before-load` (the newest five are kept);
+rewinding past an in-game save undoes it. A linked pair keeps each
+game's `.sav`, `.cht` and bindings, and saves its states next to the
+first ROM as `game.ls1` to `game.ls4`. GBA `.sav` files hold the raw
+save memory, as in mGBA.
 
 ## Screenshots and recordings
 
@@ -727,14 +731,18 @@ skipped. CI fetches everything but the mGBA suite, whose only download is
 a moving "latest" build; `fetch-mgba-suite.sh` checks it against a pinned
 commit's build.
 
+CI also runs `cargo deny check advisories`. `deny.toml` says what fails
+it: a known vulnerability or an unsound crate anywhere in the tree, or an
+unmaintained crate the workspace depends on directly.
+
 ## Workspace
 
 | Crate | Purpose |
 |---|---|
-| `emu-core` | The `Core` trait and the plain data that crosses it |
+| `emu-core` | The `Core` trait, the plain data that crosses it, and the debugger pictures' and linked pairs' shared code |
 | `emu-sched` | Cycle-timestamped event scheduler |
-| `emu-state` | Save-state container format |
-| `emu-arm` | ARM7TDMI (GBA, DS ARM7) and ARM946E-S (DS ARM9) interpreters |
+| `emu-state` | Save-state container, and the checked reading and writing of a core's state |
+| `emu-arm` | ARM7TDMI (GBA, DS ARM7) and ARM946E-S (DS ARM9) interpreters, and the BIOS routines both consoles share |
 | `emu-psg` | The Game Boy family's sound generator, shared by GB and GBA |
 | `emu-gba-cart` | The GBA cartridge, shared by the GBA core and the DS GBA slot |
 | `emu-gb` | Game Boy and Game Boy Color core |
@@ -747,6 +755,7 @@ commit's build.
 | `emu-script` | Lua scripts, sandboxed, run between frames |
 | `emu-guide` | Guide's OpenRouter connection: sign-in, the key, the API |
 | `emu-cores` | Picks the core for a ROM |
+| `emu-os` | What differs by system: folders, other programs, downloads, locks |
 | `emu-headless` | Windowless runner for test ROMs |
 | `emu-app` | The GPUI app (`ds-emulator` binary) |
 

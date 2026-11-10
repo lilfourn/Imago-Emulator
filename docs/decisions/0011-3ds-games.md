@@ -419,3 +419,17 @@ state saved and loaded (or under Vulkan, the refusal homebrew gets), and
 --test real_core -- --ignored`. On this Mac it installed the core and
 MoltenVK and played at 186 fps on Vulkan; on Linux for ARM it checks the
 install refuses, with the words above.
+
+## Update, 2026-11-10: after the review
+
+- `emulator::set_aside_own_saves`, named in the 2026-11-04 update, is
+  now `emulator::erase_progress`, which sets aside an RPG Maker game's
+  saves as well.
+- The app stops the running game before a 3DS game's helper starts, so
+  the helper's five-second wait for `3DS/helper.lock` is the second
+  guard, not the only one.
+- The core's installer is `emu_os::install` over `emu_os::fetch`, which
+  the RPG Maker player's and the randomizer's installers share: one
+  download, checked against its pinned digest, then put in place. All
+  three use `/usr/bin/curl` on macOS and `curl` from `PATH` elsewhere,
+  with the same user agent, and never read `~/.curlrc`.

@@ -153,3 +153,15 @@ missed 18 others.
   Pokemon, Orchestrina's Zelda songs, Sonic Robo Blast 2, Nazi Zombies:
   Portable. Their files were not checked one by one; withholding one is a
   line in `WITHHELD`.
+
+## Update, 2026-11-10: what a catalog can ask for
+
+A catalog is another site's file, so the app holds it to limits:
+
+- Downloads are HTTPS only. An entry whose download is not is not
+  offered (one today).
+- A download is written into its work folder as it comes, and a program
+  unpacking it is stopped past twice what the archive lists plus 16 MiB
+  (32 GiB at most; 8 GiB if it lists nothing), 100,000 files and
+  folders, or folders 64 deep.
+- An entry's website link is kept only if it is `http://` or `https://`.
