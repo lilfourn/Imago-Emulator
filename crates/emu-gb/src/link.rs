@@ -23,11 +23,6 @@ use crate::{CYCLES_PER_FRAME, Gb, INFO, Machine};
 /// Clock cycles each machine runs before the cable is serviced.
 const SLICE_CYCLES: u64 = 32;
 
-/// The furthest apart a state's two clocks may be. A slice leaves them
-/// an instruction apart, and the console behind runs until it has caught
-/// up, so a state that put them years apart would hold a frame as long.
-const CLOCKS_APART_MOST: u64 = 1 << 24;
-
 const SCREENS: [ScreenSize; 2] = [ScreenSize::new(160, 144), ScreenSize::new(160, 144)];
 
 /// Two Game Boys and the cable between them, as one two-player core.
@@ -182,10 +177,7 @@ impl Core for Linked {
         // Both are checked before either console is changed.
         first.bus.fits(&self.players[0].machine.bus)?;
         second.bus.fits(&self.players[1].machine.bus)?;
-        payload::check(
-            first.bus.cycles().abs_diff(second.bus.cycles()) <= CLOCKS_APART_MOST,
-            "the linked state's two consoles are not at the same time",
-        )?;
+        pair::clocks_together(first.bus.cycles(), second.bus.cycles())?;
         first.bus.take_media_from(&mut self.players[0].machine.bus);
         second.bus.take_media_from(&mut self.players[1].machine.bus);
         self.players[0].machine = first;

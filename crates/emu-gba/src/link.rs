@@ -26,12 +26,6 @@ use crate::{CYCLES_PER_FRAME, Gba, INFO, Machine};
 /// Cycles each console runs before the other catches up.
 const SLICE_CYCLES: u64 = 128;
 
-/// The furthest apart a state's two clocks may be. A slice leaves them
-/// an instruction or a DMA apart, and the console behind runs until it
-/// has caught up, so a state that put them years apart would hold a
-/// frame as long.
-const CLOCKS_APART_MOST: u64 = 1 << 24;
-
 const SCREENS: [ScreenSize; 2] = [ScreenSize::new(240, 160), ScreenSize::new(240, 160)];
 
 /// Two Game Boy Advances and the cable between them, as one two-player
@@ -231,10 +225,7 @@ impl Core for Linked {
         // Both are checked before either console is changed.
         first.bus.fits()?;
         second.bus.fits()?;
-        payload::check(
-            first.bus.cycles().abs_diff(second.bus.cycles()) <= CLOCKS_APART_MOST,
-            "the linked state's two consoles are not at the same time",
-        )?;
+        pair::clocks_together(first.bus.cycles(), second.bus.cycles())?;
         for (gba, mut machine) in self.players.iter_mut().zip([first, second]) {
             machine.bus.take_media_from(&mut gba.machine.bus);
             gba.machine = machine;

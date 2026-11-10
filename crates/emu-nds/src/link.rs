@@ -34,11 +34,6 @@ use crate::{INFO, Nds, SCREEN};
 /// radio has power: about 15 µs.
 const SLICE_CYCLES: u64 = 512;
 
-/// The furthest apart a state's two clocks may be. They run slice by
-/// slice together, and the console behind runs until it has caught up,
-/// so a state that put them years apart would hold a frame as long.
-const CLOCKS_APART_MOST: u64 = 1 << 24;
-
 /// Two consoles' screens: the first's top and bottom, then the second's.
 const SCREENS: [ScreenSize; 4] = [SCREEN; 4];
 
@@ -259,10 +254,7 @@ impl Core for Linked {
             payload::load(state, "not a linked Nintendo DS state")?;
         self.players[0].check_state(&mut first)?;
         self.players[1].check_state(&mut second)?;
-        payload::check(
-            first.now().abs_diff(second.now()) <= CLOCKS_APART_MOST,
-            "the linked state's two consoles are not at the same time",
-        )?;
+        pair::clocks_together(first.now(), second.now())?;
         for (nds, machine) in self.players.iter_mut().zip([first, second]) {
             nds.install(machine);
         }
