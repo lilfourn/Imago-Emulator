@@ -5,6 +5,10 @@ use serde_json::Value;
 
 use crate::{curl, url};
 
+/// The most one of OpenRouter's answers here may be: each is a few hundred
+/// bytes of JSON.
+const MAX_REPLY: u64 = 1 << 20;
+
 /// Where OpenRouter is: its site, or a stand-in for tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoints {
@@ -133,6 +137,7 @@ impl Endpoints {
             body.to_string().as_bytes(),
             &format!("{}/api/v1/auth/keys", self.site),
             30,
+            MAX_REPLY,
         )
         .map_err(ApiError::Unreachable)?;
         let reply = answer(&response)?;
@@ -158,6 +163,7 @@ impl Endpoints {
             config.as_bytes(),
             &format!("{}/api/v1/key", self.site),
             15,
+            MAX_REPLY,
         )
         .map_err(ApiError::Unreachable)?;
         KeyInfo::parse(&answer(&response)?).ok_or(ApiError::Unreadable)

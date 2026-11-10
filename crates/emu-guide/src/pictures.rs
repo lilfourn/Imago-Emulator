@@ -231,11 +231,10 @@ pub fn download(address: &str) -> Result<Vec<u8>, PictureError> {
     Ok(bytes)
 }
 
-/// What `address` answers, following redirects, which as every request
-/// of the app's go to HTTPS only.
+/// What `address` answers, if it is no more than [`MAX_BYTES`], following
+/// redirects, which as every request of the app's go to HTTPS only.
 fn get(address: &str) -> Result<Vec<u8>, PictureError> {
-    let max = MAX_BYTES.to_string();
-    let reply = curl::request(&["--location", "--max-filesize", &max], &[], address, 20)
+    let reply = curl::request(&["--location"], &[], address, 20, MAX_BYTES as u64)
         .map_err(PictureError::Network)?;
     match reply.status {
         200 => Ok(reply.body),
