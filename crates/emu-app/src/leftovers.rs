@@ -903,10 +903,33 @@ fn remove_unused_files(folder: &Path, wanted: impl Fn(&str) -> bool) -> u64 {
 /// Whether what is at `path` is still in use: `lock` is held, or, if
 /// there is no lock to be had, `path` changed lately.
 fn in_use(lock: &Path, path: &Path) -> bool {
-    match File::open(lock) {
-        Ok(lock) => matches!(lock.try_lock(), Err(fs::TryLockError::WouldBlock)),
-        Err(_) => changed_lately(path),
+    match open_lock(lock) {
+        Some(lock) => matches!(lock.try_lock(), Err(fs::TryLockError::WouldBlock)),
+        None => changed_lately(path),
     }
+}
+
+/// Opens the lock file at `lock`, to try its lock; `None` if no file is
+/// there.
+///
+/// A work folder's lock is in the folder an archive is unpacked into, and
+/// an unpacking program replaces a file with an entry of the same name.
+/// So what has the lock's name may be anything: a pipe, which opening
+/// would wait on for ever, at every launch; or a link, to a file that is
+/// some other program's to lock. Only a file itself is opened, never what
+/// a link leads to, and nothing is waited on.
+#[cfg(unix)]
+fn open_lock(lock: &Path) -> Option<File> {
+    let reading = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let lock = File::from(rustix::fs::open(lock, reading, Mode::empty()).ok()?);
+    lock.metadata().ok()?.is_file().then_some(lock)
+}
+
+/// Opens the lock file at `lock`, to try its lock; `None` if none is
+/// there.
+#[cfg(not(unix))]
+fn open_lock(lock: &Path) -> Option<File> {
+    File::open(lock).ok()
 }
 
 /// Whether what is at `path` changed less than [`STALE`] ago.
@@ -1866,6 +1889,61 @@ mod tests {
             let left = std::env::temp_dir()
                 .join(format!("ds-emulator-unpack-{}-900005", std::process::id()));
             assert!(stop_programs_left_working_in(&left, STOP, GONE_WITHIN));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: a named pipe is not a file in a folder, and making a link there needs a privilege"
+    )]
+    fn what_an_archive_put_under_the_lock_s_name_is_neither_waited_on_nor_followed() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            use std::sync::mpsc;
+
+            let temp = temp_dir("lock-names");
+            // As an archive with an entry of the lock's name leaves a work
+            // folder: where the lock was, a pipe, which opening would wait
+            // on for ever...
+            let piped = temp.join("ds-emulator-unpack-1-0");
+            fs::create_dir_all(&piped).expect("folder");
+            let made = Command::new("mkfifo")
+                .arg(piped.join(LOCK))
+                .status()
+                .expect("mkfifo runs");
+            assert!(made.success());
+            fs::write(piped.join("Game.3ds"), [0; 100]).expect("game");
+            // ...or a link to a file of the user's that a running program
+            // holds locked, which is not the folder's lock.
+            let outside = temp.join("the-user-s.lock");
+            let held = emu_os::lock::lock(&outside).expect("locked");
+            let linked = temp.join("ds-emulator-unpack-1-1");
+            fs::create_dir_all(&linked).expect("folder");
+            symlink(&outside, linked.join(LOCK)).expect("link");
+            fs::write(linked.join("Game.3ds"), [0; 10]).expect("game");
+            // The clean-up, which must come back.
+            let clean_up = || {
+                let (done, freed) = mpsc::channel();
+                let temp = temp.clone();
+                thread::spawn(move || done.send(remove_left_behind_in(&temp, &[])));
+                freed.recv_timeout(Duration::from_secs(10))
+            };
+            // Neither has a lock to be had, so each is in use for as long
+            // as it changed lately, as a folder from before locks is.
+            assert_eq!(clean_up(), Ok(0), "no waiting, and both are new");
+            assert!(piped.exists() && linked.exists());
+            // And done with once it is old.
+            age(&piped, Duration::from_secs(2 * 60 * 60));
+            age(&linked, Duration::from_secs(2 * 60 * 60));
+            // The two games, and the link itself: not what it leads to.
+            let link = fs::symlink_metadata(linked.join(LOCK)).expect("link").len();
+            assert_eq!(clean_up(), Ok(100 + 10 + link), "both are old");
+            assert!(!piped.exists() && !linked.exists());
+            assert!(outside.exists(), "the user's file is as it was");
+            drop(held);
+            remove_folder(&temp);
         }
     }
 
