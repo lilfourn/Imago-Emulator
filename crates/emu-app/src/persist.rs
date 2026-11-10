@@ -238,8 +238,10 @@ impl StateFiles {
         }
     }
 
-    /// What is at `path`, by the first bytes of a save state's header (see
-    /// `emu-state`): its magic, its system and its ROMs' checksum.
+    /// What is at `path`, by the start of a save state's header alone
+    /// ([`emu_state::Header::peek`]): a state of this session's system and
+    /// ROMs is its own whichever build's core saved it, and whether or not
+    /// the rest of the file is whole.
     ///
     /// # Errors
     ///
@@ -250,16 +252,21 @@ impl StateFiles {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Found::Nothing),
             Err(error) => return Err(error),
         };
-        let mut header = [0; 20];
-        let ours = match file.read_exact(&mut header) {
-            Ok(()) => {
-                &header[..8] == b"EMUSTATE"
-                    && header[10] == self.system.tag()
-                    && header[16..20] == self.rom_crc32.to_le_bytes()
-            }
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
+        let mut start = [0; emu_state::Header::PEEK_LEN];
+        let header = match file.read_exact(&mut start) {
+            Ok(()) => emu_state::Header::peek(&start),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => None,
             Err(error) => return Err(error),
         };
+        let ours = header.is_some_and(|header| {
+            // The state's own version, which is not what makes it ours.
+            let playing = emu_state::Header {
+                system: self.system,
+                state_version: header.state_version,
+                rom_crc32: self.rom_crc32,
+            };
+            header.check(&playing).is_ok()
+        });
         Ok(if ours { Found::Ours } else { Found::Another })
     }
 
