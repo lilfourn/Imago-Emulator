@@ -890,6 +890,449 @@ mod tests {
             .collect()
     }
 
+    /// The keys of `binding`, as GPUI writes them, with its context if it
+    /// has one.
+    fn keys_of(binding: &KeyBinding) -> String {
+        let keys: Vec<String> = binding
+            .keystrokes()
+            .iter()
+            .map(|keystroke| keystroke.inner().unparse())
+            .collect();
+        match binding.predicate() {
+            Some(context) => format!("{} in {context}", keys.join(" ")),
+            None => keys.join(" "),
+        }
+    }
+
+    /// Every menu item with an action, by its path through the menus
+    /// (`View > Picture > Smooth`), with the action.
+    fn items_of(menus: &[Menu]) -> Vec<(String, Box<dyn gpui::Action>)> {
+        fn walk(path: &str, items: &[MenuItem], out: &mut Vec<(String, Box<dyn gpui::Action>)>) {
+            for item in items {
+                match item {
+                    MenuItem::Action { name, action, .. } => {
+                        out.push((format!("{path} > {name}"), action.boxed_clone()));
+                    }
+                    MenuItem::Submenu(menu) => {
+                        walk(&format!("{path} > {}", menu.name), &menu.items, out);
+                    }
+                    MenuItem::Separator | MenuItem::SystemMenu(_) => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for menu in menus {
+            walk(&menu.name, &menu.items, &mut out);
+        }
+        out
+    }
+
+    /// The menus as text: each menu's name, then its items in order, one
+    /// to a line and indented under what they are in. A separator is `-`,
+    /// a submenu ends in ` >`, a choice is `✓ name` if checked and `·name`
+    /// if not, and an item is followed by the keys of every binding that
+    /// runs its very action, in the order bound: those the system's menu
+    /// bar and the window's menu pick its shortcut from.
+    fn menus_written(menus: &[Menu], bindings: &[KeyBinding]) -> String {
+        fn walk(depth: usize, items: &[MenuItem], bindings: &[KeyBinding], out: &mut String) {
+            let indent = "  ".repeat(depth);
+            for item in items {
+                match item {
+                    MenuItem::Separator => out.push_str(&format!("{indent}-\n")),
+                    MenuItem::SystemMenu(menu) => {
+                        out.push_str(&format!("{indent}{} (system)\n", menu.name));
+                    }
+                    MenuItem::Submenu(menu) => {
+                        out.push_str(&format!("{indent}{} >\n", menu.name));
+                        walk(depth + 1, &menu.items, bindings, out);
+                    }
+                    MenuItem::Action { name, action, .. } => {
+                        // A choice not checked starts with an em space,
+                        // which nobody can see in a listing.
+                        let name = name.replace('\u{2003}', "·");
+                        let keys: Vec<String> = bindings
+                            .iter()
+                            .filter(|binding| binding.action().partial_eq(action.as_ref()))
+                            .map(keys_of)
+                            .collect();
+                        if keys.is_empty() {
+                            out.push_str(&format!("{indent}{name}\n"));
+                        } else {
+                            out.push_str(&format!("{indent}{name}  [{}]\n", keys.join(", ")));
+                        }
+                    }
+                }
+            }
+        }
+        let mut out = String::new();
+        for menu in menus {
+            out.push_str(&format!("{}\n", menu.name));
+            walk(1, &menu.items, bindings, &mut out);
+        }
+        out
+    }
+
+    /// The bindings as text, in the order bound, which decides between
+    /// two on one key: each one's keys, then the menu item it runs, by its
+    /// path, or the name of its action if no menu has it.
+    fn bindings_written(bindings: &[KeyBinding], menus: &[Menu]) -> String {
+        let items = items_of(menus);
+        let mut out = String::new();
+        for binding in bindings {
+            let runs = items
+                .iter()
+                .find(|(_, action)| action.partial_eq(binding.action()))
+                .map_or_else(
+                    || format!("({})", binding.action().name()),
+                    |(path, _)| path.clone(),
+                );
+            out.push_str(&format!("{}  ->  {runs}\n", keys_of(binding)));
+        }
+        out
+    }
+
+    /// macOS's menu bar with nothing changed from the defaults, as
+    /// [`menus_written`] writes it: recorded from the build before the
+    /// menus' choices became actions that carry their value.
+    const MAC_MENUS: &str = r#"Imago Emulator
+  About Imago Emulator
+  -
+  Settings…  [cmd-,]
+  -
+  Services (system)
+  -
+  Hide Imago Emulator  [cmd-h]
+  Hide Others  [alt-cmd-h]
+  Show All
+  -
+  Quit Imago Emulator  [cmd-q]
+File
+  Open ROM…  [cmd-o]
+  Add Games to Library…  [cmd-shift-a]
+  Game Store  [cmd-shift-g]
+  Game Info  [cmd-i in Emulator]
+  Remove from Library  [cmd-backspace in Emulator]
+  Close Game  [cmd-w]
+  Connect Second Console…
+  Insert GBA Cartridge…
+  -
+  Randomize Game…  [alt-cmd-r]
+  -
+  Save Screenshot  [cmd-shift-s]
+  Screenshot for Guide  [alt-cmd-s]
+  Start / Stop Recording  [cmd-shift-r]
+  -
+  Edit Cheats…
+  -
+  Run Script…  [cmd-shift-l]
+  Stop Script  [alt-cmd-l]
+Emulation
+  Pause / Resume  [cmd-p]
+  Reset  [cmd-r]
+  Fast-Forward  [cmd-f]
+  Slow Motion  [cmd-shift-f]
+  Fast-Forward Speed >
+    ✓ 2×
+    ·3×
+    ·4×
+    ·Unlimited
+  Switch Player  [cmd-t]
+  Use Microphone
+  -
+  Step Instruction  [cmd-shift-i]
+  Step Over  [cmd-shift-o]
+  Next Frame  [cmd-shift-n]
+  -
+  Save State  [cmd-s]
+  Load State  [cmd-l]
+  Next State Slot  [cmd-]]
+  Previous State Slot  [cmd-[]
+View
+  Screens Stacked  [cmd-1]
+  Screens Side by Side  [cmd-2]
+  One Screen  [cmd-3]
+  One Large, Both Small  [cmd-4]
+  -
+  Swap Screens  [cmd-e]
+  Rotate Clockwise  [alt-cmd-right]
+  Rotate Anticlockwise  [alt-cmd-left]
+  Change Screen Gap  [cmd-g]
+  -
+  3D Resolution >
+    Match Display
+    Native (1×)
+    2×
+    3×
+    4×
+    6×
+    8×
+  Picture >
+    Auto
+    Sharp Pixels
+    Smooth
+    Rounded Pixels
+    LCD Grid
+    Scanlines
+  Colour Correction  [cmd-shift-c]
+  Show FPS  [alt-cmd-f]
+  Original Game Boy Games >
+    In Grey, as on a Game Boy
+    In Colour, as on a Game Boy Color
+  -
+  Guide  [cmd-j]
+  Show / Hide Window Controls
+  Debugger  [cmd-shift-d]
+Window
+  Minimize  [cmd-m]
+  Zoom
+"#;
+
+    /// macOS's bindings, as [`bindings_written`] writes them, from the
+    /// same build.
+    const MAC_BINDINGS: &str = r#"cmd-,  ->  Imago Emulator > Settings…
+cmd-o  ->  File > Open ROM…
+cmd-shift-a  ->  File > Add Games to Library…
+cmd-shift-g  ->  File > Game Store
+alt-cmd-r  ->  File > Randomize Game…
+cmd-i in Emulator  ->  File > Game Info
+cmd-backspace in Emulator  ->  File > Remove from Library
+cmd-w  ->  File > Close Game
+cmd-w in Settings  ->  (ds_emulator::CloseWindow)
+cmd-w in Debugger  ->  (ds_emulator::CloseWindow)
+cmd-m  ->  Window > Minimize
+cmd-t  ->  Emulation > Switch Player
+cmd-p  ->  Emulation > Pause / Resume
+cmd-r  ->  Emulation > Reset
+cmd-s  ->  Emulation > Save State
+cmd-l  ->  Emulation > Load State
+cmd-shift-s  ->  File > Save Screenshot
+cmd-j  ->  View > Guide
+alt-cmd-s  ->  File > Screenshot for Guide
+cmd-shift-r  ->  File > Start / Stop Recording
+cmd-shift-l  ->  File > Run Script…
+alt-cmd-l  ->  File > Stop Script
+cmd-]  ->  Emulation > Next State Slot
+cmd-[  ->  Emulation > Previous State Slot
+cmd-f  ->  Emulation > Fast-Forward
+cmd-shift-f  ->  Emulation > Slow Motion
+alt-cmd-f  ->  View > Show FPS
+cmd-1  ->  View > Screens Stacked
+cmd-2  ->  View > Screens Side by Side
+cmd-3  ->  View > One Screen
+cmd-4  ->  View > One Large, Both Small
+cmd-e  ->  View > Swap Screens
+alt-cmd-right  ->  View > Rotate Clockwise
+alt-cmd-left  ->  View > Rotate Anticlockwise
+cmd-g  ->  View > Change Screen Gap
+cmd-shift-c  ->  View > Colour Correction
+cmd-shift-d  ->  View > Debugger
+cmd-shift-i  ->  Emulation > Step Instruction
+cmd-shift-o  ->  Emulation > Step Over
+cmd-shift-n  ->  Emulation > Next Frame
+ctrl-cmd-f  ->  (ds_emulator::ToggleFullScreen)
+cmd-q  ->  Imago Emulator > Quit Imago Emulator
+cmd-h  ->  Imago Emulator > Hide Imago Emulator
+alt-cmd-h  ->  Imago Emulator > Hide Others
+"#;
+
+    /// The window's menu on Linux and Windows, from the same build, with
+    /// `{quit}` where Windows says Exit and Linux Quit.
+    const OTHER_MENUS: &str = r#"File
+  Open ROM…  [ctrl-o]
+  Open Game Folder…
+  Add Games to Library…  [ctrl-shift-a]
+  Add Game Folders to Library…
+  Game Store  [ctrl-shift-g]
+  Game Info  [ctrl-i in Emulator]
+  Remove from Library  [delete in Emulator]
+  Close Game  [ctrl-w]
+  Connect Second Console…
+  Insert GBA Cartridge…
+  -
+  Randomize Game…  [ctrl-alt-r]
+  -
+  Save Screenshot  [ctrl-shift-s]
+  Screenshot for Guide  [ctrl-alt-s]
+  Start / Stop Recording  [ctrl-shift-r]
+  -
+  Edit Cheats…
+  -
+  Run Script…  [ctrl-shift-l]
+  Stop Script  [ctrl-shift-k]
+  -
+  Settings…  [ctrl-,]
+  -
+  {quit}  [ctrl-q]
+Emulation
+  Pause / Resume  [ctrl-p]
+  Reset  [ctrl-r]
+  Fast-Forward  [ctrl-f]
+  Slow Motion  [ctrl-shift-f]
+  Fast-Forward Speed >
+    ✓ 2×
+    ·3×
+    ·4×
+    ·Unlimited
+  Switch Player  [ctrl-t]
+  Use Microphone
+  -
+  Step Instruction  [ctrl-shift-i]
+  Step Over  [ctrl-shift-o]
+  Next Frame  [ctrl-shift-n]
+  -
+  Save State  [ctrl-s]
+  Load State  [ctrl-l]
+  Next State Slot  [ctrl-]]
+  Previous State Slot  [ctrl-[]
+View
+  Screens Stacked  [ctrl-1]
+  Screens Side by Side  [ctrl-2]
+  One Screen  [ctrl-3]
+  One Large, Both Small  [ctrl-4]
+  -
+  Swap Screens  [ctrl-e]
+  Rotate Clockwise  [ctrl-shift-right]
+  Rotate Anticlockwise  [ctrl-shift-left]
+  Change Screen Gap  [ctrl-g]
+  -
+  3D Resolution >
+    Match Display
+    Native (1×)
+    2×
+    3×
+    4×
+    6×
+    8×
+  Picture >
+    Auto
+    Sharp Pixels
+    Smooth
+    Rounded Pixels
+    LCD Grid
+    Scanlines
+  Colour Correction  [ctrl-shift-c]
+  Show FPS  [ctrl-alt-f]
+  Original Game Boy Games >
+    In Grey, as on a Game Boy
+    In Colour, as on a Game Boy Color
+  -
+  Guide  [ctrl-j]
+  Show / Hide Window Controls
+  Debugger  [ctrl-shift-d]
+  -
+  Full Screen  [f11]
+Window
+  Minimize  [ctrl-m]
+  Maximize
+Help
+  About Imago Emulator
+"#;
+
+    /// Linux's and Windows's bindings, from the same build.
+    const OTHER_BINDINGS: &str = r#"ctrl-,  ->  File > Settings…
+ctrl-o  ->  File > Open ROM…
+ctrl-shift-a  ->  File > Add Games to Library…
+ctrl-shift-g  ->  File > Game Store
+ctrl-alt-r  ->  File > Randomize Game…
+ctrl-i in Emulator  ->  File > Game Info
+delete in Emulator  ->  File > Remove from Library
+ctrl-w  ->  File > Close Game
+ctrl-w in Settings  ->  (ds_emulator::CloseWindow)
+ctrl-w in Debugger  ->  (ds_emulator::CloseWindow)
+ctrl-m  ->  Window > Minimize
+ctrl-t  ->  Emulation > Switch Player
+ctrl-p  ->  Emulation > Pause / Resume
+ctrl-r  ->  Emulation > Reset
+ctrl-s  ->  Emulation > Save State
+ctrl-l  ->  Emulation > Load State
+ctrl-shift-s  ->  File > Save Screenshot
+ctrl-j  ->  View > Guide
+ctrl-alt-s  ->  File > Screenshot for Guide
+ctrl-shift-r  ->  File > Start / Stop Recording
+ctrl-shift-l  ->  File > Run Script…
+ctrl-shift-k  ->  File > Stop Script
+ctrl-]  ->  Emulation > Next State Slot
+ctrl-[  ->  Emulation > Previous State Slot
+ctrl-f  ->  Emulation > Fast-Forward
+ctrl-shift-f  ->  Emulation > Slow Motion
+ctrl-alt-f  ->  View > Show FPS
+ctrl-1  ->  View > Screens Stacked
+ctrl-2  ->  View > Screens Side by Side
+ctrl-3  ->  View > One Screen
+ctrl-4  ->  View > One Large, Both Small
+ctrl-e  ->  View > Swap Screens
+ctrl-shift-right  ->  View > Rotate Clockwise
+ctrl-shift-left  ->  View > Rotate Anticlockwise
+ctrl-g  ->  View > Change Screen Gap
+ctrl-shift-c  ->  View > Colour Correction
+ctrl-shift-d  ->  View > Debugger
+ctrl-shift-i  ->  Emulation > Step Instruction
+ctrl-shift-o  ->  Emulation > Step Over
+ctrl-shift-n  ->  Emulation > Next Frame
+f11  ->  View > Full Screen
+ctrl-q  ->  File > {quit}
+f10  ->  (ds_emulator::ShowAppMenu)
+"#;
+
+    /// What [`OTHER_MENUS`] and [`OTHER_BINDINGS`] say on this system.
+    fn off_macos(written: &str) -> String {
+        written.replace("{quit}", if cfg!(windows) { "Exit" } else { "Quit" })
+    }
+
+    #[test]
+    fn every_menu_item_its_title_its_place_and_its_shortcuts_are_what_they_were() {
+        let written = menus_written(&menus(MenuChecks::default()), &bindings());
+        if cfg!(target_os = "macos") {
+            assert_eq!(written, MAC_MENUS);
+        } else {
+            assert_eq!(written, off_macos(OTHER_MENUS));
+        }
+    }
+
+    #[test]
+    fn every_binding_runs_what_it_ran_in_the_order_it_was_bound() {
+        let written = bindings_written(&bindings(), &menus(MenuChecks::default()));
+        if cfg!(target_os = "macos") {
+            assert_eq!(written, MAC_BINDINGS);
+        } else {
+            assert_eq!(written, off_macos(OTHER_BINDINGS));
+        }
+    }
+
+    #[test]
+    fn the_menus_checks_follow_what_is_chosen_and_change_nothing_else() {
+        let default = menus_written(&menus(MenuChecks::default()), &bindings());
+        let other = menus_written(
+            &menus(MenuChecks {
+                fast_forward: speed::FAST_FORWARD_CHOICES[3],
+                show_fps: true,
+            }),
+            &bindings(),
+        );
+        let changed: Vec<(&str, &str)> = default
+            .lines()
+            .zip(other.lines())
+            .filter(|(was, is)| was != is)
+            .collect();
+        let fps = if cfg!(target_os = "macos") {
+            "alt-cmd-f"
+        } else {
+            "ctrl-alt-f"
+        };
+        assert_eq!(
+            changed,
+            [
+                ("    ✓ 2×", "    ·2×"),
+                ("    ·Unlimited", "    ✓ Unlimited"),
+                (
+                    format!("  Show FPS  [{fps}]").as_str(),
+                    format!("  Hide FPS  [{fps}]").as_str()
+                ),
+            ]
+        );
+        assert_eq!(default.lines().count(), other.lines().count());
+    }
+
     #[test]
     #[cfg_attr(
         not(target_os = "macos"),
