@@ -18,8 +18,7 @@
 use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::thread::{self, JoinHandle};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use emu_core::{CoreInfo, Frame, FrameRate, ScreenSize, StereoSample};
@@ -27,6 +26,7 @@ use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 
 use crate::capture;
 use crate::mov::{self, MovWriter};
+use crate::worker::Worker;
 
 /// Frames the writer may fall behind before the emulation waits for it.
 const QUEUE_FRAMES: usize = 16;
@@ -37,8 +37,9 @@ const JPEG_QUALITY: u8 = 90;
 /// A recording in progress. Dropping it finishes the movie.
 pub struct Recorder {
     path: PathBuf,
-    moments: Option<SyncSender<Moment>>,
-    writer: Option<JoinHandle<io::Result<Recording>>>,
+    /// The thread that writes the movie, which it finishes once its queue
+    /// of moments closes.
+    writer: Worker<Moment, io::Result<Recording>>,
 }
 
 /// A finished recording.
@@ -79,15 +80,10 @@ impl Recorder {
         };
         let movie = MovWriter::new(BufWriter::new(file), video, info.audio_sample_rate)?;
         let players = info.players;
-        let (moments, receiver) = mpsc::sync_channel(QUEUE_FRAMES);
-        let writer = thread::Builder::new()
-            .name("recording".to_owned())
-            .spawn(move || write(movie, &receiver, players, size))?;
-        Ok(Self {
-            path,
-            moments: Some(moments),
-            writer: Some(writer),
-        })
+        let writer = Worker::start_bounded("recording", QUEUE_FRAMES, move |moments| {
+            write(movie, &moments, players, size)
+        })?;
+        Ok(Self { path, writer })
     }
 
     /// The movie's file.
@@ -99,14 +95,10 @@ impl Recorder {
     /// waiting if the writer is far behind. Returns false if the writer
     /// stopped after an error, which [`Recorder::finish`] returns.
     pub fn push(&self, screens: &[Frame], sound: &[StereoSample]) -> bool {
-        let Some(moments) = &self.moments else {
-            return false;
-        };
-        let moment = Moment {
+        self.writer.send(Moment {
             screens: screens.to_vec(),
             sound: sound.to_vec(),
-        };
-        moments.send(moment).is_ok()
+        })
     }
 
     /// Writes the frames still queued and finishes the movie.
@@ -115,24 +107,10 @@ impl Recorder {
     ///
     /// Returns the error that stopped the writer, if any.
     pub fn finish(mut self) -> io::Result<Recording> {
-        self.stop()
-    }
-
-    fn stop(&mut self) -> io::Result<Recording> {
         // Closing the queue lets the writer finish.
-        self.moments = None;
-        match self.writer.take().map(JoinHandle::join) {
-            Some(Ok(result)) => result,
-            _ => Err(io::Error::other("the recording thread stopped")),
-        }
-    }
-}
-
-impl Drop for Recorder {
-    fn drop(&mut self) {
-        if self.writer.is_some() {
-            self.stop().ok();
-        }
+        self.writer
+            .stop()
+            .unwrap_or_else(|| Err(io::Error::other("the recording thread stopped")))
     }
 }
 

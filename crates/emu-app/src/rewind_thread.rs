@@ -10,9 +10,9 @@
 //! waits for the worker to finish what it was sent, then for the state.
 
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread::{self, JoinHandle};
 
 use crate::rewind::Rewind;
+use crate::worker::Worker;
 
 /// States sent but not yet recorded, beyond which frames are skipped.
 const MAX_PENDING: usize = 2;
@@ -40,13 +40,14 @@ enum Reply {
 /// The emulation thread's handle on the rewind history. Dropping it stops
 /// the worker.
 pub struct RewindThread {
-    jobs: Option<Sender<Job>>,
+    /// Dropped first, which stops the worker after the jobs it was sent,
+    /// while `replies` still takes what it sends back.
+    worker: Worker<Job>,
     replies: Receiver<Reply>,
     /// Buffers to serialize states into.
     spares: Vec<Vec<u8>>,
     /// States sent that the worker has not yet recorded.
     pending: usize,
-    worker: Option<JoinHandle<()>>,
 }
 
 impl RewindThread {
@@ -56,18 +57,14 @@ impl RewindThread {
     ///
     /// Returns the error if the system will not start a thread.
     pub fn start(budget_bytes: usize) -> std::io::Result<Self> {
-        let (jobs, job_receiver) = mpsc::channel();
         let (reply_sender, replies) = mpsc::channel();
         let history = Rewind::new(budget_bytes);
-        let worker = thread::Builder::new()
-            .name("rewind".to_owned())
-            .spawn(move || work(history, &job_receiver, &reply_sender))?;
+        let worker = Worker::start("rewind", move |jobs| work(history, &jobs, &reply_sender))?;
         Ok(Self {
-            jobs: Some(jobs),
+            worker,
             replies,
             spares: Vec::new(),
             pending: 0,
-            worker: Some(worker),
         })
     }
 
@@ -114,10 +111,8 @@ impl RewindThread {
     }
 
     fn send(&self, job: Job) {
-        if let Some(jobs) = &self.jobs {
-            // A send error means the worker stopped; there is no history.
-            jobs.send(job).ok();
-        }
+        // False means the worker stopped; there is no history.
+        self.worker.send(job);
     }
 
     /// Notes a reply to a push, keeping the buffer it brings.
@@ -127,16 +122,6 @@ impl RewindThread {
             if self.spares.len() < MAX_PENDING {
                 self.spares.extend(spare);
             }
-        }
-    }
-}
-
-impl Drop for RewindThread {
-    fn drop(&mut self) {
-        // Closing the channel stops the worker after its current job.
-        self.jobs = None;
-        if let Some(worker) = self.worker.take() {
-            worker.join().ok();
         }
     }
 }
