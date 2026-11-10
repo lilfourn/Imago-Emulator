@@ -21,7 +21,7 @@
 
 use std::f64::consts::PI;
 
-use emu_arm::bios::{bit_unpack, diff_unfilter};
+use emu_arm::bios::{self, WaitingByte, bit_unpack, diff_unfilter, run_length};
 use emu_arm::{Access, Bus as _, Cpu, Mode, psr};
 
 use crate::bus::Bus;
@@ -620,114 +620,13 @@ fn obj_affine_set(bus: &mut Bus, mut source: u32, mut destination: u32, count: u
     }
 }
 
-/// Writes decompressed bytes, either byte by byte (WRAM functions) or
-/// a halfword at a time (VRAM functions, which cannot write single bytes).
-struct Output {
-    destination: u32,
-    halfwords: bool,
-    pending: Option<u8>,
-}
-
-impl Output {
-    fn push(&mut self, bus: &mut Bus, byte: u8) {
-        if !self.halfwords {
-            bus.write_8(self.destination, byte, Access::NONSEQUENTIAL);
-            self.destination = self.destination.wrapping_add(1);
-            return;
-        }
-        match self.pending.take() {
-            None => self.pending = Some(byte),
-            Some(low) => {
-                bus.write_16(
-                    self.destination,
-                    u16::from_le_bytes([low, byte]),
-                    Access::NONSEQUENTIAL,
-                );
-                self.destination = self.destination.wrapping_add(2);
-            }
-        }
-    }
-
-    /// The byte written `distance` bytes back, for LZ77 back-references.
-    fn earlier(&self, bus: &mut Bus, distance: u32) -> u8 {
-        let written = self
-            .destination
-            .wrapping_add(u32::from(self.pending.is_some()));
-        let address = written.wrapping_sub(distance);
-        if self.halfwords && self.pending.is_some() && distance == 1 {
-            return self.pending.unwrap_or(0);
-        }
-        bus.read_8(address, Access::NONSEQUENTIAL)
-    }
-}
-
-/// LZ77UnComp: GBATEK's LZ77 format with a 4-byte header.
-fn lz77(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source = source.wrapping_add(4);
-    let mut out = Output {
-        destination,
-        halfwords,
-        pending: None,
-    };
-    while remaining > 0 {
-        let flags = bus.read_8(source, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(1);
-        for bit in (0..8).rev() {
-            if remaining == 0 {
-                break;
-            }
-            if flags & (1 << bit) == 0 {
-                let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source = source.wrapping_add(1);
-                out.push(bus, byte);
-                remaining -= 1;
-            } else {
-                let high = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-                let low = u32::from(bus.read_8(source.wrapping_add(1), Access::NONSEQUENTIAL));
-                source = source.wrapping_add(2);
-                let length = (high >> 4) + 3;
-                let distance = ((high & 0xF) << 8 | low) + 1;
-                for _ in 0..length.min(remaining) {
-                    let byte = out.earlier(bus, distance);
-                    out.push(bus, byte);
-                    remaining -= 1;
-                }
-            }
-        }
-    }
-}
-
-/// RLUnComp: runs of repeated bytes and literal stretches.
-fn run_length(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source = source.wrapping_add(4);
-    let mut out = Output {
-        destination,
-        halfwords,
-        pending: None,
-    };
-    while remaining > 0 {
-        let flag = bus.read_8(source, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(1);
-        if flag & 0x80 == 0 {
-            for _ in 0..(u32::from(flag & 0x7F) + 1).min(remaining) {
-                let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source = source.wrapping_add(1);
-                out.push(bus, byte);
-                remaining -= 1;
-            }
-        } else {
-            let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-            source = source.wrapping_add(1);
-            for _ in 0..(u32::from(flag & 0x7F) + 3).min(remaining) {
-                out.push(bus, byte);
-                remaining -= 1;
-            }
-        }
-    }
+/// LZ77UnComp, a byte at a time (Wram) or two (Vram): GBATEK's LZ77
+/// format with a 4-byte header. A reference of distance 1 made while the
+/// first byte of a halfword waits for its second copies that byte
+/// ([`WaitingByte::Copied`]), which is what this BIOS has always done; the
+/// DS's does otherwise.
+fn lz77(bus: &mut Bus, source: u32, destination: u32, halfwords: bool) {
+    bios::lz77(bus, source, destination, halfwords, WaitingByte::Copied);
 }
 
 /// Bitstream words HuffUnComp follows beyond one for each byte it has to
