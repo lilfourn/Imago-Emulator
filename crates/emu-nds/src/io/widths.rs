@@ -970,3 +970,165 @@ fn an_offset_with_no_register_reads_back_what_was_written_at_any_width() {
         assert_eq!(raw(&hw, side, 0x064), 0);
     }
 }
+
+// ----- What a byte written beside a register's other byte leaves alone ----
+//
+// A byte write used to be merged with the raw copy of what the CPU last
+// wrote to that halfword, and the halfword written again. Where the raw
+// copy was not what the register held, that put something old back. Each
+// test here says what such a write did before every write took one path.
+
+/// A bit that only acts when a one is written is not in the register, but
+/// it was in the raw copy: a byte written beside it acted again.
+#[test]
+fn a_byte_written_beside_a_bit_that_only_acts_does_not_act_again() {
+    for side in SIDES {
+        let other = SIDES[usize::from(side == Side::Arm9)];
+        // IPCSYNC's bit 13 sends the other CPU an interrupt. A byte then
+        // written below it sent another.
+        let mut hw = hardware();
+        write(&mut hw, other, 2, 0x0400_0180, 0x4000);
+        write(&mut hw, side, 2, 0x0400_0180, 0x2500);
+        assert_eq!(hw.cpu(other).interrupts.flags, irq::IPC_SYNC);
+        hw.cpu_mut(other).interrupts.flags = 0;
+        write(&mut hw, side, 1, 0x0400_0180, 0x00);
+        assert_eq!(hw.cpu(other).interrupts.flags, 0);
+        assert_eq!(
+            read(&mut hw, side, 2, 0x0400_0180),
+            0x0500,
+            "the data stays"
+        );
+
+        // IPCFIFOCNT's bit 3 flushes the words sent. A byte then written
+        // above it flushed the next word sent too.
+        let mut hw = hardware();
+        write(&mut hw, side, 2, 0x0400_0184, 0x8008);
+        write(&mut hw, side, 4, 0x0400_0188, 0x1234_5678);
+        write(&mut hw, side, 1, 0x0400_0185, 0x80);
+        assert_eq!(read(&mut hw, side, 2, 0x0400_0184) & 1, 0, "the word waits");
+        assert_eq!(read(&mut hw, other, 4, 0x0410_0000), 0x1234_5678);
+
+        // Its bit 14 acknowledges an error. A byte then written below it
+        // acknowledged the next error too.
+        let mut hw = hardware();
+        write(&mut hw, side, 2, 0x0400_0184, 0x8000);
+        for word in 0..17 {
+            write(&mut hw, side, 4, 0x0400_0188, word);
+        }
+        write(&mut hw, side, 2, 0x0400_0184, 0xC000);
+        assert_eq!(read(&mut hw, side, 2, 0x0400_0184) & 0x4000, 0);
+        write(&mut hw, side, 4, 0x0400_0188, 17);
+        assert_ne!(read(&mut hw, side, 2, 0x0400_0184) & 0x4000, 0, "an error");
+        write(&mut hw, side, 1, 0x0400_0184, 0x00);
+        assert_ne!(
+            read(&mut hw, side, 2, 0x0400_0184) & 0x4000,
+            0,
+            "still there"
+        );
+    }
+}
+
+/// The byte a serial bus sent is not kept by the bus, but it was in the
+/// raw copy: a byte written above the data register sent it again.
+#[test]
+fn only_the_data_byte_of_a_serial_bus_sends() {
+    let mut hw = hardware();
+    hw.arm9_write_16(0x0400_01A0, 0xA000);
+    hw.arm9_write_16(0x0400_01A2, 0x0005);
+    hw.cart.finish_spi();
+    hw.scheduler.cancel(|event| *event == Event::CartSpiDone);
+    hw.arm9_write_8(0x0400_01A3, 0xFF);
+    assert_eq!(hw.arm9_read_16(0x0400_01A0), 0xA000, "nothing was sent");
+    assert!(
+        !hw.scheduler
+            .pending()
+            .iter()
+            .any(|due| due.event == Event::CartSpiDone)
+    );
+
+    hw.arm7_write_16(0x0400_01C0, 0x8000);
+    hw.arm7_write_16(0x0400_01C2, 0x0000);
+    hw.spi.finish();
+    hw.scheduler.cancel(|event| *event == Event::SpiDone);
+    hw.arm7_write_8(0x0400_01C3, 0xFF);
+    assert_eq!(hw.arm7_read_16(0x0400_01C0), 0x8000, "nothing was sent");
+    assert!(
+        !hw.scheduler
+            .pending()
+            .iter()
+            .any(|due| due.event == Event::SpiDone)
+    );
+}
+
+/// A byte written to the ARM9's POSTFLG is not kept in the raw copy, so a
+/// byte then written above it set POSTFLG back to what the last halfword
+/// written there had held.
+#[test]
+fn a_byte_written_above_the_arm9s_postflg_leaves_it() {
+    let mut hw = hardware();
+    hw.arm9_write_8(0x0400_0300, 1);
+    hw.arm9_write_8(0x0400_0301, 0xFF);
+    assert_eq!(hw.arm9.postflg, 1);
+    hw.arm9_write_16(0x0400_0300, 0x0002);
+    hw.arm9_write_8(0x0400_0300, 1);
+    hw.arm9_write_8(0x0400_0301, 0x00);
+    assert_eq!(hw.arm9.postflg, 1);
+}
+
+/// A register set without a write of the CPU's (at power-on, or by the
+/// boot that stands in for the firmware) was never in the raw copy: a
+/// byte written to it was merged with zero.
+#[test]
+fn a_byte_written_to_a_register_set_without_a_write_keeps_its_other_byte() {
+    // The affine matrices are the identity at power-on: PA is 1.0, 0x0100.
+    for base in [0x0400_0000, 0x0400_1000] {
+        let engine = |hw: &Hardware| {
+            saved(if base == 0x0400_0000 {
+                &hw.engine_a
+            } else {
+                &hw.engine_b
+            })
+        };
+        let mut byte = hardware();
+        byte.arm9_write_8(base + 0x20, 0x80);
+        let mut halfword = hardware();
+        halfword.arm9_write_16(base + 0x20, 0x0180);
+        assert!(engine(&byte) == engine(&halfword), "PA is 0x0180");
+    }
+    // Direct boot leaves POWCNT1 with both screens and engines on, and
+    // POWCNT2 with the speakers on.
+    let mut hw = hardware();
+    hw.powcnt1 = 0x820F;
+    hw.powcnt2 = 1;
+    hw.arm9_write_8(0x0400_0305, 0x02);
+    assert_eq!(hw.powcnt1, 0x020F, "the screens stay on");
+    hw.arm7_write_8(0x0400_0305, 0x00);
+    assert_eq!(hw.powcnt2, 1, "the speakers stay on");
+}
+
+/// Each CPU has a raw copy of its own, and a write to the game card from
+/// the CPU that does not own it is kept there though it reaches nothing.
+/// Once that CPU owned the card, a byte it wrote was merged with what it
+/// had written before, not with what the card held.
+#[test]
+fn a_byte_written_to_the_game_card_by_its_new_owner_is_merged_with_the_cards_own() {
+    let mut hw = hardware();
+    // The ARM7's, while the card is the ARM9's.
+    hw.arm7_write_16(0x0400_01A0, 0xFFFF);
+    hw.arm7_write_32(0x0400_01A8, 0xFFFF_FFFF);
+    // The ARM9's, which the card holds.
+    hw.arm9_write_16(0x0400_01A0, 0xA000);
+    hw.arm9_write_32(0x0400_01A8, 0x4433_2211);
+    hw.arm9_write_32(0x0400_01AC, 0x8877_6655);
+    // The card goes to the ARM7, which writes a byte of each.
+    hw.arm9_write_16(0x0400_0204, 1 << 11);
+    hw.arm7_write_8(0x0400_01A0, 0x01);
+    assert_eq!(hw.arm7_read_16(0x0400_01A0), 0xA001);
+    hw.arm7_write_8(0x0400_01A8, 0x99);
+    let card = saved(&hw.cart);
+    assert!(
+        card.windows(8)
+            .any(|bytes| bytes == [0x99, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]),
+        "the command's other bytes are the card's"
+    );
+}
