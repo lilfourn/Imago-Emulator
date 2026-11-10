@@ -21,7 +21,7 @@
 
 use std::f64::consts::PI;
 
-use emu_arm::bios::bit_unpack;
+use emu_arm::bios::{bit_unpack, diff_unfilter};
 use emu_arm::{Access, Bus as _, Cpu, Mode, psr};
 
 use crate::bus::Bus;
@@ -796,42 +796,6 @@ fn huffman(bus: &mut Bus, mut source: u32, mut destination: u32) {
                 }
             }
         }
-    }
-}
-
-/// Diff8bitUnFilter and Diff16bitUnFilter: running sums.
-fn diff_unfilter(
-    bus: &mut Bus,
-    mut source: u32,
-    mut destination: u32,
-    sixteen: bool,
-    halfwords: bool,
-) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source = source.wrapping_add(4);
-    if sixteen {
-        let mut sum = 0u16;
-        while remaining >= 2 {
-            sum = sum.wrapping_add(bus.read_16(source, Access::NONSEQUENTIAL));
-            bus.write_16(destination, sum, Access::NONSEQUENTIAL);
-            source = source.wrapping_add(2);
-            destination = destination.wrapping_add(2);
-            remaining -= 2;
-        }
-        return;
-    }
-    let mut out = Output {
-        destination,
-        halfwords,
-        pending: None,
-    };
-    let mut sum = 0u8;
-    while remaining > 0 {
-        sum = sum.wrapping_add(bus.read_8(source, Access::NONSEQUENTIAL));
-        out.push(bus, sum);
-        source = source.wrapping_add(1);
-        remaining -= 1;
     }
 }
 
