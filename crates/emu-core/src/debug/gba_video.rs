@@ -10,8 +10,21 @@
 //! where tiles and maps are, which palette colours them, and how a
 //! sprite's tile number finds its texels.
 
-use super::draw::set_pixel;
+use super::draw::{blank, fill_rect, set_pixel};
 use crate::Frame;
+
+/// Bytes the tile picture shows.
+pub const TILE_BLOCK: usize = 0x8000;
+/// Tiles per row in the tile picture.
+const TILES_WIDE: usize = 32;
+
+/// The first OBJ colour in palette RAM, by colour number: BG colours are
+/// 0–255, OBJ colours 256–511 (each of the DS's engines has its own 512).
+pub const OBJ_PALETTE: usize = 256;
+/// Width and height of one colour swatch in the palette picture.
+const SWATCH: usize = 8;
+/// Gap between the BG and OBJ halves of the palette picture.
+const PALETTE_GAP: usize = 8;
 
 /// One 8×8 tile's palette indices, row by row.
 pub type Tile = [[u8; 8]; 8];
@@ -83,10 +96,47 @@ pub fn draw_tile(
     }
 }
 
+/// The tile picture: the [`TILE_BLOCK`] bytes `read` gives, as tiles 32 to
+/// a row, 1024 4bpp tiles (256×256) or 512 8bpp tiles (256×128), each
+/// palette index painted by `paint`. Returns the picture and how many
+/// tiles it shows.
+pub fn tile_sheet(
+    read: impl Fn(usize) -> u8,
+    eight_bit: bool,
+    paint: impl Fn(u8) -> u32,
+) -> (Frame, usize) {
+    let tile_bytes = if eight_bit { 64 } else { 32 };
+    let count = TILE_BLOCK / tile_bytes;
+    let mut frame = blank(TILES_WIDE * 8, count / TILES_WIDE * 8);
+    for tile in 0..count {
+        let indices = read_tile(&read, tile * tile_bytes, eight_bit);
+        let corner = (tile % TILES_WIDE * 8, tile / TILES_WIDE * 8);
+        draw_tile(&mut frame, &indices, corner, Flips::default(), &paint);
+    }
+    (frame, count)
+}
+
+/// The palette picture: 512 colours, one 8×8 swatch each, the 256 BG
+/// colours on the left and the 256 OBJ colours on the right, each a 16×16
+/// grid with one 16-colour palette per row. `color` gives the pixel of a
+/// colour number (0–255 BG, 256–511 OBJ).
+pub fn palette_sheet(color: impl Fn(usize) -> u32) -> Frame {
+    let half_width = 16 * SWATCH;
+    let mut frame = blank(2 * half_width + PALETTE_GAP, 16 * SWATCH);
+    for index in 0..2 * OBJ_PALETTE {
+        let (half, entry) = (index / OBJ_PALETTE, index % OBJ_PALETTE);
+        let left = half * (half_width + PALETTE_GAP) + entry % 16 * SWATCH;
+        let top = entry / 16 * SWATCH;
+        fill_rect(&mut frame, (left, top), (SWATCH, SWATCH), color(index));
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::draw::{BACKGROUND, blank};
+    use super::super::draw::BACKGROUND;
     use super::*;
+    use crate::ScreenSize;
 
     fn pixel(frame: &Frame, x: usize, y: usize) -> u32 {
         frame.pixels()[y * usize::from(frame.size().width) + x]
@@ -128,5 +178,37 @@ mod tests {
         assert_eq!(pixel(&drawn(1 << 11), 9, 15), 9, "top to bottom");
         assert_eq!(pixel(&drawn(3 << 10), 14, 15), 9, "both");
         assert_eq!(pixel(&drawn(0), 7, 7), BACKGROUND, "outside the tile");
+    }
+
+    #[test]
+    fn the_tile_picture_is_32_tiles_wide_at_either_depth() {
+        // Tile 33 is the second tile of the second row.
+        let mut memory = vec![0u8; TILE_BLOCK];
+        memory[33 * 32] = 0x02;
+        memory[33 * 64] |= 0x40;
+        let read = |offset: usize| memory[offset];
+        let paint = |index: u8| u32::from(index);
+
+        let (four_bit, count) = tile_sheet(read, false, paint);
+        assert_eq!(count, 1024);
+        assert_eq!(four_bit.size(), ScreenSize::new(256, 256));
+        assert_eq!(pixel(&four_bit, 8, 8), 2);
+
+        let (eight_bit, count) = tile_sheet(read, true, paint);
+        assert_eq!(count, 512);
+        assert_eq!(eight_bit.size(), ScreenSize::new(256, 128));
+        assert_eq!(pixel(&eight_bit, 8, 8), 0x40);
+    }
+
+    #[test]
+    fn the_palette_picture_has_bg_colours_left_and_obj_colours_right() {
+        let frame = palette_sheet(|index| index as u32);
+        assert_eq!(frame.size(), ScreenSize::new(264, 128));
+        assert_eq!(pixel(&frame, 0, 0), 0);
+        assert_eq!(pixel(&frame, 8, 8), 17, "BG palette 1, colour 1");
+        assert_eq!(pixel(&frame, 127, 127), 255);
+        assert_eq!(pixel(&frame, 130, 0), BACKGROUND, "the gap");
+        assert_eq!(pixel(&frame, 136, 0), 256, "the first OBJ colour");
+        assert_eq!(pixel(&frame, 263, 127), 511);
     }
 }

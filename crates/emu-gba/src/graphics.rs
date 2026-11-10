@@ -11,7 +11,9 @@
 use emu_core::debug::draw::{
     BACKGROUND, blank, fill_checker, fill_rect, outline_wrapping, set_pixel,
 };
-use emu_core::debug::gba_video::{Flips, draw_tile, read_tile, tile_texel};
+use emu_core::debug::gba_video::{
+    Flips, OBJ_PALETTE, draw_tile, palette_sheet, read_tile, tile_sheet, tile_texel,
+};
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
 use emu_core::{Frame, rgb};
 
@@ -25,9 +27,6 @@ const CELL_SHADES: [u32; 2] = [BACKGROUND, rgb(0x2C, 0x2C, 0x2C)];
 const VRAM_ADDRESS: usize = 0x0600_0000;
 /// Where palette RAM starts on the CPU's bus.
 const PALETTE_ADDRESS: usize = 0x0500_0000;
-/// The first OBJ colour in palette RAM, by colour number: BG colours are
-/// 0–255, OBJ colours 256–511.
-const OBJ_PALETTE: usize = 256;
 /// Where OBJ tiles start in VRAM.
 const OBJ_TILES: usize = 0x1_0000;
 
@@ -35,11 +34,6 @@ const OBJ_TILES: usize = 0x1_0000;
 const SCREEN_WIDTH: usize = 240;
 /// Screen height in pixels.
 const SCREEN_HEIGHT: usize = 160;
-
-/// Bytes the tile picture shows.
-const TILE_BLOCK: usize = 0x8000;
-/// Tiles per row in the tile picture.
-const TILES_WIDE: usize = 32;
 
 /// Sprite sizes in pixels by shape (square, wide, tall) and size field
 /// (GBATEK, "LCD OBJ - OAM Attributes").
@@ -54,11 +48,6 @@ const SPRITES: usize = 128;
 const SPRITE_COLUMNS: usize = 16;
 /// A sprite cell's width and height: room for the largest sprite.
 const CELL: usize = 64;
-
-/// Width and height of one colour swatch in the palette picture.
-const SWATCH: usize = 8;
-/// Gap between the BG and OBJ halves of the palette picture.
-const PALETTE_GAP: usize = 8;
 
 /// Draws `request`'s view of `ppu`'s video memory. The GBA can draw every
 /// view, so this always returns a picture.
@@ -79,18 +68,12 @@ pub(crate) fn draw(ppu: &Ppu, request: &GraphicsRequest) -> Option<Graphics> {
 fn tiles(ppu: &Ppu, request: &GraphicsRequest) -> Graphics {
     let start = mirror(request.base as usize) & !31;
     let eight_bit = request.eight_bit;
-    let tile_bytes = if eight_bit { 64 } else { 32 };
-    let count = TILE_BLOCK / tile_bytes;
-    let mut frame = blank(TILES_WIDE * 8, count / TILES_WIDE * 8);
     let (first_color, palette_name) = tile_palette(request.palette, eight_bit, start >= OBJ_TILES);
-    let read = |offset: usize| ppu.vram()[mirror(start + offset)];
-    for tile in 0..count {
-        let indices = read_tile(&read, tile * tile_bytes, eight_bit);
-        let corner = (tile % TILES_WIDE * 8, tile / TILES_WIDE * 8);
-        draw_tile(&mut frame, &indices, corner, Flips::default(), |index| {
-            palette_color(ppu, first_color + usize::from(index))
-        });
-    }
+    let (frame, count) = tile_sheet(
+        |offset| ppu.vram()[mirror(start + offset)],
+        eight_bit,
+        |index| palette_color(ppu, first_color + usize::from(index)),
+    );
     let bpp = if eight_bit { "8bpp" } else { "4bpp" };
     Graphics {
         image: frame,
@@ -184,21 +167,8 @@ fn sprites(ppu: &Ppu) -> Graphics {
 /// on the left and the 256 OBJ colours on the right, each a 16×16 grid
 /// with one 16-colour palette per row.
 fn palettes(ppu: &Ppu) -> Graphics {
-    let half_width = 16 * SWATCH;
-    let mut frame = blank(2 * half_width + PALETTE_GAP, 16 * SWATCH);
-    for index in 0..2 * OBJ_PALETTE {
-        let (half, entry) = (index / OBJ_PALETTE, index % OBJ_PALETTE);
-        let left = half * (half_width + PALETTE_GAP) + entry % 16 * SWATCH;
-        let top = entry / 16 * SWATCH;
-        fill_rect(
-            &mut frame,
-            (left, top),
-            (SWATCH, SWATCH),
-            palette_color(ppu, index),
-        );
-    }
     Graphics {
-        image: frame,
+        image: palette_sheet(|index| palette_color(ppu, index)),
         notes: vec![
             format!(
                 "BG 0x{PALETTE_ADDRESS:08X}, OBJ 0x{:08X}",

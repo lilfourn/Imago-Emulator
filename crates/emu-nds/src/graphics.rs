@@ -11,7 +11,9 @@
 //! OAM, palette RAM and the registers, the way the 2D engines decode them.
 
 use emu_core::debug::draw::{BACKGROUND, blank, fill_checker, fill_rect, set_pixel};
-use emu_core::debug::gba_video::{Flips, draw_tile, read_tile, tile_texel};
+use emu_core::debug::gba_video::{
+    Flips, OBJ_PALETTE, TILE_BLOCK, draw_tile, palette_sheet, read_tile, tile_sheet, tile_texel,
+};
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
 use emu_core::{Frame, rgb};
 
@@ -25,16 +27,8 @@ const CELL_SHADES: [u32; 2] = [BACKGROUND, rgb(0x2C, 0x2C, 0x2C)];
 
 /// Where VRAM starts on the ARM9's bus.
 const VRAM_ADDRESS: u32 = 0x0600_0000;
-/// The first OBJ colour in an engine's palette RAM, by colour number: BG
-/// colours are 0–255, OBJ colours 256–511.
-const OBJ_PALETTE: usize = 256;
 /// Bank names, by VRAMCNT number.
 const BANK_NAMES: [&str; 9] = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
-
-/// Bytes the tile picture shows.
-const TILE_BLOCK: u32 = 0x8000;
-/// Tiles per row in the tile picture.
-const TILES_WIDE: usize = 32;
 
 /// Sprite sizes in pixels by shape (square, wide, tall) and size field
 /// (GBATEK, "LCD OBJ - OAM Attributes").
@@ -49,11 +43,6 @@ const SPRITES: usize = 128;
 const SPRITE_COLUMNS: usize = 16;
 /// A sprite cell's width and height: room for the largest sprite.
 const CELL: usize = 64;
-
-/// Width and height of one colour swatch in the palette picture.
-const SWATCH: usize = 8;
-/// Gap between the BG and OBJ halves of the palette picture.
-const PALETTE_GAP: usize = 8;
 
 /// Draws `request`'s view of the video memory of `request.engine`'s 2D
 /// engine (0 for A, anything else for B), or of any VRAM for the tile
@@ -76,20 +65,14 @@ pub(crate) fn draw(hw: &Hardware, request: &GraphicsRequest) -> Option<Graphics>
 fn tiles(vram: &Vram, engine: &EngineParts<'_>, request: &GraphicsRequest) -> Graphics {
     // Anything outside 0x06xxxxxx is taken as an offset into VRAM.
     let base = VRAM_ADDRESS | (request.base & 0x00FF_FFE0);
-    let bytes = read_arm9_vram(vram, base, TILE_BLOCK);
+    let bytes = read_arm9_vram(vram, base, TILE_BLOCK as u32);
     let eight_bit = request.eight_bit;
-    let tile_bytes = if eight_bit { 64 } else { 32 };
-    let count = bytes.len() / tile_bytes;
-    let mut frame = blank(TILES_WIDE * 8, count / TILES_WIDE * 8);
     let (first_color, palette_name) = tile_palette(request.palette, eight_bit);
-    let read = |offset: usize| bytes[offset];
-    for tile in 0..count {
-        let indices = read_tile(&read, tile * tile_bytes, eight_bit);
-        let corner = (tile % TILES_WIDE * 8, tile / TILES_WIDE * 8);
-        draw_tile(&mut frame, &indices, corner, Flips::default(), |index| {
-            engine.color(first_color + usize::from(index))
-        });
-    }
+    let (frame, count) = tile_sheet(
+        |offset| bytes[offset],
+        eight_bit,
+        |index| engine.color(first_color + usize::from(index)),
+    );
     let bpp = if eight_bit { "8bpp" } else { "4bpp" };
     Graphics {
         image: frame,
@@ -102,7 +85,7 @@ fn tiles(vram: &Vram, engine: &EngineParts<'_>, request: &GraphicsRequest) -> Gr
             ),
             format!(
                 "VRAM there: {}; unmapped bytes read 0",
-                banks_mapped(vram, base, TILE_BLOCK)
+                banks_mapped(vram, base, TILE_BLOCK as u32)
             ),
         ],
     }
@@ -178,22 +161,9 @@ fn sprites(engine: &EngineParts<'_>) -> Graphics {
 /// 256 BG colours on the left and the 256 OBJ colours on the right, each a
 /// 16×16 grid with one 16-colour palette per row.
 fn palettes(engine: &EngineParts<'_>) -> Graphics {
-    let half_width = 16 * SWATCH;
-    let mut frame = blank(2 * half_width + PALETTE_GAP, 16 * SWATCH);
-    for index in 0..2 * OBJ_PALETTE {
-        let (half, entry) = (index / OBJ_PALETTE, index % OBJ_PALETTE);
-        let left = half * (half_width + PALETTE_GAP) + entry % 16 * SWATCH;
-        let top = entry / 16 * SWATCH;
-        fill_rect(
-            &mut frame,
-            (left, top),
-            (SWATCH, SWATCH),
-            engine.color(index),
-        );
-    }
     let bg = engine.palette_address();
     Graphics {
-        image: frame,
+        image: palette_sheet(|index| engine.color(index)),
         notes: vec![
             format!(
                 "{}: BG 0x{bg:08X}, OBJ 0x{:08X}",
