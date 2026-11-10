@@ -803,4 +803,158 @@ mod tests {
         });
         assert_eq!(last_read, Some(0x106), "the byte after is not read");
     }
+
+    /// A Huffman stream at 0x100 for `length` bytes of `symbol_bits`-bit
+    /// symbols with the codes 1 = "0", 2 = "10" and 3 = "11": the header,
+    /// the size byte (8 bytes / 2 − 1), the root at 0x105 with symbol 1
+    /// as child 0 and a node as child 1, that node's two symbols, padding
+    /// to a word, then the bitstream 1, 2, 3, 1, 2, 3, ...
+    fn huffman_stream(symbol_bits: u8, length: u8) -> Ram {
+        let mut ram = Ram::with(0x100, &[0x20 | symbol_bits, length, 0, 0]);
+        ram.bytes[0x104..0x10C].copy_from_slice(&[0x03, 0x80, 0x01, 0xC0, 0x02, 0x03, 0, 0]);
+        let bits: u32 = 0b0101_1010_1101_0110_1011_0101_1010_1101;
+        ram.bytes[0x10C..0x110].copy_from_slice(&bits.to_le_bytes());
+        ram
+    }
+
+    #[test]
+    fn huffman_unpacks_whole_words_of_symbols_of_a_size_that_fills_one() {
+        for (symbol_bits, expected) in [
+            (8, [1, 2, 3, 1]),
+            (4, [0x21, 0x13, 0x32, 0x21]),
+            (2, [0x79, 0x9E, 0xE7, 0x79]),
+        ] {
+            let mut ram = huffman_stream(symbol_bits, 4);
+            huffman(&mut ram, 0x100, 0x200);
+            assert_eq!(&ram.bytes[0x200..0x204], &expected, "{symbol_bits} bits");
+            assert_eq!(&ram.bytes[0x204..0x208], &[0; 4], "one word for four bytes");
+        }
+        // Sizes that never fill a word exactly are left alone, after the
+        // header alone has been read.
+        for symbol_bits in [0, 3, 5, 6, 7, 9, 15] {
+            let mut ram = huffman_stream(symbol_bits, 0xFF);
+            huffman(&mut ram, 0x100, 0x200);
+            assert_eq!(
+                ram.accesses,
+                [Made::Read {
+                    address: 0x100,
+                    bytes: 4
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn huffman_reads_each_node_as_the_walk_arrives_and_the_root_again_before_it_writes() {
+        // One word of 8-bit symbols: 1 ("0"), 2 ("10"), 3 ("11"), 1.
+        let mut ram = huffman_stream(8, 4);
+        huffman(&mut ram, 0x100, 0x200);
+        let read = |address| Made::Read { address, bytes: 1 };
+        let expected = [
+            Made::Read {
+                address: 0x100,
+                bytes: 4,
+            },
+            read(0x104), // the size byte
+            read(0x105), // the root
+            Made::Read {
+                address: 0x10C,
+                bytes: 4,
+            }, // the bitstream's first word
+            read(0x106),
+            read(0x105), // 1, and back to the root
+            read(0x107),
+            read(0x108),
+            read(0x105), // 2
+            read(0x107),
+            read(0x109),
+            read(0x105), // 3
+            read(0x106),
+            read(0x105), // 1, the root once more,
+            Made::Write {
+                address: 0x200,
+                bytes: 4,
+            }, // and only then the word
+        ];
+        assert_eq!(ram.accesses, expected);
+    }
+
+    #[test]
+    fn huffman_ends_when_a_walk_leaves_the_tree_or_the_bitstream_outruns_its_budget() {
+        // No node marks a child as a symbol: the walk runs off the tree's
+        // seven bytes after two steps.
+        let mut ram = huffman_stream(8, 0xFF);
+        ram.bytes[0x105..0x10C].fill(0);
+        huffman(&mut ram, 0x100, 0x200);
+        assert!(ram.accesses.len() < 10, "{}", ram.accesses.len());
+        assert!(
+            ram.accesses
+                .iter()
+                .all(|made| matches!(made, Made::Read { .. }))
+        );
+
+        // The longest code a tree can hold: a full tree (size byte 0xFF)
+        // that is a chain of 255 nodes, each the 1 child of the one
+        // before, the last with two symbols. Every symbol takes 255 bits,
+        // so 256 bytes would take 2,040 words of bitstream; the call
+        // follows a word for each byte and the slack, and ends.
+        let mut ram = Ram::with(0x100, &[0x28, 0x00, 0x01, 0x00]);
+        ram.bytes[0x104] = 0xFF;
+        ram.bytes[0x104 + 509] = 0xC0;
+        ram.bytes[0x104 + 511] = 0x5A;
+        ram.bytes[0x304..0x1304].fill(0xFF);
+        huffman(&mut ram, 0x100, 0x2000);
+        let words_read = ram
+            .accesses
+            .iter()
+            .filter(|made| matches!(made, Made::Read { bytes: 4, .. }))
+            .count();
+        // The header, then the bitstream.
+        assert_eq!(words_read as u32, 1 + 0x100 + HUFFMAN_SLACK_WORDS);
+        // 320 words hold 40 symbols of 255 bits: ten words written.
+        let written = |ram: &Ram, word: usize| ram.bytes[0x2000 + word * 4..][..4].to_vec();
+        assert_eq!(written(&ram, 9), [0x5A; 4]);
+        assert_eq!(written(&ram, 10), [0; 4]);
+    }
+
+    #[test]
+    fn the_resumable_huffman_reads_a_node_when_a_bit_needs_it_and_keeps_only_a_symbols_bits() {
+        // The same tree, copied to 0x400 a byte at a time, its symbol 3
+        // given high bits that 4-bit symbols must not carry.
+        let mut ram = Ram::new();
+        let mut decoder = Huffman::new(4, 0x400);
+        let mut out = Output::new(0x200, 4, 4);
+        for byte in [0x02, 0x80, 0x01, 0xC0, 0x02, 0xF3] {
+            assert!(decoder.copying_tree());
+            decoder.copy_tree(byte, &mut ram);
+        }
+        assert!(!decoder.copying_tree() && decoder.in_range());
+        ram.accesses.clear();
+        decoder.feed(
+            0b0101_1010_1101_0110_1011_0101_1010_1101,
+            &mut out,
+            &mut ram,
+        );
+        assert!(out.done());
+        assert_eq!(&ram.bytes[0x200..0x204], &[0x21, 0x13, 0x32, 0x21]);
+        // The first symbol: the root is read for the first bit, then the
+        // symbol; nothing is read ahead.
+        let read = |address| Made::Read { address, bytes: 1 };
+        assert_eq!(ram.accesses[..2], [read(0x401), read(0x402)]);
+        assert_eq!(
+            ram.accesses.last(),
+            Some(&Made::Write {
+                address: 0x200,
+                bytes: 4
+            })
+        );
+
+        // The function that reads where the data lies keeps the whole
+        // byte: the 0xF0 of each symbol 3 lands on the symbol after it,
+        // a 1 that becomes 0xF.
+        let mut ram = huffman_stream(4, 4);
+        ram.bytes[0x109] = 0xF3;
+        huffman(&mut ram, 0x100, 0x200);
+        assert_eq!(&ram.bytes[0x200..0x204], &[0x21, 0xF3, 0x32, 0x2F]);
+    }
 }
