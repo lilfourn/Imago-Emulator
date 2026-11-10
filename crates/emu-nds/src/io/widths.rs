@@ -157,7 +157,10 @@ fn the_arm9s_postflg_is_two_bits_of_one_byte() {
         "a byte to POSTFLG is not kept"
     );
     hw.arm9_write_8(0x0400_0300, 0);
-    assert_eq!(hw.arm9.postflg, 0, "the ARM9 may clear it");
+    assert_eq!(
+        hw.arm9.postflg, 1,
+        "bit 1 is cleared; bit 0, once set, stays"
+    );
     hw.arm9_write_16(0x0400_0300, 0xFF01);
     assert_eq!(hw.arm9.postflg, 1);
     assert_eq!(raw(&hw, Side::Arm9, 0x300), 0xFF01);
@@ -166,9 +169,15 @@ fn the_arm9s_postflg_is_two_bits_of_one_byte() {
     assert_eq!(hw.arm9.postflg, 1);
     assert_eq!(raw(&hw, Side::Arm9, 0x300), 0x0201);
     hw.arm9_write_32(0x0400_0300, 0xFFFF_FFFE);
-    assert_eq!(hw.arm9.postflg, 2);
+    assert_eq!(hw.arm9.postflg, 3);
     assert_eq!(raw(&hw, Side::Arm9, 0x300), 0xFFFF_FFFE);
-    assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_0300), 0xFFFF_0002);
+    assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_0300), 0xFFFF_0003);
+    // Before boot has ended, bit 0 is still to be set.
+    let mut booting = hardware();
+    booting.arm9_write_8(0x0400_0300, 2);
+    assert_eq!(booting.arm9.postflg, 2);
+    booting.arm9_write_8(0x0400_0300, 0);
+    assert_eq!(booting.arm9.postflg, 0);
     assert_eq!(hw.arm7.postflg, 0, "each CPU has its own");
 }
 

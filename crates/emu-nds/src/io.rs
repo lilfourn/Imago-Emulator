@@ -20,7 +20,10 @@
 //!
 //! # The raw copy
 //!
-//! `io9` and `io7` hold what was last written to each offset of the page.
+//! `io9` and `io7` hold what the rules below keep of the writes to each
+//! offset of the page: a word to a DMA, ROMCTRL, fill or maths register
+//! is not kept, nor a byte to IF, VRAMCNT, the 3D engine, sound, or the
+//! ARM7's POSTFLG and HALTCNT.
 //! An offset with no register behind it is read back from there, which is
 //! all DISPCAPCNT and the ARM7's EXMEMSTAT bits are. For every other
 //! register the copy is never read: it stays because it is part of a save
@@ -621,10 +624,11 @@ impl Hardware {
                     self.write_vram_control(offset + 1, (value >> 8) as u8);
                 }
             }
-            // POSTFLG is the low byte.
+            // POSTFLG is the low byte. Bit 0, once set, stays set, as on
+            // the ARM7; bit 1 is the ARM9's to set and clear.
             0x300 => {
                 if mask & 0x00FF != 0 {
-                    self.arm9.postflg = (value & 3) as u8;
+                    self.arm9.postflg = (value & 3) as u8 | (self.arm9.postflg & 1);
                 }
             }
             0x304 => self.powcnt1 = merged(mask, value, || self.powcnt1) & 0x820F,
