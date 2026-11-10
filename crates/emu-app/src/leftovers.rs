@@ -48,6 +48,10 @@ const KINDS: [&str; 3] = [
     "ds-emulator-randomize-",
 ];
 
+/// The app's program, as a command line names it.
+#[cfg(unix)]
+const APP: &str = "ds-emulator";
+
 /// How often a program that is waited for is looked at.
 const WAIT: Duration = Duration::from_millis(20);
 
@@ -273,7 +277,9 @@ pub(crate) fn remove_folder(path: &Path) {
 
 /// The most folders one removal empties: far more than an archive of
 /// games unpacks to. It only keeps a removal from going on for ever after
-/// a program that is still writing into the folder.
+/// a program that is still making folders in the one removed; files it
+/// goes on making are left once the passes are used up
+/// ([`REMOVAL_PASSES`]).
 #[cfg(unix)]
 const MAX_REMOVED_FOLDERS: u64 = 10_000_000;
 
@@ -567,19 +573,20 @@ fn open_folder(parent: BorrowedFd<'_>, name: &CStr) -> Option<OwnedFd> {
         Err(_) => return None,
     };
     // To write and search in as well, or nothing in it could be removed
-    // or moved out of it.
-    if let Ok(found) = rustix::fs::fstat(&folder) {
-        let mode = Mode::from_raw_mode(found.st_mode);
-        if !mode.contains(Mode::RWXU) {
-            rustix::fs::fchmod(&folder, mode | Mode::RWXU).ok();
-        }
+    // or moved out of it. Its owner's and no one else's: the folder is on
+    // its way out, and an archive's own modes may give leave to anyone.
+    if let Ok(found) = rustix::fs::fstat(&folder)
+        && !Mode::from_raw_mode(found.st_mode).contains(Mode::RWXU)
+    {
+        rustix::fs::fchmod(&folder, Mode::RWXU).ok();
     }
     Some(folder)
 }
 
 /// Makes the folder that has the name `name` in `parent`, which its owner
-/// may not read, its owner's to read, write and search. A link by the
-/// name is not followed, and only a folder's mode is changed.
+/// may not read, its owner's to read, write and search, and no one
+/// else's. A link by the name is not followed, and only a folder's mode
+/// is changed.
 ///
 /// Linux can open a descriptor that only names a folder (`O_PATH`), for
 /// which no leave to read it is needed, and change the mode of what that
@@ -594,16 +601,13 @@ fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
     let Ok(folder) = rustix::fs::openat(parent, name, naming, Mode::empty()) else {
         return;
     };
-    let Ok(found) = rustix::fs::fstat(&folder) else {
-        return;
-    };
-    let mode = Mode::from_raw_mode(found.st_mode) | Mode::RWXU;
-    rustix::fs::chmod(format!("/proc/self/fd/{}", folder.as_raw_fd()), mode).ok();
+    rustix::fs::chmod(format!("/proc/self/fd/{}", folder.as_raw_fd()), Mode::RWXU).ok();
 }
 
 /// Makes the folder that has the name `name` in `parent`, which its owner
-/// may not read, its owner's to read, write and search. A link by the
-/// name is not followed, and only a folder's mode is changed.
+/// may not read, its owner's to read, write and search, and no one
+/// else's. A link by the name is not followed, and only a folder's mode
+/// is changed.
 ///
 /// macOS gives no descriptor for a folder its owner may not read (not
 /// with `O_EVTONLY` either), so this is the one step taken by a name
@@ -619,7 +623,9 @@ fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
 /// only for a folder unpacked with no leave for its owner to read it. The
 /// one thing outside the folder it could touch is a file that an unpacker
 /// had made a second name for there (a hard link): that file's mode, not
-/// what is in it.
+/// what is in it. The mode given is the owner's leave alone, never the
+/// folder's own bits, so such a file would end up closed to everyone but
+/// its owner, not opened to anyone.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
     let Ok(found) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
@@ -628,8 +634,7 @@ fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
     if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
         return;
     }
-    let mode = Mode::from_raw_mode(found.st_mode) | Mode::RWXU;
-    rustix::fs::chmodat(parent, name, mode, AtFlags::SYMLINK_NOFOLLOW).ok();
+    rustix::fs::chmodat(parent, name, Mode::RWXU, AtFlags::SYMLINK_NOFOLLOW).ok();
 }
 
 /// A game being written, `….partial`, locked while it is and removed when
@@ -806,8 +811,11 @@ fn remove_left_behind_stopping(
                 && !in_use(&path.join(LOCK), &path)
                 && stop_programs_left_working_in(&path, signal, within)
             {
-                freed += size(&path);
+                let held = size(&path);
                 remove_folder(&path);
+                if !path.exists() {
+                    freed += held;
+                }
             }
         }
     }
@@ -898,8 +906,10 @@ fn remove_unused_files(folder: &Path, wanted: impl Fn(&str) -> bool) -> u64 {
             !changed_lately(&path)
         };
         if unused {
-            freed += size(&path);
-            fs::remove_file(&path).ok();
+            let held = size(&path);
+            if fs::remove_file(&path).is_ok() {
+                freed += held;
+            }
         }
     }
     freed
@@ -960,8 +970,13 @@ fn changed_lately(path: &Path) -> bool {
 /// Each is sent `signal`, and then they are looked for again, every
 /// [`WAIT`], until none is found or `within` has passed. If one is still
 /// there (the system may hold a killed program for a while, and another
-/// user's cannot be stopped at all), or nothing can say (no `pgrep`), the
-/// folder is left as it is, for a later launch to try again.
+/// user's cannot be stopped at all), or nothing can say (no `pgrep`,
+/// which is logged), the folder is left as it is, for a later launch to
+/// try again.
+///
+/// A copy of the app is never stopped: one started on a game in the
+/// folder is playing it, and the folder is left, whether that copy is
+/// this one or another.
 ///
 /// The folder's name is read from disk and goes into a pattern, so only
 /// one the app gives a folder is used: letters, digits and dashes, which
@@ -984,12 +999,27 @@ fn stop_programs_left_working_in(path: &Path, signal: &str, within: Duration) ->
     if names_folder(std::env::args_os(), name) {
         return false;
     }
+    let runs = |pattern: &str| {
+        let runs = any_program_runs(pattern);
+        if runs.is_none() {
+            eprintln!(
+                "ds-emulator: nothing says what still works in {} (is pgrep installed?); it is left",
+                path.display()
+            );
+        }
+        runs
+    };
     // The name as a whole part of a path: after a slash, and before one, a
     // space or the end.
     let pattern = format!("/{name}([/ ]|$)");
+    // Nor another copy of the app started on a file in it: that copy
+    // would be stopped with the rest, and its game removed under it.
+    if runs(&format!("(^|[/ ]){APP} .*{pattern}")) != Some(false) {
+        return false;
+    }
     let started = Instant::now();
     loop {
-        match any_program_runs(&pattern) {
+        match runs(&pattern) {
             Some(false) => return true,
             Some(true) if started.elapsed() < within => {}
             _ => return false,
@@ -1396,6 +1426,30 @@ mod tests {
         assert!(lock(&child).try_wait().expect("waits").is_some(), "stopped");
         drop(folder);
         fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    #[cfg_attr(not(unix), ignore = "Windows: folders have no permission bits")]
+    fn a_folder_opened_to_be_emptied_is_its_owner_s_alone() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let temp = temp_dir("owner-alone");
+            let parent = File::open(&temp).expect("open");
+            // As an archive can unpack: closed to its owner and open to
+            // everyone else, or the owner's only to read.
+            for (name, mode) in [(c"others", 0o077), (c"read-only", 0o477)] {
+                let path = temp.join(name.to_str().expect("a name"));
+                fs::create_dir(&path).expect("folder");
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("mode");
+                let folder = open_folder(parent.as_fd(), name);
+                assert!(folder.is_some(), "{name:?} is opened");
+                let mode = fs::metadata(&path).expect("there").permissions().mode();
+                assert_eq!(mode & 0o7777, 0o700, "{name:?}");
+            }
+            remove_folder(&temp);
+        }
     }
 
     #[test]
@@ -1897,6 +1951,40 @@ mod tests {
             let left = std::env::temp_dir()
                 .join(format!("ds-emulator-unpack-{}-900005", std::process::id()));
             assert!(stop_programs_left_working_in(&left, STOP, GONE_WITHIN));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: no program an app left running is stopped there"
+    )]
+    fn another_copy_of_the_app_playing_a_game_in_a_folder_left_behind_is_not_stopped() {
+        #[cfg(unix)]
+        {
+            let temp = temp_dir("another-copy");
+            let left = temp.join(format!("ds-emulator-unpack-{}-900006", std::process::id()));
+            fs::create_dir_all(&left).expect("folder");
+            fs::write(left.join(LOCK), b"").expect("lock");
+            fs::write(left.join("Game.gb"), b"a game").expect("game");
+            // A stand-in whose command line reads as the app's, started on
+            // the game: it waits for input that never comes.
+            let copy = Command::new("/bin/sh")
+                .args(["-c", "read line", APP])
+                .arg(left.join("Game.gb"))
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("runs");
+            let mut copy = StandIn(copy);
+            assert!(!stop_programs_left_working_in(&left, STOP, GONE_WITHIN));
+            assert_eq!(remove_left_behind_in(&temp, &[]), 0, "nothing is removed");
+            assert!(!copy.is_gone(), "it plays on");
+            assert_eq!(fs::read(left.join("Game.gb")).expect("kept"), b"a game");
+            // Once that copy has quit, the folder is no one's and goes.
+            drop(copy);
+            remove_left_behind_in(&temp, &[]);
+            assert!(!left.exists(), "and then the folder goes");
+            remove_folder(&temp);
         }
     }
 
