@@ -27,6 +27,7 @@ mod alu;
 mod arm;
 mod arm9;
 mod armv5;
+pub mod bios;
 pub mod cp15;
 mod describe;
 mod disasm;
