@@ -10,17 +10,14 @@
 //! a [`Frame`] and lines of notes. Everything is decoded here from VRAM,
 //! OAM, palette RAM and the registers, the way the 2D engines decode them.
 
+use emu_core::debug::draw::{BACKGROUND, blank, fill_checker, fill_rect, set_pixel};
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
-use emu_core::{Frame, ScreenSize, rgb};
+use emu_core::{Frame, rgb};
 
 use crate::gpu2d::Engine2d;
 use crate::hardware::Hardware;
 use crate::vram::{Engine, EngineMemory, EngineView, Region, Vram};
 
-/// Fills the parts of a picture that show nothing.
-const BACKGROUND: u32 = rgb(0x20, 0x20, 0x20);
-/// The two squares of the checkerboard behind transparent sprite pixels.
-const CHECKER: [u32; 2] = [rgb(0x40, 0x40, 0x40), rgb(0x58, 0x58, 0x58)];
 /// Sprite cells alternate between these, so cells stand apart without
 /// gaps.
 const CELL_SHADES: [u32; 2] = [BACKGROUND, rgb(0x2C, 0x2C, 0x2C)];
@@ -29,33 +26,33 @@ const CELL_SHADES: [u32; 2] = [BACKGROUND, rgb(0x2C, 0x2C, 0x2C)];
 const VRAM_ADDRESS: u32 = 0x0600_0000;
 /// The first OBJ colour in an engine's palette RAM, by colour number: BG
 /// colours are 0–255, OBJ colours 256–511.
-const OBJ_PALETTE: u32 = 256;
+const OBJ_PALETTE: usize = 256;
 /// Bank names, by VRAMCNT number.
 const BANK_NAMES: [&str; 9] = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
 
 /// Bytes the tile picture shows.
 const TILE_BLOCK: u32 = 0x8000;
 /// Tiles per row in the tile picture.
-const TILES_WIDE: u32 = 32;
+const TILES_WIDE: usize = 32;
 
 /// Sprite sizes in pixels by shape (square, wide, tall) and size field
 /// (GBATEK, "LCD OBJ - OAM Attributes").
-const OBJ_SIZES: [[(u32, u32); 4]; 3] = [
+const OBJ_SIZES: [[(usize, usize); 4]; 3] = [
     [(8, 8), (16, 16), (32, 32), (64, 64)],
     [(16, 8), (32, 8), (32, 16), (64, 32)],
     [(8, 16), (8, 32), (16, 32), (32, 64)],
 ];
 /// Entries in each engine's OAM.
-const SPRITES: u32 = 128;
+const SPRITES: usize = 128;
 /// Cells per row in the sprite picture.
-const SPRITE_COLUMNS: u32 = 16;
+const SPRITE_COLUMNS: usize = 16;
 /// A sprite cell's width and height: room for the largest sprite.
-const CELL: u32 = 64;
+const CELL: usize = 64;
 
 /// Width and height of one colour swatch in the palette picture.
-const SWATCH: u32 = 8;
+const SWATCH: usize = 8;
 /// Gap between the BG and OBJ halves of the palette picture.
-const PALETTE_GAP: u32 = 8;
+const PALETTE_GAP: usize = 8;
 
 /// Draws `request`'s view of the video memory of `request.engine`'s 2D
 /// engine (0 for A, anything else for B), or of any VRAM for the tile
@@ -81,15 +78,15 @@ fn tiles(vram: &Vram, engine: &EngineParts<'_>, request: &GraphicsRequest) -> Gr
     let bytes = read_arm9_vram(vram, base, TILE_BLOCK);
     let eight_bit = request.eight_bit;
     let tile_bytes = if eight_bit { 64 } else { 32 };
-    let count = TILE_BLOCK / tile_bytes;
+    let count = bytes.len() / tile_bytes;
     let mut frame = blank(TILES_WIDE * 8, count / TILES_WIDE * 8);
     let (first_color, palette_name) = tile_palette(request.palette, eight_bit);
-    let read = |offset: u32| bytes[offset as usize];
+    let read = |offset: usize| bytes[offset];
     for tile in 0..count {
         let indices = read_tile(&read, tile * tile_bytes, eight_bit);
         let corner = (tile % TILES_WIDE * 8, tile / TILES_WIDE * 8);
         draw_tile(&mut frame, &indices, corner, Flips::default(), |index| {
-            engine.color(first_color + u32::from(index))
+            engine.color(first_color + usize::from(index))
         });
     }
     let bpp = if eight_bit { "8bpp" } else { "4bpp" };
@@ -147,7 +144,7 @@ fn sprites(engine: &EngineParts<'_>) -> Graphics {
     for index in 0..SPRITES {
         let (column, row) = (index % SPRITE_COLUMNS, index / SPRITE_COLUMNS);
         let corner = (column * CELL, row * CELL);
-        let shade = CELL_SHADES[((column + row) % 2) as usize];
+        let shade = CELL_SHADES[(column + row) % 2];
         fill_rect(&mut frame, corner, (CELL, CELL), shade);
         let sprite = Sprite::read(engine.gpu, index);
         if sprite.disabled() {
@@ -200,7 +197,7 @@ fn palettes(engine: &EngineParts<'_>) -> Graphics {
             format!(
                 "{}: BG 0x{bg:08X}, OBJ 0x{:08X}",
                 engine.name(),
-                bg + OBJ_PALETTE * 2
+                bg + OBJ_PALETTE as u32 * 2
             ),
             "Each row is one 16-colour palette, 0–15 from the top; BG colour 0 is the \
              backdrop. Extended palettes (in VRAM) are not shown"
@@ -273,8 +270,8 @@ impl<'a> EngineParts<'a> {
     }
 
     /// Standard palette colour `index` (0–255 BG, 256–511 OBJ) as a pixel.
-    fn color(&self, index: u32) -> u32 {
-        bgr555(self.gpu.read_palette(index * 2))
+    fn color(&self, index: usize) -> u32 {
+        bgr555(self.gpu.read_palette(index as u32 * 2))
     }
 
     /// The byte at `offset` in the engine's BG VRAM.
@@ -367,8 +364,8 @@ fn banks_mapped(vram: &Vram, start: u32, length: u32) -> String {
 /// tiles use 16-colour palette `palette` (0–15 BG, 16–31 OBJ, wrapping
 /// past 31); 8bpp tiles use the 256-colour BG palette for `palette` 0–15
 /// and OBJ's for 16–31.
-fn tile_palette(palette: u8, eight_bit: bool) -> (u32, String) {
-    let palette = u32::from(palette & 31);
+fn tile_palette(palette: u8, eight_bit: bool) -> (usize, String) {
+    let palette = usize::from(palette & 31);
     match (eight_bit, palette) {
         (true, 0..=15) => (0, "BG 256-colour palette".to_string()),
         (true, _) => (OBJ_PALETTE, "OBJ 256-colour palette".to_string()),
@@ -409,7 +406,13 @@ impl Flips {
 /// 4bpp tiles are 32 bytes, two pixels per byte with the left one in the
 /// low nibble; 8bpp tiles are 64 bytes, one per pixel (GBATEK, "LCD VRAM
 /// Character Data"). `read` gives the byte at an offset.
-fn tile_texel(read: &impl Fn(u32) -> u8, address: u32, eight_bit: bool, x: u32, y: u32) -> u8 {
+fn tile_texel(
+    read: &impl Fn(usize) -> u8,
+    address: usize,
+    eight_bit: bool,
+    x: usize,
+    y: usize,
+) -> u8 {
     if eight_bit {
         read(address + y * 8 + x)
     } else {
@@ -423,10 +426,8 @@ fn tile_texel(read: &impl Fn(u32) -> u8, address: u32, eight_bit: bool, x: u32, 
 }
 
 /// The whole tile at `address`, read through `read`.
-fn read_tile(read: &impl Fn(u32) -> u8, address: u32, eight_bit: bool) -> Tile {
-    std::array::from_fn(|y| {
-        std::array::from_fn(|x| tile_texel(read, address, eight_bit, x as u32, y as u32))
-    })
+fn read_tile(read: &impl Fn(usize) -> u8, address: usize, eight_bit: bool) -> Tile {
+    std::array::from_fn(|y| std::array::from_fn(|x| tile_texel(read, address, eight_bit, x, y)))
 }
 
 /// Draws `tile` with its top-left corner at `corner`, mirrored as `flips`
@@ -434,13 +435,13 @@ fn read_tile(read: &impl Fn(u32) -> u8, address: u32, eight_bit: bool) -> Tile {
 fn draw_tile(
     frame: &mut Frame,
     tile: &Tile,
-    (left, top): (u32, u32),
+    (left, top): (usize, usize),
     flips: Flips,
     paint: impl Fn(u8) -> u32,
 ) {
-    for (row, indices) in (0..).zip(tile) {
+    for (row, indices) in tile.iter().enumerate() {
         let y = if flips.y { 7 - row } else { row };
-        for (column, &index) in (0..).zip(indices) {
+        for (column, &index) in indices.iter().enumerate() {
             let x = if flips.x { 7 - column } else { column };
             set_pixel(frame, left + x, top + y, paint(index));
         }
@@ -506,23 +507,26 @@ fn text_map(engine: &EngineParts<'_>, layer: u32, control: u16) -> Graphics {
     let ext_slot = (eight_bit && dispcnt & (1 << 30) != 0).then_some(slot);
     let tile_bytes = if eight_bit { 64 } else { 32 };
     let backdrop = engine.color(0);
-    let read = |offset: u32| engine.bg_byte(offset);
+    let read = |offset: usize| engine.bg_byte(offset as u32);
     let mut frame = blank(width, height);
     for cell_y in 0..height / 8 {
         for cell_x in 0..width / 8 {
             // Maps wider or taller than 256 pixels are 2 KiB screen blocks
             // of 32×32 entries, left to right then top to bottom.
             let block = cell_x / 32 + (cell_y / 32) * (width / 256);
-            let offset = screen_base + block * 0x800 + (cell_y % 32) * 64 + (cell_x % 32) * 2;
-            let entry = engine.memory.bg(offset);
+            let offset = block * 0x800 + (cell_y % 32) * 64 + (cell_x % 32) * 2;
+            let entry = engine.memory.bg(screen_base + offset as u32);
             let address = char_base + u32::from(entry & 0x3FF) * tile_bytes;
-            let tile = read_tile(&read, address, eight_bit);
-            let palette = u32::from(entry >> 12);
+            let tile = read_tile(&read, address as usize, eight_bit);
+            let palette = usize::from(entry >> 12);
             let paint = |index: u8| {
-                let index = u32::from(index);
+                let index = usize::from(index);
                 match ext_slot {
                     _ if index == 0 => backdrop,
-                    Some(slot) => bgr555(engine.memory.bg_ext_palette(slot, palette * 256 + index)),
+                    Some(slot) => {
+                        let color = (palette * 256 + index) as u32;
+                        bgr555(engine.memory.bg_ext_palette(slot, color))
+                    }
                     None if eight_bit => engine.color(index),
                     None => engine.color(palette * 16 + index),
                 }
@@ -568,8 +572,8 @@ struct Sprite {
 impl Sprite {
     /// OAM entry `index` (0–127). The fourth halfword of each entry is an
     /// affine parameter, which drawing unrotated does not need.
-    fn read(gpu: &Engine2d, index: u32) -> Self {
-        let base = index * 8;
+    fn read(gpu: &Engine2d, index: usize) -> Self {
+        let base = index as u32 * 8;
         Self {
             attr0: gpu.read_oam(base),
             attr1: gpu.read_oam(base + 2),
@@ -621,7 +625,7 @@ impl Sprite {
 
     /// Width and height in pixels, from the shape and the size field
     /// (attribute 1 bits 14–15); `None` for the prohibited shape.
-    fn size(self) -> Option<(u32, u32)> {
+    fn size(self) -> Option<(usize, usize)> {
         let sizes = OBJ_SIZES.get(self.shape())?;
         Some(sizes[usize::from(self.attr1 >> 14)])
     }
@@ -666,8 +670,8 @@ impl Sprite {
 
     /// Attribute 2 bits 12–15: the 16-colour or extended OBJ palette, or a
     /// bitmap sprite's alpha (0 hides it).
-    fn palette(self) -> u32 {
-        u32::from(self.attr2 >> 12)
+    fn palette(self) -> usize {
+        usize::from(self.attr2 >> 12)
     }
 }
 
@@ -675,7 +679,7 @@ impl Sprite {
 #[derive(Debug, Clone, Copy)]
 enum Texels {
     /// 16-colour tiles using standard OBJ palette `palette` (0–15).
-    Tiles16 { palette: u32 },
+    Tiles16 { palette: usize },
     /// 256-colour tiles; `ext_base` is the first colour of the sprite's
     /// extended palette when DISPCNT bit 31 enables extended OBJ palettes.
     Tiles256 { ext_base: Option<u32> },
@@ -695,9 +699,9 @@ struct Layout {
     /// Address mask: 2D tile mapping wraps within 32 KiB.
     mask: u32,
     /// The sprite's width in pixels.
-    width: u32,
+    width: usize,
     /// The sprite's height in pixels.
-    height: u32,
+    height: usize,
 }
 
 /// Where `sprite`'s texels are, from its attributes and DISPCNT's mapping
@@ -718,7 +722,7 @@ fn layout(dispcnt: u32, sprite: Sprite) -> Option<Layout> {
                 )
             }
             // 1D: the tile number counts 128- or 256-byte units.
-            2 => (tile * (128 << ((dispcnt >> 22) & 1)), width * 2),
+            2 => (tile * (128 << ((dispcnt >> 22) & 1)), width as u32 * 2),
             _ => return None,
         };
         (Texels::Bitmap, base, stride, u32::MAX)
@@ -726,7 +730,7 @@ fn layout(dispcnt: u32, sprite: Sprite) -> Option<Layout> {
         let eight_bit = sprite.eight_bit();
         let texels = if eight_bit {
             Texels::Tiles256 {
-                ext_base: (dispcnt & (1 << 31) != 0).then_some(sprite.palette() * 256),
+                ext_base: (dispcnt & (1 << 31) != 0).then_some(sprite.palette() as u32 * 256),
             }
         } else {
             Texels::Tiles16 {
@@ -738,7 +742,7 @@ fn layout(dispcnt: u32, sprite: Sprite) -> Option<Layout> {
             // in units of the boundary (DISPCNT bits 20–21: 32–256 bytes).
             let tile_bytes = if eight_bit { 64 } else { 32 };
             let base = tile * (32 << ((dispcnt >> 20) & 3));
-            (texels, base, width / 8 * tile_bytes, u32::MAX)
+            (texels, base, width as u32 / 8 * tile_bytes, u32::MAX)
         } else {
             // 2D: a sheet 32 tiles wide in the first 32 KiB.
             (texels, tile * 32, 32 * 32, 0x7FFF)
@@ -761,7 +765,7 @@ fn draw_sprite(
     engine: &EngineParts<'_>,
     sprite: Sprite,
     layout: &Layout,
-    (left, top): (u32, u32),
+    (left, top): (usize, usize),
 ) {
     let flips = Flips {
         x: sprite.h_flip(),
@@ -780,26 +784,32 @@ fn draw_sprite(
 
 /// The colour of texel (`x`, `y`) of a sprite laid out as `layout`, `None`
 /// where transparent.
-fn sprite_texel(engine: &EngineParts<'_>, layout: &Layout, x: u32, y: u32) -> Option<u32> {
+fn sprite_texel(engine: &EngineParts<'_>, layout: &Layout, x: usize, y: usize) -> Option<u32> {
+    // The same texel for arithmetic on OBJ VRAM offsets, which are 32 bits.
+    let (wide_x, wide_y) = (x as u32, y as u32);
     match layout.texels {
         Texels::Bitmap => {
-            let color = engine.memory.obj(layout.base + y * layout.stride + x * 2);
+            let color = engine
+                .memory
+                .obj(layout.base + wide_y * layout.stride + wide_x * 2);
             (color & 0x8000 != 0).then(|| bgr555(color))
         }
         Texels::Tiles16 { palette } => {
-            let tile = layout.base + y / 8 * layout.stride + x / 8 * 32;
-            let read = |offset: u32| engine.obj_byte(offset & layout.mask);
-            let index = u32::from(tile_texel(&read, tile, false, x % 8, y % 8));
+            let tile = layout.base + wide_y / 8 * layout.stride + wide_x / 8 * 32;
+            let read = |offset: usize| engine.obj_byte(offset as u32 & layout.mask);
+            let index = usize::from(tile_texel(&read, tile as usize, false, x % 8, y % 8));
             (index != 0).then(|| engine.color(OBJ_PALETTE + palette * 16 + index))
         }
         Texels::Tiles256 { ext_base } => {
-            let tile = layout.base + y / 8 * layout.stride + x / 8 * 64;
-            let read = |offset: u32| engine.obj_byte(offset & layout.mask);
-            let index = u32::from(tile_texel(&read, tile, true, x % 8, y % 8));
+            let tile = layout.base + wide_y / 8 * layout.stride + wide_x / 8 * 64;
+            let read = |offset: usize| engine.obj_byte(offset as u32 & layout.mask);
+            let index = tile_texel(&read, tile as usize, true, x % 8, y % 8);
             match ext_base {
                 _ if index == 0 => None,
-                Some(base) => Some(bgr555(engine.memory.obj_ext_palette(base + index))),
-                None => Some(engine.color(OBJ_PALETTE + index)),
+                Some(base) => Some(bgr555(
+                    engine.memory.obj_ext_palette(base + u32::from(index)),
+                )),
+                None => Some(engine.color(OBJ_PALETTE + usize::from(index))),
             }
         }
     }
@@ -840,7 +850,7 @@ fn sprites_summary(engine: &EngineParts<'_>, dispcnt: u32) -> String {
 /// colours, priority, mode, rotation or flips, and mosaic. `unmapped` says
 /// it uses the reserved bitmap mapping; `hidden` that Alpha-OAM 0 hides
 /// it.
-fn sprite_note(index: u32, sprite: Sprite, dispcnt: u32, unmapped: bool, hidden: bool) -> String {
+fn sprite_note(index: usize, sprite: Sprite, dispcnt: u32, unmapped: bool, hidden: bool) -> String {
     let Some((width, height)) = sprite.size() else {
         return format!("{index:3}: prohibited shape 3, not drawn");
     };
@@ -879,46 +889,11 @@ fn sprite_note(index: u32, sprite: Sprite, dispcnt: u32, unmapped: bool, hidden:
     note
 }
 
-// ----- Drawing -----------------------------------------------------------
-
-/// A `width`×`height` picture filled with [`BACKGROUND`].
-fn blank(width: u32, height: u32) -> Frame {
-    let mut frame = Frame::new(ScreenSize::new(width as u16, height as u16));
-    frame.pixels_mut().fill(BACKGROUND);
-    frame
-}
-
-/// Sets the pixel at (`x`, `y`) if it is inside the picture.
-fn set_pixel(frame: &mut Frame, x: u32, y: u32, color: u32) {
-    let size = frame.size();
-    let (width, height) = (u32::from(size.width), u32::from(size.height));
-    if x < width && y < height {
-        frame.pixels_mut()[(y * width + x) as usize] = color;
-    }
-}
-
-/// Fills the `width`×`height` rectangle from (`left`, `top`) with `color`.
-fn fill_rect(frame: &mut Frame, (left, top): (u32, u32), (width, height): (u32, u32), color: u32) {
-    for y in top..top + height {
-        for x in left..left + width {
-            set_pixel(frame, x, y, color);
-        }
-    }
-}
-
-/// Fills the `width`×`height` rectangle from (`left`, `top`) with a
-/// checkerboard of 4-pixel squares, the usual picture of "transparent".
-fn fill_checker(frame: &mut Frame, (left, top): (u32, u32), (width, height): (u32, u32)) {
-    for y in 0..height {
-        for x in 0..width {
-            let square = CHECKER[((x / 4 + y / 4) % 2) as usize];
-            set_pixel(frame, left + x, top + y, square);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use emu_core::ScreenSize;
+    use emu_core::debug::draw::CHECKER;
+
     use super::*;
 
     const RED: u16 = 0x001F;
