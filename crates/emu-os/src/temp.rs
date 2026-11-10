@@ -10,7 +10,9 @@
 //!
 //! - [`work_dir`] is a folder of the app's inside the temporary folder,
 //!   `ds-emulator-<user id>`, made for its user alone and refused if it is
-//!   someone else's.
+//!   someone else's. If someone else took that name, the app works in
+//!   `ds-emulator/tmp` in the user's own cache folder instead, so that
+//!   one `mkdir` by another user turns nothing off.
 //! - [`runtime_dir`] is `$XDG_RUNTIME_DIR` when the session has one, such
 //!   as `/run/user/1000`: the folder the system makes for the user alone,
 //!   for sockets and the like. It is a small disk in memory, so only the
@@ -23,16 +25,20 @@ use std::path::PathBuf;
 
 /// The folder for work folders and other files the app removes when it is
 /// done with them, which may be as big as a game: the temporary folder,
-/// or on Linux a folder of the user's own inside it.
+/// or on Linux a folder of the user's own inside it, or failing that
+/// inside their cache folder.
 ///
 /// # Errors
 ///
-/// On Linux, if that folder cannot be made, or one is there by its name
-/// that is not the user's own folder.
+/// On Linux, if neither folder can be made as the user's own.
 pub fn work_dir() -> io::Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        linux::private_in(&std::env::temp_dir(), user::id())
+        linux::work_dir(
+            &std::env::temp_dir(),
+            crate::cache_dir().as_deref(),
+            user::id(),
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -92,6 +98,30 @@ mod linux {
         })
     }
 
+    /// The folder for work folders: `ds-emulator-<uid>` in `temp`, the
+    /// temporary folder, for the user `uid` alone ([`private_in`]).
+    ///
+    /// Another user can take that name first, with one `mkdir` in `/tmp`.
+    /// The app does not use what they made, and is not to be stopped by
+    /// it either: it then works in `ds-emulator/tmp` in `cache`, the
+    /// user's own cache folder, made and checked the same way. Its path
+    /// is kept short, as an RPG Maker game's socket may go there too.
+    /// Only without a cache folder does it fail, saying what is in its
+    /// way in the temporary folder.
+    pub(super) fn work_dir(temp: &Path, cache: Option<&Path>, uid: u32) -> io::Result<PathBuf> {
+        let refused = match private_in(temp, uid) {
+            Ok(dir) => return Ok(dir),
+            Err(refused) => refused,
+        };
+        let Some(cache) = cache else {
+            return Err(refused);
+        };
+        let own = cache.join("ds-emulator");
+        fs::create_dir_all(&own)
+            .and_then(|()| private(own.join("tmp"), uid))
+            .map_err(|_| refused)
+    }
+
     /// The folder `ds-emulator-<uid>` in `temp`, made if it is not there,
     /// for the user `uid` alone.
     ///
@@ -100,7 +130,12 @@ mod linux {
     /// can then put anything in it, or swap it for something else, as
     /// `/tmp` lets nobody remove what is another's.
     pub(super) fn private_in(temp: &Path, uid: u32) -> io::Result<PathBuf> {
-        let dir = temp.join(format!("ds-emulator-{uid}"));
+        private(temp.join(format!("ds-emulator-{uid}")), uid)
+    }
+
+    /// The folder `dir`, made if it is not there, for the user `uid`
+    /// alone, or why it is not theirs to use.
+    fn private(dir: PathBuf, uid: u32) -> io::Result<PathBuf> {
         match fs::DirBuilder::new().mode(0o700).create(&dir) {
             Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
             _ => {}
@@ -195,6 +230,69 @@ mod tests {
             assert!(!linux::is_private(&link, uid), "a link, not a folder");
             assert!(dir.join("kept").exists(), "nothing was written through it");
             fs::remove_dir_all(&temp).expect("clean up");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(unix), ignore = "Windows: the temporary folder is the user's own")]
+    fn a_name_taken_in_the_shared_temporary_folder_sends_the_app_to_its_cache_folder() {
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+            let root = std::env::temp_dir().join(format!("emu-os-taken-{}", std::process::id()));
+            fs::remove_dir_all(&root).ok();
+            let (temp, cache) = (root.join("tmp"), root.join("home").join(".cache"));
+            fs::create_dir_all(&temp).expect("temp");
+            fs::create_dir_all(&cache).expect("cache");
+            let uid = fs::metadata(&root).expect("metadata").uid();
+            let shared = temp.join(format!("ds-emulator-{uid}"));
+
+            // Nothing in the way: the folder in the temporary folder.
+            let dir = linux::work_dir(&temp, Some(&cache), uid).expect("made");
+            assert_eq!(dir, shared);
+            fs::remove_dir(&shared).expect("removed");
+
+            // Another user took the name first, with a link to a folder of
+            // theirs: one `mkdir` or `ln` in `/tmp` is all it takes. The
+            // app does not use it, and is not stopped by it either.
+            let theirs = root.join("theirs");
+            fs::create_dir(&theirs).expect("theirs");
+            std::os::unix::fs::symlink(&theirs, &shared).expect("taken");
+            let dir = linux::work_dir(&temp, Some(&cache), uid).expect("the user's own");
+            assert_eq!(dir, cache.join("ds-emulator").join("tmp"));
+            let mode = fs::metadata(&dir).expect("metadata").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "nobody else may open it");
+            assert!(linux::is_private(&dir, uid));
+            assert_eq!(
+                fs::read_dir(&theirs).expect("theirs").count(),
+                0,
+                "untouched"
+            );
+            // Found again, and short: a socket's path may be 108 bytes,
+            // and this adds 16 to the cache folder's.
+            assert_eq!(
+                linux::work_dir(&temp, Some(&cache), uid).expect("found"),
+                dir
+            );
+            assert_eq!(dir.as_os_str().len(), cache.as_os_str().len() + 16);
+
+            // Without a cache folder, or with its folder taken too, the
+            // app says which folder is in its way.
+            let error = linux::work_dir(&temp, None, uid).expect_err("nowhere");
+            assert!(
+                error.to_string().contains("is not this user's own folder"),
+                "{error}"
+            );
+            fs::remove_dir(&dir).expect("removed");
+            std::os::unix::fs::symlink(&theirs, &dir).expect("taken too");
+            let error = linux::work_dir(&temp, Some(&cache), uid).expect_err("nowhere");
+            assert!(
+                error.to_string().contains(&shared.display().to_string()),
+                "{error}"
+            );
+            fs::remove_dir_all(&root).expect("clean up");
         }
     }
 }
