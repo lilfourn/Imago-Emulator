@@ -239,14 +239,15 @@ impl Drop for WorkFolder {
 /// first made its owner's to read, write and search. Windows has no such
 /// bits.
 fn remove_folder(path: &Path) {
-    if fs::remove_dir_all(path).is_ok() {
-        return;
-    }
+    let removed = fs::remove_dir_all(path);
     #[cfg(unix)]
-    {
+    if removed.is_err() {
         open_folders(path);
         fs::remove_dir_all(path).ok();
     }
+    // Windows: there is nothing more to try.
+    #[cfg(not(unix))]
+    let _ = removed;
 }
 
 /// Makes the folder at `path`, and each folder under it, its owner's to
