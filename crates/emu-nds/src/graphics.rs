@@ -7,42 +7,27 @@
 //! (Tile) Mapping").
 //!
 //! [`draw`] reads the hardware without changing it and returns plain data:
-//! a [`Frame`] and lines of notes. Everything is decoded here from VRAM,
-//! OAM, palette RAM and the registers, the way the 2D engines decode them.
+//! a [`Frame`](emu_core::Frame) and lines of notes. Everything is decoded
+//! from VRAM, OAM, palette RAM and the registers, the way the 2D engines
+//! decode them; what the DS shares with the GBA is decoded by
+//! [`emu_core::debug::gba_video`].
 
-use emu_core::debug::draw::{BACKGROUND, blank, fill_checker, fill_rect, set_pixel};
+use emu_core::debug::draw::blank;
 use emu_core::debug::gba_video::{
-    Flips, OBJ_PALETTE, TILE_BLOCK, draw_tile, palette_sheet, read_tile, tile_sheet, tile_texel,
+    Flips, OBJ_PALETTE, SPRITES, Sprite, TILE_BLOCK, draw_sprite, draw_tile, palette_sheet,
+    read_tile, sprite_sheet, tile_sheet, tile_texel,
 };
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
-use emu_core::{Frame, rgb};
+use emu_core::rgb;
 
 use crate::gpu2d::Engine2d;
 use crate::hardware::Hardware;
 use crate::vram::{Engine, EngineMemory, EngineView, Region, Vram};
 
-/// Sprite cells alternate between these, so cells stand apart without
-/// gaps.
-const CELL_SHADES: [u32; 2] = [BACKGROUND, rgb(0x2C, 0x2C, 0x2C)];
-
 /// Where VRAM starts on the ARM9's bus.
 const VRAM_ADDRESS: u32 = 0x0600_0000;
 /// Bank names, by VRAMCNT number.
 const BANK_NAMES: [&str; 9] = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
-
-/// Sprite sizes in pixels by shape (square, wide, tall) and size field
-/// (GBATEK, "LCD OBJ - OAM Attributes").
-const OBJ_SIZES: [[(usize, usize); 4]; 3] = [
-    [(8, 8), (16, 16), (32, 32), (64, 64)],
-    [(16, 8), (32, 8), (32, 16), (64, 32)],
-    [(8, 16), (8, 32), (16, 32), (32, 64)],
-];
-/// Entries in each engine's OAM.
-const SPRITES: usize = 128;
-/// Cells per row in the sprite picture.
-const SPRITE_COLUMNS: usize = 16;
-/// A sprite cell's width and height: room for the largest sprite.
-const CELL: usize = 64;
 
 /// Draws `request`'s view of the video memory of `request.engine`'s 2D
 /// engine (0 for A, anything else for B), or of any VRAM for the tile
@@ -122,26 +107,23 @@ fn map(engine: &EngineParts<'_>, layer: u8) -> Graphics {
 /// not disabled.
 fn sprites(engine: &EngineParts<'_>) -> Graphics {
     let dispcnt = engine.dispcnt();
-    let rows = SPRITES / SPRITE_COLUMNS;
-    let mut frame = blank(SPRITE_COLUMNS * CELL, rows * CELL);
+    let mut frame = sprite_sheet();
     let mut notes = vec![sprites_summary(engine, dispcnt)];
     for index in 0..SPRITES {
-        let (column, row) = (index % SPRITE_COLUMNS, index / SPRITE_COLUMNS);
-        let corner = (column * CELL, row * CELL);
-        let shade = CELL_SHADES[(column + row) % 2];
-        fill_rect(&mut frame, corner, (CELL, CELL), shade);
-        let sprite = Sprite::read(engine.gpu, index);
+        let sprite = Sprite::read(|offset| engine.gpu.read_oam(offset), index);
         if sprite.disabled() {
             continue;
         }
         let layout = layout(dispcnt, sprite);
         // Alpha-OAM 0 hides a bitmap sprite.
-        let hidden = sprite.bitmap() && sprite.palette() == 0;
+        let hidden = is_bitmap(sprite) && sprite.palette() == 0;
         if let Some(layout) = &layout
             && !hidden
         {
-            fill_checker(&mut frame, corner, (layout.width, layout.height));
-            draw_sprite(&mut frame, engine, sprite, layout, corner);
+            let size = (layout.width, layout.height);
+            draw_sprite(&mut frame, index, size, sprite.flips(), |x, y| {
+                sprite_texel(engine, layout, x, y)
+            });
         }
         notes.push(sprite_note(
             index,
@@ -460,119 +442,10 @@ fn text_map(engine: &EngineParts<'_>, layer: u32, control: u16) -> Graphics {
 
 // ----- Sprites -----------------------------------------------------------
 
-/// One OAM entry's three attribute halfwords (GBATEK, "DS Video OBJs" and
-/// the GBA's "LCD OBJ - OAM Attributes").
-#[derive(Debug, Clone, Copy)]
-struct Sprite {
-    attr0: u16,
-    attr1: u16,
-    attr2: u16,
-}
-
-impl Sprite {
-    /// OAM entry `index` (0–127). The fourth halfword of each entry is an
-    /// affine parameter, which drawing unrotated does not need.
-    fn read(gpu: &Engine2d, index: usize) -> Self {
-        let base = index as u32 * 8;
-        Self {
-            attr0: gpu.read_oam(base),
-            attr1: gpu.read_oam(base + 2),
-            attr2: gpu.read_oam(base + 4),
-        }
-    }
-
-    /// Rotation/scaling is on (attribute 0 bit 8).
-    fn affine(self) -> bool {
-        self.attr0 & (1 << 8) != 0
-    }
-
-    /// Not drawn at all: not affine, with attribute 0 bit 9 set.
-    fn disabled(self) -> bool {
-        !self.affine() && self.attr0 & (1 << 9) != 0
-    }
-
-    /// An affine sprite's drawing area is twice its size (attribute 0 bit
-    /// 9).
-    fn double_size(self) -> bool {
-        self.affine() && self.attr0 & (1 << 9) != 0
-    }
-
-    /// Attribute 0 bits 10–11: 0 normal, 1 semi-transparent, 2 OBJ window,
-    /// 3 bitmap.
-    fn mode(self) -> usize {
-        usize::from((self.attr0 >> 10) & 3)
-    }
-
-    /// A direct-colour bitmap sprite (mode 3).
-    fn bitmap(self) -> bool {
-        self.mode() == 3
-    }
-
-    /// Mosaic applies (attribute 0 bit 12).
-    fn mosaic(self) -> bool {
-        self.attr0 & (1 << 12) != 0
-    }
-
-    /// 256-colour tiles (attribute 0 bit 13).
-    fn eight_bit(self) -> bool {
-        self.attr0 & (1 << 13) != 0
-    }
-
-    /// Attribute 0 bits 14–15: 0 square, 1 wide, 2 tall, 3 prohibited.
-    fn shape(self) -> usize {
-        usize::from(self.attr0 >> 14)
-    }
-
-    /// Width and height in pixels, from the shape and the size field
-    /// (attribute 1 bits 14–15); `None` for the prohibited shape.
-    fn size(self) -> Option<(usize, usize)> {
-        let sizes = OBJ_SIZES.get(self.shape())?;
-        Some(sizes[usize::from(self.attr1 >> 14)])
-    }
-
-    /// Screen x: attribute 1 bits 0–8, signed.
-    fn x(self) -> i32 {
-        let x = i32::from(self.attr1 & 0x1FF);
-        if x >= 256 { x - 512 } else { x }
-    }
-
-    /// Screen y: attribute 0 bits 0–7. Rows count within 256 lines, so a
-    /// sprite crossing the bottom edge shows at the top as well.
-    fn y(self) -> u16 {
-        self.attr0 & 0xFF
-    }
-
-    /// Mirrored left to right (attribute 1 bit 12, without rotation).
-    fn h_flip(self) -> bool {
-        !self.affine() && self.attr1 & (1 << 12) != 0
-    }
-
-    /// Mirrored top to bottom (attribute 1 bit 13, without rotation).
-    fn v_flip(self) -> bool {
-        !self.affine() && self.attr1 & (1 << 13) != 0
-    }
-
-    /// Which of the 32 affine parameter groups it uses (attribute 1 bits
-    /// 9–13).
-    fn affine_index(self) -> u16 {
-        (self.attr1 >> 9) & 0x1F
-    }
-
-    /// Its tile number (attribute 2 bits 0–9), in units DISPCNT sets.
-    fn tile(self) -> u32 {
-        u32::from(self.attr2 & 0x3FF)
-    }
-
-    /// Priority against backgrounds (attribute 2 bits 10–11).
-    fn priority(self) -> u16 {
-        (self.attr2 >> 10) & 3
-    }
-
-    /// Attribute 2 bits 12–15: the 16-colour or extended OBJ palette, or a
-    /// bitmap sprite's alpha (0 hides it).
-    fn palette(self) -> usize {
-        usize::from(self.attr2 >> 12)
-    }
+/// A direct-colour bitmap sprite: mode 3, which the GBA prohibits (GBATEK,
+/// "DS Video OBJs").
+fn is_bitmap(sprite: Sprite) -> bool {
+    sprite.mode() == 3
 }
 
 /// How a sprite's texels are stored.
@@ -609,8 +482,8 @@ struct Layout {
 /// reserved bitmap mapping (GBATEK, "DS Video OBJs").
 fn layout(dispcnt: u32, sprite: Sprite) -> Option<Layout> {
     let (width, height) = sprite.size()?;
-    let tile = sprite.tile();
-    let (texels, base, stride, mask) = if sprite.bitmap() {
+    let tile = u32::from(sprite.tile());
+    let (texels, base, stride, mask) = if is_bitmap(sprite) {
         let (base, stride) = match (dispcnt >> 5) & 3 {
             // 2D: one 128- or 256-dot-wide bitmap. The tile number's low 4
             // or 5 bits pick an 8-dot column, the rest an 8-dot row.
@@ -630,11 +503,11 @@ fn layout(dispcnt: u32, sprite: Sprite) -> Option<Layout> {
         let eight_bit = sprite.eight_bit();
         let texels = if eight_bit {
             Texels::Tiles256 {
-                ext_base: (dispcnt & (1 << 31) != 0).then_some(sprite.palette() as u32 * 256),
+                ext_base: (dispcnt & (1 << 31) != 0).then_some(u32::from(sprite.palette()) * 256),
             }
         } else {
             Texels::Tiles16 {
-                palette: sprite.palette(),
+                palette: usize::from(sprite.palette()),
             }
         };
         if dispcnt & (1 << 4) != 0 {
@@ -656,30 +529,6 @@ fn layout(dispcnt: u32, sprite: Sprite) -> Option<Layout> {
         width,
         height,
     })
-}
-
-/// Draws a sprite unrotated with its top-left corner at `corner`, flipped
-/// as its attributes say; transparent texels leave the picture as it is.
-fn draw_sprite(
-    frame: &mut Frame,
-    engine: &EngineParts<'_>,
-    sprite: Sprite,
-    layout: &Layout,
-    (left, top): (usize, usize),
-) {
-    let flips = Flips {
-        x: sprite.h_flip(),
-        y: sprite.v_flip(),
-    };
-    for y in 0..layout.height {
-        let texel_y = if flips.y { layout.height - 1 - y } else { y };
-        for x in 0..layout.width {
-            let texel_x = if flips.x { layout.width - 1 - x } else { x };
-            if let Some(pixel) = sprite_texel(engine, layout, texel_x, texel_y) {
-                set_pixel(frame, left + x, top + y, pixel);
-            }
-        }
-    }
 }
 
 /// The colour of texel (`x`, `y`) of a sprite laid out as `layout`, `None`
@@ -751,11 +600,7 @@ fn sprites_summary(engine: &EngineParts<'_>, dispcnt: u32) -> String {
 /// it uses the reserved bitmap mapping; `hidden` that Alpha-OAM 0 hides
 /// it.
 fn sprite_note(index: usize, sprite: Sprite, dispcnt: u32, unmapped: bool, hidden: bool) -> String {
-    let Some((width, height)) = sprite.size() else {
-        return format!("{index:3}: prohibited shape 3, not drawn");
-    };
-    let shape = ["square", "wide", "tall"][sprite.shape()];
-    let colors = match (sprite.bitmap(), sprite.eight_bit()) {
+    let colors = match (is_bitmap(sprite), sprite.eight_bit()) {
         (true, _) => format!("alpha {}", sprite.palette()),
         (false, true) if dispcnt & (1 << 31) != 0 => {
             format!("8bpp, extended palette {}", sprite.palette())
@@ -763,36 +608,25 @@ fn sprite_note(index: usize, sprite: Sprite, dispcnt: u32, unmapped: bool, hidde
         (false, true) => "8bpp".to_string(),
         (false, false) => format!("palette {}", sprite.palette()),
     };
-    let mode = ["normal", "semi-transparent", "window", "bitmap"][sprite.mode()];
-    let mut note = format!(
-        "{index:3}: x {}, y {}, {width}×{height} {shape}, tile 0x{:03X}, {colors}, priority {}, {mode}",
-        sprite.x(),
-        sprite.y(),
-        sprite.tile(),
-        sprite.priority()
-    );
-    if sprite.affine() {
-        note += &format!(", affine {}", sprite.affine_index());
-    }
-    let flags = [
-        (sprite.double_size(), "double size"),
-        (sprite.h_flip(), "h-flip"),
-        (sprite.v_flip(), "v-flip"),
-        (sprite.mosaic(), "mosaic"),
-        (unmapped, "reserved bitmap mapping, not drawn"),
-        (hidden, "hidden (alpha 0)"),
-    ];
-    for (_, flag) in flags.iter().filter(|(set, _)| *set) {
-        note += ", ";
-        note += flag;
-    }
-    note
+    // Rows count within 256 lines, so a sprite crossing the bottom edge
+    // shows at the top as well: y is told as stored.
+    sprite.note(
+        index,
+        i32::from(sprite.y()),
+        &colors,
+        "bitmap",
+        &[
+            (unmapped, "reserved bitmap mapping, not drawn"),
+            (hidden, "hidden (alpha 0)"),
+        ],
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use emu_core::ScreenSize;
     use emu_core::debug::draw::CHECKER;
+    use emu_core::debug::gba_video::CELL_SHADES;
 
     use super::*;
 
