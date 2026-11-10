@@ -4,6 +4,7 @@
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Renames the file or folder at `from` to `to`, replacing a file there,
 /// as [`fs::rename`] does.
@@ -89,6 +90,12 @@ mod windows {
 /// file first, reach the disk, and only then is it renamed over `path`
 /// (with [`rename`], which on Windows waits out a virus scanner).
 ///
+/// The temporary file is this write's alone, `name.<process>-<n>.tmp`, so
+/// two writers of one file, in this app or in two copies of it, never
+/// write through each other's: the later rename wins, whole. A write that
+/// fails removes it; one cut short by a crash leaves it, named `….tmp`
+/// for the app to clear at a later launch.
+///
 /// On macOS the folder is not synced after the rename: syncing there
 /// flushes the whole drive's cache, which is slow, and without it a power
 /// cut can at worst undo the rename, leaving the old file whole. Windows
@@ -117,14 +124,27 @@ pub fn write_atomic_with(
     mode: Option<u32>,
     fill: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
+    /// Writes so far, which tells this process's temporary files apart.
+    static WRITES: AtomicU32 = AtomicU32::new(0);
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
+    temporary.push(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
     let temporary = PathBuf::from(temporary);
-    let mut file = create(&temporary, mode)?;
-    fill(&mut file)?;
-    file.sync_all()?;
-    drop(file);
-    rename(&temporary, path)?;
+    let written = (|| {
+        let mut file = create(&temporary, mode)?;
+        fill(&mut file)?;
+        file.sync_all()?;
+        // Closed before it is renamed, and before it is removed below.
+        drop(file);
+        rename(&temporary, path)
+    })();
+    if written.is_err() {
+        fs::remove_file(&temporary).ok();
+    }
+    written?;
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let folder = match path.parent() {
@@ -138,8 +158,9 @@ pub fn write_atomic_with(
 }
 
 /// Makes the new, empty file `temporary`, with the Unix permissions `mode`
-/// if given. One left by a write cut short goes first: opened again, it
-/// would keep the permissions it had.
+/// if given. One left under the same name by a write cut short, in a
+/// process that had this one's number, goes first: opened again, it would
+/// keep the permissions it had.
 fn create(temporary: &Path, mode: Option<u32>) -> io::Result<File> {
     match fs::remove_file(temporary) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
@@ -237,6 +258,82 @@ mod tests {
     }
 
     #[test]
+    fn a_write_that_fails_leaves_no_temporary_file() {
+        let dir = temp_dir("failed");
+        let path = dir.join("game.sav");
+        fs::write(&path, b"old").expect("write");
+        // The disk fills as it is written.
+        let failed = write_atomic_with(&path, None, |file| {
+            file.write_all(b"half")?;
+            Err(io::Error::other("disk full"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(names(&dir), ["game.sav"], "nothing beside the save");
+        // It cannot be renamed into place: a folder is in the way.
+        let taken = dir.join("Saves");
+        fs::create_dir(&taken).expect("folder");
+        fs::write(taken.join("kept"), b"kept").expect("write");
+        assert!(write_atomic(&taken, b"new").is_err());
+        assert_eq!(names(&dir), ["Saves", "game.sav"]);
+        assert_eq!(fs::read(&path).expect("read back"), b"old");
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn two_writers_of_one_file_each_write_a_temporary_of_their_own() {
+        use std::sync::Barrier;
+
+        let dir = temp_dir("writers");
+        let path = dir.join("library.toml");
+        // Both have made their temporary file before either is done, as
+        // two windows saving the library at once would.
+        let both_writing = Barrier::new(2);
+        let write = |bytes: &'static [u8]| {
+            write_atomic_with(&path, None, |file| {
+                file.write_all(bytes)?;
+                both_writing.wait();
+                Ok(())
+            })
+        };
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| write(b"the first writer's, whole"));
+            let second = scope.spawn(|| write(b"the second's"));
+            (
+                first.join().expect("no panic"),
+                second.join().expect("no panic"),
+            )
+        });
+        first.expect("the first is written");
+        second.expect("the second is written");
+        let kept = fs::read(&path).expect("read back");
+        assert!(
+            kept == b"the first writer's, whole" || kept == b"the second's",
+            "one of the two, whole: {:?}",
+            String::from_utf8_lossy(&kept)
+        );
+        assert_eq!(names(&dir), ["library.toml"]);
+        // The name still ends as what is left behind is looked for by.
+        let seen = std::sync::Mutex::new(Vec::new());
+        write_atomic_with(&path, None, |_| {
+            seen.lock().expect("lock").extend(names(&dir));
+            Ok(())
+        })
+        .expect("written");
+        let seen = seen.into_inner().expect("lock");
+        let temporary = seen
+            .iter()
+            .find(|name| *name != "library.toml")
+            .expect("one");
+        assert!(temporary.starts_with("library.toml."), "{temporary}");
+        assert!(temporary.ends_with(".tmp"), "{temporary}");
+        assert!(
+            temporary.contains(&std::process::id().to_string()),
+            "{temporary}"
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
     #[cfg_attr(not(unix), ignore = "Windows: files have no permission bits")]
     fn a_private_file_is_never_readable_by_others() {
         #[cfg(unix)]
@@ -245,10 +342,6 @@ mod tests {
             let dir = temp_dir("private");
             let path = dir.join("auth.json");
             let mode = |path: &Path| fs::metadata(path).expect("metadata").permissions().mode();
-            // A temporary file left by a write cut short, readable by all.
-            let leftover = dir.join("auth.json.tmp");
-            fs::write(&leftover, b"old").expect("leftover");
-            fs::set_permissions(&leftover, fs::Permissions::from_mode(0o644)).expect("mode");
             write_atomic_with(&path, Some(0o600), |file| {
                 // As it is written, too.
                 assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
