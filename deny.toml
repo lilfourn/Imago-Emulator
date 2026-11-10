@@ -1,7 +1,9 @@
 # What `cargo deny check advisories` holds the app's dependencies to. CI
 # runs it on every change (.github/workflows/ci.yml, "Advisories").
 #
-# A known vulnerability in any crate, however deep, fails the check.
+# A known vulnerability in any crate, however deep, fails the check, and
+# so does a crate known to be unsound: cargo-deny would by default look
+# for those only among the workspace's own dependencies.
 #
 # A crate that is no longer maintained fails it only where the workspace
 # can do something about it: when a crate of this workspace depends on it
@@ -17,3 +19,4 @@
 
 [advisories]
 unmaintained = "workspace"
+unsound = "all"
