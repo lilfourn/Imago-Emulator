@@ -823,7 +823,9 @@ fn wait_for_notice(events: &async_channel::Receiver<Event>, start: &str) -> Stri
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match events.try_recv() {
-            Ok(Event::Notice(text)) if text.starts_with(start) => return text,
+            Ok(event) if event.notice().is_some_and(|text| text.starts_with(start)) => {
+                return event.notice().expect("a notice").into_owned();
+            }
             Ok(_) => {}
             Err(_) => {
                 assert!(Instant::now() < deadline, "no notice {start:?}");
@@ -899,6 +901,49 @@ fn durations_read_as_minutes_and_seconds() {
 }
 
 #[test]
+fn a_state_saved_loaded_or_refused_is_said_by_what_it_is() {
+    let dir = empty_dir("state-events");
+    let (emulator, events) = start(dir.join("counter.gb"));
+    emulator.send(Command::SaveState(3));
+    wait_for_event(&events, &Event::StateSaved(3));
+    emulator.send(Command::LoadState(3));
+    wait_for_event(&events, &Event::StateLoaded(3));
+    // Nothing in slot 4: a failure, in the words it has always had.
+    emulator.send(Command::LoadState(4));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let refused = loop {
+        assert!(Instant::now() < deadline, "no failure for the empty slot");
+        match events.try_recv() {
+            Ok(Event::Failed(text)) => break text,
+            Ok(Event::StateLoaded(slot)) => panic!("loaded the empty slot {slot}"),
+            Ok(_) => {}
+            Err(_) => thread::sleep(Duration::from_millis(1)),
+        }
+    };
+    assert!(
+        refused.starts_with("Could not load state: cannot read "),
+        "{refused}"
+    );
+    // The same words, for what shows them and for what prints them.
+    assert_eq!(
+        Event::StateSaved(3).notice().as_deref(),
+        Some("Saved state 3")
+    );
+    assert_eq!(
+        Event::StateLoaded(3).words().as_deref(),
+        Some("Loaded state 3")
+    );
+    assert_eq!(Event::Warning("kept".to_owned()).notice(), None);
+    assert_eq!(
+        Event::Warning("kept".to_owned()).words().as_deref(),
+        Some("kept")
+    );
+    assert_eq!(Event::Frame.words(), None);
+    drop(emulator);
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
 fn save_states_round_trip_through_slot_files() {
     let dir = std::env::temp_dir().join(format!("emu-app-states-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("temp dir");
@@ -921,8 +966,11 @@ fn save_states_round_trip_through_slot_files() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !waiting.is_empty() {
         match events.try_recv() {
-            Ok(Event::Notice(text)) => waiting.retain(|notice| *notice != text),
-            Ok(_) => {}
+            Ok(event) => {
+                if let Some(text) = event.notice() {
+                    waiting.retain(|notice| *notice != text);
+                }
+            }
             Err(_) => {
                 assert!(Instant::now() < deadline, "no notices {waiting:?}");
                 thread::sleep(Duration::from_millis(1));
@@ -1510,7 +1558,7 @@ fn an_empty_checkpoint_slot_is_no_matter() {
     assert!(
         !said
             .iter()
-            .any(|event| matches!(event, Event::PickedUp(_) | Event::Notice(_))),
+            .any(|event| matches!(event, Event::PickedUp(_)) || event.notice().is_some()),
         "{said:?}"
     );
     fs::remove_dir_all(&dir).expect("clean up");
@@ -2141,6 +2189,64 @@ fn a_game_s_files_are_named_as_its_session_names_them() {
     assert_eq!(files_of(&game).backup(), dir.join("Fan Game 1.2.sav"));
     let rom = dir.join("ruby.gba");
     assert_eq!(files_of(&rom), GameFiles::of(&rom));
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
+fn the_library_names_a_game_s_files_as_its_session_does() {
+    use crate::library::{self, Game};
+    use crate::rom_info::{Platform, RomInfo};
+
+    let dir = empty_dir("files-of-listed");
+    // An RPG Maker game in a folder with a dot in its name, read by its
+    // folder or by the player app in it.
+    let folder = dir.join("Fan Game 1.2");
+    fs::create_dir_all(folder.join("Player.app")).expect("the player's folder");
+    fs::write(folder.join("Game.ini"), b"Title=Fan Game").expect("write");
+    fs::write(folder.join("Game.exe"), b"player").expect("write");
+    let listed = Game::rpg_maker(&folder, None);
+    assert_eq!(library::files_of(&listed), files_of(&folder));
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("Fan Game 1.2.ss0")
+    );
+    // Its files keep their names once the folder holds no game, or has
+    // gone: no session can start to name them, but they are still there.
+    fs::remove_file(folder.join("Game.ini")).expect("no game now");
+    assert_eq!(files_of(&folder), GameFiles::of(&folder));
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("Fan Game 1.2.ss0")
+    );
+    fs::remove_dir_all(&folder).expect("gone");
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("Fan Game 1.2.ss0")
+    );
+
+    // A ROM: plain names, or with its extension once a namesake for
+    // another system sits beside it, in the library as in a session.
+    let info = |platform| RomInfo {
+        platform,
+        crc32: 1,
+        serial: None,
+        header_title: None,
+        banner_title: None,
+    };
+    let rom = dir.join("platinum.nds");
+    let listed = Game::new(&rom, &info(Platform::Nds));
+    assert_eq!(library::files_of(&listed), files_of(&rom));
+    assert_eq!(library::checkpoint_path(&listed), dir.join("platinum.ss0"));
+    fs::write(dir.join("platinum.gba"), b"rom").expect("a namesake");
+    assert_eq!(library::files_of(&listed), files_of(&rom));
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("platinum.nds.ss0")
+    );
+    assert_eq!(
+        files_of_listed(&rom, false).backup(),
+        dir.join("platinum.nds.sav")
+    );
     fs::remove_dir_all(&dir).expect("clean up");
 }
 

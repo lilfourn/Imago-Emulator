@@ -192,7 +192,7 @@ impl EmulatorView {
             .collect::<Vec<_>>()
             .join(" + ");
         self.show_notice(loading_notice(&paths, &name), cx);
-        let dmg_colors = self.dmg_colors;
+        let dmg_colors = self.settings.dmg_colors;
         let games = paths.clone();
         let open = cx
             .background_executor()
@@ -346,14 +346,14 @@ impl EmulatorView {
             (f32::from(viewport.width), f32::from(viewport.height)),
         );
         let render_scale = render_scale(
-            self.resolution_3d,
+            self.settings.resolution_3d,
             &info,
             &placements,
             window.scale_factor(),
         );
         emulator.send(Command::SetRenderScale(render_scale));
         emulator.send(Command::SetTextureUpscaling(
-            self.picture.texture_upscaling(),
+            self.settings.picture.texture_upscaling(),
         ));
         // Pick up where the player left off, unless a battery save has
         // changed since: the emulation thread checks.
@@ -409,13 +409,10 @@ impl EmulatorView {
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
-        self.sent = HeldState::default();
-        self.sent_touch = None;
-        self.stylus = None;
-        self.cursor = None;
-        self.active_player = 0;
+        self.input.game_started();
         let bindings = self.reload_bindings();
-        self.sync_held();
+        let held = self.input.resend(&self.stage());
+        self.send_all(held);
         self.sessions += 1;
         let game = self.guide_game(cx);
         self.guide.update(cx, |guide, cx| guide.set_game(game, cx));
@@ -431,12 +428,12 @@ impl EmulatorView {
         }
         let running = format!("Running {name}");
         // Left on last time, so worth saying.
-        let pace = if self.controls.fast_forward_latched() {
+        let pace = if self.input.fast_forward_latched() {
             Some(format!(
                 "fast-forward on ({})",
                 keys::shortcut(shortcut::FAST_FORWARD)
             ))
-        } else if self.controls.slow_motion_latched() {
+        } else if self.input.slow_motion_latched() {
             Some(format!(
                 "slow motion on ({})",
                 keys::shortcut(shortcut::SLOW_MOTION)
@@ -490,11 +487,7 @@ impl EmulatorView {
         for image in images.map(|(_, image)| image).chain(ambient) {
             window.drop_image(image).ok();
         }
-        let said: Vec<String> = session
-            .finish()
-            .into_iter()
-            .filter_map(checkpoint_notice)
-            .collect();
+        let said = session.finish();
         (!said.is_empty()).then(|| said.join(" · "))
     }
 
@@ -518,7 +511,7 @@ impl EmulatorView {
             return;
         };
         let roms = session.rom_paths.clone();
-        let save = session.player_files_of(self.active_player).backup();
+        let save = session.player_files_of(self.input.player()).backup();
         let states = session.states.clone();
         let own_saves = session.own_saves.clone();
         // Stopping writes the battery saves, and stops the player or helper

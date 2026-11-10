@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
+use emu_core::{CoreInfo, Frame, ScreenSize, System, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
     Animation, AnimationExt, App, BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle,
@@ -19,33 +19,24 @@ use gpui::{
 
 use crate::ambient::{self, Backdrop};
 use crate::app::{
-    AddGameFolders, OpenGameFolder, ScreenshotForGuide, ShowAppMenu, ToggleGuide, shortcut,
-};
-use crate::app::{
-    AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
-    EditCheats, GameInfo, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
-    LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore,
-    PictureAuto, PictureLcdGrid, PictureRoundedPixels, PictureScanlines, PictureSharpPixels,
-    PictureSmooth, PreviousStateSlot, Randomize, RemoveFromLibrary, Reset, Resolution3d1x,
-    Resolution3d2x, Resolution3d3x, Resolution3d4x, Resolution3d6x, Resolution3d8x,
-    Resolution3dMatchDisplay, RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot,
-    SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer, TOP_BAR, ToggleColorCorrection,
-    ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause, ToggleRecording,
-    ToggleSlowMotion, ToggleWindowControls,
-};
-use crate::app::{
-    FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
+    AddGameFolders, AddToLibrary, Arrange, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep,
+    DebugStepOver, EditCheats, GameInfo, InsertGbaCartridge, LoadState, MenuChecks, NextScreenGap,
+    NextStateSlot, OpenGameFolder, OpenRom, OpenSettings, OpenStore, PreviousStateSlot, Randomize,
+    RemoveFromLibrary, Reset, RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot,
+    SaveState, ScreenshotForGuide, SetDmgColors, SetFastForward, SetPicture, SetResolution3d,
+    ShowAppMenu, ShowDebugger, StopScript, SwapScreens, SwitchPlayer, TOP_BAR,
+    ToggleColorCorrection, ToggleFastForward, ToggleFps, ToggleFullScreen, ToggleGuide,
+    ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion, ToggleWindowControls,
+    hotkey_action, shortcut,
 };
 use crate::app_menu::{AppMenu, AppMenuEvent};
 use crate::archive;
 use crate::audio::{self, AudioOutput};
-use crate::bindings::{self, Bindings, Held, Shortcut};
+use crate::bindings::{self, Bindings};
 use crate::cheats;
-use crate::chords::{Chords, Effect};
 use crate::chrome::{self, Tone};
 use crate::color::Correction;
-use crate::controls::{Controls, HeldState};
-use crate::cursor::{self, Cursor};
+use crate::cursor::Cursor;
 use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
 use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Opened, OwnSaves};
@@ -56,7 +47,7 @@ use crate::gamepad::{self, PadEvent};
 use crate::gpu_upscale::{Bgra, Gpu, GpuDevice, GpuError, Method, Request};
 use crate::guide::{self, GuideEvent, GuideGame, GuidePanel};
 use crate::key_guide;
-use crate::key_routes::{KeyRoutes, Route};
+use crate::key_routes::Route;
 use crate::keys;
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::library::{self, Library};
@@ -71,16 +62,20 @@ use crate::romhack::{self, MakeError};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
-use crate::speed::{self, Pace, Speed, Speeds};
+use crate::speed::{Pace, Speed};
 use crate::store_view::pulse;
 use crate::theme::{BACKGROUND, INSET, STAGE};
 use crate::trace;
 use crate::video;
 use crate::window_chrome;
 
+mod input;
 mod opening;
+mod screens;
 
+use input::{GameInput, Pressed, Stage};
 use opening::Game;
+use screens::{Glow, ImageKey, Keeping, Upscaler, Upscaling};
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
@@ -109,62 +104,37 @@ const TOP_BAR_SHADE: u32 = 0x0000_0066;
 /// drag or resize writes the settings once rather than on every step.
 const PLACE_SAVE_DELAY: Duration = Duration::from_millis(500);
 
-/// The source name under which a held mouse button presses A, off the
-/// touchscreen.
-const MOUSE: &str = "mouse:left";
-
-/// What every keyboard key's source name starts with, before the key's
-/// GPUI name.
-const KEY: &str = "key:";
-
-/// Shift's name in the bindings: held on its own, it comes only as a
-/// change of modifiers.
-const SHIFT: &str = "shift";
-
 /// The root view of the main window.
 pub struct EmulatorView {
     focus: FocusHandle,
-    /// The bindings in force: the user's, with the active player's game's
-    /// own laid over them.
-    bindings: Bindings,
-    layout: Layout,
+    /// Everything held for the game, from the keyboard, gamepads and the
+    /// mouse, with the bindings in force and the player they control.
+    input: GameInput,
+    /// The settings in force, as the settings file keeps them: the
+    /// layout, the speeds, the picture and the rest. Fast-forward and
+    /// slow motion being left on are `input`'s to say, not this
+    /// value's (see [`EmulatorView::settings`]).
+    settings: Settings,
     /// Whether a linked game shows its consoles side by side whatever
-    /// `layout`, the user's own, says; until it stops or the user picks
-    /// an arrangement.
+    /// the settings' layout, the user's own, says; until it stops or the
+    /// user picks an arrangement.
     linked_side_by_side: bool,
     /// Warnings from startup kept for the game it opens, whose loading
     /// notices would hide them.
     startup_notice: Option<String>,
-    /// Where the window is, to open it there next launch.
-    window_place: Option<WindowPlace>,
     /// Saves the window's place once it has stopped moving.
     place_save: Option<Task<()>>,
     /// Where the layout is saved for next launch, if there is a config
     /// folder.
     settings_path: Option<PathBuf>,
-    /// How fast fast-forward and slow motion run, from the settings file.
-    speeds: Speeds,
-    /// How many times its own resolution DS and 3DS 3D is drawn at.
-    resolution_3d: Resolution3d,
     /// The computer's microphone, while the user has it on: off at every
     /// launch.
     microphone: Option<(Microphone, Loudness)>,
-    /// How loud the microphone was when the emulation thread was last
-    /// told.
-    heard: u8,
-    /// Show GBC and GBA colours as their screens did.
-    color_correction: bool,
-    /// How the screens look: upscaled, as sharp pixels, or shaded.
-    picture: Picture,
     /// The GPU half of the upscaler, started when a picture first needs it.
     upscaler: Upscaler,
     /// Draws again once the upscaler finishes screens it took too long
     /// over to wait for.
     upscale_wake: Option<Task<()>>,
-    /// What fills the window around the screens.
-    backdrop: Backdrop,
-    /// Whether the speed readout shows in the window's corner.
-    show_fps: bool,
     /// What the speed readout says, once it has measured.
     speed_readout: Option<SharedString>,
     /// Measures the speed for the readout, with the number from
@@ -172,12 +142,6 @@ pub struct EmulatorView {
     fps_meter: Option<(u64, Meter)>,
     /// Updates the readout while it shows.
     readout_task: Option<Task<()>>,
-    /// How games made for the original Game Boy are shown, from the next
-    /// game opened.
-    dmg_colors: emu_core::DmgColors,
-    /// Whether the window shows its close, minimise and zoom buttons and
-    /// the bar they sit in.
-    window_controls: bool,
     /// Whether the buttons were last shown or hidden, once they have been.
     shown_controls: Option<bool>,
     /// The debugger window, once opened.
@@ -205,25 +169,6 @@ pub struct EmulatorView {
     /// A script from the command line, to run with the first game.
     startup_script: Option<PathBuf>,
     placements: Vec<Placement>,
-    controls: Controls,
-    /// Gamepad hotkey chords in progress.
-    chords: Chords,
-    /// Where each key held down went when pressed, which its repeats go
-    /// to as well.
-    key_routes: KeyRoutes,
-    /// The gamepad's touchscreen cursor, once a gamepad has used it.
-    cursor: Option<Cursor>,
-    /// What the emulation thread was last told is held.
-    sent: HeldState,
-    /// Where the emulation thread was last told the screen is touched.
-    sent_touch: Option<TouchPoint>,
-    /// While the mouse button is held down after a click on the
-    /// touchscreen: which of `placements` was clicked, and where the mouse
-    /// touches.
-    stylus: Option<(usize, TouchPoint)>,
-    /// The player keyboard and gamepads control, in multi-player sessions.
-    active_player: usize,
-    state_slot: u8,
     notice: Option<SharedString>,
     /// Whether the notice shown is a warning, which shows for longer, and
     /// so does what joins it.
@@ -245,10 +190,6 @@ pub struct EmulatorView {
     guide_pill_hide: Option<Task<()>>,
     /// Whether the pointer is on the pill, which keeps it and lights it.
     guide_pill_hovered: bool,
-    /// How hard Guide's model thinks, from the settings.
-    guide_thinking: emu_guide::chat::Effort,
-    /// Whether Guide looks answers up, from the settings.
-    guide_lookups: bool,
     _gamepad: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -329,216 +270,6 @@ struct Session {
     _audio: Option<AudioOutput>,
 }
 
-/// What an image shows: a screen of a frame, turned, in a look, for a
-/// place on the window so many device pixels across.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ImageKey {
-    screen: usize,
-    rotation: Rotation,
-    look: Look,
-    /// The placement's size in device pixels.
-    target: (u32, u32),
-    /// The frames' sequence number ([`Session::sequence`]).
-    sequence: u64,
-}
-
-impl ImageKey {
-    /// A key no placement wants, for an image shown only until one drawn
-    /// as now replaces it.
-    fn stale(self) -> Self {
-        Self {
-            target: (0, 0),
-            ..self
-        }
-    }
-
-    /// Whether an image for `self` may stand in for one for `wanted`
-    /// until that is drawn: the same screen, look and size, from a frame
-    /// no older than `shown`'s, the image there now, if any.
-    fn stands_in(self, wanted: Self, shown: Option<Self>) -> bool {
-        let same = |key: Self| {
-            Self {
-                sequence: wanted.sequence,
-                ..key
-            } == wanted
-        };
-        same(self) && shown.is_none_or(|shown| !same(shown) || shown.sequence < self.sequence)
-    }
-}
-
-/// A screen sent to the upscaler: where it goes, what it shows, and its
-/// size in device pixels.
-#[derive(Debug, Clone, Copy)]
-struct Upscaling {
-    index: usize,
-    key: ImageKey,
-    size: (u32, u32),
-}
-
-/// Match Display's check that the game keeps the speed asked for
-/// ([`picture::SpeedKeeper`]).
-struct Keeping {
-    keeper: picture::SpeedKeeper,
-    set_for: Option<(u32, Speed)>,
-    measured: Option<(Instant, u64)>,
-    /// The scale just changed: the first second after is not measured, as
-    /// the 3DS's core rebuilds what it draws into, a hitch of its own.
-    settling: bool,
-}
-
-impl Keeping {
-    /// Starting from `most`, the scale that matches the screens.
-    fn new(most: u32) -> Self {
-        Self {
-            keeper: picture::SpeedKeeper::new(most),
-            set_for: None,
-            measured: None,
-            settling: false,
-        }
-    }
-}
-
-impl Session {
-    /// The scale Match Display draws 3D at: `matched`, the scale that
-    /// matches the screens, or less while the game cannot keep `speed`,
-    /// measured every [`picture::SPEED_CHECK`].
-    fn keep_speed(&mut self, matched: u32, speed: Speed) -> u32 {
-        let keeping = &mut self.keeping;
-        if keeping.set_for != Some((matched, speed)) {
-            *keeping = Keeping::new(matched);
-            keeping.set_for = Some((matched, speed));
-        }
-        let now = Instant::now();
-        let frames = self.emulator.frames_shown();
-        match keeping.measured {
-            Some((at, before)) if now.duration_since(at) >= picture::SPEED_CHECK => {
-                // Frame counts are far below 2^52, so f64 holds them exactly.
-                let ran =
-                    frames.saturating_sub(before) as f64 / now.duration_since(at).as_secs_f64();
-                let normal = self.info.frame_rate.hz();
-                let wanted = match speed {
-                    Speed::Unlimited => None,
-                    Speed::Times(rate) => Some(normal * rate.get()),
-                };
-                if !std::mem::take(&mut keeping.settling) {
-                    keeping.keeper.check(self.render_scale, ran, wanted, normal);
-                }
-                keeping.measured = Some((now, frames));
-            }
-            Some(_) => {}
-            None => keeping.measured = Some((now, frames)),
-        }
-        matched.min(keeping.keeper.ceiling())
-    }
-}
-
-/// The GPU half of the upscaler ([`gpu_upscale`](crate::gpu_upscale)).
-enum Upscaler {
-    /// Not started: no picture has needed it.
-    Idle,
-    /// Starting on a background thread ([`EmulatorView::start_upscaler`]).
-    Starting,
-    Ready(Gpu),
-    /// It would not start, or failed: screens stay on the CPU path, with
-    /// Scale2x and Scale3x standing in for Rounded Pixels. Holds why
-    /// until the player has been told.
-    Off(Option<GpuError>),
-}
-
-/// What became of screens sent to the upscaler.
-enum Sent {
-    /// They are on the GPU.
-    Yes,
-    /// The GPU is starting or off: the CPU draws them.
-    Unavailable,
-    /// The last batch is still on the GPU: the screens shown stay until it
-    /// is taken, and these are sent with the next frame.
-    Busy,
-}
-
-/// How long a draw waits for the upscaler before showing what it showed
-/// last and taking the new screens once they are done. On an M5 Max a
-/// frame's screens usually take 0.5–2.5 ms; with other apps busy on the
-/// GPU, one in a hundred took 14–30 ms, and waiting that out made the
-/// window miss refreshes.
-const UPSCALE_WAIT: Duration = Duration::from_millis(4);
-
-impl Upscaler {
-    /// Sends `requests` to the GPU, to be taken with [`Upscaler::take`].
-    ///
-    /// # Errors
-    ///
-    /// The [`GpuError`] that turned it off, once.
-    fn send(&mut self, requests: &[Request<'_>]) -> Result<Sent, GpuError> {
-        match self {
-            Self::Ready(gpu) => match gpu.submit(requests) {
-                Ok(true) => Ok(Sent::Yes),
-                Ok(false) => Ok(Sent::Busy),
-                Err(error) => {
-                    *self = Self::Off(None);
-                    Err(error)
-                }
-            },
-            Self::Off(untold) => untold.take().map_or(Ok(Sent::Unavailable), Err),
-            Self::Idle | Self::Starting => Ok(Sent::Unavailable),
-        }
-    }
-
-    /// The batch on the GPU's screens, as BGRA bytes in the order sent, if
-    /// it finishes within `wait`.
-    ///
-    /// # Errors
-    ///
-    /// The [`GpuError`] that turned it off.
-    fn take(&mut self, wait: Duration) -> Option<Result<Vec<Bgra>, GpuError>> {
-        let Self::Ready(gpu) = self else {
-            return None;
-        };
-        let taken = gpu.finish(Some(wait))?;
-        if taken.is_err() {
-            *self = Self::Off(None);
-        }
-        Some(taken)
-    }
-
-    /// Whether a batch is on the GPU.
-    fn busy(&self) -> bool {
-        matches!(self, Self::Ready(gpu) if gpu.busy())
-    }
-
-    /// Whether the batch on the GPU is done, to take without waiting.
-    fn finished(&self) -> bool {
-        matches!(self, Self::Ready(gpu) if gpu.finished())
-    }
-
-    fn is_off(&self) -> bool {
-        matches!(self, Self::Off(_))
-    }
-}
-
-/// The CPU pass that draws `look` while the GPU is starting, or without
-/// one: sharp pixels enlarged by a whole factor, the shading filters, and
-/// without the GPU, Scale2x and Scale3x standing in for Rounded Pixels, as
-/// large as `factor` device pixels to a console pixel allows.
-fn cpu_filter(look: Look, factor: usize, gpu_off: bool) -> Filter {
-    match look {
-        Look::LcdGrid => Filter::LcdGrid,
-        Look::Scanlines => Filter::Scanlines,
-        Look::Upscaled(Method::Rounded) if gpu_off && factor >= 3 => Filter::Scale3x,
-        Look::Upscaled(Method::Rounded) if gpu_off => Filter::Scale2x,
-        Look::Upscaled(_) => Filter::None,
-    }
-}
-
-/// The ambient backdrop: what it was last sampled from, its fade toward
-/// that, and the image of where the fade has got to.
-struct Glow {
-    /// The placements and the frames' sequence number sampled.
-    sampled: (Vec<Placement>, u64),
-    fade: ambient::Fade,
-    image: Arc<RenderImage>,
-}
-
 impl EmulatorView {
     /// Creates the view, loading `roms` straight away if there are any.
     /// `script` runs alongside the first game to start.
@@ -592,8 +323,8 @@ impl EmulatorView {
                     // send key-up. Keys still down when focus comes back
                     // count once pressed again (the arrows may count from
                     // their next repeat, which GPUI passes on as a press).
-                    this.key_routes.clear();
-                    this.release_all();
+                    let commands = this.input.focus_lost(&this.stage());
+                    this.send_all(commands);
                 } else {
                     // Back from editing a cheat file, perhaps.
                     if let Some(message) = this.reload_cheats() {
@@ -650,28 +381,18 @@ impl EmulatorView {
 
         let mut view = Self {
             focus,
-            bindings: Bindings::default(),
-            layout: Layout::default(),
+            input: GameInput::default(),
+            settings: Settings::default(),
             linked_side_by_side: false,
             startup_notice: None,
-            window_place: None,
             place_save: None,
             settings_path,
-            speeds: Speeds::default(),
-            resolution_3d: Settings::default().resolution_3d,
             microphone: None,
-            heard: 0,
-            color_correction: true,
-            picture: Picture::default(),
             upscaler: Upscaler::Idle,
             upscale_wake: None,
-            backdrop: Backdrop::default(),
-            show_fps: false,
             speed_readout: None,
             fps_meter: None,
             readout_task: None,
-            dmg_colors: Settings::default().dmg_colors,
-            window_controls: Settings::default().window_controls,
             shown_controls: None,
             debugger: None,
             settings_window: None,
@@ -685,15 +406,6 @@ impl EmulatorView {
             game: Game::Idle,
             startup_script: script,
             placements: Vec::new(),
-            controls: Controls::default(),
-            chords: Chords::default(),
-            key_routes: KeyRoutes::default(),
-            cursor: None,
-            sent: HeldState::default(),
-            sent_touch: None,
-            stylus: None,
-            active_player: 0,
-            state_slot: 1,
             notice: None,
             notice_is_warning: false,
             notice_timer: None,
@@ -705,38 +417,20 @@ impl EmulatorView {
             guide_pill: None,
             guide_pill_hide: None,
             guide_pill_hovered: false,
-            guide_thinking: Settings::default().guide_thinking,
-            guide_lookups: Settings::default().guide_lookups,
             _gamepad: gamepad_task,
             _subscriptions: subscriptions,
         };
         let mut warnings = Vec::new();
         match loaded_bindings {
-            Some(Ok(bindings)) => view.bindings = bindings,
+            Some(Ok(bindings)) => view.input.set_bindings(bindings),
             Some(Err(error)) => warnings.push(format!("{error}; using default bindings")),
             None => {}
         }
         match loaded_settings {
             Some(Ok(settings)) => {
-                view.layout = settings.layout;
-                view.speeds = settings.speed;
-                view.resolution_3d = settings.resolution_3d;
-                view.picture = settings.picture;
-                view.backdrop = settings.backdrop;
-                view.show_fps = settings.show_fps;
-                view.dmg_colors = settings.dmg_colors;
-                view.window_controls = settings.window_controls;
-                view.color_correction = settings.color_correction;
-                view.state_slot = settings.state_slot;
-                view.window_place = settings.window_place;
-                view.guide_thinking = settings.guide_thinking;
-                view.guide_lookups = settings.guide_lookups;
-                if settings.fast_forward_on {
-                    view.controls.toggle_fast_forward();
-                }
-                if settings.slow_motion_on {
-                    view.controls.toggle_slow_motion();
-                }
+                view.settings = settings;
+                view.input
+                    .latch(settings.fast_forward_on, settings.slow_motion_on);
             }
             Some(Err(error)) => {
                 // A file that cannot be read is left for the user to fix,
@@ -759,7 +453,7 @@ impl EmulatorView {
         }
         view.tell_guide_settings(cx);
         view.refresh_menus(cx);
-        if view.show_fps {
+        if view.settings.show_fps {
             view.start_readout(cx);
         }
         view.start_upscaler(cx);
@@ -828,11 +522,12 @@ impl EmulatorView {
                 })
             })
             .collect();
-        self.bindings = session
+        let in_force = session
             .bindings
-            .get(self.active_player)
+            .get(self.input.player())
             .cloned()
             .unwrap_or(user);
+        self.input.set_bindings(in_force);
         (!problems.is_empty()).then(|| problems.join(" · "))
     }
 
@@ -919,9 +614,12 @@ impl EmulatorView {
             }
             // Wakes the debugger window, which redraws with this view.
             Event::Debug => cx.notify(),
-            Event::Notice(text) => {
-                if let Some(text) = checkpoint_notice(text) {
-                    self.show_notice(text, cx);
+            event @ (Event::StateSaved(_)
+            | Event::StateLoaded(_)
+            | Event::Failed(_)
+            | Event::Notice(_)) => {
+                if let Some(text) = notice_of(&event) {
+                    self.show_notice(text.into_owned(), cx);
                 }
             }
             Event::Warning(text) => self.show_warning(text, cx),
@@ -1002,35 +700,39 @@ impl EmulatorView {
         }
     }
 
-    fn send_input(&self) {
-        trace::event("send", &[u64::from(self.sent.buttons.bits())]);
-        self.send(Command::SetInput {
-            player: self.active_player,
-            input: Input {
-                buttons: self.sent.buttons,
-                touch: self.sent_touch,
-                microphone: if self.sent.blow {
-                    Input::LOUDEST
-                } else {
-                    self.heard
-                },
-                gentle: self.sent.gentle,
-            },
-        });
+    /// Sends the emulation thread each of `commands`, in order.
+    fn send_all(&self, commands: Vec<Command>) {
+        for command in commands {
+            self.send(command);
+        }
     }
 
-    fn send_turbo(&self) {
-        self.send(Command::SetTurbo {
-            player: self.active_player,
-            buttons: self.sent.turbo,
-            frames: self.bindings.turbo_frames(),
-        });
+    /// Sends the emulation thread what an input event came to, and draws
+    /// the window again if the gamepad cursor no longer looks as it
+    /// `looked` before the event, even when paused. Held inputs show
+    /// nowhere else.
+    fn obey(
+        &mut self,
+        commands: Vec<Command>,
+        looked: (Option<Cursor>, bool),
+        cx: &mut Context<Self>,
+    ) {
+        self.send_all(commands);
+        if self.input.cursor_look() != looked {
+            cx.notify();
+        }
     }
 
-    /// Hands keyboard and gamepad control to `player`. The previous player
-    /// lets go of everything at once, and the new one starts with nothing
-    /// held: what is down now was pressed under the previous player's
-    /// bindings, so it counts again only once pressed again.
+    /// What the input needs to know of the game and the settings now.
+    fn stage(&self) -> Stage {
+        Stage {
+            touchscreen: self.touchscreen(),
+            speeds: self.settings.speed,
+        }
+    }
+
+    /// Hands keyboard and gamepad control to `player` (see
+    /// [`GameInput::switch_player`]).
     ///
     /// Not while the game menu is open: it is the active player's game's
     /// menu, its cheats and Start Over that player's, so the player stays
@@ -1039,72 +741,18 @@ impl EmulatorView {
         let Some(players) = self.game.session().map(|s| s.info.players) else {
             return;
         };
-        if players < 2 || player == self.active_player || player >= players || self.menu.is_some() {
+        if players < 2 || player == self.input.player() || player >= players || self.menu.is_some()
+        {
             return;
         }
-        // The mouse touches the screen it was pressed on, not the next
-        // player's, so it lets go too.
-        self.release_player();
-        self.active_player = player;
-        // Keyboard and gamepads now play the other player's game.
-        if let Some(bindings) = self
+        let bindings = self
             .game
             .session()
             .and_then(|session| session.bindings.get(player))
-        {
-            self.bindings = bindings.clone();
-        }
-        self.send_input();
-        self.send_turbo();
+            .cloned();
+        let commands = self.input.switch_player(player, bindings, &self.stage());
+        self.send_all(commands);
         self.show_notice(format!("Controlling player {}", player + 1), cx);
-    }
-
-    /// Tells the emulation thread about any change in held inputs or in
-    /// where the mouse or the gamepad cursor touches the screen. The mouse
-    /// comes first.
-    fn sync_held(&mut self) {
-        let state = self.controls.state();
-        let touch = match self.stylus {
-            Some((_, at)) => Some(at),
-            None => self.cursor_touch(state.touch),
-        };
-        if state.buttons != self.sent.buttons
-            || touch != self.sent_touch
-            || state.blow != self.sent.blow
-            || state.gentle != self.sent.gentle
-        {
-            self.sent.buttons = state.buttons;
-            self.sent.blow = state.blow;
-            self.sent.gentle = state.gentle;
-            self.sent_touch = touch;
-            self.send_input();
-        }
-        if state.turbo != self.sent.turbo {
-            self.sent.turbo = state.turbo;
-            self.send_turbo();
-        }
-        if state.pace != self.sent.pace {
-            self.send(Command::SetSpeed(self.speeds.speed(state.pace)));
-        }
-        if state.rewind != self.sent.rewind {
-            self.send(Command::SetRewind(state.rewind));
-        }
-        self.sent = state;
-    }
-
-    /// Where the gamepad cursor touches, if its touch input is `held`. The
-    /// cursor appears in the middle of the touchscreen if no gamepad has
-    /// moved it yet.
-    fn cursor_touch(&mut self, held: bool) -> Option<TouchPoint> {
-        if !held {
-            return None;
-        }
-        let (_, size) = self.touchscreen()?;
-        Some(
-            self.cursor
-                .get_or_insert_with(|| Cursor::centre(size))
-                .pixel(),
-        )
     }
 
     /// The touchscreen of the console being played: its index and size.
@@ -1112,7 +760,7 @@ impl EmulatorView {
     fn touchscreen(&self) -> Option<(usize, ScreenSize)> {
         let info = &self.game.session()?.info;
         let per_console = info.screens.len() / consoles(info);
-        let screen = info.touch_screen? + self.active_player.min(consoles(info) - 1) * per_console;
+        let screen = info.touch_screen? + self.input.player().min(consoles(info) - 1) * per_console;
         Some((screen, *info.screens.get(screen)?))
     }
 
@@ -1132,34 +780,11 @@ impl EmulatorView {
     }
 
     /// Lets go of everything held, at once: for when keys and buttons stop
-    /// reaching the game while they may still be down, as when the window
-    /// loses focus or the game menu opens. A key still down counts again
-    /// only once pressed again, as its repeats are not presses.
+    /// reaching the game while they may still be down, as when the game
+    /// menu opens (see [`GameInput::release_all`]).
     fn release_all(&mut self) {
-        self.release_player();
-        // The microphone goes on being heard.
-        self.send_input();
-    }
-
-    /// Forgets everything held, and has the active player let go of it in
-    /// the game at once, microphone and all: quick taps and turbo presses
-    /// are cut short rather than held for the game to see.
-    fn release_player(&mut self) {
-        self.stylus = None;
-        self.controls.release_all();
-        self.chords.clear();
-        self.sync_held();
-        self.send(Command::ReleaseInput {
-            player: self.active_player,
-        });
-    }
-
-    /// What the window shows of the gamepad cursor: where it is, and
-    /// whether it touches. Held inputs show nowhere else, so input events
-    /// redraw only when this changes; a redraw holds up the events behind
-    /// it.
-    fn cursor_look(&self) -> (Option<Cursor>, bool) {
-        (self.cursor, self.sent.touch)
+        let commands = self.input.release_all(&self.stage());
+        self.send_all(commands);
     }
 
     /// Where keys go now.
@@ -1177,101 +802,59 @@ impl EmulatorView {
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let route = self.key_route(window, cx);
-        let key = event.keystroke.key.as_str();
-        // A key held down repeats. GPUI passes on the repeats of keys that
-        // type nothing (the arrows, Escape, Backspace) as fresh presses, so
-        // a key already down is repeating whatever the event says.
-        let pressed_to = self.key_routes.route_of(key);
-        let repeat = event.is_held || pressed_to.is_some();
-        if !repeat {
-            // ⌘ keys are shortcuts, and macOS may never say they came up.
-            if !event.keystroke.modifiers.platform {
-                self.key_routes.press(key, route);
-            }
-        } else if pressed_to != Some(route) {
-            // Repeats go only where the press went: Return held to choose
-            // in the menu or the library never reaches what comes after,
-            // and W held to walk never types into Guide.
-            if route == Route::Guide {
-                cx.stop_propagation();
-            }
-            return;
-        }
-        // Typing in Guide's composer: the composer's own, never the game's.
-        if route == Route::Guide {
-            return;
-        }
-        let event = KeyDownEvent {
+        let looked = self.input.cursor_look();
+        let pressed = self.input.key_down(
+            event.keystroke.key.as_str(),
+            event.keystroke.modifiers,
+            event.is_held,
+            route,
+            self.menu.is_some(),
+            &self.stage(),
+        );
+        // What the library and the menu are told of the key: a key already
+        // down is repeating whatever the event says.
+        let passed_on = |repeat: bool| KeyDownEvent {
             keystroke: event.keystroke.clone(),
             is_held: repeat,
         };
-        // Without a game, keys search and choose in the library.
-        if route == Route::Library {
-            self.library
-                .update(cx, |library, cx| library.key_down(&event, cx));
-            return;
-        }
-        // While the game menu is open, keys are the menu's.
-        if let Some((menu, _)) = &self.menu {
-            menu.clone()
-                .update(cx, |menu, cx| menu.key_down(&event, cx));
-            return;
-        }
-        // The game holds a key from its press to its release; repeats add
-        // nothing. A key still down when the game stopped hearing it, as
-        // the menu opened, counts again once pressed again.
-        if repeat {
-            return;
-        }
-        let modifiers = event.keystroke.modifiers;
-        let plain = !modifiers.platform && !modifiers.control && !modifiers.alt;
-        if key == "escape" && plain {
-            self.open_menu(window, cx);
-            return;
-        }
-        // Command and Control chords are menu shortcuts, not game input.
-        if !modifiers.platform && !modifiers.control {
-            let looked = self.cursor_look();
-            let action = self.bindings.key_action(key);
-            self.controls.set(format!("{KEY}{key}"), action, true);
-            self.sync_held();
-            // Redraw the cursor if a key touches with it, even when paused.
-            if self.cursor_look() != looked {
-                cx.notify();
+        match pressed {
+            Pressed::Elsewhere => {
+                if route == Route::Guide {
+                    cx.stop_propagation();
+                }
             }
+            // The composer's own.
+            Pressed::Guide => {}
+            Pressed::Library { repeat } => {
+                let event = passed_on(repeat);
+                self.library
+                    .update(cx, |library, cx| library.key_down(&event, cx));
+            }
+            Pressed::Menu { repeat } => {
+                if let Some((menu, _)) = &self.menu {
+                    let event = passed_on(repeat);
+                    menu.clone()
+                        .update(cx, |menu, cx| menu.key_down(&event, cx));
+                }
+            }
+            Pressed::OpensMenu => self.open_menu(window, cx),
+            // Redraws the cursor if a key touches with it.
+            Pressed::Game(commands) => self.obey(commands, looked, cx),
         }
     }
 
     fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let looked = self.cursor_look();
-        let key = event.keystroke.key.as_str();
-        // Shift going down or up while a key is down renames some keys: `1`
-        // held as Shift goes down comes up as `!`. A key that went down
-        // under this name is the one coming up, though, such as a keypad
-        // `1`, which Shift leaves alone.
-        let name = match bindings::shift_twin(key) {
-            Some(twin)
-                if self.key_routes.route_of(key).is_none()
-                    && self.key_routes.route_of(twin).is_some() =>
-            {
-                twin
-            }
-            _ => key,
-        };
-        self.key_routes.release(name);
-        self.controls.set(format!("{KEY}{name}"), None, false);
-        self.sync_held();
-        if self.cursor_look() != looked {
-            cx.notify();
-        }
+        let looked = self.input.cursor_look();
+        let commands = self
+            .input
+            .key_up(event.keystroke.key.as_str(), &self.stage());
+        self.obey(commands, looked, cx);
     }
 
     /// Holds or lets go of whatever Shift is bound to, as it comes only as
     /// a change of modifiers, never as a key; Shift is the game's while it
     /// plays, as a key would be. Lets go of every key held for the game
-    /// when ⌘ goes down: macOS sends no key-up for a key let go of while
-    /// ⌘ is down, which would leave it held. A key still down counts again
-    /// once pressed again.
+    /// when ⌘ goes down (see [`GameInput::release_keys`]).
     fn modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
@@ -1279,19 +862,14 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         let shift = event.modifiers.shift && self.key_route(window, cx) == Route::Game;
-        let action = shift.then(|| self.bindings.key_action(SHIFT)).flatten();
-        self.controls.set(format!("{KEY}{SHIFT}"), action, shift);
-        self.sync_held();
+        let commands = self.input.shift(shift, &self.stage());
+        self.send_all(commands);
         if !event.modifiers.platform {
             return;
         }
-        let looked = self.cursor_look();
-        self.key_routes.clear();
-        self.controls.release_from(KEY);
-        self.sync_held();
-        if self.cursor_look() != looked {
-            cx.notify();
-        }
+        let looked = self.input.cursor_look();
+        let commands = self.input.release_keys(&self.stage());
+        self.obey(commands, looked, cx);
     }
 
     fn pad_event(&mut self, event: &PadEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1299,79 +877,42 @@ impl EmulatorView {
         if self.menu.is_some() {
             return;
         }
-        let looked = self.cursor_look();
-        match event {
+        let looked = self.input.cursor_look();
+        let stage = self.stage();
+        let commands = match event {
             PadEvent::Control {
                 controller,
                 control,
                 pressed,
             } => {
-                let hotkey = |control: &str| self.bindings.hotkey(control);
-                let effects = self.chords.event(hotkey, controller, control, *pressed);
-                for effect in effects {
-                    self.pad_effect(controller, effect, window, cx);
+                let (commands, shortcuts) = self
+                    .input
+                    .pad_control(controller, control, *pressed, &stage);
+                for shortcut in shortcuts {
+                    // Its handler updates this view, which is busy until
+                    // this event is done, so it runs just after.
+                    let action = hotkey_action(shortcut);
+                    let focus = self.focus.clone();
+                    window.defer(cx, move |window, cx| {
+                        focus.dispatch_action(action.as_ref(), window, cx);
+                    });
                 }
+                commands
             }
-            PadEvent::Pointer { dx, dy } => self.move_cursor((*dx, *dy)),
-        }
-        // Redraw the cursor, even when paused.
-        if self.cursor_look() != looked {
-            cx.notify();
-        }
-    }
-
-    /// Carries out one effect of a control on `controller` going down or
-    /// up (see `chords.rs`).
-    fn pad_effect(
-        &mut self,
-        controller: &str,
-        effect: Effect,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match effect {
-            Effect::Pass { control, pressed } => {
-                let action = self.bindings.pad_action(controller, &control);
-                let source = format!("pad:{controller}:{control}");
-                self.controls.set(source, action, pressed);
-                self.sync_held();
+            PadEvent::Pointer { dx, dy } => {
+                let rotation = self.settings.layout.rotation;
+                self.input.move_cursor((*dx, *dy), rotation, &stage)
             }
-            Effect::Hold { control, held } => {
-                let source = format!("pad:{controller}:{control}");
-                self.controls.set(source, Some(held), true);
-                self.sync_held();
-            }
-            Effect::Run(shortcut) => {
-                // Its handler updates this view, which is busy until this
-                // event is done, so it runs just after.
-                let action = shortcut_action(shortcut);
-                let focus = self.focus.clone();
-                window.defer(cx, move |window, cx| {
-                    focus.dispatch_action(action.as_ref(), window, cx);
-                });
-            }
-        }
-    }
-
-    /// Moves the gamepad cursor by `motion`, in the units of
-    /// [`PadEvent::Pointer`] as seen on the window, whichever way the
-    /// screens are turned.
-    fn move_cursor(&mut self, motion: (f32, f32)) {
-        let Some((_, size)) = self.touchscreen() else {
-            return;
         };
-        let (dx, dy) = self.layout.rotation.unturn_vector(motion);
-        self.cursor
-            .get_or_insert_with(|| Cursor::centre(size))
-            .move_by((dx * cursor::SPEED, dy * cursor::SPEED), size);
-        self.sync_held();
+        // Redraws the cursor, even when paused.
+        self.obey(commands, looked, cx);
     }
 
     /// Turns latched fast-forward on or off, and saves that for next
     /// launch.
     fn toggle_fast_forward(&mut self, cx: &mut Context<Self>) {
-        let on = self.controls.toggle_fast_forward();
-        self.sync_held();
+        let (on, commands) = self.input.toggle_fast_forward(&self.stage());
+        self.send_all(commands);
         self.show_notice(
             if on {
                 "Fast-forward on"
@@ -1386,8 +927,8 @@ impl EmulatorView {
     /// Turns latched slow motion on or off, and saves that for next
     /// launch.
     fn toggle_slow_motion(&mut self, cx: &mut Context<Self>) {
-        let on = self.controls.toggle_slow_motion();
-        self.sync_held();
+        let (on, commands) = self.input.toggle_slow_motion(&self.stage());
+        self.send_all(commands);
         self.show_notice(
             if on {
                 "Slow motion on"
@@ -1417,10 +958,10 @@ impl EmulatorView {
                 .and_then(|display| display.uuid().ok())
                 .map(|uuid| uuid.as_u128()),
         };
-        if self.window_place == Some(place) {
+        if self.settings.window_place == Some(place) {
             return;
         }
-        self.window_place = Some(place);
+        self.settings.window_place = Some(place);
         let timer = cx.background_executor().timer(PLACE_SAVE_DELAY);
         self.place_save = Some(cx.spawn(async move |this, cx| {
             timer.await;
@@ -1435,8 +976,8 @@ impl EmulatorView {
     /// Moves to the next or previous save-state slot, and saves that for
     /// next launch.
     fn change_state_slot(&mut self, forward: bool, cx: &mut Context<Self>) {
-        self.state_slot = next_slot(self.state_slot, forward);
-        let slot = self.state_slot;
+        self.settings.state_slot = next_slot(self.settings.state_slot, forward);
+        let slot = self.settings.state_slot;
         self.show_notice(format!("State slot {slot}"), cx);
         self.save_settings(cx);
         // The file Load State would read.
@@ -1496,10 +1037,6 @@ impl EmulatorView {
         if let Some(player) = clicked {
             self.switch_player(player, cx);
         }
-        // Back to the mouse: hide the gamepad cursor unless it is touching.
-        if !self.sent.touch {
-            self.cursor = None;
-        }
         // The touchscreen as the window shows it, possibly more than once.
         let touched = self.touchscreen().and_then(|(screen, size)| {
             let (index, placement) = self
@@ -1509,15 +1046,10 @@ impl EmulatorView {
                 .find(|(_, p)| p.screen == screen && p.rect.contains(point))?;
             Some((index, placement.pixel_at(size, point)?))
         });
-        if touched.is_some() {
-            self.stylus = touched;
-        } else {
-            // Elsewhere, and in every other game, a click presses A for as
-            // long as it is held.
-            self.controls
-                .set(MOUSE.to_owned(), Some(Held::Button(Button::A)), true);
-        }
-        self.sync_held();
+        // Back to the mouse, which touches there, or elsewhere, and in
+        // every other game, presses A for as long as it is held.
+        let commands = self.input.mouse_down(touched, &self.stage());
+        self.send_all(commands);
         cx.notify();
     }
 
@@ -1526,35 +1058,29 @@ impl EmulatorView {
     /// off a DS would.
     fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.show_guide_pill(event, window, cx);
-        let Some((index, at)) = self.stylus else {
+        let Some((index, _)) = self.input.stylus() else {
             return;
         };
         let Some((screen, size)) = self.touchscreen() else {
             return;
         };
         let point = (f32::from(event.position.x), f32::from(event.position.y));
-        // Where the screen is now, should the layout have changed.
+        // Where the screen is now, should the layout have changed: nowhere
+        // if the screen pressed on is gone from the window.
         let moved = self
             .placements
             .get(index)
             .filter(|placement| placement.screen == screen)
             .and_then(|placement| placement.pixel_nearest(size, point));
-        if moved.is_none() {
-            // The screen pressed on is gone from the window.
-            self.stylus = None;
-            self.sync_held();
-        } else if let Some(moved) = moved.filter(|moved| *moved != at) {
-            self.stylus = Some((index, moved));
-            self.sync_held();
-        }
+        let commands = self.input.drag_stylus(moved, &self.stage());
+        self.send_all(commands);
     }
 
     /// Lifts the stylus or releases A when the mouse button comes up, in
     /// the window or out of it.
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.stylus = None;
-        self.controls.set(MOUSE.to_owned(), None, false);
-        self.sync_held();
+        let commands = self.input.mouse_up(&self.stage());
+        self.send_all(commands);
     }
 
     /// Asks for a game, then calls `then` with it: a file, or on macOS a
@@ -1642,7 +1168,8 @@ impl EmulatorView {
     fn guide_game(&self, cx: &App) -> Option<GuideGame> {
         let session = self.game.session()?;
         let player = self
-            .active_player
+            .input
+            .player()
             .min(session.player_rom_paths.len().saturating_sub(1));
         let rom = session.player_rom_paths.get(player)?;
         let game = self.library.read(cx).game_of(rom);
@@ -1834,14 +1361,14 @@ impl EmulatorView {
             return;
         }
         // The active player's game, which Start Over erases.
-        let player = self.active_player.min(session.player_rom_paths.len() - 1);
+        let player = self.input.player().min(session.player_rom_paths.len() - 1);
         let rom = session.player_rom_paths[player].clone();
         let title = self
             .library
             .read(cx)
             .title_of(&rom)
             .unwrap_or_else(|| file_name(&rom));
-        let controls = key_guide::columns(session.info.system, &self.bindings);
+        let controls = key_guide::columns(session.info.system, self.input.bindings());
         // Let go at once, before pausing, so no quick tap waits under the
         // menu to reach the game when it resumes.
         self.release_all();
@@ -1900,7 +1427,7 @@ impl EmulatorView {
     /// The active player's cheat file, while a game runs.
     fn cheat_file(&self) -> Option<PathBuf> {
         let session = self.game.session()?;
-        Some(session.player_files_of(self.active_player).cheats())
+        Some(session.player_files_of(self.input.player()).cheats())
     }
 
     /// The active player's cheats, as the game menu lists them.
@@ -2072,10 +1599,10 @@ impl EmulatorView {
         if self.linked_side_by_side {
             Layout {
                 arrangement: Arrangement::Horizontal,
-                ..self.layout
+                ..self.settings.layout
             }
         } else {
-            self.layout
+            self.settings.layout
         }
     }
 
@@ -2085,7 +1612,7 @@ impl EmulatorView {
         self.set_layout(
             Layout {
                 arrangement,
-                ..self.layout
+                ..self.settings.layout
             },
             cx,
         );
@@ -2094,8 +1621,8 @@ impl EmulatorView {
     fn swap_screens(&mut self, cx: &mut Context<Self>) {
         self.set_layout(
             Layout {
-                swapped: !self.layout.swapped,
-                ..self.layout
+                swapped: !self.settings.layout.swapped,
+                ..self.settings.layout
             },
             cx,
         );
@@ -2112,14 +1639,14 @@ impl EmulatorView {
         self.set_layout(
             Layout {
                 rotation,
-                ..self.layout
+                ..self.settings.layout
             },
             cx,
         );
     }
 
     fn change_gap(&mut self, cx: &mut Context<Self>) {
-        let gap = layout::next_gap(self.layout.gap);
+        let gap = layout::next_gap(self.settings.layout.gap);
         let message = if gap <= 0.0 {
             "No gap between screens".to_owned()
         } else if gap == layout::HINGE_GAP {
@@ -2128,12 +1655,18 @@ impl EmulatorView {
             format!("Screen gap {gap} px")
         };
         self.show_notice(message, cx);
-        self.set_layout(Layout { gap, ..self.layout }, cx);
+        self.set_layout(
+            Layout {
+                gap,
+                ..self.settings.layout
+            },
+            cx,
+        );
     }
 
     /// Switches to `layout` and saves it for next launch.
     fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        self.layout = layout;
+        self.settings.layout = layout;
         cx.notify();
         self.save_settings(cx);
     }
@@ -2141,7 +1674,7 @@ impl EmulatorView {
     /// Draws DS and 3DS 3D at `resolution` from now on, and saves that for
     /// next launch. The next draw sends the core the scale it comes to.
     fn set_resolution_3d(&mut self, resolution: Resolution3d, cx: &mut Context<Self>) {
-        self.resolution_3d = resolution;
+        self.settings.resolution_3d = resolution;
         let system = self.game.session().map(|session| session.info.system);
         let three_d = matches!(system, Some(System::Nds | System::N3ds) | None);
         let mut message = match (resolution, system) {
@@ -2168,8 +1701,8 @@ impl EmulatorView {
     /// Starts or stops listening to the computer's microphone for DS games.
     fn toggle_microphone(&mut self, cx: &mut Context<Self>) {
         if self.microphone.take().is_some() {
-            self.heard = 0;
-            self.send_input();
+            let command = self.input.stop_hearing();
+            self.send(command);
             self.show_notice("Microphone off", cx);
             return;
         }
@@ -2189,30 +1722,18 @@ impl EmulatorView {
             return;
         };
         let heard = loudness.take();
-        if heard != self.heard {
-            self.heard = heard;
-            self.send_input();
+        if let Some(command) = self.input.hear(heard) {
+            self.send(command);
         }
     }
 
-    /// The settings in force.
+    /// The settings in force, to save or to show: the ones held, with
+    /// fast-forward and slow motion as `input` has them latched now.
     pub fn settings(&self) -> Settings {
         Settings {
-            layout: self.layout,
-            speed: self.speeds,
-            fast_forward_on: self.controls.fast_forward_latched(),
-            slow_motion_on: self.controls.slow_motion_latched(),
-            resolution_3d: self.resolution_3d,
-            picture: self.picture,
-            backdrop: self.backdrop,
-            show_fps: self.show_fps,
-            color_correction: self.color_correction,
-            state_slot: self.state_slot,
-            dmg_colors: self.dmg_colors,
-            window_controls: self.window_controls,
-            window_place: self.window_place,
-            guide_thinking: self.guide_thinking,
-            guide_lookups: self.guide_lookups,
+            fast_forward_on: self.input.fast_forward_latched(),
+            slow_motion_on: self.input.slow_motion_latched(),
+            ..self.settings
         }
     }
 
@@ -2236,7 +1757,7 @@ impl EmulatorView {
             // from the menu; any other change keeps it, and keeps the
             // user's own arrangement for after.
             let arrangement = if settings.layout.arrangement == shown.arrangement {
-                self.layout.arrangement
+                self.settings.layout.arrangement
             } else {
                 self.linked_side_by_side = false;
                 settings.layout.arrangement
@@ -2249,23 +1770,23 @@ impl EmulatorView {
                 cx,
             );
         }
-        if settings.resolution_3d != self.resolution_3d {
+        if settings.resolution_3d != self.settings.resolution_3d {
             self.set_resolution_3d(settings.resolution_3d, cx);
         }
-        if settings.picture != self.picture {
+        if settings.picture != self.settings.picture {
             self.set_picture(settings.picture, cx);
         }
-        if settings.backdrop != self.backdrop {
+        if settings.backdrop != self.settings.backdrop {
             self.set_backdrop(settings.backdrop, cx);
         }
-        if settings.window_controls != self.window_controls {
+        if settings.window_controls != self.settings.window_controls {
             self.set_window_controls(settings.window_controls, cx);
         }
         if (settings.guide_thinking, settings.guide_lookups)
-            != (self.guide_thinking, self.guide_lookups)
+            != (self.settings.guide_thinking, self.settings.guide_lookups)
         {
-            self.guide_thinking = settings.guide_thinking;
-            self.guide_lookups = settings.guide_lookups;
+            self.settings.guide_thinking = settings.guide_thinking;
+            self.settings.guide_lookups = settings.guide_lookups;
             self.tell_guide_settings(cx);
             self.save_settings(cx);
         }
@@ -2273,7 +1794,7 @@ impl EmulatorView {
 
     /// Hands Guide's settings to its panel.
     fn tell_guide_settings(&self, cx: &mut App) {
-        let (effort, lookups) = (self.guide_thinking, self.guide_lookups);
+        let (effort, lookups) = (self.settings.guide_thinking, self.settings.guide_lookups);
         self.guide.update(cx, |guide, _| {
             guide.effort = effort;
             guide.lookups = lookups;
@@ -2283,7 +1804,7 @@ impl EmulatorView {
     /// Fills the window around the screens with `backdrop` from now on,
     /// and saves that for next launch.
     fn set_backdrop(&mut self, backdrop: Backdrop, cx: &mut Context<Self>) {
-        self.backdrop = backdrop;
+        self.settings.backdrop = backdrop;
         if let Some(session) = self.game.session_mut() {
             self.stale_images
                 .extend(session.ambient.take().map(|glow| glow.image));
@@ -2295,7 +1816,7 @@ impl EmulatorView {
     /// Shows or hides the window's close, minimise and zoom buttons and the
     /// bar they sit in, and saves that for next launch.
     fn set_window_controls(&mut self, shown: bool, cx: &mut Context<Self>) {
-        self.window_controls = shown;
+        self.settings.window_controls = shown;
         cx.notify();
         self.save_settings(cx);
     }
@@ -2315,8 +1836,8 @@ impl EmulatorView {
     /// Runs fast-forward at `speed` from now on, at once if it is on,
     /// and saves that for next launch.
     fn set_fast_forward(&mut self, speed: Speed, cx: &mut Context<Self>) {
-        self.speeds.fast_forward = speed;
-        if self.sent.pace == Pace::FastForward {
+        self.settings.speed.fast_forward = speed;
+        if self.input.pace() == Pace::FastForward {
             self.send(Command::SetSpeed(speed));
         }
         self.refresh_menus(cx);
@@ -2326,8 +1847,8 @@ impl EmulatorView {
 
     /// Shows or hides the speed readout, and saves that for next launch.
     fn toggle_fps(&mut self, cx: &mut Context<Self>) {
-        self.show_fps = !self.show_fps;
-        if self.show_fps {
+        self.settings.show_fps = !self.settings.show_fps;
+        if self.settings.show_fps {
             self.start_readout(cx);
         } else {
             self.readout_task = None;
@@ -2382,8 +1903,8 @@ impl EmulatorView {
     /// What the menus show checked now.
     fn menu_checks(&self) -> MenuChecks {
         MenuChecks {
-            fast_forward: self.speeds.fast_forward,
-            show_fps: self.show_fps,
+            fast_forward: self.settings.speed.fast_forward,
+            show_fps: self.settings.show_fps,
         }
     }
 
@@ -2499,7 +2020,7 @@ impl EmulatorView {
         Some(DebugTarget {
             session: self.sessions,
             system: session.info.system,
-            player: self.active_player,
+            player: self.input.player(),
             snapshot: session.emulator.debug_snapshot(),
         })
     }
@@ -2513,13 +2034,13 @@ impl EmulatorView {
     /// filled in while it touches.
     fn cursor_marks(&self) -> Vec<impl IntoElement + use<>> {
         const RADIUS: f32 = 6.0;
-        let (Some(cursor), Some((screen, size))) = (self.cursor, self.touchscreen()) else {
+        let (Some(cursor), Some((screen, size))) = (self.input.cursor(), self.touchscreen()) else {
             return Vec::new();
         };
         // Centre the mark on the pixel it touches.
         let pixel = cursor.pixel();
         let centre = (f32::from(pixel.x) + 0.5, f32::from(pixel.y) + 0.5);
-        let touching = self.sent.touch;
+        let touching = self.input.touching();
         self.placements
             .iter()
             .filter(|placement| placement.screen == screen)
@@ -2561,7 +2082,7 @@ impl EmulatorView {
     /// next one opened, and saves that for next launch. A game already
     /// running keeps its console until it is opened again.
     fn set_dmg_colors(&mut self, colors: emu_core::DmgColors, cx: &mut Context<Self>) {
-        self.dmg_colors = colors;
+        self.settings.dmg_colors = colors;
         let shown = match colors {
             emu_core::DmgColors::Grey => "in grey, as on a Game Boy",
             _ => "in colour, as on a Game Boy Color",
@@ -2576,7 +2097,7 @@ impl EmulatorView {
     /// Shows the screens as `picture` from now on, and saves that for next
     /// launch.
     fn set_picture(&mut self, picture: Picture, cx: &mut Context<Self>) {
-        self.picture = picture;
+        self.settings.picture = picture;
         if let Some(session) = self.game.session() {
             session
                 .emulator
@@ -2593,7 +2114,7 @@ impl EmulatorView {
     /// about 130 ms, which the first upscaled frame would otherwise wait
     /// for; screens are drawn as sharp pixels until it is ready.
     fn start_upscaler(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.upscaler, Upscaler::Idle) || !self.picture.upscales() {
+        if !matches!(self.upscaler, Upscaler::Idle) || !self.settings.picture.upscales() {
             return;
         }
         let started = cx.background_executor().spawn(async { GpuDevice::start() });
@@ -2616,10 +2137,10 @@ impl EmulatorView {
 
     /// Turns colour correction on or off, and saves that for next launch.
     fn toggle_color_correction(&mut self, cx: &mut Context<Self>) {
-        self.color_correction = !self.color_correction;
+        self.settings.color_correction = !self.settings.color_correction;
         self.rebuild_images();
         self.show_notice(
-            if self.color_correction {
+            if self.settings.color_correction {
                 "Colour correction on"
             } else {
                 "Colour correction off"
@@ -2644,7 +2165,8 @@ impl Session {
 
     /// Stops the emulation thread, which first finishes what it was asked,
     /// such as saving the checkpoint, and writes the battery saves.
-    /// Returns what it said meanwhile that was not yet shown.
+    /// Returns what it said meanwhile that was not yet shown, as it would
+    /// have been ([`said_by`]).
     fn finish(self) -> Vec<String> {
         let Self {
             emulator,
@@ -2656,292 +2178,8 @@ impl Session {
         // The thread has stopped, so the device can go.
         drop(audio);
         std::iter::from_fn(|| events.try_recv().ok())
-            .filter_map(|event| match event {
-                Event::Notice(text) | Event::Warning(text) | Event::Stopped(text) => Some(text),
-                _ => None,
-            })
+            .filter_map(|event| said_by(&event).map(Cow::into_owned))
             .collect()
-    }
-
-    /// Takes the emulation thread's latest frames, if they are new. The
-    /// screen images drawn from the last ones stay until images of these
-    /// replace them ([`Session::refresh_images`]), and the ambient
-    /// backdrop fades over to them.
-    fn take_frames(&mut self) {
-        let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) else {
-            return;
-        };
-        self.sequence = sequence;
-        self.taken_at = Some(Instant::now());
-    }
-
-    /// Puts the upscaler's finished screens, `taken`, where they were
-    /// sent for, wherever each still stands in for what `wanted` there
-    /// ([`ImageKey::stands_in`]). Returns the GPU's error if it failed.
-    fn place_upscaled(
-        &mut self,
-        taken: Option<Result<Vec<Bgra>, GpuError>>,
-        wanted: &[Option<ImageKey>],
-        window: &mut Window,
-    ) -> Option<GpuError> {
-        let images = match taken? {
-            Ok(images) => images,
-            Err(error) => {
-                self.upscaling.clear();
-                return Some(error);
-            }
-        };
-        // A batch sent for another game, or before the screens were
-        // rebuilt, has nothing here to stand in for.
-        for (sent, bgra) in std::mem::take(&mut self.upscaling).into_iter().zip(images) {
-            let Some(Some(wanted)) = wanted.get(sent.index) else {
-                continue;
-            };
-            let slot = &mut self.images[sent.index];
-            if !sent
-                .key
-                .stands_in(*wanted, slot.as_ref().map(|(key, _)| *key))
-            {
-                continue;
-            }
-            let image = video::bgra_image(sent.size.0, sent.size.1, bgra);
-            if let Some((_, old)) = slot.replace((sent.key, image)) {
-                window.drop_image(old).ok();
-            }
-        }
-        None
-    }
-
-    /// Brings the images up to date with how each placement draws its
-    /// screen. Each frame is colour corrected and turned, then upscaled on
-    /// the GPU to the placement's exact size in device pixels, or filtered
-    /// and enlarged by a whole factor on the CPU.
-    ///
-    /// The GPU is waited for up to [`UPSCALE_WAIT`]. A batch that takes
-    /// longer stays on it, the images shown stay, and a later draw puts
-    /// it in place; meanwhile newer frames wait rather than queue.
-    ///
-    /// Returns the GPU's error the moment it fails, after which screens
-    /// stay on the CPU, and whether a batch is still on the GPU, for the
-    /// view to draw again when it is done.
-    fn refresh_images(
-        &mut self,
-        placements: &[Placement],
-        scale_factor: f32,
-        color_correction: bool,
-        picture: Picture,
-        upscaler: &mut Upscaler,
-        window: &mut Window,
-    ) -> (Option<GpuError>, bool) {
-        // One image per placement, so the layout decides how many.
-        if self.images.len() > placements.len() {
-            for (_, image) in self.images.drain(placements.len()..).flatten() {
-                window.drop_image(image).ok();
-            }
-        }
-        self.images.resize(placements.len(), None);
-        let look = picture.look(self.info.system);
-        let targets: Vec<(u32, u32)> = placements
-            .iter()
-            .map(|placement| {
-                picture::device_size(placement.rect.width, placement.rect.height, scale_factor)
-            })
-            .collect();
-        let drawn = picture::within_budget(&targets, picture::MAX_UPSCALED_PIXELS);
-        // What each placement should show now.
-        let wanted: Vec<Option<ImageKey>> = placements
-            .iter()
-            .zip(&targets)
-            .map(|(placement, &target)| {
-                self.frames.get(placement.screen).map(|_| ImageKey {
-                    screen: placement.screen,
-                    rotation: placement.rotation,
-                    look,
-                    target,
-                    sequence: self.sequence,
-                })
-            })
-            .collect();
-        // An earlier batch the GPU has finished meanwhile.
-        let mut failed = self.place_upscaled(upscaler.take(Duration::ZERO), &wanted, window);
-        let correction = self.correction.as_ref().filter(|_| color_correction);
-
-        // The screens to draw again, each frame colour corrected and turned.
-        let mut redraws = Vec::new();
-        for (index, (slot, placement)) in self.images.iter().zip(placements).enumerate() {
-            let (Some(frame), Some(key)) = (self.frames.get(placement.screen), wanted[index])
-            else {
-                continue;
-            };
-            if slot.as_ref().is_some_and(|(built, _)| *built == key) {
-                continue;
-            }
-            // Frames drawn at a higher 3D resolution have several pixels
-            // to each console pixel.
-            let native = self.info.screens.get(placement.screen);
-            let cell = native.map_or(1, |native| frame.size().width / native.width.max(1));
-            let mut frame = Cow::Borrowed(frame);
-            if let Some(correction) = correction {
-                frame = Cow::Owned(correction.frame(&frame));
-            }
-            if key.rotation != Rotation::Upright {
-                frame = Cow::Owned(video::turn(&frame, key.rotation));
-            }
-            redraws.push((index, key, frame, cell));
-        }
-
-        // Drawn together on the GPU, each at its exact size. Sharp Pixels
-        // draws any frame at any size. Smooth and Rounded Pixels only
-        // enlarge: Smooth the frame itself, unless it is about as large
-        // already, when it is shown as it is; Rounded the console's pixels,
-        // which on a frame with larger 3D it works on beside the 3D; where
-        // they would not enlarge, Sharp Pixels draws the frame instead.
-        let requests: Vec<(usize, Request<'_>)> = redraws
-            .iter()
-            .enumerate()
-            .filter_map(|(at, (index, key, frame, cell))| {
-                let Look::Upscaled(method) = key.look else {
-                    return None;
-                };
-                let shown = frame.size();
-                let cell = (*cell).max(1);
-                let (width, height) = drawn[*index];
-                let enlarges = |(across, down): (u16, u16)| {
-                    width > u32::from(across) && height > u32::from(down)
-                };
-                if method == Method::Smooth
-                    && picture::shown_as_drawn((shown.width, shown.height), (width, height))
-                {
-                    // Shown as it is, without a trip to the GPU.
-                    return None;
-                }
-                let method = match method {
-                    Method::Rounded if !enlarges((shown.width / cell, shown.height / cell)) => {
-                        Method::Sharp
-                    }
-                    Method::Smooth if !enlarges((shown.width, shown.height)) => Method::Sharp,
-                    method => method,
-                };
-                Some((
-                    at,
-                    Request {
-                        frame,
-                        method,
-                        cell: u32::from(cell),
-                        width,
-                        height,
-                    },
-                ))
-            })
-            .collect();
-        let gpu_requests: Vec<Request<'_>> = requests.iter().map(|(_, request)| *request).collect();
-        // Whether each redraw is the GPU's: sent, or waiting for the batch
-        // before it.
-        let mut on_gpu = vec![false; redraws.len()];
-        let mut sent = false;
-        if !gpu_requests.is_empty() {
-            match upscaler.send(&gpu_requests) {
-                Ok(Sent::Yes) => {
-                    sent = true;
-                    self.upscaling = requests
-                        .iter()
-                        .map(|(at, request)| Upscaling {
-                            index: redraws[*at].0,
-                            key: redraws[*at].1,
-                            size: (request.width, request.height),
-                        })
-                        .collect();
-                    for (at, _) in &requests {
-                        on_gpu[*at] = true;
-                    }
-                }
-                Ok(Sent::Busy) => {
-                    for (at, _) in &requests {
-                        on_gpu[*at] = true;
-                    }
-                }
-                Ok(Sent::Unavailable) => {}
-                Err(error) => failed = Some(error),
-            }
-        }
-
-        // The rest on the CPU: filtered, then enlarged by a whole factor.
-        // A place the GPU is drawing for that shows nothing yet, as one the
-        // layout just added, gets the CPU's picture meanwhile, under a key
-        // the GPU's replaces.
-        for ((index, key, frame, cell), on_gpu) in redraws.into_iter().zip(on_gpu) {
-            if on_gpu && self.images[index].is_some() {
-                continue;
-            }
-            let width = frame.size().width;
-            let factor = video::prescale_factor(width, placements[index].rect.width, scale_factor);
-            let filter = cpu_filter(key.look, factor, upscaler.is_off());
-            let (filtered, factor) = filter.apply(&frame, factor, usize::from(cell), key.rotation);
-            let image = video::render_image(&filtered, factor);
-            let key = if on_gpu { key.stale() } else { key };
-            if let Some((_, old)) = self.images[index].replace((key, image)) {
-                window.drop_image(old).ok();
-            }
-        }
-
-        // The batch just sent, if the GPU finishes it soon enough. A batch
-        // from before is not waited for: once it is done, the view draws
-        // again and sends these screens then.
-        if sent {
-            let taken = upscaler.take(UPSCALE_WAIT);
-            failed = failed.or(self.place_upscaled(taken, &wanted, window));
-        }
-        (failed, upscaler.busy())
-    }
-
-    /// Brings the ambient backdrop up to date with the screens as
-    /// `placements` show them, fading toward their colours. Whether it is
-    /// still fading.
-    fn refresh_ambient(
-        &mut self,
-        placements: &[Placement],
-        color_correction: bool,
-        window: &mut Window,
-    ) -> bool {
-        let now = Instant::now();
-        let current = self
-            .ambient
-            .as_ref()
-            .is_some_and(|glow| glow.sampled.1 == self.sequence && glow.sampled.0 == placements);
-        if !current {
-            let correction = self.correction.as_ref().filter(|_| color_correction);
-            let Some(target) = ambient::picture(&self.frames, placements, correction) else {
-                if let Some(glow) = self.ambient.take() {
-                    window.drop_image(glow.image).ok();
-                }
-                return false;
-            };
-            let sampled = (placements.to_vec(), self.sequence);
-            let Some(glow) = &mut self.ambient else {
-                let fade = ambient::Fade::new(target, now);
-                let image = video::render_image(&fade.shown().frame(ambient::BORDER), 1);
-                self.ambient = Some(Glow {
-                    sampled,
-                    fade,
-                    image,
-                });
-                return false;
-            };
-            glow.sampled = sampled;
-            glow.fade.aim(target);
-        }
-        let Some(glow) = &mut self.ambient else {
-            return false;
-        };
-        let changed = !current || !glow.fade.settled();
-        let moving = glow.fade.step(now);
-        if changed {
-            let image = video::render_image(&glow.fade.shown().frame(ambient::BORDER), 1);
-            window
-                .drop_image(std::mem::replace(&mut glow.image, image))
-                .ok();
-        }
-        moving
     }
 }
 
@@ -2950,7 +2188,7 @@ impl Render for EmulatorView {
         trace::event("render", &[]);
         // Full screen shows its own bar on hover, buttons and all.
         let fullscreen = window.is_fullscreen();
-        let show_controls = self.window_controls || fullscreen;
+        let show_controls = self.settings.window_controls || fullscreen;
         if self.shown_controls != Some(show_controls) {
             window_chrome::set_controls_visible(window, show_controls);
             self.shown_controls = Some(show_controls);
@@ -2992,7 +2230,7 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &StopScript, _, _| this.send(Command::StopScript)))
             .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
                 let players = this.game.session().map_or(1, |s| s.info.players);
-                this.switch_player((this.active_player + 1) % players.max(1), cx);
+                this.switch_player((this.input.player() + 1) % players.max(1), cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePause, _, cx| {
                 // Under the game menu the game is paused already: resume.
@@ -3005,11 +2243,11 @@ impl Render for EmulatorView {
                 this.send(Command::Reset);
             }))
             .on_action(cx.listener(|this, _: &SaveState, _, _| {
-                this.send(Command::SaveState(this.state_slot));
+                this.send(Command::SaveState(this.settings.state_slot));
             }))
             .on_action(cx.listener(|this, _: &LoadState, _, cx| {
                 this.leave_menu(cx);
-                this.send(Command::LoadState(this.state_slot));
+                this.send(Command::LoadState(this.settings.state_slot));
             }))
             .on_action(
                 cx.listener(|this, _: &NextStateSlot, _, cx| this.change_state_slot(true, cx)),
@@ -3021,41 +2259,21 @@ impl Render for EmulatorView {
                 cx.listener(|this, _: &ToggleFastForward, _, cx| this.toggle_fast_forward(cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSlowMotion, _, cx| this.toggle_slow_motion(cx)))
-            .on_action(cx.listener(|this, _: &LayoutVertical, _, cx| {
-                this.arrange(Arrangement::Vertical, cx);
-            }))
-            .on_action(cx.listener(|this, _: &LayoutHorizontal, _, cx| {
-                this.arrange(Arrangement::Horizontal, cx);
-            }))
-            .on_action(cx.listener(|this, _: &LayoutSingle, _, cx| {
-                this.arrange(Arrangement::Single, cx);
-            }))
-            .on_action(cx.listener(|this, _: &LayoutHybrid, _, cx| {
-                this.arrange(Arrangement::Hybrid, cx);
-            }))
+            .on_action(cx.listener(|this, action: &Arrange, _, cx| this.arrange(action.0, cx)))
             .on_action(cx.listener(|this, _: &SwapScreens, _, cx| this.swap_screens(cx)))
             .on_action(cx.listener(|this, _: &RotateClockwise, _, cx| {
-                this.rotate(this.layout.rotation.clockwise(), cx);
+                this.rotate(this.settings.layout.rotation.clockwise(), cx);
             }))
             .on_action(cx.listener(|this, _: &RotateAnticlockwise, _, cx| {
-                this.rotate(this.layout.rotation.anticlockwise(), cx);
+                this.rotate(this.settings.layout.rotation.anticlockwise(), cx);
             }))
             .on_action(cx.listener(|this, _: &NextScreenGap, _, cx| this.change_gap(cx)))
             .on_action(cx.listener(|this, _: &ToggleColorCorrection, _, cx| {
                 this.toggle_color_correction(cx);
             }))
             .on_action(cx.listener(|this, _: &ShowDebugger, _, cx| this.show_debugger(cx)))
-            .on_action(cx.listener(|this, _: &FastForward2x, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[0], cx);
-            }))
-            .on_action(cx.listener(|this, _: &FastForward3x, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[1], cx);
-            }))
-            .on_action(cx.listener(|this, _: &FastForward4x, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[2], cx);
-            }))
-            .on_action(cx.listener(|this, _: &FastForwardUnlimited, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[3], cx);
+            .on_action(cx.listener(|this, action: &SetFastForward, _, cx| {
+                this.set_fast_forward(action.0, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFps, _, cx| this.toggle_fps(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
@@ -3063,28 +2281,10 @@ impl Render for EmulatorView {
                 this.show_randomizer(None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleWindowControls, _, cx| {
-                this.set_window_controls(!this.window_controls, cx);
+                this.set_window_controls(!this.settings.window_controls, cx);
             }))
-            .on_action(cx.listener(|this, _: &Resolution3dMatchDisplay, _, cx| {
-                this.set_resolution_3d(Resolution3d::MatchDisplay, cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(1), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d2x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(2), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d3x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(3), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d4x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(4), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d6x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(6), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d8x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(8), cx);
+            .on_action(cx.listener(|this, action: &SetResolution3d, _, cx| {
+                this.set_resolution_3d(action.0, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleMicrophone, _, cx| {
                 this.toggle_microphone(cx);
@@ -3101,31 +2301,11 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleRecording, _, _| {
                 this.send(Command::ToggleRecording);
             }))
-            .on_action(cx.listener(|this, _: &crate::app::DmgColorsGrey, _, cx| {
-                this.set_dmg_colors(emu_core::DmgColors::Grey, cx);
+            .on_action(cx.listener(|this, action: &SetDmgColors, _, cx| {
+                this.set_dmg_colors(action.0, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &crate::app::DmgColorsGameBoyColor, _, cx| {
-                    this.set_dmg_colors(emu_core::DmgColors::ByTitle, cx);
-                }),
-            )
-            .on_action(cx.listener(|this, _: &PictureAuto, _, cx| {
-                this.set_picture(Picture::Auto, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureSharpPixels, _, cx| {
-                this.set_picture(Picture::SharpPixels, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureRoundedPixels, _, cx| {
-                this.set_picture(Picture::RoundedPixels, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureSmooth, _, cx| {
-                this.set_picture(Picture::Smooth, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureLcdGrid, _, cx| {
-                this.set_picture(Picture::LcdGrid, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureScanlines, _, cx| {
-                this.set_picture(Picture::Scanlines, cx);
+            .on_action(cx.listener(|this, action: &SetPicture, _, cx| {
+                this.set_picture(action.0, cx);
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
@@ -3212,13 +2392,13 @@ impl Render for EmulatorView {
             // 3D as large as the screens are now shown, for Match Display,
             // as long as the game keeps the speed asked for.
             let mut scale = render_scale(
-                self.resolution_3d,
+                self.settings.resolution_3d,
                 &session.info,
                 &self.placements,
                 scale_factor,
             );
-            if self.resolution_3d == Resolution3d::MatchDisplay {
-                scale = session.keep_speed(scale, self.speeds.speed(self.sent.pace));
+            if self.settings.resolution_3d == Resolution3d::MatchDisplay {
+                scale = session.keep_speed(scale, self.settings.speed.speed(self.input.pace()));
             }
             if scale != session.render_scale {
                 trace::event("scale", &[u64::from(scale)]);
@@ -3247,8 +2427,8 @@ impl Render for EmulatorView {
             (upscaler_failed, upscaling) = session.refresh_images(
                 &self.placements,
                 scale_factor,
-                self.color_correction,
-                self.picture,
+                self.settings.color_correction,
+                self.settings.picture,
                 &mut self.upscaler,
                 window,
             );
@@ -3280,8 +2460,9 @@ impl Render for EmulatorView {
                 let made = trace::micros(refreshing.elapsed());
                 trace::event("drawn", &[session.sequence, made]);
             }
-            if self.backdrop == Backdrop::Ambient {
-                if session.refresh_ambient(&self.placements, self.color_correction, window) {
+            if self.settings.backdrop == Backdrop::Ambient {
+                if session.refresh_ambient(&self.placements, self.settings.color_correction, window)
+                {
                     // New frames draw the fade on as they come, so the
                     // window redraws no more often than the game. Once they
                     // stop, as when paused, it draws the rest itself.
@@ -3307,7 +2488,7 @@ impl Render for EmulatorView {
                         let correction = session
                             .correction
                             .as_ref()
-                            .filter(|_| self.color_correction);
+                            .filter(|_| self.settings.color_correction);
                         ambient::picture(&session.frames, &self.placements, correction)
                             .map(|picture| picture.colors().to_vec())
                     }
@@ -3360,7 +2541,7 @@ impl Render for EmulatorView {
         // macOS, hidden with them, and shown again as the pointer comes
         // into the bar; in full screen only the menu's.
         let off_mac = !cfg!(target_os = "macos");
-        let controls_shown = self.window_controls && !fullscreen;
+        let controls_shown = self.settings.window_controls && !fullscreen;
         let chrome_shown =
             off_mac && (controls_shown || self.title_hovered || self.app_menu.is_some());
         let shaded = if off_mac {
@@ -3501,7 +2682,9 @@ impl Render for EmulatorView {
         let speed = self
             .speed_readout
             .clone()
-            .filter(|_| self.show_fps && self.game.session().is_some() && self.menu.is_none())
+            .filter(|_| {
+                self.settings.show_fps && self.game.session().is_some() && self.menu.is_none()
+            })
             .map(speed_readout);
         let notice = self.notice.as_ref().map(|notice| {
             let mut card = overlay_plate(div()).flex_col().gap_1();
@@ -3738,16 +2921,25 @@ fn recording_mark() -> Div {
         .children(probe::part("rec"))
 }
 
-/// What to tell the player of the emulation thread's notice `text`:
-/// nothing of the checkpoint being saved, which happens unasked, and
-/// loading it in words of its own.
-fn checkpoint_notice(text: String) -> Option<String> {
-    if text == format!("Saved state {CHECKPOINT}") {
-        None
-    } else if text == format!("Loaded state {CHECKPOINT}") {
-        Some("Picked up where you left off".to_owned())
-    } else {
-        Some(text)
+/// What to tell the player briefly of the emulation thread's `event`, if
+/// anything: its own words ([`Event::notice`]), but nothing of the
+/// checkpoint being saved, which happens unasked, and loading it in words
+/// of its own.
+fn notice_of(event: &Event) -> Option<Cow<'_, str>> {
+    match event {
+        Event::StateSaved(CHECKPOINT) => None,
+        Event::StateLoaded(CHECKPOINT) => Some("Picked up where you left off".into()),
+        event => event.notice(),
+    }
+}
+
+/// What the emulation thread's `event` tells the player, however it is
+/// shown: a notice as [`notice_of`] words it, a warning, or why the game
+/// stopped.
+fn said_by(event: &Event) -> Option<Cow<'_, str>> {
+    match event {
+        Event::Warning(text) | Event::Stopped(text) => Some(text.as_str().into()),
+        event => notice_of(event),
     }
 }
 
@@ -3789,23 +2981,6 @@ fn speed_readout(text: SharedString) -> Div {
         .text_color(rgb(READOUT))
         .child(text)
         .children(probe::part("speed"))
-}
-
-/// The menu action a gamepad hotkey runs.
-fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
-    match shortcut {
-        Shortcut::SaveState => Box::new(SaveState),
-        Shortcut::LoadState => Box::new(LoadState),
-        Shortcut::NextSlot => Box::new(NextStateSlot),
-        Shortcut::PreviousSlot => Box::new(PreviousStateSlot),
-        Shortcut::Pause => Box::new(TogglePause),
-        Shortcut::Reset => Box::new(Reset),
-        Shortcut::ToggleFastForward => Box::new(ToggleFastForward),
-        Shortcut::ToggleSlowMotion => Box::new(ToggleSlowMotion),
-        Shortcut::SwapScreens => Box::new(SwapScreens),
-        Shortcut::SwitchPlayer => Box::new(SwitchPlayer),
-        Shortcut::FullScreen => Box::new(ToggleFullScreen),
-    }
 }
 
 /// The 3D resolution to draw `info`'s game at: the one chosen, or for
@@ -3998,30 +3173,54 @@ mod tests {
     const DS: [ScreenSize; 2] = [ScreenSize::new(256, 192), ScreenSize::new(256, 192)];
 
     #[test]
-    fn an_older_frame_stands_in_until_the_new_one_is_drawn() {
-        let key = |sequence, target| ImageKey {
-            screen: 0,
-            rotation: Rotation::Upright,
-            look: Look::Upscaled(Method::Sharp),
-            target,
-            sequence,
-        };
-        let wanted = key(10, (1309, 982));
-        // The GPU finished frame 9 while frame 10 came: it replaces frame
-        // 8, or an empty place, but not frame 10 or a newer 9.
-        assert!(key(9, (1309, 982)).stands_in(wanted, Some(key(8, (1309, 982)))));
-        assert!(key(9, (1309, 982)).stands_in(wanted, None));
-        assert!(!key(9, (1309, 982)).stands_in(wanted, Some(key(10, (1309, 982)))));
-        assert!(!key(9, (1309, 982)).stands_in(wanted, Some(key(9, (1309, 982)))));
-        // Drawn for another size, look or screen: it never stands in, but
-        // replaces whatever of those is shown.
-        assert!(!key(10, (800, 600)).stands_in(wanted, None));
-        let smooth = ImageKey {
-            look: Look::Upscaled(Method::Smooth),
-            ..wanted
-        };
-        assert!(!smooth.stands_in(wanted, None));
-        assert!(key(9, (1309, 982)).stands_in(wanted, Some(key(12, (800, 600)))));
+    fn a_state_saved_or_loaded_is_told_by_its_slot_not_by_its_words() {
+        let told = |event: Event| notice_of(&event).map(Cow::into_owned);
+        // The slots the player saves to and loads from, in the words they
+        // have always had.
+        for slot in 1..=slots::LAST_FILE_SLOT {
+            assert_eq!(
+                told(Event::StateSaved(slot)),
+                Some(format!("Saved state {slot}"))
+            );
+            assert_eq!(
+                told(Event::StateLoaded(slot)),
+                Some(format!("Loaded state {slot}"))
+            );
+        }
+        // The checkpoint is saved unasked, and picked up in its own words.
+        assert_eq!(told(Event::StateSaved(CHECKPOINT)), None);
+        assert_eq!(
+            told(Event::StateLoaded(CHECKPOINT)).as_deref(),
+            Some("Picked up where you left off")
+        );
+        // Words are only ever shown: a script that says what the
+        // checkpoint's notice once said is not taken for it.
+        let said = format!("Saved state {CHECKPOINT}");
+        assert_eq!(told(Event::Notice(said.clone())), Some(said.clone()));
+        assert_eq!(told(Event::Failed(said.clone())), Some(said));
+        // Warnings and the rest are not notices.
+        assert_eq!(told(Event::Warning("kept".to_owned())), None);
+        assert_eq!(told(Event::Stopped("stopped".to_owned())), None);
+        assert_eq!(told(Event::PickedUp(true)), None);
+        assert_eq!(told(Event::Frame), None);
+        // What a game said as it stopped is worded the same way, with its
+        // warnings and why it stopped.
+        let left = |event: Event| said_by(&event).map(Cow::into_owned);
+        assert_eq!(left(Event::StateSaved(CHECKPOINT)), None);
+        assert_eq!(
+            left(Event::StateLoaded(CHECKPOINT)).as_deref(),
+            Some("Picked up where you left off")
+        );
+        assert_eq!(left(Event::StateSaved(2)).as_deref(), Some("Saved state 2"));
+        assert_eq!(
+            left(Event::Warning("kept".to_owned())).as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            left(Event::Stopped("stopped".to_owned())).as_deref(),
+            Some("stopped")
+        );
+        assert_eq!(left(Event::Recording(false)), None);
     }
 
     #[test]

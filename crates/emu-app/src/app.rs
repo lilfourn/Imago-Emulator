@@ -2,16 +2,19 @@
 
 use std::path::PathBuf;
 
+use emu_core::DmgColors;
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, Pixels, SystemMenuType, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
+    Action, App, Application, Bounds, KeyBinding, Menu, MenuItem, Pixels, SystemMenuType,
+    TitlebarOptions, WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
 };
 
 use crate::about_window;
+use crate::bindings::Shortcut;
 use crate::chrome;
 use crate::fonts;
 use crate::icons;
-use crate::layout;
+use crate::layout::{self, Arrangement};
+use crate::picture::{self, Picture, Resolution3d};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::speed::{self, Speed, Speeds};
 use crate::view::EmulatorView;
@@ -51,40 +54,17 @@ actions!(
         PreviousStateSlot,
         ToggleFastForward,
         ToggleSlowMotion,
-        FastForward2x,
-        FastForward3x,
-        FastForward4x,
-        FastForwardUnlimited,
         ToggleFps,
-        LayoutVertical,
-        LayoutHorizontal,
-        LayoutSingle,
-        LayoutHybrid,
         SwapScreens,
         RotateClockwise,
         RotateAnticlockwise,
         NextScreenGap,
         ToggleColorCorrection,
-        DmgColorsGrey,
-        DmgColorsGameBoyColor,
-        PictureAuto,
-        PictureSharpPixels,
-        PictureRoundedPixels,
-        PictureSmooth,
-        PictureLcdGrid,
-        PictureScanlines,
         ShowDebugger,
         DebugStep,
         DebugStepOver,
         DebugNextFrame,
         ToggleFullScreen,
-        Resolution3dMatchDisplay,
-        Resolution3d1x,
-        Resolution3d2x,
-        Resolution3d3x,
-        Resolution3d4x,
-        Resolution3d6x,
-        Resolution3d8x,
         ToggleMicrophone,
         ToggleGuide,
         ScreenshotForGuide,
@@ -95,6 +75,78 @@ actions!(
         ShowAppMenu,
     ]
 );
+
+// The actions that choose one of several: each carries what it chooses,
+// so a menu lists its choices from the list the choices are kept in, and
+// one handler in the window serves them all. A menu item's shortcut and
+// its tick are found by the value it carries. None is built from JSON:
+// the app's bindings are made here, in code.
+
+/// Lays the screens out in this arrangement.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct Arrange(pub Arrangement);
+
+/// Runs fast-forward at this speed from now on.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetFastForward(pub Speed);
+
+/// Draws DS and 3DS 3D at this resolution.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetResolution3d(pub Resolution3d);
+
+/// Shows the screens as this picture.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetPicture(pub Picture);
+
+/// Shows games made for the original Game Boy in these colours, from the
+/// next one opened.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetDmgColors(pub DmgColors);
+
+/// The screen arrangements, in the View menu's order: each with its
+/// item's title there and its shortcut. The menu's items and the key
+/// bindings are both made from this.
+const ARRANGEMENTS: [(Arrangement, &str, &str); 4] = [
+    (Arrangement::Vertical, "Screens Stacked", "secondary-1"),
+    (
+        Arrangement::Horizontal,
+        "Screens Side by Side",
+        "secondary-2",
+    ),
+    (Arrangement::Single, "One Screen", "secondary-3"),
+    (Arrangement::Hybrid, "One Large, Both Small", "secondary-4"),
+];
+
+/// How games made for the original Game Boy can be shown, as View >
+/// Original Game Boy Games offers them. The button combinations a Game Boy
+/// Color takes are the settings file's alone.
+const DMG_COLORS: [(DmgColors, &str); 2] = [
+    (DmgColors::Grey, "In Grey, as on a Game Boy"),
+    (DmgColors::ByTitle, "In Colour, as on a Game Boy Color"),
+];
+
+/// The action a gamepad hotkey runs: the one its menu item and its
+/// shortcut run.
+pub fn hotkey_action(shortcut: Shortcut) -> Box<dyn Action> {
+    match shortcut {
+        Shortcut::SaveState => Box::new(SaveState),
+        Shortcut::LoadState => Box::new(LoadState),
+        Shortcut::NextSlot => Box::new(NextStateSlot),
+        Shortcut::PreviousSlot => Box::new(PreviousStateSlot),
+        Shortcut::Pause => Box::new(TogglePause),
+        Shortcut::Reset => Box::new(Reset),
+        Shortcut::ToggleFastForward => Box::new(ToggleFastForward),
+        Shortcut::ToggleSlowMotion => Box::new(ToggleSlowMotion),
+        Shortcut::SwapScreens => Box::new(SwapScreens),
+        Shortcut::SwitchPlayer => Box::new(SwitchPlayer),
+        Shortcut::FullScreen => Box::new(ToggleFullScreen),
+    }
+}
 
 /// Two DS screens stacked, in emulated pixels: the shape the window opens
 /// in.
@@ -338,10 +390,13 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(shortcut::FAST_FORWARD, ToggleFastForward, None),
         KeyBinding::new(shortcut::SLOW_MOTION, ToggleSlowMotion, None),
         KeyBinding::new("secondary-alt-f", ToggleFps, None),
-        KeyBinding::new("secondary-1", LayoutVertical, None),
-        KeyBinding::new("secondary-2", LayoutHorizontal, None),
-        KeyBinding::new("secondary-3", LayoutSingle, None),
-        KeyBinding::new("secondary-4", LayoutHybrid, None),
+    ];
+    bindings.extend(
+        ARRANGEMENTS
+            .iter()
+            .map(|&(arrangement, _, keys)| KeyBinding::new(keys, Arrange(arrangement), None)),
+    );
+    bindings.extend([
         KeyBinding::new("secondary-e", SwapScreens, None),
         KeyBinding::new(shortcut::ROTATE_CLOCKWISE, RotateClockwise, None),
         KeyBinding::new(shortcut::ROTATE_ANTICLOCKWISE, RotateAnticlockwise, None),
@@ -356,7 +411,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         // F11, as in every Linux and Windows app.
         KeyBinding::new(shortcut::FULL_SCREEN, ToggleFullScreen, None),
         KeyBinding::new("secondary-q", Quit, None),
-    ];
+    ]);
     if cfg!(target_os = "macos") {
         bindings.extend([
             KeyBinding::new("cmd-h", HideApp, None),
@@ -535,11 +590,11 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
             MenuItem::action("Previous State Slot", PreviousStateSlot),
         ],
     });
-    let mut view = vec![
-        MenuItem::action("Screens Stacked", LayoutVertical),
-        MenuItem::action("Screens Side by Side", LayoutHorizontal),
-        MenuItem::action("One Screen", LayoutSingle),
-        MenuItem::action("One Large, Both Small", LayoutHybrid),
+    let mut view: Vec<MenuItem> = ARRANGEMENTS
+        .iter()
+        .map(|&(arrangement, title, _)| MenuItem::action(title, Arrange(arrangement)))
+        .collect();
+    view.extend([
         MenuItem::separator(),
         MenuItem::action("Swap Screens", SwapScreens),
         MenuItem::action("Rotate Clockwise", RotateClockwise),
@@ -548,41 +603,34 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::submenu(Menu {
             name: "3D Resolution".into(),
-            items: vec![
-                MenuItem::action("Match Display", Resolution3dMatchDisplay),
-                MenuItem::action("Native (1×)", Resolution3d1x),
-                MenuItem::action("2×", Resolution3d2x),
-                MenuItem::action("3×", Resolution3d3x),
-                MenuItem::action("4×", Resolution3d4x),
-                MenuItem::action("6×", Resolution3d6x),
-                MenuItem::action("8×", Resolution3d8x),
-            ],
+            items: picture::RESOLUTIONS_3D
+                .iter()
+                .map(|&resolution| {
+                    MenuItem::action(resolution.label(), SetResolution3d(resolution))
+                })
+                .collect(),
         }),
         MenuItem::submenu(Menu {
             name: "Picture".into(),
-            items: vec![
-                MenuItem::action("Auto", PictureAuto),
-                MenuItem::action("Sharp Pixels", PictureSharpPixels),
-                MenuItem::action("Smooth", PictureSmooth),
-                MenuItem::action("Rounded Pixels", PictureRoundedPixels),
-                MenuItem::action("LCD Grid", PictureLcdGrid),
-                MenuItem::action("Scanlines", PictureScanlines),
-            ],
+            items: Picture::ALL
+                .iter()
+                .map(|&picture| MenuItem::action(picture.label(), SetPicture(picture)))
+                .collect(),
         }),
         MenuItem::action("Colour Correction", ToggleColorCorrection),
         MenuItem::action(fps, ToggleFps),
         MenuItem::submenu(Menu {
             name: "Original Game Boy Games".into(),
-            items: vec![
-                MenuItem::action("In Grey, as on a Game Boy", DmgColorsGrey),
-                MenuItem::action("In Colour, as on a Game Boy Color", DmgColorsGameBoyColor),
-            ],
+            items: DMG_COLORS
+                .iter()
+                .map(|&(colors, title)| MenuItem::action(title, SetDmgColors(colors)))
+                .collect(),
         }),
         MenuItem::separator(),
         MenuItem::action("Guide", ToggleGuide),
         MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
         MenuItem::action("Debugger", ShowDebugger),
-    ];
+    ]);
     if !mac {
         // AppKit adds Enter Full Screen to macOS's View menu itself.
         view.push(MenuItem::separator());
@@ -611,16 +659,15 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
 
 /// Emulation > Fast-Forward Speed, with `current` checked.
 fn fast_forward_menu(current: Speed) -> Menu {
-    let [twice, three_times, four_times, unlimited] = speed::FAST_FORWARD_CHOICES;
-    let item = |speed: Speed| checked(&speed.label(), speed == current);
     Menu {
         name: "Fast-Forward Speed".into(),
-        items: vec![
-            MenuItem::action(item(twice), FastForward2x),
-            MenuItem::action(item(three_times), FastForward3x),
-            MenuItem::action(item(four_times), FastForward4x),
-            MenuItem::action(item(unlimited), FastForwardUnlimited),
-        ],
+        items: speed::FAST_FORWARD_CHOICES
+            .iter()
+            .map(|&speed| {
+                let name = checked(&speed.label(), speed == current);
+                MenuItem::action(name, SetFastForward(speed))
+            })
+            .collect(),
     }
 }
 
@@ -781,10 +828,10 @@ mod tests {
             KeyBinding::new("cmd-f", ToggleFastForward, None),
             KeyBinding::new("cmd-shift-f", ToggleSlowMotion, None),
             KeyBinding::new("cmd-alt-f", ToggleFps, None),
-            KeyBinding::new("cmd-1", LayoutVertical, None),
-            KeyBinding::new("cmd-2", LayoutHorizontal, None),
-            KeyBinding::new("cmd-3", LayoutSingle, None),
-            KeyBinding::new("cmd-4", LayoutHybrid, None),
+            KeyBinding::new("cmd-1", Arrange(Arrangement::Vertical), None),
+            KeyBinding::new("cmd-2", Arrange(Arrangement::Horizontal), None),
+            KeyBinding::new("cmd-3", Arrange(Arrangement::Single), None),
+            KeyBinding::new("cmd-4", Arrange(Arrangement::Hybrid), None),
             KeyBinding::new("cmd-e", SwapScreens, None),
             KeyBinding::new("cmd-alt-right", RotateClockwise, None),
             KeyBinding::new("cmd-alt-left", RotateAnticlockwise, None),
@@ -888,6 +935,552 @@ mod tests {
             .iter()
             .map(|menu| (menu.name.to_string(), items(&menu.items)))
             .collect()
+    }
+
+    /// The keys of `binding`, as GPUI writes them, with its context if it
+    /// has one.
+    fn keys_of(binding: &KeyBinding) -> String {
+        let keys: Vec<String> = binding
+            .keystrokes()
+            .iter()
+            .map(|keystroke| keystroke.inner().unparse())
+            .collect();
+        match binding.predicate() {
+            Some(context) => format!("{} in {context}", keys.join(" ")),
+            None => keys.join(" "),
+        }
+    }
+
+    /// Every menu item with an action, by its path through the menus
+    /// (`View > Picture > Smooth`), with the action.
+    fn items_of(menus: &[Menu]) -> Vec<(String, Box<dyn gpui::Action>)> {
+        fn walk(path: &str, items: &[MenuItem], out: &mut Vec<(String, Box<dyn gpui::Action>)>) {
+            for item in items {
+                match item {
+                    MenuItem::Action { name, action, .. } => {
+                        out.push((format!("{path} > {name}"), action.boxed_clone()));
+                    }
+                    MenuItem::Submenu(menu) => {
+                        walk(&format!("{path} > {}", menu.name), &menu.items, out);
+                    }
+                    MenuItem::Separator | MenuItem::SystemMenu(_) => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for menu in menus {
+            walk(&menu.name, &menu.items, &mut out);
+        }
+        out
+    }
+
+    /// The menus as text: each menu's name, then its items in order, one
+    /// to a line and indented under what they are in. A separator is `-`,
+    /// a submenu ends in ` >`, a choice is `✓ name` if checked and `·name`
+    /// if not, and an item is followed by the keys of every binding that
+    /// runs its very action, in the order bound: those the system's menu
+    /// bar and the window's menu pick its shortcut from.
+    fn menus_written(menus: &[Menu], bindings: &[KeyBinding]) -> String {
+        fn walk(depth: usize, items: &[MenuItem], bindings: &[KeyBinding], out: &mut String) {
+            let indent = "  ".repeat(depth);
+            for item in items {
+                match item {
+                    MenuItem::Separator => out.push_str(&format!("{indent}-\n")),
+                    MenuItem::SystemMenu(menu) => {
+                        out.push_str(&format!("{indent}{} (system)\n", menu.name));
+                    }
+                    MenuItem::Submenu(menu) => {
+                        out.push_str(&format!("{indent}{} >\n", menu.name));
+                        walk(depth + 1, &menu.items, bindings, out);
+                    }
+                    MenuItem::Action { name, action, .. } => {
+                        // A choice not checked starts with an em space,
+                        // which nobody can see in a listing.
+                        let name = name.replace('\u{2003}', "·");
+                        let keys: Vec<String> = bindings
+                            .iter()
+                            .filter(|binding| binding.action().partial_eq(action.as_ref()))
+                            .map(keys_of)
+                            .collect();
+                        if keys.is_empty() {
+                            out.push_str(&format!("{indent}{name}\n"));
+                        } else {
+                            out.push_str(&format!("{indent}{name}  [{}]\n", keys.join(", ")));
+                        }
+                    }
+                }
+            }
+        }
+        let mut out = String::new();
+        for menu in menus {
+            out.push_str(&format!("{}\n", menu.name));
+            walk(1, &menu.items, bindings, &mut out);
+        }
+        out
+    }
+
+    /// The bindings as text, in the order bound, which decides between
+    /// two on one key: each one's keys, then the menu item it runs, by its
+    /// path, or the name of its action if no menu has it.
+    fn bindings_written(bindings: &[KeyBinding], menus: &[Menu]) -> String {
+        let items = items_of(menus);
+        let mut out = String::new();
+        for binding in bindings {
+            let runs = items
+                .iter()
+                .find(|(_, action)| action.partial_eq(binding.action()))
+                .map_or_else(
+                    || format!("({})", binding.action().name()),
+                    |(path, _)| path.clone(),
+                );
+            out.push_str(&format!("{}  ->  {runs}\n", keys_of(binding)));
+        }
+        out
+    }
+
+    /// macOS's menu bar with nothing changed from the defaults, as
+    /// [`menus_written`] writes it: recorded from the build before the
+    /// menus' choices became actions that carry their value.
+    const MAC_MENUS: &str = r#"Imago Emulator
+  About Imago Emulator
+  -
+  Settings…  [cmd-,]
+  -
+  Services (system)
+  -
+  Hide Imago Emulator  [cmd-h]
+  Hide Others  [alt-cmd-h]
+  Show All
+  -
+  Quit Imago Emulator  [cmd-q]
+File
+  Open ROM…  [cmd-o]
+  Add Games to Library…  [cmd-shift-a]
+  Game Store  [cmd-shift-g]
+  Game Info  [cmd-i in Emulator]
+  Remove from Library  [cmd-backspace in Emulator]
+  Close Game  [cmd-w]
+  Connect Second Console…
+  Insert GBA Cartridge…
+  -
+  Randomize Game…  [alt-cmd-r]
+  -
+  Save Screenshot  [cmd-shift-s]
+  Screenshot for Guide  [alt-cmd-s]
+  Start / Stop Recording  [cmd-shift-r]
+  -
+  Edit Cheats…
+  -
+  Run Script…  [cmd-shift-l]
+  Stop Script  [alt-cmd-l]
+Emulation
+  Pause / Resume  [cmd-p]
+  Reset  [cmd-r]
+  Fast-Forward  [cmd-f]
+  Slow Motion  [cmd-shift-f]
+  Fast-Forward Speed >
+    ✓ 2×
+    ·3×
+    ·4×
+    ·Unlimited
+  Switch Player  [cmd-t]
+  Use Microphone
+  -
+  Step Instruction  [cmd-shift-i]
+  Step Over  [cmd-shift-o]
+  Next Frame  [cmd-shift-n]
+  -
+  Save State  [cmd-s]
+  Load State  [cmd-l]
+  Next State Slot  [cmd-]]
+  Previous State Slot  [cmd-[]
+View
+  Screens Stacked  [cmd-1]
+  Screens Side by Side  [cmd-2]
+  One Screen  [cmd-3]
+  One Large, Both Small  [cmd-4]
+  -
+  Swap Screens  [cmd-e]
+  Rotate Clockwise  [alt-cmd-right]
+  Rotate Anticlockwise  [alt-cmd-left]
+  Change Screen Gap  [cmd-g]
+  -
+  3D Resolution >
+    Match Display
+    Native (1×)
+    2×
+    3×
+    4×
+    6×
+    8×
+  Picture >
+    Auto
+    Sharp Pixels
+    Smooth
+    Rounded Pixels
+    LCD Grid
+    Scanlines
+  Colour Correction  [cmd-shift-c]
+  Show FPS  [alt-cmd-f]
+  Original Game Boy Games >
+    In Grey, as on a Game Boy
+    In Colour, as on a Game Boy Color
+  -
+  Guide  [cmd-j]
+  Show / Hide Window Controls
+  Debugger  [cmd-shift-d]
+Window
+  Minimize  [cmd-m]
+  Zoom
+"#;
+
+    /// macOS's bindings, as [`bindings_written`] writes them, from the
+    /// same build.
+    const MAC_BINDINGS: &str = r#"cmd-,  ->  Imago Emulator > Settings…
+cmd-o  ->  File > Open ROM…
+cmd-shift-a  ->  File > Add Games to Library…
+cmd-shift-g  ->  File > Game Store
+alt-cmd-r  ->  File > Randomize Game…
+cmd-i in Emulator  ->  File > Game Info
+cmd-backspace in Emulator  ->  File > Remove from Library
+cmd-w  ->  File > Close Game
+cmd-w in Settings  ->  (ds_emulator::CloseWindow)
+cmd-w in Debugger  ->  (ds_emulator::CloseWindow)
+cmd-m  ->  Window > Minimize
+cmd-t  ->  Emulation > Switch Player
+cmd-p  ->  Emulation > Pause / Resume
+cmd-r  ->  Emulation > Reset
+cmd-s  ->  Emulation > Save State
+cmd-l  ->  Emulation > Load State
+cmd-shift-s  ->  File > Save Screenshot
+cmd-j  ->  View > Guide
+alt-cmd-s  ->  File > Screenshot for Guide
+cmd-shift-r  ->  File > Start / Stop Recording
+cmd-shift-l  ->  File > Run Script…
+alt-cmd-l  ->  File > Stop Script
+cmd-]  ->  Emulation > Next State Slot
+cmd-[  ->  Emulation > Previous State Slot
+cmd-f  ->  Emulation > Fast-Forward
+cmd-shift-f  ->  Emulation > Slow Motion
+alt-cmd-f  ->  View > Show FPS
+cmd-1  ->  View > Screens Stacked
+cmd-2  ->  View > Screens Side by Side
+cmd-3  ->  View > One Screen
+cmd-4  ->  View > One Large, Both Small
+cmd-e  ->  View > Swap Screens
+alt-cmd-right  ->  View > Rotate Clockwise
+alt-cmd-left  ->  View > Rotate Anticlockwise
+cmd-g  ->  View > Change Screen Gap
+cmd-shift-c  ->  View > Colour Correction
+cmd-shift-d  ->  View > Debugger
+cmd-shift-i  ->  Emulation > Step Instruction
+cmd-shift-o  ->  Emulation > Step Over
+cmd-shift-n  ->  Emulation > Next Frame
+ctrl-cmd-f  ->  (ds_emulator::ToggleFullScreen)
+cmd-q  ->  Imago Emulator > Quit Imago Emulator
+cmd-h  ->  Imago Emulator > Hide Imago Emulator
+alt-cmd-h  ->  Imago Emulator > Hide Others
+"#;
+
+    /// The window's menu on Linux and Windows, from the same build, with
+    /// `{quit}` where Windows says Exit and Linux Quit.
+    const OTHER_MENUS: &str = r#"File
+  Open ROM…  [ctrl-o]
+  Open Game Folder…
+  Add Games to Library…  [ctrl-shift-a]
+  Add Game Folders to Library…
+  Game Store  [ctrl-shift-g]
+  Game Info  [ctrl-i in Emulator]
+  Remove from Library  [delete in Emulator]
+  Close Game  [ctrl-w]
+  Connect Second Console…
+  Insert GBA Cartridge…
+  -
+  Randomize Game…  [ctrl-alt-r]
+  -
+  Save Screenshot  [ctrl-shift-s]
+  Screenshot for Guide  [ctrl-alt-s]
+  Start / Stop Recording  [ctrl-shift-r]
+  -
+  Edit Cheats…
+  -
+  Run Script…  [ctrl-shift-l]
+  Stop Script  [ctrl-shift-k]
+  -
+  Settings…  [ctrl-,]
+  -
+  {quit}  [ctrl-q]
+Emulation
+  Pause / Resume  [ctrl-p]
+  Reset  [ctrl-r]
+  Fast-Forward  [ctrl-f]
+  Slow Motion  [ctrl-shift-f]
+  Fast-Forward Speed >
+    ✓ 2×
+    ·3×
+    ·4×
+    ·Unlimited
+  Switch Player  [ctrl-t]
+  Use Microphone
+  -
+  Step Instruction  [ctrl-shift-i]
+  Step Over  [ctrl-shift-o]
+  Next Frame  [ctrl-shift-n]
+  -
+  Save State  [ctrl-s]
+  Load State  [ctrl-l]
+  Next State Slot  [ctrl-]]
+  Previous State Slot  [ctrl-[]
+View
+  Screens Stacked  [ctrl-1]
+  Screens Side by Side  [ctrl-2]
+  One Screen  [ctrl-3]
+  One Large, Both Small  [ctrl-4]
+  -
+  Swap Screens  [ctrl-e]
+  Rotate Clockwise  [ctrl-shift-right]
+  Rotate Anticlockwise  [ctrl-shift-left]
+  Change Screen Gap  [ctrl-g]
+  -
+  3D Resolution >
+    Match Display
+    Native (1×)
+    2×
+    3×
+    4×
+    6×
+    8×
+  Picture >
+    Auto
+    Sharp Pixels
+    Smooth
+    Rounded Pixels
+    LCD Grid
+    Scanlines
+  Colour Correction  [ctrl-shift-c]
+  Show FPS  [ctrl-alt-f]
+  Original Game Boy Games >
+    In Grey, as on a Game Boy
+    In Colour, as on a Game Boy Color
+  -
+  Guide  [ctrl-j]
+  Show / Hide Window Controls
+  Debugger  [ctrl-shift-d]
+  -
+  Full Screen  [f11]
+Window
+  Minimize  [ctrl-m]
+  Maximize
+Help
+  About Imago Emulator
+"#;
+
+    /// Linux's and Windows's bindings, from the same build.
+    const OTHER_BINDINGS: &str = r#"ctrl-,  ->  File > Settings…
+ctrl-o  ->  File > Open ROM…
+ctrl-shift-a  ->  File > Add Games to Library…
+ctrl-shift-g  ->  File > Game Store
+ctrl-alt-r  ->  File > Randomize Game…
+ctrl-i in Emulator  ->  File > Game Info
+delete in Emulator  ->  File > Remove from Library
+ctrl-w  ->  File > Close Game
+ctrl-w in Settings  ->  (ds_emulator::CloseWindow)
+ctrl-w in Debugger  ->  (ds_emulator::CloseWindow)
+ctrl-m  ->  Window > Minimize
+ctrl-t  ->  Emulation > Switch Player
+ctrl-p  ->  Emulation > Pause / Resume
+ctrl-r  ->  Emulation > Reset
+ctrl-s  ->  Emulation > Save State
+ctrl-l  ->  Emulation > Load State
+ctrl-shift-s  ->  File > Save Screenshot
+ctrl-j  ->  View > Guide
+ctrl-alt-s  ->  File > Screenshot for Guide
+ctrl-shift-r  ->  File > Start / Stop Recording
+ctrl-shift-l  ->  File > Run Script…
+ctrl-shift-k  ->  File > Stop Script
+ctrl-]  ->  Emulation > Next State Slot
+ctrl-[  ->  Emulation > Previous State Slot
+ctrl-f  ->  Emulation > Fast-Forward
+ctrl-shift-f  ->  Emulation > Slow Motion
+ctrl-alt-f  ->  View > Show FPS
+ctrl-1  ->  View > Screens Stacked
+ctrl-2  ->  View > Screens Side by Side
+ctrl-3  ->  View > One Screen
+ctrl-4  ->  View > One Large, Both Small
+ctrl-e  ->  View > Swap Screens
+ctrl-shift-right  ->  View > Rotate Clockwise
+ctrl-shift-left  ->  View > Rotate Anticlockwise
+ctrl-g  ->  View > Change Screen Gap
+ctrl-shift-c  ->  View > Colour Correction
+ctrl-shift-d  ->  View > Debugger
+ctrl-shift-i  ->  Emulation > Step Instruction
+ctrl-shift-o  ->  Emulation > Step Over
+ctrl-shift-n  ->  Emulation > Next Frame
+f11  ->  View > Full Screen
+ctrl-q  ->  File > {quit}
+f10  ->  (ds_emulator::ShowAppMenu)
+"#;
+
+    /// What [`OTHER_MENUS`] and [`OTHER_BINDINGS`] say on this system.
+    fn off_macos(written: &str) -> String {
+        written.replace("{quit}", if cfg!(windows) { "Exit" } else { "Quit" })
+    }
+
+    #[test]
+    fn every_menu_item_its_title_its_place_and_its_shortcuts_are_what_they_were() {
+        let written = menus_written(&menus(MenuChecks::default()), &bindings());
+        if cfg!(target_os = "macos") {
+            assert_eq!(written, MAC_MENUS);
+        } else {
+            assert_eq!(written, off_macos(OTHER_MENUS));
+        }
+    }
+
+    #[test]
+    fn every_binding_runs_what_it_ran_in_the_order_it_was_bound() {
+        let written = bindings_written(&bindings(), &menus(MenuChecks::default()));
+        if cfg!(target_os = "macos") {
+            assert_eq!(written, MAC_BINDINGS);
+        } else {
+            assert_eq!(written, off_macos(OTHER_BINDINGS));
+        }
+    }
+
+    #[test]
+    fn each_choice_in_the_menus_carries_what_its_item_always_chose() {
+        let items = items_of(&menus(MenuChecks::default()));
+        let carries = |path: &str, chosen: &dyn Action| {
+            let (_, action) = items
+                .iter()
+                .find(|(at, _)| at == path)
+                .unwrap_or_else(|| panic!("no menu item {path}"));
+            assert!(action.partial_eq(chosen), "{path}");
+        };
+        // As each item's own action, and its handler, had it before the
+        // actions carried their choice.
+        carries("View > Screens Stacked", &Arrange(Arrangement::Vertical));
+        carries(
+            "View > Screens Side by Side",
+            &Arrange(Arrangement::Horizontal),
+        );
+        carries("View > One Screen", &Arrange(Arrangement::Single));
+        carries(
+            "View > One Large, Both Small",
+            &Arrange(Arrangement::Hybrid),
+        );
+        let speed = |times| Speed::Times(speed::Rate::new(times).expect("a speed"));
+        let speeds = "Emulation > Fast-Forward Speed";
+        carries(&format!("{speeds} > ✓ 2×"), &SetFastForward(speed(2.0)));
+        carries(
+            &format!("{speeds} > \u{2003}3×"),
+            &SetFastForward(speed(3.0)),
+        );
+        carries(
+            &format!("{speeds} > \u{2003}4×"),
+            &SetFastForward(speed(4.0)),
+        );
+        carries(
+            &format!("{speeds} > \u{2003}Unlimited"),
+            &SetFastForward(Speed::Unlimited),
+        );
+        let resolutions = "View > 3D Resolution";
+        carries(
+            &format!("{resolutions} > Match Display"),
+            &SetResolution3d(Resolution3d::MatchDisplay),
+        );
+        carries(
+            &format!("{resolutions} > Native (1×)"),
+            &SetResolution3d(Resolution3d::Times(1)),
+        );
+        for times in [2, 3, 4, 6, 8] {
+            carries(
+                &format!("{resolutions} > {times}×"),
+                &SetResolution3d(Resolution3d::Times(times)),
+            );
+        }
+        for (title, picture) in [
+            ("Auto", Picture::Auto),
+            ("Sharp Pixels", Picture::SharpPixels),
+            ("Smooth", Picture::Smooth),
+            ("Rounded Pixels", Picture::RoundedPixels),
+            ("LCD Grid", Picture::LcdGrid),
+            ("Scanlines", Picture::Scanlines),
+        ] {
+            carries(&format!("View > Picture > {title}"), &SetPicture(picture));
+        }
+        let game_boy = "View > Original Game Boy Games";
+        carries(
+            &format!("{game_boy} > In Grey, as on a Game Boy"),
+            &SetDmgColors(DmgColors::Grey),
+        );
+        carries(
+            &format!("{game_boy} > In Colour, as on a Game Boy Color"),
+            &SetDmgColors(DmgColors::ByTitle),
+        );
+        // Each is its own choice: no two items carry the same.
+        for (at, (path, action)) in items.iter().enumerate() {
+            for (other, same) in &items[at + 1..] {
+                assert!(!action.partial_eq(same.as_ref()), "{path} and {other}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_gamepad_hotkey_runs_what_a_shortcut_and_a_menu_item_run() {
+        let bound = bindings();
+        let items = items_of(&menus(MenuChecks::default()));
+        for (shortcut, name) in crate::bindings::SHORTCUTS {
+            let action = hotkey_action(shortcut);
+            assert!(
+                bound
+                    .iter()
+                    .any(|binding| binding.action().partial_eq(action.as_ref())),
+                "{name} has a shortcut"
+            );
+            // AppKit puts Enter Full Screen in macOS's View menu itself.
+            let apples_own = cfg!(target_os = "macos") && shortcut == Shortcut::FullScreen;
+            assert!(
+                apples_own
+                    || items
+                        .iter()
+                        .any(|(_, item)| item.partial_eq(action.as_ref())),
+                "{name} has a menu item"
+            );
+        }
+    }
+
+    #[test]
+    fn the_menus_checks_follow_what_is_chosen_and_change_nothing_else() {
+        let default = menus_written(&menus(MenuChecks::default()), &bindings());
+        let other = menus_written(
+            &menus(MenuChecks {
+                fast_forward: speed::FAST_FORWARD_CHOICES[3],
+                show_fps: true,
+            }),
+            &bindings(),
+        );
+        let changed: Vec<(&str, &str)> = default
+            .lines()
+            .zip(other.lines())
+            .filter(|(was, is)| was != is)
+            .collect();
+        let fps = if cfg!(target_os = "macos") {
+            "alt-cmd-f"
+        } else {
+            "ctrl-alt-f"
+        };
+        assert_eq!(
+            changed,
+            [
+                ("    ✓ 2×", "    ·2×"),
+                ("    ·Unlimited", "    ✓ Unlimited"),
+                (
+                    format!("  Show FPS  [{fps}]").as_str(),
+                    format!("  Hide FPS  [{fps}]").as_str()
+                ),
+            ]
+        );
+        assert_eq!(default.lines().count(), other.lines().count());
     }
 
     #[test]

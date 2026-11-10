@@ -33,7 +33,7 @@ to `scripts/macos/layout.swift`.
   capitals, not its line, so descenders don't count.
 - **A leading icon is inset as far from the side as from the top and bottom.**
 - **Wrapped, centred text breaks its own lines** (`broken_lines` in
-  `library_view.rs`). GPUI centres a line it wraps with the space it broke
+  `library_view/draw.rs`). GPUI centres a line it wraps with the space it broke
   at, half a space off centre.
 - **Text never runs out of its box.** A title too long for its lines ends in
   an ellipsis.
@@ -42,7 +42,7 @@ to `scripts/macos/layout.swift`.
 - **Rounded boxes cover their own corners.** GPUI clips what is in a box to
   its bounds, not its rounded corners, so a picture that fills one (the
   last-played game's) is covered at the corners by a band in the colour
-  behind it (`corners` in `library_view.rs`).
+  behind it (`corners` in `library_view/draw.rs`).
 - **Colour carries meaning.** The accent marks what to press (Resume,
   Play, Get) and where the caret is; the chosen tab, filter or setting is an
   ink pill with white type; the chosen game sits on a grey tile. Red

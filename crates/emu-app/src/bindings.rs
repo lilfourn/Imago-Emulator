@@ -143,7 +143,7 @@ pub enum Shortcut {
 }
 
 /// Each shortcut and its name in the `[hotkeys]` table.
-const SHORTCUTS: [(Shortcut, &str); 11] = [
+pub const SHORTCUTS: [(Shortcut, &str); 11] = [
     (Shortcut::SaveState, "save_state"),
     (Shortcut::LoadState, "load_state"),
     (Shortcut::NextSlot, "next_slot"),

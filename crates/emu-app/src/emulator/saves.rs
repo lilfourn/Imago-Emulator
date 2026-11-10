@@ -34,8 +34,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context as _, ensure};
+use anyhow::{Context as _, anyhow, ensure};
 use emu_core::Core;
+use emu_state::Mismatch;
 
 use super::{Loaded, OwnSaves};
 use crate::capture;
@@ -52,6 +53,19 @@ pub(super) enum PickUp {
     Loaded,
     /// A battery save changed after it was saved, so it was left alone.
     SavesChanged,
+}
+
+/// Why a state does not go with the game being played, in the words the
+/// player has always been told. `emu-state` finds which of the three it
+/// is ([`emu_state::Header::check`]); its own words are `emu-headless`'s.
+fn refusal(mismatch: Mismatch) -> anyhow::Error {
+    match mismatch {
+        Mismatch::System { found, .. } => anyhow!("it is a {found} state"),
+        Mismatch::Rom { .. } => anyhow!("it was saved from a different ROM"),
+        Mismatch::StateVersion { found, reads } => {
+            anyhow!("it is state version {found}, this build reads {reads}")
+        }
+    }
 }
 
 /// State loads less than this long apart, each from the one before, are
@@ -194,6 +208,17 @@ impl Saves {
         self.take_written();
     }
 
+    /// The header of a state `core` saves now in this session, which a
+    /// state it loads must go with.
+    fn header(&self, core: &dyn Core) -> emu_state::Header {
+        let info = core.info();
+        emu_state::Header {
+            system: info.system,
+            state_version: info.state_version,
+            rom_crc32: self.states.rom_crc32(),
+        }
+    }
+
     /// Writes `core`'s state to `slot`'s file. A file there that is not a
     /// state of this session's, such as one the same game left with
     /// another cartridge in its slot, is set aside first, never replaced,
@@ -203,11 +228,7 @@ impl Saves {
         let mut payload = Vec::new();
         core.try_save_state(&mut payload)
             .map_err(anyhow::Error::msg)?;
-        let header = emu_state::Header {
-            system: info.system,
-            state_version: info.state_version,
-            rom_crc32: self.states.rom_crc32(),
-        };
+        let header = self.header(core);
         // At the screen's own size, whatever the 3D resolution.
         let screen = video::shrink(&core.screens()[0], info.screens[0]);
         let size = screen.size();
@@ -267,22 +288,7 @@ impl Saves {
         let emu_state::Decoded {
             header, payload, ..
         } = emu_state::decode(&bytes)?;
-        let info = core.info();
-        ensure!(
-            header.system == info.system,
-            "it is a {} state",
-            header.system
-        );
-        ensure!(
-            header.rom_crc32 == self.states.rom_crc32(),
-            "it was saved from a different ROM"
-        );
-        ensure!(
-            header.state_version == info.state_version,
-            "it is state version {}, this build reads {}",
-            header.state_version,
-            info.state_version,
-        );
+        header.check(&self.header(core)).map_err(refusal)?;
         core.load_state(payload)?;
         // A clock set back gives no gap, so that load starts a run.
         let since_last = self
@@ -777,6 +783,63 @@ mod tests {
         assert!(
             format!("{empty:#}").starts_with("cannot read "),
             "{empty:#}"
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_state_of_another_system_rom_or_version_is_refused_in_the_words_it_always_was() {
+        let dir = empty_dir("refused");
+        let (mut core, mut saves) = game(&dir, 1);
+        core.poke(0, 1, 5);
+        // What a state of this game's says it is for.
+        let ours = emu_state::Header {
+            system: System::Gba,
+            state_version: 1,
+            rom_crc32: 0,
+        };
+        let mut refused = |header: emu_state::Header| {
+            fs::write(
+                dir.join("game.ss2"),
+                emu_state::encode(&header, &[9, 9], None),
+            )
+            .expect("write");
+            let error = saves.load_state(&mut *core, 2).expect_err("refused");
+            assert_eq!(bytes(&*core), (1, 5), "nothing of it was loaded");
+            format!("{error:#}")
+        };
+        let other_system = emu_state::Header {
+            system: System::Nds,
+            ..ours
+        };
+        assert_eq!(refused(other_system), "it is a nds state");
+        let other_rom = emu_state::Header {
+            rom_crc32: 0xA,
+            ..ours
+        };
+        assert_eq!(refused(other_rom), "it was saved from a different ROM");
+        let other_version = emu_state::Header {
+            state_version: 4,
+            ..ours
+        };
+        assert_eq!(
+            refused(other_version),
+            "it is state version 4, this build reads 1"
+        );
+        // The first of the three is the one said: the system, then the ROM.
+        let nothing_right = emu_state::Header {
+            system: System::Gb,
+            state_version: 4,
+            rom_crc32: 0xA,
+        };
+        assert_eq!(refused(nothing_right), "it is a gb state");
+        let rom_and_version = emu_state::Header {
+            system: System::Gba,
+            ..nothing_right
+        };
+        assert_eq!(
+            refused(rom_and_version),
+            "it was saved from a different ROM"
         );
         fs::remove_dir_all(&dir).expect("clean up");
     }

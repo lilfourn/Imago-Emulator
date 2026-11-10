@@ -93,6 +93,7 @@ mod ui;
 mod video;
 mod view;
 mod window_chrome;
+mod worker;
 mod x11_redraw;
 
 use std::ffi::OsString;

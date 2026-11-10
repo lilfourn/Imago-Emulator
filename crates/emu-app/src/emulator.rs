@@ -38,6 +38,7 @@
 //! plays (see [`CHECKPOINT_INTERVAL`]).
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::fs;
 use std::io::Write as _;
 use std::panic::{self, AssertUnwindSafe};
@@ -364,6 +365,19 @@ pub fn files_of(path: &Path) -> GameFiles {
     match rpg_maker::game_folder(path) {
         Some(game) => GameFiles::of_folder(&game),
         None => GameFiles::of(path),
+    }
+}
+
+/// The files of a game the library lists at `path`: those a session gives
+/// it ([`files_of`]), so what the library says of a game is said of the
+/// files a session reads and writes. An RPG Maker game's stay named after
+/// its folder once the folder has gone, or holds no game now: nothing on
+/// disk says then what it was, but the library knows (`rpg_maker`), and
+/// its files are still beside where the folder was.
+pub fn files_of_listed(path: &Path, rpg_maker: bool) -> GameFiles {
+    match rpg_maker::game_folder(path) {
+        None if rpg_maker => GameFiles::of_folder(path),
+        _ => files_of(path),
     }
 }
 
@@ -710,7 +724,9 @@ pub enum Command {
     StopScript,
 }
 
-/// A notification from the emulation thread to the UI.
+/// A notification from the emulation thread to the UI. What it is says
+/// what happened; the UI never tells one from another by its words (see
+/// [`Event::notice`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A new frame is in the shared slot.
@@ -719,7 +735,16 @@ pub enum Event {
     /// wake-up: the debugger window must update even while the main
     /// window, which takes the frames, is hidden and draws nothing.
     Debug,
-    /// Something the user should see briefly, such as "State saved".
+    /// A save state was written to this slot's file
+    /// ([`Command::SaveState`]).
+    StateSaved(u8),
+    /// The save state in this slot's file was loaded
+    /// ([`Command::LoadState`]).
+    StateLoaded(u8),
+    /// Something asked for could not be done, saying what and why, such as
+    /// a state that would not load: seen briefly, as a notice is.
+    Failed(String),
+    /// Something else the user should see briefly, such as "Paused".
     Notice(String),
     /// Something the user must not miss, such as a battery save that
     /// could not be written: shown for longer than a notice.
@@ -733,6 +758,29 @@ pub enum Event {
     /// The emulation thread stopped after an internal error, saying so
     /// for the user: no more frames come.
     Stopped(String),
+}
+
+impl Event {
+    /// What the event tells the user briefly, if it is one that does: the
+    /// words of a notice or a failure, and of a state saved or loaded.
+    pub fn notice(&self) -> Option<Cow<'_, str>> {
+        match self {
+            Self::StateSaved(slot) => Some(format!("Saved state {slot}").into()),
+            Self::StateLoaded(slot) => Some(format!("Loaded state {slot}").into()),
+            Self::Failed(text) | Self::Notice(text) => Some(text.as_str().into()),
+            _ => None,
+        }
+    }
+
+    /// Everything the event says in words, however it is shown: what
+    /// [`Event::notice`] gives, a warning's words and why the thread
+    /// stopped.
+    pub fn words(&self) -> Option<Cow<'_, str>> {
+        match self {
+            Self::Warning(text) | Self::Stopped(text) => Some(text.as_str().into()),
+            said => said.notice(),
+        }
+    }
 }
 
 /// One player's memory in a core, as cheats see it.
@@ -1278,8 +1326,8 @@ impl Runner {
             Command::SaveState(slot) => {
                 let saved = self.saves.save_state(&*self.loaded.core, slot);
                 match saved {
-                    Ok(()) => self.notice(format!("Saved state {slot}")),
-                    Err(error) => self.notice(format!("Could not save state: {error:#}")),
+                    Ok(()) => self.tell(Event::StateSaved(slot)),
+                    Err(error) => self.failed(format!("Could not save state: {error:#}")),
                 }
                 // After, so it is what stays on screen.
                 self.say_saves();
@@ -1304,13 +1352,13 @@ impl Runner {
             Command::LoadState(slot) => match self.saves.load_state(&mut *self.loaded.core, slot) {
                 Ok(()) => {
                     self.jumped();
-                    self.notice(format!("Loaded state {slot}"));
+                    self.tell(Event::StateLoaded(slot));
                 }
-                Err(error) => self.notice(format!("Could not load state: {error:#}")),
+                Err(error) => self.failed(format!("Could not load state: {error:#}")),
             },
             Command::SaveCheckpoint(slot) => {
                 if let Err(error) = self.save_checkpoint(slot) {
-                    self.notice(format!("Could not save where you left off: {error:#}"));
+                    self.failed(format!("Could not save where you left off: {error:#}"));
                 }
             }
             Command::LoadCheckpoint(slot) => match self.load_checkpoint(slot) {
@@ -1321,7 +1369,7 @@ impl Runner {
                     self.events.try_send(Event::PickedUp(loaded)).ok();
                 }
                 Err(error) => {
-                    self.notice(format!("Could not pick up where you left off: {error:#}"));
+                    self.failed(format!("Could not pick up where you left off: {error:#}"));
                 }
             },
             Command::SaveScreenshot => self.save_screenshot(),
@@ -1354,7 +1402,7 @@ impl Runner {
                 self.script = Some(running);
                 self.obey_script(started);
             }
-            Err(error) => self.notice(scripting::failure(&name, &error)),
+            Err(error) => self.failed(scripting::failure(&name, &error)),
         }
         self.publish();
     }
@@ -1395,7 +1443,7 @@ impl Runner {
         if let Err(error) = result {
             self.script = None;
             self.overlay = Arc::default();
-            self.notice(scripting::failure(&name, &error));
+            self.failed(scripting::failure(&name, &error));
         } else if finished {
             self.script = None;
             self.overlay = Arc::default();
@@ -1421,14 +1469,14 @@ impl Runner {
                         file.write_all(&capture::encode_png(&picture))?;
                         Ok(path)
                     });
-                let text = match saved {
-                    Ok(path) => format!("Saved {}", file_name(&path)),
-                    Err(error) => format!("Could not save a screenshot: {error}"),
+                let said = match saved {
+                    Ok(path) => Event::Notice(format!("Saved {}", file_name(&path))),
+                    Err(error) => Event::Failed(format!("Could not save a screenshot: {error}")),
                 };
-                events.try_send(Event::Notice(text)).ok();
+                events.try_send(said).ok();
             });
         if let Err(error) = saving {
-            self.notice(format!("Could not save a screenshot: {error}"));
+            self.failed(format!("Could not save a screenshot: {error}"));
         }
     }
 
@@ -1448,7 +1496,7 @@ impl Runner {
                 self.recorder = Some(recorder);
                 self.events.try_send(Event::Recording(true)).ok();
             }
-            Err(error) => self.notice(format!("Could not start recording: {error}")),
+            Err(error) => self.failed(format!("Could not start recording: {error}")),
         }
     }
 
@@ -1474,7 +1522,7 @@ impl Runner {
                 "Saved {name}: {} of video",
                 minutes_and_seconds(recording.duration)
             )),
-            Err(error) => self.notice(format!("Recording {name} failed: {error}")),
+            Err(error) => self.failed(format!("Recording {name} failed: {error}")),
         }
     }
 
@@ -1746,13 +1794,19 @@ impl Runner {
         self.tell(Event::Notice(text.into()));
     }
 
-    /// Sends a notice or a warning to the UI, or, once it has stopped
-    /// listening, prints its words, as for a battery save that failed as
-    /// the game closed.
+    /// Tells the user that something asked for could not be done: `text`
+    /// says what and why (see [`Runner::tell`]).
+    fn failed(&self, text: impl Into<String>) {
+        self.tell(Event::Failed(text.into()));
+    }
+
+    /// Sends an event that says something in words to the UI, or, once it
+    /// has stopped listening, prints its words, as for a battery save that
+    /// failed as the game closed.
     fn tell(&self, event: Event) {
         let sent = self.events.try_send(event);
         if let Err(unsent) = sent
-            && let Event::Notice(text) | Event::Warning(text) = unsent.into_inner()
+            && let Some(text) = unsent.into_inner().words()
         {
             eprintln!("ds-emulator: {text}");
         }

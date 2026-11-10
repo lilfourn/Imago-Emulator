@@ -1016,6 +1016,173 @@ mod tests {
         );
     }
 
+    /// Settings with no value left at its default.
+    fn every_setting_changed() -> Settings {
+        Settings {
+            layout: Layout {
+                arrangement: Arrangement::Hybrid,
+                swapped: true,
+                rotation: Rotation::Anticlockwise,
+                gap: 90.0,
+            },
+            speed: Speeds {
+                fast_forward: Speed::Unlimited,
+                slow_motion: Rate::new(0.25).expect("a speed"),
+            },
+            fast_forward_on: true,
+            slow_motion_on: true,
+            resolution_3d: Resolution3d::Times(4),
+            picture: Picture::RoundedPixels,
+            show_fps: true,
+            backdrop: Backdrop::Solid,
+            color_correction: false,
+            state_slot: 3,
+            dmg_colors: DmgColors::Buttons(9),
+            window_controls: false,
+            window_place: Some(WindowPlace {
+                x: 320.0,
+                y: 120.5,
+                width: 640.0,
+                height: 960.0,
+                fullscreen: true,
+                display: Some(0x37d8_832a_0000_4000_8000_0000_0000_0001),
+            }),
+            guide_thinking: Effort::High,
+            guide_lookups: false,
+        }
+    }
+
+    /// [`every_setting_changed`] as the build before the window held its
+    /// settings as one value wrote it, byte for byte.
+    const EVERY_SETTING_CHANGED: &str = r#"# Saved by ds-emulator whenever a setting changes.
+
+[layout]
+arrangement = "hybrid"
+swapped = true
+rotation = 270
+gap = 90
+
+[speed]
+fast_forward = "unlimited"
+slow_motion = 0.25
+fast_forward_on = true
+slow_motion_on = true
+
+[video]
+resolution_3d = 4
+picture = "rounded-pixels"
+show_fps = true
+backdrop = "solid"
+color_correction = false
+
+[game_boy]
+dmg_colors = "left+b"
+
+[states]
+slot = 3
+
+[window]
+controls = false
+fullscreen = true
+x = 320.0
+y = 120.5
+width = 640.0
+height = 960.0
+display = "37d8832a000040008000000000000001"
+
+[guide]
+thinking = "high"
+lookups = false
+"#;
+
+    #[test]
+    fn a_file_with_every_setting_changed_reads_back_and_is_written_as_it_was() {
+        let settings = every_setting_changed();
+        let default = Settings::default();
+        // Nothing in it is a default, so nothing read is one by chance.
+        assert_ne!(settings.layout.arrangement, default.layout.arrangement);
+        assert_ne!(settings.layout.swapped, default.layout.swapped);
+        assert_ne!(settings.layout.rotation, default.layout.rotation);
+        assert_ne!(settings.layout.gap, default.layout.gap);
+        assert_ne!(settings.speed.fast_forward, default.speed.fast_forward);
+        assert_ne!(settings.speed.slow_motion, default.speed.slow_motion);
+        assert_ne!(settings.fast_forward_on, default.fast_forward_on);
+        assert_ne!(settings.slow_motion_on, default.slow_motion_on);
+        assert_ne!(settings.resolution_3d, default.resolution_3d);
+        assert_ne!(settings.picture, default.picture);
+        assert_ne!(settings.show_fps, default.show_fps);
+        assert_ne!(settings.backdrop, default.backdrop);
+        assert_ne!(settings.color_correction, default.color_correction);
+        assert_ne!(settings.state_slot, default.state_slot);
+        assert_ne!(settings.dmg_colors, default.dmg_colors);
+        assert_ne!(settings.window_controls, default.window_controls);
+        assert_ne!(settings.window_place, default.window_place);
+        assert_ne!(settings.guide_thinking, default.guide_thinking);
+        assert_ne!(settings.guide_lookups, default.guide_lookups);
+
+        assert_eq!(Settings::from_toml(EVERY_SETTING_CHANGED), Ok(settings));
+        assert_eq!(settings.to_toml(), EVERY_SETTING_CHANGED);
+        // And through a file, as the app reads and writes it.
+        let dir = std::env::temp_dir().join(format!("emu-app-settings-all-{}", std::process::id()));
+        let path = dir.join("settings.toml");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(&path, EVERY_SETTING_CHANGED).expect("the old build's file");
+        let read = Settings::load(&path).expect("read");
+        assert_eq!(read, settings);
+        read.save(&path).expect("save");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("written"),
+            EVERY_SETTING_CHANGED
+        );
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The default settings as the same build wrote them.
+    const DEFAULT_SETTINGS: &str = r#"# Saved by ds-emulator whenever a setting changes.
+
+[layout]
+arrangement = "vertical"
+swapped = false
+rotation = 0
+gap = 0
+
+[speed]
+fast_forward = 2.0
+slow_motion = 0.5
+fast_forward_on = false
+slow_motion_on = false
+
+[video]
+resolution_3d = "auto"
+picture = "auto"
+show_fps = false
+backdrop = "ambient"
+color_correction = true
+
+[game_boy]
+dmg_colors = "game-boy-color"
+
+[states]
+slot = 1
+
+[window]
+controls = true
+fullscreen = false
+
+[guide]
+thinking = "low"
+lookups = true
+"#;
+
+    #[test]
+    fn the_default_settings_are_written_as_they_were() {
+        assert_eq!(Settings::default().to_toml(), DEFAULT_SETTINGS);
+        assert_eq!(
+            Settings::from_toml(DEFAULT_SETTINGS),
+            Ok(Settings::default())
+        );
+    }
+
     #[test]
     fn missing_file_means_defaults() {
         let path = Path::new("/nonexistent/ds-emulator/settings.toml");

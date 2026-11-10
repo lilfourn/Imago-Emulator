@@ -15,11 +15,11 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, JoinHandle};
 
 use emu_core::System;
 
 use crate::persist::{self, Kept};
+use crate::worker::Worker;
 
 /// A battery save written, or not.
 #[derive(Debug)]
@@ -116,9 +116,10 @@ impl Guard {
 /// The battery save writing thread. Dropping it waits for every write
 /// handed over.
 pub struct SaveWriter {
-    jobs: Option<Sender<Job>>,
+    /// Dropped first, so the thread finishes its writes and stops while
+    /// `written` still takes their reports.
+    thread: Worker<Job>,
     written: Receiver<Written>,
-    thread: Option<JoinHandle<()>>,
 }
 
 impl SaveWriter {
@@ -128,53 +129,46 @@ impl SaveWriter {
     ///
     /// Returns the error if the system will not start a thread.
     pub fn start() -> io::Result<Self> {
-        let (jobs, receiver) = mpsc::channel();
         let (report, written) = mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("battery saves".to_owned())
-            .spawn(move || {
-                let mut guards: HashMap<usize, Guard> = HashMap::new();
-                for job in receiver {
-                    match job {
-                        Job::Write {
-                            cartridge,
-                            generation,
-                            path,
-                            bytes,
-                            load,
-                        } => {
-                            let guard = guards.entry(cartridge).or_default();
-                            let (kept, result) = guard.write(&path, &bytes, load);
-                            // Set by the write just made, if it kept.
-                            let kept_run = guard.kept_for.filter(|_| kept != Kept::Unneeded);
-                            report
-                                .send(Written {
-                                    cartridge,
-                                    generation,
-                                    path,
-                                    kept,
-                                    kept_run,
-                                    result,
-                                })
-                                .ok();
-                        }
-                        Job::Wait(done) => {
-                            done.send(()).ok();
-                        }
+        let thread = Worker::start("battery saves", move |jobs| {
+            let mut guards: HashMap<usize, Guard> = HashMap::new();
+            for job in jobs {
+                match job {
+                    Job::Write {
+                        cartridge,
+                        generation,
+                        path,
+                        bytes,
+                        load,
+                    } => {
+                        let guard = guards.entry(cartridge).or_default();
+                        let (kept, result) = guard.write(&path, &bytes, load);
+                        // Set by the write just made, if it kept.
+                        let kept_run = guard.kept_for.filter(|_| kept != Kept::Unneeded);
+                        report
+                            .send(Written {
+                                cartridge,
+                                generation,
+                                path,
+                                kept,
+                                kept_run,
+                                result,
+                            })
+                            .ok();
+                    }
+                    Job::Wait(done) => {
+                        done.send(()).ok();
                     }
                 }
-            })?;
-        Ok(Self {
-            jobs: Some(jobs),
-            written,
-            thread: Some(thread),
-        })
+            }
+        })?;
+        Ok(Self { thread, written })
     }
 
     /// Hands over cartridge `cartridge`'s battery save, `bytes` as of
     /// backup generation `generation`, to be written to `path`.
     pub fn write(&self, cartridge: usize, generation: u64, path: PathBuf, bytes: Vec<u8>) {
-        self.send(Job::Write {
+        self.thread.send(Job::Write {
             cartridge,
             generation,
             path,
@@ -196,7 +190,7 @@ impl SaveWriter {
         run: u64,
         system: System,
     ) {
-        self.send(Job::Write {
+        self.thread.send(Job::Write {
             cartridge,
             generation,
             path,
@@ -208,7 +202,7 @@ impl SaveWriter {
     /// Waits until every write handed over so far is done.
     pub fn wait(&self) {
         let (done, finished) = mpsc::channel();
-        self.send(Job::Wait(done));
+        self.thread.send(Job::Wait(done));
         // An error means the thread is gone, and its writes with it.
         finished.recv().ok();
     }
@@ -216,22 +210,6 @@ impl SaveWriter {
     /// The writes finished since last asked.
     pub fn finished(&self) -> Vec<Written> {
         self.written.try_iter().collect()
-    }
-
-    fn send(&self, job: Job) {
-        if let Some(jobs) = &self.jobs {
-            jobs.send(job).ok();
-        }
-    }
-}
-
-impl Drop for SaveWriter {
-    fn drop(&mut self) {
-        // Closing the channel lets the thread finish its writes and stop.
-        self.jobs = None;
-        if let Some(thread) = self.thread.take() {
-            thread.join().ok();
-        }
     }
 }
 
