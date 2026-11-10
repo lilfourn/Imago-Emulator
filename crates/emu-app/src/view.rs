@@ -112,7 +112,7 @@ pub struct EmulatorView {
     input: GameInput,
     /// The settings in force, as the settings file keeps them: the
     /// layout, the speeds, the picture and the rest. Fast-forward and
-    /// slow motion being left on are `controls`' to say, not this
+    /// slow motion being left on are `input`'s to say, not this
     /// value's (see [`EmulatorView::settings`]).
     settings: Settings,
     /// Whether a linked game shows its consoles side by side whatever
@@ -1728,7 +1728,7 @@ impl EmulatorView {
     }
 
     /// The settings in force, to save or to show: the ones held, with
-    /// fast-forward and slow motion as `controls` has them latched now.
+    /// fast-forward and slow motion as `input` has them latched now.
     pub fn settings(&self) -> Settings {
         Settings {
             fast_forward_on: self.input.fast_forward_latched(),

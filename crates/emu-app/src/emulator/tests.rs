@@ -910,11 +910,14 @@ fn a_state_saved_loaded_or_refused_is_said_by_what_it_is() {
     wait_for_event(&events, &Event::StateLoaded(3));
     // Nothing in slot 4: a failure, in the words it has always had.
     emulator.send(Command::LoadState(4));
+    let deadline = Instant::now() + Duration::from_secs(5);
     let refused = loop {
-        match events.recv_blocking().expect("the thread runs") {
-            Event::Failed(text) => break text,
-            Event::StateLoaded(slot) => panic!("loaded the empty slot {slot}"),
-            _ => {}
+        assert!(Instant::now() < deadline, "no failure for the empty slot");
+        match events.try_recv() {
+            Ok(Event::Failed(text)) => break text,
+            Ok(Event::StateLoaded(slot)) => panic!("loaded the empty slot {slot}"),
+            Ok(_) => {}
+            Err(_) => thread::sleep(Duration::from_millis(1)),
         }
     };
     assert!(
