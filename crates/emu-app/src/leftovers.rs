@@ -603,7 +603,12 @@ fn remove_unused_files(folder: &Path, wanted: impl Fn(&str) -> bool) -> u64 {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        // Asked first, by what reading the folder already told: nothing
+        // else in the folder is looked at, let alone opened.
         let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if !(is_file && wanted(&name)) {
+            continue;
+        }
         // A game being written is locked; anything else may be written
         // without a lock, so only an old one is done with.
         let unused = if name.ends_with(PARTIAL) {
@@ -611,7 +616,7 @@ fn remove_unused_files(folder: &Path, wanted: impl Fn(&str) -> bool) -> u64 {
         } else {
             !changed_lately(&path)
         };
-        if is_file && wanted(&name) && unused {
+        if unused {
             freed += size(&path);
             fs::remove_file(&path).ok();
         }
@@ -1185,6 +1190,40 @@ mod tests {
         // And again, as at every later launch: nothing to trip on.
         assert_eq!(on_a_small_stack(|| remove_left_behind_in(&temp, &[])), 0);
         remove_folder(&temp);
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "Windows: a named pipe is not a file in a folder")]
+    fn the_sweep_opens_only_the_files_it_is_looking_for() {
+        #[cfg(unix)]
+        {
+            use std::sync::mpsc;
+
+            let temp = temp_dir("sweep");
+            // Not a file, though named as a game being written is: a pipe,
+            // which opening would wait on for ever. And a file the sweep is
+            // not asked for, which it has no reason to look at.
+            let made = Command::new("mkfifo")
+                .arg(temp.join("Game.3ds.partial"))
+                .status()
+                .expect("mkfifo runs");
+            assert!(made.success());
+            fs::write(temp.join("Other.gba.partial"), [0; 7]).expect("written");
+            fs::write(temp.join("settings.toml.1-0.tmp"), [0; 3]).expect("written");
+            age(
+                &temp.join("settings.toml.1-0.tmp"),
+                Duration::from_secs(2 * 60 * 60),
+            );
+            let (done, freed) = mpsc::channel();
+            let folder = temp.clone();
+            std::thread::spawn(move || {
+                done.send(remove_unused_files(&folder, |name| name.ends_with(".tmp")))
+            });
+            let freed = freed.recv_timeout(Duration::from_secs(5));
+            assert_eq!(freed, Ok(3), "the old temporary file, and no waiting");
+            assert!(temp.join("Other.gba.partial").exists(), "not asked for");
+            remove_folder(&temp);
+        }
     }
 
     #[test]
