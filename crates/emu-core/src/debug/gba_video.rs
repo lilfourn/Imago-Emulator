@@ -133,6 +133,52 @@ pub fn tile_sheet(
     (frame, count)
 }
 
+/// A text background's whole map as a picture, 256 or 512 pixels each way
+/// by BGxCNT (`control`) bits 14–15, its tiles 4bpp or 8bpp by bit 7. Maps
+/// wider or taller than 256 pixels are 2 KiB screen blocks of 32×32
+/// entries, left to right then top to bottom; an entry is a tile number
+/// (bits 0–9), flips (10–11) and a 16-colour palette (12–15) (GBATEK,
+/// "LCD I/O BG Control", "LCD VRAM BG Screen Data Format").
+///
+/// `entry` gives the map entry at a byte offset from the start of the map,
+/// `tile_byte` the byte at an offset from the start of the background's
+/// tiles, and `paint` the pixel for an entry's palette and a texel's
+/// palette index: which colour that is differs by console and tile depth.
+pub fn text_map(
+    control: u16,
+    entry: impl Fn(usize) -> u16,
+    tile_byte: impl Fn(usize) -> u8,
+    paint: impl Fn(usize, u8) -> u32,
+) -> Frame {
+    let (width, height) = match control >> 14 {
+        0 => (256, 256),
+        1 => (512, 256),
+        2 => (256, 512),
+        _ => (512, 512),
+    };
+    let eight_bit = control & (1 << 7) != 0;
+    let tile_bytes = if eight_bit { 64 } else { 32 };
+    let mut frame = blank(width, height);
+    for cell_y in 0..height / 8 {
+        for cell_x in 0..width / 8 {
+            let block = cell_x / 32 + (cell_y / 32) * (width / 256);
+            let entry = entry(block * 0x800 + (cell_y % 32) * 64 + (cell_x % 32) * 2);
+            let address = usize::from(entry & 0x3FF) * tile_bytes;
+            let tile = read_tile(&tile_byte, address, eight_bit);
+            let palette = usize::from(entry >> 12);
+            let corner = (cell_x * 8, cell_y * 8);
+            draw_tile(
+                &mut frame,
+                &tile,
+                corner,
+                Flips::from_entry(entry),
+                |index| paint(palette, index),
+            );
+        }
+    }
+    frame
+}
+
 /// The palette picture: 512 colours, one 8×8 swatch each, the 256 BG
 /// colours on the left and the 256 OBJ colours on the right, each a 16×16
 /// grid with one 16-colour palette per row. `color` gives the pixel of a
@@ -526,5 +572,47 @@ mod tests {
         assert_eq!(pixel(&frame, 64, 64), CHECKER[0], "transparent");
         assert_eq!(pixel(&frame, 64 + 16, 64), CELL_SHADES[0], "past its width");
         assert_eq!(pixel(&frame, 64, 64 + 8), CELL_SHADES[0], "past its height");
+    }
+
+    #[test]
+    fn a_text_map_is_screen_blocks_of_entries_naming_a_tile_flips_and_a_palette() {
+        // 512×256, 4bpp. The entry for cell (33, 2) is in the second
+        // screen block: tile 3, mirrored left to right, palette 5.
+        let mut map = vec![0u8; 0x1000];
+        let entry: u16 = 3 | 1 << 10 | 5 << 12;
+        let offset = 0x800 + 2 * 64 + 2;
+        map[offset..offset + 2].copy_from_slice(&entry.to_le_bytes());
+        // Tile 3's top-left texel is colour 2.
+        let mut tiles = [0u8; 4 * 32];
+        tiles[3 * 32] = 0x02;
+        let frame = text_map(
+            1 << 14,
+            |offset| u16::from_le_bytes([map[offset], map[offset + 1]]),
+            |offset| tiles[offset],
+            |palette, index| (palette * 16 + usize::from(index)) as u32,
+        );
+        assert_eq!(frame.size(), ScreenSize::new(512, 256));
+        assert_eq!(pixel(&frame, 33 * 8 + 7, 2 * 8), 5 * 16 + 2, "mirrored");
+        assert_eq!(pixel(&frame, 33 * 8, 2 * 8), 5 * 16);
+        assert_eq!(pixel(&frame, 0, 0), 0, "tile 0, palette 0, colour 0");
+    }
+
+    #[test]
+    fn a_text_maps_size_and_tile_depth_come_from_its_control_register() {
+        let size = |control| text_map(control, |_| 0, |_| 0, |_, _| 0).size();
+        assert_eq!(size(0), ScreenSize::new(256, 256));
+        assert_eq!(size(2 << 14), ScreenSize::new(256, 512));
+        assert_eq!(size(3 << 14), ScreenSize::new(512, 512));
+
+        // 8bpp: tile 1 is 64 bytes on, a byte a texel.
+        let mut tiles = [0u8; 128];
+        tiles[64] = 0xEE;
+        let frame = text_map(
+            1 << 7,
+            |_| 1,
+            |offset| tiles[offset],
+            |_, index| index.into(),
+        );
+        assert_eq!(pixel(&frame, 0, 0), 0xEE);
     }
 }

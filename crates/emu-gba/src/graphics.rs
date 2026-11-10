@@ -12,7 +12,7 @@
 
 use emu_core::debug::draw::{blank, outline_wrapping, set_pixel};
 use emu_core::debug::gba_video::{
-    Flips, OBJ_PALETTE, SPRITES, Sprite, draw_sprite, draw_tile, palette_sheet, read_tile,
+    self, Flips, OBJ_PALETTE, SPRITES, Sprite, draw_sprite, draw_tile, palette_sheet, read_tile,
     sprite_sheet, tile_sheet, tile_texel,
 };
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
@@ -274,37 +274,20 @@ impl Background {
 /// 240×160 screen outlined at its scroll offsets. Colour 0 shows the
 /// backdrop.
 fn text_map(ppu: &Ppu, background: &Background) -> Graphics {
-    let (width, height) = match background.control >> 14 {
-        0 => (256, 256),
-        1 => (512, 256),
-        2 => (256, 512),
-        _ => (512, 512),
-    };
     let eight_bit = background.eight_bit();
-    let tile_bytes = if eight_bit { 64 } else { 32 };
     let backdrop = palette_color(ppu, 0);
-    let read = |offset: usize| bg_byte(ppu, offset);
-    let mut frame = blank(width, height);
-    for cell_y in 0..height / 8 {
-        for cell_x in 0..width / 8 {
-            let entry = text_entry(ppu, background.screen_base(), width, cell_x, cell_y);
-            let address = background.char_base() + usize::from(entry & 0x3FF) * tile_bytes;
-            let tile = read_tile(&read, address, eight_bit);
-            let palette = usize::from(entry >> 12) * 16;
-            let corner = (cell_x * 8, cell_y * 8);
-            draw_tile(
-                &mut frame,
-                &tile,
-                corner,
-                Flips::from_entry(entry),
-                |index| match index {
-                    0 => backdrop,
-                    _ if eight_bit => palette_color(ppu, usize::from(index)),
-                    _ => palette_color(ppu, palette + usize::from(index)),
-                },
-            );
-        }
-    }
+    let mut frame = gba_video::text_map(
+        background.control,
+        |offset| vram_halfword(ppu, background.screen_base() + offset),
+        |offset| bg_byte(ppu, background.char_base() + offset),
+        |palette, index| match index {
+            0 => backdrop,
+            _ if eight_bit => palette_color(ppu, usize::from(index)),
+            _ => palette_color(ppu, palette * 16 + usize::from(index)),
+        },
+    );
+    let size = frame.size();
+    let (width, height) = (size.width, size.height);
     // BGxHOFS and BGxVOFS are write-only; the PPU keeps what was written.
     let layer = background.layer;
     let scroll_x = usize::from(ppu.raw_register(0x10 + layer * 4) & 0x1FF);
@@ -325,18 +308,6 @@ fn text_map(ppu: &Ppu, background: &Background) -> Graphics {
             background.status()
         )],
     }
-}
-
-/// The map entry for tile (`x`, `y`) of a text background `width` pixels
-/// wide whose map starts at `screen_base`. Maps wider or taller than 256
-/// pixels are 2 KiB screen blocks of 32×32 entries, left to right then top
-/// to bottom (GBATEK, "LCD VRAM BG Screen Data Format").
-fn text_entry(ppu: &Ppu, screen_base: usize, width: usize, x: usize, y: usize) -> u16 {
-    let block = x / 32 + (y / 32) * (width / 256);
-    vram_halfword(
-        ppu,
-        screen_base + block * 0x800 + (y % 32) * 64 + (x % 32) * 2,
-    )
 }
 
 /// An affine background's whole map, 128 to 1024 pixels square, drawn

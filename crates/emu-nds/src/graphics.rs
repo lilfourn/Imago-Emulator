@@ -14,8 +14,8 @@
 
 use emu_core::debug::draw::blank;
 use emu_core::debug::gba_video::{
-    Flips, OBJ_PALETTE, SPRITES, Sprite, TILE_BLOCK, draw_sprite, draw_tile, palette_sheet,
-    read_tile, sprite_sheet, tile_sheet, tile_texel,
+    self, OBJ_PALETTE, SPRITES, Sprite, TILE_BLOCK, draw_sprite, palette_sheet, sprite_sheet,
+    tile_sheet, tile_texel,
 };
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
 use emu_core::rgb;
@@ -369,12 +369,6 @@ fn bg_kind(engine: Engine, dispcnt: u32, layer: u32) -> Option<BgKind> {
 /// DISPCNT bit 30 enables them, as the engine does.
 fn text_map(engine: &EngineParts<'_>, layer: u32, control: u16) -> Graphics {
     let dispcnt = engine.dispcnt();
-    let (width, height) = match control >> 14 {
-        0 => (256, 256),
-        1 => (512, 256),
-        2 => (256, 512),
-        _ => (512, 512),
-    };
     let control_bits = u32::from(control);
     // Engine A adds DISPCNT's 64 KiB steps; engine B's DISPCNT lacks them.
     let char_base = ((control_bits >> 2) & 0xF) * 0x4000 + ((dispcnt >> 24) & 7) * 0x1_0000;
@@ -387,36 +381,26 @@ fn text_map(engine: &EngineParts<'_>, layer: u32, control: u16) -> Graphics {
         layer
     };
     let ext_slot = (eight_bit && dispcnt & (1 << 30) != 0).then_some(slot);
-    let tile_bytes = if eight_bit { 64 } else { 32 };
     let backdrop = engine.color(0);
-    let read = |offset: usize| engine.bg_byte(offset as u32);
-    let mut frame = blank(width, height);
-    for cell_y in 0..height / 8 {
-        for cell_x in 0..width / 8 {
-            // Maps wider or taller than 256 pixels are 2 KiB screen blocks
-            // of 32×32 entries, left to right then top to bottom.
-            let block = cell_x / 32 + (cell_y / 32) * (width / 256);
-            let offset = block * 0x800 + (cell_y % 32) * 64 + (cell_x % 32) * 2;
-            let entry = engine.memory.bg(screen_base + offset as u32);
-            let address = char_base + u32::from(entry & 0x3FF) * tile_bytes;
-            let tile = read_tile(&read, address as usize, eight_bit);
-            let palette = usize::from(entry >> 12);
-            let paint = |index: u8| {
-                let index = usize::from(index);
-                match ext_slot {
-                    _ if index == 0 => backdrop,
-                    Some(slot) => {
-                        let color = (palette * 256 + index) as u32;
-                        bgr555(engine.memory.bg_ext_palette(slot, color))
-                    }
-                    None if eight_bit => engine.color(index),
-                    None => engine.color(palette * 16 + index),
+    let frame = gba_video::text_map(
+        control,
+        |offset| engine.memory.bg(screen_base + offset as u32),
+        |offset| engine.bg_byte(char_base + offset as u32),
+        |palette, index| {
+            let index = usize::from(index);
+            match ext_slot {
+                _ if index == 0 => backdrop,
+                Some(slot) => {
+                    let color = (palette * 256 + index) as u32;
+                    bgr555(engine.memory.bg_ext_palette(slot, color))
                 }
-            };
-            let corner = (cell_x * 8, cell_y * 8);
-            draw_tile(&mut frame, &tile, corner, Flips::from_entry(entry), paint);
-        }
-    }
+                None if eight_bit => engine.color(index),
+                None => engine.color(palette * 16 + index),
+            }
+        },
+    );
+    let size = frame.size();
+    let (width, height) = (size.width, size.height);
     let bpp = match (eight_bit, ext_slot) {
         (false, _) => "4bpp".to_string(),
         (true, None) => "8bpp".to_string(),
