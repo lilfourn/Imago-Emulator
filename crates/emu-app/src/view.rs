@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use emu_core::{Button, CoreInfo, Frame, Input, ScreenSize, System, TouchPoint, rgb as pack_rgb};
+use emu_core::{CoreInfo, Frame, ScreenSize, System, rgb as pack_rgb};
 use emu_script::Draw;
 use gpui::{
     Animation, AnimationExt, App, BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle,
@@ -39,13 +39,11 @@ use crate::app::{
 use crate::app_menu::{AppMenu, AppMenuEvent};
 use crate::archive;
 use crate::audio::{self, AudioOutput};
-use crate::bindings::{self, Bindings, Held, Shortcut};
+use crate::bindings::{self, Bindings, Shortcut};
 use crate::cheats;
-use crate::chords::{Chords, Effect};
 use crate::chrome::{self, Tone};
 use crate::color::Correction;
-use crate::controls::{Controls, HeldState};
-use crate::cursor::{self, Cursor};
+use crate::cursor::Cursor;
 use crate::debugger::{self, Snapshot};
 use crate::debugger_window::DebuggerWindow;
 use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Opened, OwnSaves};
@@ -56,7 +54,7 @@ use crate::gamepad::{self, PadEvent};
 use crate::gpu_upscale::{Bgra, Gpu, GpuDevice, GpuError, Method, Request};
 use crate::guide::{self, GuideEvent, GuideGame, GuidePanel};
 use crate::key_guide;
-use crate::key_routes::{KeyRoutes, Route};
+use crate::key_routes::Route;
 use crate::keys;
 use crate::layout::{self, Arrangement, Layout, Placement, Rotation};
 use crate::library::{self, Library};
@@ -78,9 +76,11 @@ use crate::trace;
 use crate::video;
 use crate::window_chrome;
 
+mod input;
 mod opening;
 mod screens;
 
+use input::{GameInput, Pressed, Stage};
 use opening::Game;
 use screens::{Glow, ImageKey, Keeping, Upscaler, Upscaling};
 
@@ -111,24 +111,12 @@ const TOP_BAR_SHADE: u32 = 0x0000_0066;
 /// drag or resize writes the settings once rather than on every step.
 const PLACE_SAVE_DELAY: Duration = Duration::from_millis(500);
 
-/// The source name under which a held mouse button presses A, off the
-/// touchscreen.
-const MOUSE: &str = "mouse:left";
-
-/// What every keyboard key's source name starts with, before the key's
-/// GPUI name.
-const KEY: &str = "key:";
-
-/// Shift's name in the bindings: held on its own, it comes only as a
-/// change of modifiers.
-const SHIFT: &str = "shift";
-
 /// The root view of the main window.
 pub struct EmulatorView {
     focus: FocusHandle,
-    /// The bindings in force: the user's, with the active player's game's
-    /// own laid over them.
-    bindings: Bindings,
+    /// Everything held for the game, from the keyboard, gamepads and the
+    /// mouse, with the bindings in force and the player they control.
+    input: GameInput,
     /// The settings in force, as the settings file keeps them: the
     /// layout, the speeds, the picture and the rest. Fast-forward and
     /// slow motion being left on are `controls`' to say, not this
@@ -149,9 +137,6 @@ pub struct EmulatorView {
     /// The computer's microphone, while the user has it on: off at every
     /// launch.
     microphone: Option<(Microphone, Loudness)>,
-    /// How loud the microphone was when the emulation thread was last
-    /// told.
-    heard: u8,
     /// The GPU half of the upscaler, started when a picture first needs it.
     upscaler: Upscaler,
     /// Draws again once the upscaler finishes screens it took too long
@@ -191,24 +176,6 @@ pub struct EmulatorView {
     /// A script from the command line, to run with the first game.
     startup_script: Option<PathBuf>,
     placements: Vec<Placement>,
-    controls: Controls,
-    /// Gamepad hotkey chords in progress.
-    chords: Chords,
-    /// Where each key held down went when pressed, which its repeats go
-    /// to as well.
-    key_routes: KeyRoutes,
-    /// The gamepad's touchscreen cursor, once a gamepad has used it.
-    cursor: Option<Cursor>,
-    /// What the emulation thread was last told is held.
-    sent: HeldState,
-    /// Where the emulation thread was last told the screen is touched.
-    sent_touch: Option<TouchPoint>,
-    /// While the mouse button is held down after a click on the
-    /// touchscreen: which of `placements` was clicked, and where the mouse
-    /// touches.
-    stylus: Option<(usize, TouchPoint)>,
-    /// The player keyboard and gamepads control, in multi-player sessions.
-    active_player: usize,
     notice: Option<SharedString>,
     /// Whether the notice shown is a warning, which shows for longer, and
     /// so does what joins it.
@@ -363,8 +330,8 @@ impl EmulatorView {
                     // send key-up. Keys still down when focus comes back
                     // count once pressed again (the arrows may count from
                     // their next repeat, which GPUI passes on as a press).
-                    this.key_routes.clear();
-                    this.release_all();
+                    let commands = this.input.focus_lost(&this.stage());
+                    this.send_all(commands);
                 } else {
                     // Back from editing a cheat file, perhaps.
                     if let Some(message) = this.reload_cheats() {
@@ -421,14 +388,13 @@ impl EmulatorView {
 
         let mut view = Self {
             focus,
-            bindings: Bindings::default(),
+            input: GameInput::default(),
             settings: Settings::default(),
             linked_side_by_side: false,
             startup_notice: None,
             place_save: None,
             settings_path,
             microphone: None,
-            heard: 0,
             upscaler: Upscaler::Idle,
             upscale_wake: None,
             speed_readout: None,
@@ -447,14 +413,6 @@ impl EmulatorView {
             game: Game::Idle,
             startup_script: script,
             placements: Vec::new(),
-            controls: Controls::default(),
-            chords: Chords::default(),
-            key_routes: KeyRoutes::default(),
-            cursor: None,
-            sent: HeldState::default(),
-            sent_touch: None,
-            stylus: None,
-            active_player: 0,
             notice: None,
             notice_is_warning: false,
             notice_timer: None,
@@ -471,19 +429,15 @@ impl EmulatorView {
         };
         let mut warnings = Vec::new();
         match loaded_bindings {
-            Some(Ok(bindings)) => view.bindings = bindings,
+            Some(Ok(bindings)) => view.input.set_bindings(bindings),
             Some(Err(error)) => warnings.push(format!("{error}; using default bindings")),
             None => {}
         }
         match loaded_settings {
             Some(Ok(settings)) => {
                 view.settings = settings;
-                if settings.fast_forward_on {
-                    view.controls.toggle_fast_forward();
-                }
-                if settings.slow_motion_on {
-                    view.controls.toggle_slow_motion();
-                }
+                view.input
+                    .latch(settings.fast_forward_on, settings.slow_motion_on);
             }
             Some(Err(error)) => {
                 // A file that cannot be read is left for the user to fix,
@@ -575,11 +529,12 @@ impl EmulatorView {
                 })
             })
             .collect();
-        self.bindings = session
+        let in_force = session
             .bindings
-            .get(self.active_player)
+            .get(self.input.player())
             .cloned()
             .unwrap_or(user);
+        self.input.set_bindings(in_force);
         (!problems.is_empty()).then(|| problems.join(" · "))
     }
 
@@ -752,35 +707,39 @@ impl EmulatorView {
         }
     }
 
-    fn send_input(&self) {
-        trace::event("send", &[u64::from(self.sent.buttons.bits())]);
-        self.send(Command::SetInput {
-            player: self.active_player,
-            input: Input {
-                buttons: self.sent.buttons,
-                touch: self.sent_touch,
-                microphone: if self.sent.blow {
-                    Input::LOUDEST
-                } else {
-                    self.heard
-                },
-                gentle: self.sent.gentle,
-            },
-        });
+    /// Sends the emulation thread each of `commands`, in order.
+    fn send_all(&self, commands: Vec<Command>) {
+        for command in commands {
+            self.send(command);
+        }
     }
 
-    fn send_turbo(&self) {
-        self.send(Command::SetTurbo {
-            player: self.active_player,
-            buttons: self.sent.turbo,
-            frames: self.bindings.turbo_frames(),
-        });
+    /// Sends the emulation thread what an input event came to, and draws
+    /// the window again if the gamepad cursor no longer looks as it
+    /// `looked` before the event, even when paused. Held inputs show
+    /// nowhere else.
+    fn obey(
+        &mut self,
+        commands: Vec<Command>,
+        looked: (Option<Cursor>, bool),
+        cx: &mut Context<Self>,
+    ) {
+        self.send_all(commands);
+        if self.input.cursor_look() != looked {
+            cx.notify();
+        }
     }
 
-    /// Hands keyboard and gamepad control to `player`. The previous player
-    /// lets go of everything at once, and the new one starts with nothing
-    /// held: what is down now was pressed under the previous player's
-    /// bindings, so it counts again only once pressed again.
+    /// What the input needs to know of the game and the settings now.
+    fn stage(&self) -> Stage {
+        Stage {
+            touchscreen: self.touchscreen(),
+            speeds: self.settings.speed,
+        }
+    }
+
+    /// Hands keyboard and gamepad control to `player` (see
+    /// [`GameInput::switch_player`]).
     ///
     /// Not while the game menu is open: it is the active player's game's
     /// menu, its cheats and Start Over that player's, so the player stays
@@ -789,72 +748,18 @@ impl EmulatorView {
         let Some(players) = self.game.session().map(|s| s.info.players) else {
             return;
         };
-        if players < 2 || player == self.active_player || player >= players || self.menu.is_some() {
+        if players < 2 || player == self.input.player() || player >= players || self.menu.is_some()
+        {
             return;
         }
-        // The mouse touches the screen it was pressed on, not the next
-        // player's, so it lets go too.
-        self.release_player();
-        self.active_player = player;
-        // Keyboard and gamepads now play the other player's game.
-        if let Some(bindings) = self
+        let bindings = self
             .game
             .session()
             .and_then(|session| session.bindings.get(player))
-        {
-            self.bindings = bindings.clone();
-        }
-        self.send_input();
-        self.send_turbo();
+            .cloned();
+        let commands = self.input.switch_player(player, bindings, &self.stage());
+        self.send_all(commands);
         self.show_notice(format!("Controlling player {}", player + 1), cx);
-    }
-
-    /// Tells the emulation thread about any change in held inputs or in
-    /// where the mouse or the gamepad cursor touches the screen. The mouse
-    /// comes first.
-    fn sync_held(&mut self) {
-        let state = self.controls.state();
-        let touch = match self.stylus {
-            Some((_, at)) => Some(at),
-            None => self.cursor_touch(state.touch),
-        };
-        if state.buttons != self.sent.buttons
-            || touch != self.sent_touch
-            || state.blow != self.sent.blow
-            || state.gentle != self.sent.gentle
-        {
-            self.sent.buttons = state.buttons;
-            self.sent.blow = state.blow;
-            self.sent.gentle = state.gentle;
-            self.sent_touch = touch;
-            self.send_input();
-        }
-        if state.turbo != self.sent.turbo {
-            self.sent.turbo = state.turbo;
-            self.send_turbo();
-        }
-        if state.pace != self.sent.pace {
-            self.send(Command::SetSpeed(self.settings.speed.speed(state.pace)));
-        }
-        if state.rewind != self.sent.rewind {
-            self.send(Command::SetRewind(state.rewind));
-        }
-        self.sent = state;
-    }
-
-    /// Where the gamepad cursor touches, if its touch input is `held`. The
-    /// cursor appears in the middle of the touchscreen if no gamepad has
-    /// moved it yet.
-    fn cursor_touch(&mut self, held: bool) -> Option<TouchPoint> {
-        if !held {
-            return None;
-        }
-        let (_, size) = self.touchscreen()?;
-        Some(
-            self.cursor
-                .get_or_insert_with(|| Cursor::centre(size))
-                .pixel(),
-        )
     }
 
     /// The touchscreen of the console being played: its index and size.
@@ -862,7 +767,7 @@ impl EmulatorView {
     fn touchscreen(&self) -> Option<(usize, ScreenSize)> {
         let info = &self.game.session()?.info;
         let per_console = info.screens.len() / consoles(info);
-        let screen = info.touch_screen? + self.active_player.min(consoles(info) - 1) * per_console;
+        let screen = info.touch_screen? + self.input.player().min(consoles(info) - 1) * per_console;
         Some((screen, *info.screens.get(screen)?))
     }
 
@@ -882,34 +787,11 @@ impl EmulatorView {
     }
 
     /// Lets go of everything held, at once: for when keys and buttons stop
-    /// reaching the game while they may still be down, as when the window
-    /// loses focus or the game menu opens. A key still down counts again
-    /// only once pressed again, as its repeats are not presses.
+    /// reaching the game while they may still be down, as when the game
+    /// menu opens (see [`GameInput::release_all`]).
     fn release_all(&mut self) {
-        self.release_player();
-        // The microphone goes on being heard.
-        self.send_input();
-    }
-
-    /// Forgets everything held, and has the active player let go of it in
-    /// the game at once, microphone and all: quick taps and turbo presses
-    /// are cut short rather than held for the game to see.
-    fn release_player(&mut self) {
-        self.stylus = None;
-        self.controls.release_all();
-        self.chords.clear();
-        self.sync_held();
-        self.send(Command::ReleaseInput {
-            player: self.active_player,
-        });
-    }
-
-    /// What the window shows of the gamepad cursor: where it is, and
-    /// whether it touches. Held inputs show nowhere else, so input events
-    /// redraw only when this changes; a redraw holds up the events behind
-    /// it.
-    fn cursor_look(&self) -> (Option<Cursor>, bool) {
-        (self.cursor, self.sent.touch)
+        let commands = self.input.release_all(&self.stage());
+        self.send_all(commands);
     }
 
     /// Where keys go now.
@@ -927,101 +809,59 @@ impl EmulatorView {
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let route = self.key_route(window, cx);
-        let key = event.keystroke.key.as_str();
-        // A key held down repeats. GPUI passes on the repeats of keys that
-        // type nothing (the arrows, Escape, Backspace) as fresh presses, so
-        // a key already down is repeating whatever the event says.
-        let pressed_to = self.key_routes.route_of(key);
-        let repeat = event.is_held || pressed_to.is_some();
-        if !repeat {
-            // ⌘ keys are shortcuts, and macOS may never say they came up.
-            if !event.keystroke.modifiers.platform {
-                self.key_routes.press(key, route);
-            }
-        } else if pressed_to != Some(route) {
-            // Repeats go only where the press went: Return held to choose
-            // in the menu or the library never reaches what comes after,
-            // and W held to walk never types into Guide.
-            if route == Route::Guide {
-                cx.stop_propagation();
-            }
-            return;
-        }
-        // Typing in Guide's composer: the composer's own, never the game's.
-        if route == Route::Guide {
-            return;
-        }
-        let event = KeyDownEvent {
+        let looked = self.input.cursor_look();
+        let pressed = self.input.key_down(
+            event.keystroke.key.as_str(),
+            event.keystroke.modifiers,
+            event.is_held,
+            route,
+            self.menu.is_some(),
+            &self.stage(),
+        );
+        // What the library and the menu are told of the key: a key already
+        // down is repeating whatever the event says.
+        let passed_on = |repeat: bool| KeyDownEvent {
             keystroke: event.keystroke.clone(),
             is_held: repeat,
         };
-        // Without a game, keys search and choose in the library.
-        if route == Route::Library {
-            self.library
-                .update(cx, |library, cx| library.key_down(&event, cx));
-            return;
-        }
-        // While the game menu is open, keys are the menu's.
-        if let Some((menu, _)) = &self.menu {
-            menu.clone()
-                .update(cx, |menu, cx| menu.key_down(&event, cx));
-            return;
-        }
-        // The game holds a key from its press to its release; repeats add
-        // nothing. A key still down when the game stopped hearing it, as
-        // the menu opened, counts again once pressed again.
-        if repeat {
-            return;
-        }
-        let modifiers = event.keystroke.modifiers;
-        let plain = !modifiers.platform && !modifiers.control && !modifiers.alt;
-        if key == "escape" && plain {
-            self.open_menu(window, cx);
-            return;
-        }
-        // Command and Control chords are menu shortcuts, not game input.
-        if !modifiers.platform && !modifiers.control {
-            let looked = self.cursor_look();
-            let action = self.bindings.key_action(key);
-            self.controls.set(format!("{KEY}{key}"), action, true);
-            self.sync_held();
-            // Redraw the cursor if a key touches with it, even when paused.
-            if self.cursor_look() != looked {
-                cx.notify();
+        match pressed {
+            Pressed::Elsewhere => {
+                if route == Route::Guide {
+                    cx.stop_propagation();
+                }
             }
+            // The composer's own.
+            Pressed::Guide => {}
+            Pressed::Library { repeat } => {
+                let event = passed_on(repeat);
+                self.library
+                    .update(cx, |library, cx| library.key_down(&event, cx));
+            }
+            Pressed::Menu { repeat } => {
+                if let Some((menu, _)) = &self.menu {
+                    let event = passed_on(repeat);
+                    menu.clone()
+                        .update(cx, |menu, cx| menu.key_down(&event, cx));
+                }
+            }
+            Pressed::OpensMenu => self.open_menu(window, cx),
+            // Redraws the cursor if a key touches with it.
+            Pressed::Game(commands) => self.obey(commands, looked, cx),
         }
     }
 
     fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let looked = self.cursor_look();
-        let key = event.keystroke.key.as_str();
-        // Shift going down or up while a key is down renames some keys: `1`
-        // held as Shift goes down comes up as `!`. A key that went down
-        // under this name is the one coming up, though, such as a keypad
-        // `1`, which Shift leaves alone.
-        let name = match bindings::shift_twin(key) {
-            Some(twin)
-                if self.key_routes.route_of(key).is_none()
-                    && self.key_routes.route_of(twin).is_some() =>
-            {
-                twin
-            }
-            _ => key,
-        };
-        self.key_routes.release(name);
-        self.controls.set(format!("{KEY}{name}"), None, false);
-        self.sync_held();
-        if self.cursor_look() != looked {
-            cx.notify();
-        }
+        let looked = self.input.cursor_look();
+        let commands = self
+            .input
+            .key_up(event.keystroke.key.as_str(), &self.stage());
+        self.obey(commands, looked, cx);
     }
 
     /// Holds or lets go of whatever Shift is bound to, as it comes only as
     /// a change of modifiers, never as a key; Shift is the game's while it
     /// plays, as a key would be. Lets go of every key held for the game
-    /// when ⌘ goes down: macOS sends no key-up for a key let go of while
-    /// ⌘ is down, which would leave it held. A key still down counts again
-    /// once pressed again.
+    /// when ⌘ goes down (see [`GameInput::release_keys`]).
     fn modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
@@ -1029,19 +869,14 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         let shift = event.modifiers.shift && self.key_route(window, cx) == Route::Game;
-        let action = shift.then(|| self.bindings.key_action(SHIFT)).flatten();
-        self.controls.set(format!("{KEY}{SHIFT}"), action, shift);
-        self.sync_held();
+        let commands = self.input.shift(shift, &self.stage());
+        self.send_all(commands);
         if !event.modifiers.platform {
             return;
         }
-        let looked = self.cursor_look();
-        self.key_routes.clear();
-        self.controls.release_from(KEY);
-        self.sync_held();
-        if self.cursor_look() != looked {
-            cx.notify();
-        }
+        let looked = self.input.cursor_look();
+        let commands = self.input.release_keys(&self.stage());
+        self.obey(commands, looked, cx);
     }
 
     fn pad_event(&mut self, event: &PadEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1049,79 +884,42 @@ impl EmulatorView {
         if self.menu.is_some() {
             return;
         }
-        let looked = self.cursor_look();
-        match event {
+        let looked = self.input.cursor_look();
+        let stage = self.stage();
+        let commands = match event {
             PadEvent::Control {
                 controller,
                 control,
                 pressed,
             } => {
-                let hotkey = |control: &str| self.bindings.hotkey(control);
-                let effects = self.chords.event(hotkey, controller, control, *pressed);
-                for effect in effects {
-                    self.pad_effect(controller, effect, window, cx);
+                let (commands, shortcuts) = self
+                    .input
+                    .pad_control(controller, control, *pressed, &stage);
+                for shortcut in shortcuts {
+                    // Its handler updates this view, which is busy until
+                    // this event is done, so it runs just after.
+                    let action = shortcut_action(shortcut);
+                    let focus = self.focus.clone();
+                    window.defer(cx, move |window, cx| {
+                        focus.dispatch_action(action.as_ref(), window, cx);
+                    });
                 }
+                commands
             }
-            PadEvent::Pointer { dx, dy } => self.move_cursor((*dx, *dy)),
-        }
-        // Redraw the cursor, even when paused.
-        if self.cursor_look() != looked {
-            cx.notify();
-        }
-    }
-
-    /// Carries out one effect of a control on `controller` going down or
-    /// up (see `chords.rs`).
-    fn pad_effect(
-        &mut self,
-        controller: &str,
-        effect: Effect,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match effect {
-            Effect::Pass { control, pressed } => {
-                let action = self.bindings.pad_action(controller, &control);
-                let source = format!("pad:{controller}:{control}");
-                self.controls.set(source, action, pressed);
-                self.sync_held();
+            PadEvent::Pointer { dx, dy } => {
+                let rotation = self.settings.layout.rotation;
+                self.input.move_cursor((*dx, *dy), rotation, &stage)
             }
-            Effect::Hold { control, held } => {
-                let source = format!("pad:{controller}:{control}");
-                self.controls.set(source, Some(held), true);
-                self.sync_held();
-            }
-            Effect::Run(shortcut) => {
-                // Its handler updates this view, which is busy until this
-                // event is done, so it runs just after.
-                let action = shortcut_action(shortcut);
-                let focus = self.focus.clone();
-                window.defer(cx, move |window, cx| {
-                    focus.dispatch_action(action.as_ref(), window, cx);
-                });
-            }
-        }
-    }
-
-    /// Moves the gamepad cursor by `motion`, in the units of
-    /// [`PadEvent::Pointer`] as seen on the window, whichever way the
-    /// screens are turned.
-    fn move_cursor(&mut self, motion: (f32, f32)) {
-        let Some((_, size)) = self.touchscreen() else {
-            return;
         };
-        let (dx, dy) = self.settings.layout.rotation.unturn_vector(motion);
-        self.cursor
-            .get_or_insert_with(|| Cursor::centre(size))
-            .move_by((dx * cursor::SPEED, dy * cursor::SPEED), size);
-        self.sync_held();
+        // Redraws the cursor, even when paused.
+        self.obey(commands, looked, cx);
     }
 
     /// Turns latched fast-forward on or off, and saves that for next
     /// launch.
     fn toggle_fast_forward(&mut self, cx: &mut Context<Self>) {
-        let on = self.controls.toggle_fast_forward();
-        self.sync_held();
+        let (on, commands) = self.input.toggle_fast_forward(&self.stage());
+        self.send_all(commands);
         self.show_notice(
             if on {
                 "Fast-forward on"
@@ -1136,8 +934,8 @@ impl EmulatorView {
     /// Turns latched slow motion on or off, and saves that for next
     /// launch.
     fn toggle_slow_motion(&mut self, cx: &mut Context<Self>) {
-        let on = self.controls.toggle_slow_motion();
-        self.sync_held();
+        let (on, commands) = self.input.toggle_slow_motion(&self.stage());
+        self.send_all(commands);
         self.show_notice(
             if on {
                 "Slow motion on"
@@ -1246,10 +1044,6 @@ impl EmulatorView {
         if let Some(player) = clicked {
             self.switch_player(player, cx);
         }
-        // Back to the mouse: hide the gamepad cursor unless it is touching.
-        if !self.sent.touch {
-            self.cursor = None;
-        }
         // The touchscreen as the window shows it, possibly more than once.
         let touched = self.touchscreen().and_then(|(screen, size)| {
             let (index, placement) = self
@@ -1259,15 +1053,10 @@ impl EmulatorView {
                 .find(|(_, p)| p.screen == screen && p.rect.contains(point))?;
             Some((index, placement.pixel_at(size, point)?))
         });
-        if touched.is_some() {
-            self.stylus = touched;
-        } else {
-            // Elsewhere, and in every other game, a click presses A for as
-            // long as it is held.
-            self.controls
-                .set(MOUSE.to_owned(), Some(Held::Button(Button::A)), true);
-        }
-        self.sync_held();
+        // Back to the mouse, which touches there, or elsewhere, and in
+        // every other game, presses A for as long as it is held.
+        let commands = self.input.mouse_down(touched, &self.stage());
+        self.send_all(commands);
         cx.notify();
     }
 
@@ -1276,35 +1065,29 @@ impl EmulatorView {
     /// off a DS would.
     fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.show_guide_pill(event, window, cx);
-        let Some((index, at)) = self.stylus else {
+        let Some((index, _)) = self.input.stylus() else {
             return;
         };
         let Some((screen, size)) = self.touchscreen() else {
             return;
         };
         let point = (f32::from(event.position.x), f32::from(event.position.y));
-        // Where the screen is now, should the layout have changed.
+        // Where the screen is now, should the layout have changed: nowhere
+        // if the screen pressed on is gone from the window.
         let moved = self
             .placements
             .get(index)
             .filter(|placement| placement.screen == screen)
             .and_then(|placement| placement.pixel_nearest(size, point));
-        if moved.is_none() {
-            // The screen pressed on is gone from the window.
-            self.stylus = None;
-            self.sync_held();
-        } else if let Some(moved) = moved.filter(|moved| *moved != at) {
-            self.stylus = Some((index, moved));
-            self.sync_held();
-        }
+        let commands = self.input.drag_stylus(moved, &self.stage());
+        self.send_all(commands);
     }
 
     /// Lifts the stylus or releases A when the mouse button comes up, in
     /// the window or out of it.
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.stylus = None;
-        self.controls.set(MOUSE.to_owned(), None, false);
-        self.sync_held();
+        let commands = self.input.mouse_up(&self.stage());
+        self.send_all(commands);
     }
 
     /// Asks for a game, then calls `then` with it: a file, or on macOS a
@@ -1392,7 +1175,8 @@ impl EmulatorView {
     fn guide_game(&self, cx: &App) -> Option<GuideGame> {
         let session = self.game.session()?;
         let player = self
-            .active_player
+            .input
+            .player()
             .min(session.player_rom_paths.len().saturating_sub(1));
         let rom = session.player_rom_paths.get(player)?;
         let game = self.library.read(cx).game_of(rom);
@@ -1584,14 +1368,14 @@ impl EmulatorView {
             return;
         }
         // The active player's game, which Start Over erases.
-        let player = self.active_player.min(session.player_rom_paths.len() - 1);
+        let player = self.input.player().min(session.player_rom_paths.len() - 1);
         let rom = session.player_rom_paths[player].clone();
         let title = self
             .library
             .read(cx)
             .title_of(&rom)
             .unwrap_or_else(|| file_name(&rom));
-        let controls = key_guide::columns(session.info.system, &self.bindings);
+        let controls = key_guide::columns(session.info.system, self.input.bindings());
         // Let go at once, before pausing, so no quick tap waits under the
         // menu to reach the game when it resumes.
         self.release_all();
@@ -1650,7 +1434,7 @@ impl EmulatorView {
     /// The active player's cheat file, while a game runs.
     fn cheat_file(&self) -> Option<PathBuf> {
         let session = self.game.session()?;
-        Some(session.player_files_of(self.active_player).cheats())
+        Some(session.player_files_of(self.input.player()).cheats())
     }
 
     /// The active player's cheats, as the game menu lists them.
@@ -1924,8 +1708,8 @@ impl EmulatorView {
     /// Starts or stops listening to the computer's microphone for DS games.
     fn toggle_microphone(&mut self, cx: &mut Context<Self>) {
         if self.microphone.take().is_some() {
-            self.heard = 0;
-            self.send_input();
+            let command = self.input.stop_hearing();
+            self.send(command);
             self.show_notice("Microphone off", cx);
             return;
         }
@@ -1945,9 +1729,8 @@ impl EmulatorView {
             return;
         };
         let heard = loudness.take();
-        if heard != self.heard {
-            self.heard = heard;
-            self.send_input();
+        if let Some(command) = self.input.hear(heard) {
+            self.send(command);
         }
     }
 
@@ -1955,8 +1738,8 @@ impl EmulatorView {
     /// fast-forward and slow motion as `controls` has them latched now.
     pub fn settings(&self) -> Settings {
         Settings {
-            fast_forward_on: self.controls.fast_forward_latched(),
-            slow_motion_on: self.controls.slow_motion_latched(),
+            fast_forward_on: self.input.fast_forward_latched(),
+            slow_motion_on: self.input.slow_motion_latched(),
             ..self.settings
         }
     }
@@ -2061,7 +1844,7 @@ impl EmulatorView {
     /// and saves that for next launch.
     fn set_fast_forward(&mut self, speed: Speed, cx: &mut Context<Self>) {
         self.settings.speed.fast_forward = speed;
-        if self.sent.pace == Pace::FastForward {
+        if self.input.pace() == Pace::FastForward {
             self.send(Command::SetSpeed(speed));
         }
         self.refresh_menus(cx);
@@ -2244,7 +2027,7 @@ impl EmulatorView {
         Some(DebugTarget {
             session: self.sessions,
             system: session.info.system,
-            player: self.active_player,
+            player: self.input.player(),
             snapshot: session.emulator.debug_snapshot(),
         })
     }
@@ -2258,13 +2041,13 @@ impl EmulatorView {
     /// filled in while it touches.
     fn cursor_marks(&self) -> Vec<impl IntoElement + use<>> {
         const RADIUS: f32 = 6.0;
-        let (Some(cursor), Some((screen, size))) = (self.cursor, self.touchscreen()) else {
+        let (Some(cursor), Some((screen, size))) = (self.input.cursor(), self.touchscreen()) else {
             return Vec::new();
         };
         // Centre the mark on the pixel it touches.
         let pixel = cursor.pixel();
         let centre = (f32::from(pixel.x) + 0.5, f32::from(pixel.y) + 0.5);
-        let touching = self.sent.touch;
+        let touching = self.input.touching();
         self.placements
             .iter()
             .filter(|placement| placement.screen == screen)
@@ -2454,7 +2237,7 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &StopScript, _, _| this.send(Command::StopScript)))
             .on_action(cx.listener(|this, _: &SwitchPlayer, _, cx| {
                 let players = this.game.session().map_or(1, |s| s.info.players);
-                this.switch_player((this.active_player + 1) % players.max(1), cx);
+                this.switch_player((this.input.player() + 1) % players.max(1), cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePause, _, cx| {
                 // Under the game menu the game is paused already: resume.
@@ -2680,7 +2463,7 @@ impl Render for EmulatorView {
                 scale_factor,
             );
             if self.settings.resolution_3d == Resolution3d::MatchDisplay {
-                scale = session.keep_speed(scale, self.settings.speed.speed(self.sent.pace));
+                scale = session.keep_speed(scale, self.settings.speed.speed(self.input.pace()));
             }
             if scale != session.render_scale {
                 trace::event("scale", &[u64::from(scale)]);

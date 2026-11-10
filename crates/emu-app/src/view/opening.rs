@@ -409,13 +409,10 @@ impl EmulatorView {
             _audio: audio_output,
         });
         // The new emulator starts with nothing held; resend what is.
-        self.sent = HeldState::default();
-        self.sent_touch = None;
-        self.stylus = None;
-        self.cursor = None;
-        self.active_player = 0;
+        self.input.game_started();
         let bindings = self.reload_bindings();
-        self.sync_held();
+        let held = self.input.resend(&self.stage());
+        self.send_all(held);
         self.sessions += 1;
         let game = self.guide_game(cx);
         self.guide.update(cx, |guide, cx| guide.set_game(game, cx));
@@ -431,12 +428,12 @@ impl EmulatorView {
         }
         let running = format!("Running {name}");
         // Left on last time, so worth saying.
-        let pace = if self.controls.fast_forward_latched() {
+        let pace = if self.input.fast_forward_latched() {
             Some(format!(
                 "fast-forward on ({})",
                 keys::shortcut(shortcut::FAST_FORWARD)
             ))
-        } else if self.controls.slow_motion_latched() {
+        } else if self.input.slow_motion_latched() {
             Some(format!(
                 "slow motion on ({})",
                 keys::shortcut(shortcut::SLOW_MOTION)
@@ -514,7 +511,7 @@ impl EmulatorView {
             return;
         };
         let roms = session.rom_paths.clone();
-        let save = session.player_files_of(self.active_player).backup();
+        let save = session.player_files_of(self.input.player()).backup();
         let states = session.states.clone();
         let own_saves = session.own_saves.clone();
         // Stopping writes the battery saves, and stops the player or helper
