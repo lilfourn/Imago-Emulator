@@ -609,12 +609,17 @@ fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
 /// with `O_EVTONLY` either), so this is the one step taken by a name
 /// after a look at it: the mode is changed by the folder's name in its
 /// open parent, with `AT_SYMLINK_NOFOLLOW`, straight after a look, not
-/// following either, that found a folder there. Were the name to change
-/// hands in between, the mode would go to what has the name then, in that
-/// same folder: a link's own mode, which means nothing, or a file's. It
-/// cannot reach a folder elsewhere, nothing is read, written or removed
-/// by it, and it happens only for a folder unpacked with no leave to
-/// read it.
+/// following either, that found a folder there.
+///
+/// Were the name to change hands between the look and the change, the
+/// mode would go to what has the name then, in that same folder: a
+/// link's own mode, which means nothing, or a file's. That is all the
+/// window allows. No link is followed, so no folder elsewhere is reached;
+/// nothing is read, written, moved or removed by it; and it is taken
+/// only for a folder unpacked with no leave for its owner to read it. The
+/// one thing outside the folder it could touch is a file that an unpacker
+/// had made a second name for there (a hard link): that file's mode, not
+/// what is in it.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
     let Ok(found) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
@@ -1689,10 +1694,10 @@ mod tests {
 
             /// How many work folders are removed, each with names changing
             /// under the removal the whole time.
-            const ROUNDS: usize = 8;
+            const ROUNDS: usize = 5;
             /// How many folders each holds, so that removing it takes a
             /// while: one in ten has a folder in it, to be moved up.
-            const FOLDERS: usize = 2_000;
+            const FOLDERS: usize = 3_000;
 
             let temp = temp_dir("swapped");
             let outside = outside_folder(&temp, 200);
@@ -1710,16 +1715,19 @@ mod tests {
                 // As a program still unpacking does when a later entry of
                 // its archive has an earlier one's name: an empty folder
                 // gives way to a link, here to the folder outside, and the
-                // link to a folder again. At the top, down in a folder,
-                // and under the names the removal moves folders up to.
-                let swapped = [
-                    work.join("x"),
-                    work.join("folder-1000/inner"),
-                    work.join("folder-1990/inner"),
+                // link to a folder again. Eight names at the top, two
+                // down in a folder, and three of the names the removal
+                // moves folders up to.
+                let mut swapped: Vec<PathBuf> = (0..8)
+                    .map(|number| work.join(format!("x-{number}")))
+                    .collect();
+                swapped.extend([
+                    work.join("folder-1500/inner"),
+                    work.join("folder-2990/inner"),
                     work.join(".ds-emulator-removing-0"),
                     work.join(".ds-emulator-removing-7"),
                     work.join(".ds-emulator-removing-150"),
-                ];
+                ]);
                 let removed = AtomicBool::new(false);
                 thread::scope(|scope| {
                     scope.spawn(|| {
