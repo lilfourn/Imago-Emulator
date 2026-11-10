@@ -7,6 +7,11 @@
 //!
 //! Everything crossing this boundary is plain data: pixels are `u32` words,
 //! audio is interleaved `i16` stereo, input is a bitmask, and state is bytes.
+//!
+//! Two modules are for the cores themselves, which share them: the
+//! drawing behind the debugger's pictures of video memory
+//! ([`debug::draw`], [`debug::gba_video`]) and what every linked pair of
+//! consoles does the same way ([`pair`]).
 
 mod audio;
 mod core;

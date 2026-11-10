@@ -1,6 +1,6 @@
 [package]
 name = "emu-arm"
-description = "ARMv4T/ARMv5TE interpreter shared by the GBA and DS cores."
+description = "ARMv4T/ARMv5TE interpreter shared by the GBA and DS cores, and the BIOS routines their emulated BIOSes share."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

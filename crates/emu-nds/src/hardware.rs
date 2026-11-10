@@ -147,8 +147,10 @@ pub(crate) struct Hardware {
     pub(crate) hblank: bool,
     /// A display capture is writing this frame's lines.
     pub(crate) capturing: bool,
-    /// Raw values of I/O registers without side effects, for reading back:
-    /// one 0x2000-byte page per CPU.
+    /// What each CPU last wrote to each offset of its I/O page, one
+    /// 0x2000-byte page per CPU. Offsets with no register behind them
+    /// (DISPCAPCNT among them) read back from here; for the rest it is
+    /// kept only because a save state holds it (`io.rs`).
     #[serde(with = "payload::Exact::<0x2000>")]
     pub(crate) io9: Box<[u8]>,
     #[serde(with = "payload::Exact::<0x2000>")]
