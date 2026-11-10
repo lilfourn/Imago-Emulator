@@ -77,14 +77,14 @@ impl Channel {
         if self.control & (1 << 10) != 0 { 4 } else { 2 }
     }
 
-    /// Units to move, from the count register: zero means the maximum,
-    /// 0x4000 (0x10000 for channel 3).
     /// Whether this, read from a save state, has no more units to move
     /// than the longest transfer, channel 3's 0x10000.
     fn in_range(&self) -> bool {
         self.current_count <= 0x1_0000 && self.current_total <= 0x1_0000
     }
 
+    /// Units to move, from the count register: zero means the maximum,
+    /// 0x4000 (0x10000 for channel 3).
     fn count_for(&self, index: usize) -> u32 {
         let max = if index == 3 { 0x1_0000 } else { 0x4000 };
         match u32::from(self.count) & (max - 1) {

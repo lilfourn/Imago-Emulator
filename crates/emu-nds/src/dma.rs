@@ -127,7 +127,6 @@ impl Dma {
         }
     }
 
-    /// The word count in the control register; zero means the maximum.
     /// Whether these, read from a save state, have no more units left
     /// than the longest transfer, the ARM9's 21 bits of them.
     pub(crate) fn in_range(&self) -> bool {
@@ -136,6 +135,7 @@ impl Dma {
             .all(|channel| channel.remaining <= 1 << 21)
     }
 
+    /// The word count in the control register; zero means the maximum.
     fn count(&self, index: usize) -> u32 {
         let bits = match (self.owner, index) {
             (Owner::Arm9, _) => 21,

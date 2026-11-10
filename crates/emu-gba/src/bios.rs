@@ -770,9 +770,10 @@ fn run_length(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool)
 /// of a few bytes.
 const HUFFMAN_SLACK_WORDS: u32 = 64;
 
-/// HuffUnComp: GBATEK's Huffman format with 4- or 8-bit symbols, the two
-/// sizes that fill the 32-bit words it writes; data that names another
-/// size is left alone.
+/// HuffUnComp: GBATEK's Huffman format, whose symbols are 4 or 8 bits.
+/// Any size that fills the 32-bit words it writes exactly is decoded (1
+/// and 2 bits too); data that names another size, which never fills a
+/// word, is left alone.
 ///
 /// A node's children lie after it, so a walk only moves on through the
 /// tree. One that leaves the tree (the size byte says where it ends) can
@@ -786,7 +787,7 @@ const HUFFMAN_SLACK_WORDS: u32 = 64;
 fn huffman(bus: &mut Bus, mut source: u32, mut destination: u32) {
     let header = bus.read_32(source, Access::NONSEQUENTIAL);
     let symbol_bits = header & 0xF;
-    if !matches!(symbol_bits, 4 | 8) {
+    if !matches!(symbol_bits, 1 | 2 | 4 | 8) {
         return;
     }
     let mut remaining = header >> 8;
@@ -984,9 +985,10 @@ mod tests {
     const HUFFMAN_BITS: u32 = 0b0101_1010_1101_0110_1011_0101_1010_1101;
 
     #[test]
-    fn huffman_decodes_four_and_eight_bit_symbols() {
-        // Four-bit symbols pack two to a byte, the first in the low nibble.
-        for (symbol_bits, expected) in [(8, 0x0103_0201), (4, 0x2132_1321)] {
+    fn huffman_decodes_symbols_of_every_size_that_fills_a_word() {
+        // Four-bit symbols pack two to a byte, the first in the low nibble;
+        // two-bit ones four to a byte, the same way.
+        for (symbol_bits, expected) in [(8, 0x0103_0201), (4, 0x2132_1321), (2, 0x79E7_9E79)] {
             let mut bus = ram_bus();
             put_huffman(&mut bus, 0x0200_0000, symbol_bits, 4, HUFFMAN_BITS);
             huffman(&mut bus, 0x0200_0000, 0x0200_0100);
@@ -1003,7 +1005,7 @@ mod tests {
     /// used to wait for ever for its count of bits to equal 32.
     #[test]
     fn huffman_leaves_other_symbol_sizes_alone() {
-        for symbol_bits in [0, 1, 2, 3, 5, 6, 7, 9, 15] {
+        for symbol_bits in [0, 3, 5, 6, 7, 9, 15] {
             let mut bus = ram_bus();
             put_huffman(&mut bus, 0x0200_0000, symbol_bits, 0xFF_FFFF, HUFFMAN_BITS);
             huffman(&mut bus, 0x0200_0000, 0x0200_0100);

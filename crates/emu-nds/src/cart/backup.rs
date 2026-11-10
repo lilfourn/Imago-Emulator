@@ -94,9 +94,10 @@ const PAGE_ERASE: u8 = 0xDB;
 const IDLE: u8 = 0xFF;
 
 /// The most bytes of one instruction an unknown chip keeps to replay:
-/// three of address and a page, the longest write any of the chips
-/// takes. A longer one wraps within its page on the chip itself.
-const WRITTEN_MOST: usize = 3 + 256;
+/// three of address and as many of data as the largest chip a write runs
+/// on through holds, 128 KiB (an EEPROM or FRAM here has no pages: see
+/// `eeprom.rs`). Flash takes a page of 256 at a time.
+const WRITTEN_MOST: usize = 3 + 128 * 1024;
 
 /// The game code at header 0x0C, if the ROM is long enough.
 pub(crate) fn game_code(rom: &[u8]) -> Option<&[u8]> {
@@ -569,20 +570,33 @@ mod tests {
 
     /// Bytes clocked into an unknown chip were all kept for as long as
     /// chip select was held, megabytes of them, in every save state and
-    /// rewind snapshot. A chip takes a page at a time.
+    /// rewind snapshot. No chip a write runs on through holds more than
+    /// 128 KiB.
     #[test]
-    fn an_unknown_chip_keeps_no_more_than_a_page_of_an_instruction() {
+    fn an_unknown_chip_keeps_no_more_of_an_instruction_than_a_chip_holds() {
         let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
         command(&mut backup, &[0x06]);
         backup.transfer(0x0A);
-        for byte in 0..100_000u32 {
+        for byte in 0..300_000u32 {
             backup.transfer(byte as u8);
         }
         let Chip::Unknown(detector) = &backup.chip else {
             panic!("still unknown while select is held");
         };
         assert_eq!(detector.written.len(), WRITTEN_MOST);
-        assert_eq!(detector.count, 100_000, "every byte is counted");
+        assert_eq!(detector.count, 300_000, "every byte is counted");
+
+        // A write longer than a page, as a chip without pages takes, is
+        // replayed whole into the chip it shows: none of it is dropped.
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x03, 0x00, 0x01, 0x00, 0]);
+        command(&mut backup, &[0x06]);
+        let long: Vec<u8> = (0..1000u32).map(|byte| (byte % 251) as u8 + 1).collect();
+        let mut write = vec![0x02, 0x00, 0x00, 0x10];
+        write.extend_from_slice(&long);
+        command(&mut backup, &write);
+        assert_eq!(backup.data().len(), 128 * KIB);
+        assert!(backup.data()[0x10..0x10 + long.len()] == long[..]);
 
         // A whole page, the longest write a chip takes, is kept whole:
         // three address bytes and 256 of data.
