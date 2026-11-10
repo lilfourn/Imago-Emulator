@@ -823,7 +823,9 @@ fn wait_for_notice(events: &async_channel::Receiver<Event>, start: &str) -> Stri
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match events.try_recv() {
-            Ok(Event::Notice(text)) if text.starts_with(start) => return text,
+            Ok(event) if event.notice().is_some_and(|text| text.starts_with(start)) => {
+                return event.notice().expect("a notice").into_owned();
+            }
             Ok(_) => {}
             Err(_) => {
                 assert!(Instant::now() < deadline, "no notice {start:?}");
@@ -899,6 +901,46 @@ fn durations_read_as_minutes_and_seconds() {
 }
 
 #[test]
+fn a_state_saved_loaded_or_refused_is_said_by_what_it_is() {
+    let dir = empty_dir("state-events");
+    let (emulator, events) = start(dir.join("counter.gb"));
+    emulator.send(Command::SaveState(3));
+    wait_for_event(&events, &Event::StateSaved(3));
+    emulator.send(Command::LoadState(3));
+    wait_for_event(&events, &Event::StateLoaded(3));
+    // Nothing in slot 4: a failure, in the words it has always had.
+    emulator.send(Command::LoadState(4));
+    let refused = loop {
+        match events.recv_blocking().expect("the thread runs") {
+            Event::Failed(text) => break text,
+            Event::StateLoaded(slot) => panic!("loaded the empty slot {slot}"),
+            _ => {}
+        }
+    };
+    assert!(
+        refused.starts_with("Could not load state: cannot read "),
+        "{refused}"
+    );
+    // The same words, for what shows them and for what prints them.
+    assert_eq!(
+        Event::StateSaved(3).notice().as_deref(),
+        Some("Saved state 3")
+    );
+    assert_eq!(
+        Event::StateLoaded(3).words().as_deref(),
+        Some("Loaded state 3")
+    );
+    assert_eq!(Event::Warning("kept".to_owned()).notice(), None);
+    assert_eq!(
+        Event::Warning("kept".to_owned()).words().as_deref(),
+        Some("kept")
+    );
+    assert_eq!(Event::Frame.words(), None);
+    drop(emulator);
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
 fn save_states_round_trip_through_slot_files() {
     let dir = std::env::temp_dir().join(format!("emu-app-states-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("temp dir");
@@ -921,8 +963,11 @@ fn save_states_round_trip_through_slot_files() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !waiting.is_empty() {
         match events.try_recv() {
-            Ok(Event::Notice(text)) => waiting.retain(|notice| *notice != text),
-            Ok(_) => {}
+            Ok(event) => {
+                if let Some(text) = event.notice() {
+                    waiting.retain(|notice| *notice != text);
+                }
+            }
             Err(_) => {
                 assert!(Instant::now() < deadline, "no notices {waiting:?}");
                 thread::sleep(Duration::from_millis(1));
@@ -1510,7 +1555,7 @@ fn an_empty_checkpoint_slot_is_no_matter() {
     assert!(
         !said
             .iter()
-            .any(|event| matches!(event, Event::PickedUp(_) | Event::Notice(_))),
+            .any(|event| matches!(event, Event::PickedUp(_)) || event.notice().is_some()),
         "{said:?}"
     );
     fs::remove_dir_all(&dir).expect("clean up");

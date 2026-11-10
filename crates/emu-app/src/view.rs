@@ -919,9 +919,12 @@ impl EmulatorView {
             }
             // Wakes the debugger window, which redraws with this view.
             Event::Debug => cx.notify(),
-            Event::Notice(text) => {
-                if let Some(text) = checkpoint_notice(text) {
-                    self.show_notice(text, cx);
+            event @ (Event::StateSaved(_)
+            | Event::StateLoaded(_)
+            | Event::Failed(_)
+            | Event::Notice(_)) => {
+                if let Some(text) = notice_of(&event) {
+                    self.show_notice(text.into_owned(), cx);
                 }
             }
             Event::Warning(text) => self.show_warning(text, cx),
@@ -2644,7 +2647,8 @@ impl Session {
 
     /// Stops the emulation thread, which first finishes what it was asked,
     /// such as saving the checkpoint, and writes the battery saves.
-    /// Returns what it said meanwhile that was not yet shown.
+    /// Returns what it said meanwhile that was not yet shown, as it would
+    /// have been ([`said_by`]).
     fn finish(self) -> Vec<String> {
         let Self {
             emulator,
@@ -2656,10 +2660,7 @@ impl Session {
         // The thread has stopped, so the device can go.
         drop(audio);
         std::iter::from_fn(|| events.try_recv().ok())
-            .filter_map(|event| match event {
-                Event::Notice(text) | Event::Warning(text) | Event::Stopped(text) => Some(text),
-                _ => None,
-            })
+            .filter_map(|event| said_by(&event).map(Cow::into_owned))
             .collect()
     }
 
@@ -3738,16 +3739,25 @@ fn recording_mark() -> Div {
         .children(probe::part("rec"))
 }
 
-/// What to tell the player of the emulation thread's notice `text`:
-/// nothing of the checkpoint being saved, which happens unasked, and
-/// loading it in words of its own.
-fn checkpoint_notice(text: String) -> Option<String> {
-    if text == format!("Saved state {CHECKPOINT}") {
-        None
-    } else if text == format!("Loaded state {CHECKPOINT}") {
-        Some("Picked up where you left off".to_owned())
-    } else {
-        Some(text)
+/// What to tell the player briefly of the emulation thread's `event`, if
+/// anything: its own words ([`Event::notice`]), but nothing of the
+/// checkpoint being saved, which happens unasked, and loading it in words
+/// of its own.
+fn notice_of(event: &Event) -> Option<Cow<'_, str>> {
+    match event {
+        Event::StateSaved(CHECKPOINT) => None,
+        Event::StateLoaded(CHECKPOINT) => Some("Picked up where you left off".into()),
+        event => event.notice(),
+    }
+}
+
+/// What the emulation thread's `event` tells the player, however it is
+/// shown: a notice as [`notice_of`] words it, a warning, or why the game
+/// stopped.
+fn said_by(event: &Event) -> Option<Cow<'_, str>> {
+    match event {
+        Event::Warning(text) | Event::Stopped(text) => Some(text.as_str().into()),
+        event => notice_of(event),
     }
 }
 
@@ -4022,6 +4032,57 @@ mod tests {
         };
         assert!(!smooth.stands_in(wanted, None));
         assert!(key(9, (1309, 982)).stands_in(wanted, Some(key(12, (800, 600)))));
+    }
+
+    #[test]
+    fn a_state_saved_or_loaded_is_told_by_its_slot_not_by_its_words() {
+        let told = |event: Event| notice_of(&event).map(Cow::into_owned);
+        // The slots the player saves to and loads from, in the words they
+        // have always had.
+        for slot in 1..=slots::LAST_FILE_SLOT {
+            assert_eq!(
+                told(Event::StateSaved(slot)),
+                Some(format!("Saved state {slot}"))
+            );
+            assert_eq!(
+                told(Event::StateLoaded(slot)),
+                Some(format!("Loaded state {slot}"))
+            );
+        }
+        // The checkpoint is saved unasked, and picked up in its own words.
+        assert_eq!(told(Event::StateSaved(CHECKPOINT)), None);
+        assert_eq!(
+            told(Event::StateLoaded(CHECKPOINT)).as_deref(),
+            Some("Picked up where you left off")
+        );
+        // Words are only ever shown: a script that says what the
+        // checkpoint's notice once said is not taken for it.
+        let said = format!("Saved state {CHECKPOINT}");
+        assert_eq!(told(Event::Notice(said.clone())), Some(said.clone()));
+        assert_eq!(told(Event::Failed(said.clone())), Some(said));
+        // Warnings and the rest are not notices.
+        assert_eq!(told(Event::Warning("kept".to_owned())), None);
+        assert_eq!(told(Event::Stopped("stopped".to_owned())), None);
+        assert_eq!(told(Event::PickedUp(true)), None);
+        assert_eq!(told(Event::Frame), None);
+        // What a game said as it stopped is worded the same way, with its
+        // warnings and why it stopped.
+        let left = |event: Event| said_by(&event).map(Cow::into_owned);
+        assert_eq!(left(Event::StateSaved(CHECKPOINT)), None);
+        assert_eq!(
+            left(Event::StateLoaded(CHECKPOINT)).as_deref(),
+            Some("Picked up where you left off")
+        );
+        assert_eq!(left(Event::StateSaved(2)).as_deref(), Some("Saved state 2"));
+        assert_eq!(
+            left(Event::Warning("kept".to_owned())).as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            left(Event::Stopped("stopped".to_owned())).as_deref(),
+            Some("stopped")
+        );
+        assert_eq!(left(Event::Recording(false)), None);
     }
 
     #[test]

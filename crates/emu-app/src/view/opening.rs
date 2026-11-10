@@ -490,11 +490,7 @@ impl EmulatorView {
         for image in images.map(|(_, image)| image).chain(ambient) {
             window.drop_image(image).ok();
         }
-        let said: Vec<String> = session
-            .finish()
-            .into_iter()
-            .filter_map(checkpoint_notice)
-            .collect();
+        let said = session.finish();
         (!said.is_empty()).then(|| said.join(" · "))
     }
 
