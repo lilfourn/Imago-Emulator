@@ -1,5 +1,5 @@
 //! What the two-player cores share: two consoles joined by a link cable
-//! or within wireless range, run as one [`Core`](crate::Core).
+//! or within wireless range, run as one [`Core`].
 //!
 //! How the two run together (the slices of time each console gets, and
 //! what crosses the link between them) is each system's own and stays in
