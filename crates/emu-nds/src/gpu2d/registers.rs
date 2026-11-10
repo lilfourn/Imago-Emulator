@@ -149,6 +149,49 @@ impl Registers {
         }
     }
 
+    /// The halfword at `offset` as the register holds it, whether or not
+    /// the CPU can read it back: what a byte written beside it leaves.
+    fn held(&self, offset: u32) -> u16 {
+        let affine = |bg: &AffineBg, offset: u32| match offset {
+            0x0 => bg.pa as u16,
+            0x2 => bg.pb as u16,
+            0x4 => bg.pc as u16,
+            0x6 => bg.pd as u16,
+            0x8 => bg.x as u16,
+            0xA => (bg.x >> 16) as u16,
+            0xC => bg.y as u16,
+            _ => (bg.y >> 16) as u16,
+        };
+        match offset {
+            0x10..=0x1E => {
+                let index = (offset as usize - 0x10) / 4;
+                if offset & 2 == 0 {
+                    self.hofs[index]
+                } else {
+                    self.vofs[index]
+                }
+            }
+            0x20..=0x2E => affine(&self.affine[0], offset - 0x20),
+            0x30..=0x3E => affine(&self.affine[1], offset - 0x30),
+            0x40 | 0x42 => self.window_h[(offset as usize - 0x40) / 2],
+            0x44 | 0x46 => self.window_v[(offset as usize - 0x44) / 2],
+            0x4C => self.mosaic,
+            0x54 => self.bldy,
+            _ => self.read(offset),
+        }
+    }
+
+    /// Writes the bytes `mask` covers (0x00FF, 0xFF00 or both) of the
+    /// halfword at `offset` (halfword-aligned).
+    pub(super) fn write_bytes(&mut self, offset: u32, value: u16, mask: u16) {
+        let merged = if mask == 0xFFFF {
+            value
+        } else {
+            (self.held(offset) & !mask) | (value & mask)
+        };
+        self.write(offset, merged);
+    }
+
     /// Writes the halfword at `offset` (halfword-aligned).
     pub(super) fn write(&mut self, offset: u32, value: u16) {
         let wide = u32::from(value);

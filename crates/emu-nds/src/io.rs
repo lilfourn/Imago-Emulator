@@ -1,15 +1,27 @@
 //! Each CPU's I/O registers at 0x04000000 (GBATEK, "DS I/O Map").
 //!
-//! Registers are handled at their natural width: most are 16-bit, with
-//! 32-bit accesses split in two; DMA, the maths unit and the IPC FIFO are
-//! 32-bit; VRAMCNT, WRAMCNT, POSTFLG and HALTCNT are bytes. Registers
-//! without side effects are kept raw so they read back what was written.
+//! # Writes
 //!
-//! The raw copy is only of what halfword and byte writes stored: a 32-bit
-//! write to a 32-bit register goes to its device alone. So the registers
-//! written that way are read from their device at every width, and a byte
-//! written to one is merged into the device's value, not the raw copy's
-//! ([`kept_by_its_device`]).
+//! Every write takes one path, [`Hardware::io_write`], whatever its width:
+//! the word the access is in, the value shifted to its place in that word,
+//! and a mask of the bytes the access covers. A register that is a whole
+//! word (a DMA channel's, the maths unit's, the 3D engine's) gets the value
+//! and the mask; the rest are halfwords and get their half of each. Either
+//! way a register changes only the bits the mask covers and keeps the rest
+//! as it holds them itself, so a byte written beside a bit the hardware
+//! changed, or one that only strobes, leaves that bit alone. The registers
+//! with rules of their own say so where they are written: IF clears the
+//! ones written, POSTFLG, HALTCNT and VRAMCNT are bytes, the IPC FIFO's
+//! send port takes only words.
+//!
+//! # The raw copy
+//!
+//! `io9` and `io7` hold what was last written to each offset of the page.
+//! An offset with no register behind it is read back from there, which is
+//! all DISPCAPCNT and the ARM7's EXMEMSTAT bits are. For every other
+//! register the copy is never read: it stays because it is part of a save
+//! state, and it is kept exactly as it always was ([`Hardware::keeps`],
+//! [`Hardware::keep_beside_device`]), so a state has the same bytes.
 
 use crate::dma::Timing;
 use crate::hardware::{Event, Hardware};
@@ -19,21 +31,18 @@ use crate::ipc::Side;
 /// Registers that live in the ARM9's or ARM7's 0x04000000 page.
 const IO_PAGE: u32 = 0x1FFF;
 
-/// `word` with the halfword that a 16-bit access at `offset` covers (the
-/// low one if bit 1 is clear, else the high one) replaced by `half`.
-fn with_half(word: u32, offset: u32, half: u16) -> u32 {
-    let shift = (offset & 2) * 8;
-    (word & !(0xFFFF << shift)) | u32::from(half) << shift
-}
+/// The first address past the page. Above it are only the IPC FIFO's and
+/// the game card's read ports; the page is not mirrored there.
+const PAGE_END: u32 = 0x0400_2000;
 
-/// Whether the register at `offset` in `side`'s page is one a 32-bit write
-/// stores in its device and nowhere else, and whose halfwords read back
-/// from there: the DMA channels and the game card's ROMCTRL on both CPUs,
-/// and the ARM9's DMA fill values and maths unit. (The 3D engine's take
-/// bytes themselves, and the IPC FIFO's send port takes only words.)
-fn kept_by_its_device(side: Side, offset: u32) -> bool {
-    matches!(offset, 0x0B0..=0x0DF | 0x1A4..=0x1A7)
-        || (side == Side::Arm9 && matches!(offset, 0x0E0..=0x0EF | 0x280..=0x2BF))
+/// The IPCFIFOCNT bits that are settings a write replaces: the two
+/// interrupt enables and the FIFOs' enable. The rest are status, or act
+/// when a one is written and are not kept.
+const FIFO_SETTINGS: u16 = 0x8404;
+
+/// `old` with the bits `mask` covers replaced by `value`'s.
+fn merge(old: u32, value: u32, mask: u32) -> u32 {
+    (old & !mask) | (value & mask)
 }
 
 /// The VRAM bank (A-I as 0-8) whose VRAMCNT byte is at `offset`:
@@ -68,9 +77,66 @@ impl Hardware {
         u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
-    fn set_raw_16(&mut self, side: Side, offset: u32, value: u16) {
+    /// Keeps the bytes of `value` that `mask` covers in the raw copy of
+    /// the halfword at `offset`.
+    fn keep_half(&mut self, side: Side, offset: u32, value: u16, mask: u16) {
         let index = (offset & IO_PAGE & !1) as usize;
-        self.raw_mut(side)[index..index + 2].copy_from_slice(&value.to_le_bytes());
+        let bytes = value.to_le_bytes();
+        let raw = self.raw_mut(side);
+        match mask {
+            0xFFFF => raw[index..index + 2].copy_from_slice(&bytes),
+            0x00FF => raw[index] = bytes[0],
+            _ => raw[index + 1] = bytes[1],
+        }
+    }
+
+    /// Keeps the bytes of `value` that `mask` covers in the raw copy of
+    /// the word at `offset`.
+    fn keep(&mut self, side: Side, offset: u32, value: u32, mask: u32) {
+        if mask & 0xFFFF != 0 {
+            self.keep_half(side, offset, value as u16, mask as u16);
+        }
+        if mask >> 16 != 0 {
+            self.keep_half(side, offset | 2, (value >> 16) as u16, (mask >> 16) as u16);
+        }
+    }
+
+    /// Whether the raw copy keeps a write to the halfword at `offset` that
+    /// covers the bytes in `mask`. It keeps every halfword written and
+    /// most bytes; the registers that are bytes, or take bytes without
+    /// their neighbours, never had a byte write kept, and the ARM7's
+    /// POSTFLG and HALTCNT no write at all.
+    fn keeps(side: Side, offset: u32, mask: u16) -> bool {
+        let halfword = mask == 0xFFFF;
+        match (side, offset) {
+            (Side::Arm7, 0x300) => false,
+            // IF; VRAMCNT and WRAMCNT; the sound registers.
+            (_, 0x214 | 0x216) | (Side::Arm9, 0x240..=0x249) | (Side::Arm7, 0x400..=0x51F) => {
+                halfword
+            }
+            // The ARM9's POSTFLG, the low byte.
+            (Side::Arm9, 0x300) => mask != 0x00FF,
+            _ => true,
+        }
+    }
+
+    /// The raw copy of a write to a register that is a word kept by its
+    /// device: a DMA channel's, ROMCTRL, and the ARM9's DMA fill values
+    /// and maths unit. A word goes to the device alone and nothing is
+    /// kept; a halfword is kept as written; and a byte keeps the halfword
+    /// it is in as the CPU read it just before, with the byte put in.
+    fn keep_beside_device(&mut self, side: Side, offset: u32, value: u32, mask: u32) {
+        match mask {
+            u32::MAX => {}
+            0x0000_FFFF | 0xFFFF_0000 => self.keep(side, offset, value, mask),
+            _ => {
+                let half = offset | (mask.trailing_zeros() / 16 * 2);
+                let shift = (half & 2) * 8;
+                let read = u32::from(self.page_16(side, half)) << shift;
+                let kept = merge(read, value, mask) >> shift;
+                self.keep_half(side, half, kept as u16, 0xFFFF);
+            }
+        }
     }
 
     /// The registers cheat codes test, read without side effects: the
@@ -145,77 +211,6 @@ impl Hardware {
         })
     }
 
-    /// Writes one of the registers both CPUs have. Returns whether
-    /// `offset` was one.
-    fn write_common_16(&mut self, side: Side, offset: u32, value: u16) -> bool {
-        match offset {
-            0x004 => self.cpu_mut(side).dispstat = value & 0xFFB8,
-            0x0B0..=0x0DF => {
-                let register = (offset - 0xB0) & !3;
-                let current = self.cpu(side).dma.read(register);
-                let merged = with_half(current, offset, value);
-                self.cpu_mut(side).dma.write(register, merged);
-            }
-            0x100..=0x10F => {
-                let index = ((offset - 0x100) / 4) as usize;
-                if offset.is_multiple_of(4) {
-                    self.cpu_mut(side).timers.write_reload(index, value);
-                } else {
-                    let now = self.now(side);
-                    let requested = self.cpu_mut(side).timers.write_control(index, value, now);
-                    self.request_timer_interrupts(side, requested);
-                    self.schedule_timer(side, index);
-                }
-            }
-            0x132 => {
-                self.cpu_mut(side).keycnt = value;
-                self.check_keypad_interrupt();
-            }
-            0x180 => {
-                let raised = self.ipc.write_sync(side, value);
-                self.raise(raised);
-            }
-            0x184 => {
-                let raised = self.ipc.write_control(side, value);
-                self.raise(raised);
-            }
-            0x208 => self.cpu_mut(side).interrupts.master_enable = value & 1 != 0,
-            0x210 => {
-                let interrupts = &mut self.cpu_mut(side).interrupts;
-                interrupts.enable = (interrupts.enable & !0xFFFF) | u32::from(value);
-            }
-            0x212 => {
-                let interrupts = &mut self.cpu_mut(side).interrupts;
-                interrupts.enable = (interrupts.enable & 0xFFFF) | u32::from(value) << 16;
-            }
-            0x214 => self.cpu_mut(side).interrupts.acknowledge(u32::from(value)),
-            0x216 => self
-                .cpu_mut(side)
-                .interrupts
-                .acknowledge(u32::from(value) << 16),
-            0x1A0..=0x1BB if self.cart_owner() != side => {}
-            0x1A0 => self.cart.write_spi_control(value),
-            0x1A2 => {
-                if let Some(cycles) = self.cart.write_spi_data(value as u8) {
-                    self.schedule_after(side, cycles, Event::CartSpiDone);
-                }
-            }
-            0x1A4 | 0x1A6 => {
-                let merged = with_half(self.cart.rom_control(), offset, value);
-                let event = self.cart.write_rom_control(merged);
-                self.rom_event(event);
-            }
-            0x1A8..=0x1AF => {
-                let index = (offset - 0x1A8) as usize;
-                self.cart.write_command(index, value as u8);
-                self.cart.write_command(index + 1, (value >> 8) as u8);
-            }
-            0x1B0..=0x1BB => {}
-            _ => return false,
-        }
-        true
-    }
-
     /// Raises the keypad interrupt on each CPU whose KEYCNT asks for it.
     pub(crate) fn check_keypad_interrupt(&mut self) {
         for side in [Side::Arm9, Side::Arm7] {
@@ -236,8 +231,10 @@ impl Hardware {
         }
     }
 
+    // Reads.
+
     /// Reads a 32-bit register that is not two 16-bit halves.
-    fn read_wide(&mut self, side: Side, address: u32) -> Option<u32> {
+    fn read_word(&mut self, side: Side, address: u32) -> Option<u32> {
         match address {
             0x0410_0000 => {
                 let (value, raised) = self.ipc.receive(side);
@@ -266,56 +263,51 @@ impl Hardware {
         }
     }
 
-    /// Writes a 32-bit register that is not two 16-bit halves. Returns
-    /// whether `address` was one.
-    fn write_wide(&mut self, side: Side, address: u32, value: u32) -> bool {
-        match address {
-            0x0400_0188 => {
-                let raised = self.ipc.send(side, value);
-                self.raise(raised);
-            }
-            0x0400_01A4 if self.cart_owner() == side => {
-                let event = self.cart.write_rom_control(value);
-                self.rom_event(event);
-            }
-            0x0400_00B0..=0x0400_00DF => {
-                self.cpu_mut(side).dma.write(address - 0x0400_00B0, value);
-            }
-            0x0400_00E0..=0x0400_00EF if side == Side::Arm9 => {
-                self.arm9.dma.fill[((address >> 2) & 3) as usize] = value;
-            }
-            0x0400_0280..=0x0400_02BF if side == Side::Arm9 => {
-                self.math.write(address - 0x0400_0280, value);
-            }
-            0x0400_0060 | 0x0400_0320..=0x0400_06A3 if side == Side::Arm9 => {
-                self.gpu3d.write_register(address & 0xFFF, value);
-            }
-            _ => return false,
-        }
-        true
-    }
-
-    // The ARM9.
-
-    pub(crate) fn io9_read_32(&mut self, address: u32) -> u32 {
-        if let Some(value) = self.read_wide(Side::Arm9, address) {
+    /// `side` reads the word at `address`.
+    pub(crate) fn io_read_32(&mut self, side: Side, address: u32) -> u32 {
+        if let Some(value) = self.read_word(side, address) {
             return value;
         }
-        u32::from(self.io9_read_16(address)) | u32::from(self.io9_read_16(address + 2)) << 16
+        u32::from(self.io_read_16(side, address))
+            | u32::from(self.io_read_16(side, address + 2)) << 16
     }
 
-    pub(crate) fn io9_read_16(&mut self, address: u32) -> u16 {
-        if address >= 0x0400_2000 {
+    /// `side` reads the halfword at `address`.
+    pub(crate) fn io_read_16(&mut self, side: Side, address: u32) -> u16 {
+        if address >= PAGE_END {
             // The IPC FIFO and card data ports are words.
-            let word = self.read_wide(Side::Arm9, address & !3).unwrap_or(0);
+            let word = self.read_word(side, address & !3).unwrap_or(0);
             return (word >> ((address & 2) * 8)) as u16;
         }
-        self.io9_page_16(address)
+        self.page_16(side, address)
     }
 
-    /// Reads a register halfword in the ARM9's 0x04000000 page, where no
+    /// `side` reads the byte at `address`.
+    pub(crate) fn io_read_8(&mut self, side: Side, address: u32) -> u8 {
+        if address >= PAGE_END {
+            return (self.io_read_16(side, address & !1) >> ((address & 1) * 8)) as u8;
+        }
+        self.page_8(side, address)
+    }
+
+    /// Reads a register halfword in `side`'s 0x04000000 page, where no
     /// read has side effects.
-    fn io9_page_16(&self, address: u32) -> u16 {
+    fn page_16(&self, side: Side, address: u32) -> u16 {
+        match side {
+            Side::Arm9 => self.arm9_page_16(address),
+            Side::Arm7 => self.arm7_page_16(address),
+        }
+    }
+
+    /// Reads a register byte in `side`'s 0x04000000 page.
+    fn page_8(&self, side: Side, address: u32) -> u8 {
+        match side {
+            Side::Arm9 => self.arm9_page_8(address),
+            Side::Arm7 => (self.arm7_page_16(address & !1) >> ((address & 1) * 8)) as u8,
+        }
+    }
+
+    fn arm9_page_16(&self, address: u32) -> u16 {
         let offset = address & IO_PAGE;
         if let Some(value) = self.read_common_16(Side::Arm9, offset) {
             return value;
@@ -332,7 +324,7 @@ impl Hardware {
             0x1000..=0x106F => self.engine_b.read_register(offset - 0x1000),
             0x204 => self.exmemcnt,
             0x240..=0x249 => {
-                u16::from(self.io9_page_8(address)) | u16::from(self.io9_page_8(address + 1)) << 8
+                u16::from(self.arm9_page_8(address)) | u16::from(self.arm9_page_8(address + 1)) << 8
             }
             0x280..=0x2BF => (self.math.read((offset - 0x280) & !3) >> ((offset & 2) * 8)) as u16,
             0x300 => u16::from(self.arm9.postflg),
@@ -341,116 +333,16 @@ impl Hardware {
         }
     }
 
-    pub(crate) fn io9_read_8(&mut self, address: u32) -> u8 {
-        if address >= 0x0400_2000 {
-            return (self.io9_read_16(address & !1) >> ((address & 1) * 8)) as u8;
-        }
-        self.io9_page_8(address)
-    }
-
-    /// Reads a register byte in the ARM9's 0x04000000 page.
-    fn io9_page_8(&self, address: u32) -> u8 {
+    fn arm9_page_8(&self, address: u32) -> u8 {
         let offset = address & IO_PAGE;
         match offset {
             0x240..=0x246 | 0x248 | 0x249 => self.vram.control(vram_bank(offset)),
             0x247 => self.wramcnt,
-            _ => (self.io9_page_16(address & !1) >> ((address & 1) * 8)) as u8,
+            _ => (self.arm9_page_16(address & !1) >> ((address & 1) * 8)) as u8,
         }
     }
 
-    pub(crate) fn io9_write_32(&mut self, address: u32, value: u32) {
-        if self.write_wide(Side::Arm9, address, value) {
-            return;
-        }
-        self.io9_write_16(address, value as u16);
-        self.io9_write_16(address + 2, (value >> 16) as u16);
-    }
-
-    pub(crate) fn io9_write_16(&mut self, address: u32, value: u16) {
-        if address >= 0x0400_2000 {
-            return;
-        }
-        let offset = address & IO_PAGE;
-        self.set_raw_16(Side::Arm9, offset, value);
-        if self.write_common_16(Side::Arm9, offset, value) {
-            return;
-        }
-        match offset {
-            0x060..=0x063 | 0x320..=0x6A3 => self.gpu3d.write_register_16(offset, value),
-            0x000..=0x05F | 0x06C..=0x06F => self.engine_a.write_register(offset, value),
-            0x0E0..=0x0EF => {
-                let fill = &mut self.arm9.dma.fill[((offset >> 2) & 3) as usize];
-                *fill = with_half(*fill, offset, value);
-            }
-            0x1000..=0x106F => self.engine_b.write_register(offset - 0x1000, value),
-            0x204 => self.exmemcnt = value,
-            0x240..=0x249 => {
-                self.io9_write_8(address, value as u8);
-                self.io9_write_8(address + 1, (value >> 8) as u8);
-            }
-            0x280..=0x2BF => {
-                let register = (offset - 0x280) & !3;
-                let merged = with_half(self.math.read(register), offset, value);
-                self.math.write(register, merged);
-            }
-            0x300 => self.arm9.postflg = (value & 3) as u8,
-            0x304 => self.powcnt1 = value & 0x820F,
-            _ => {}
-        }
-    }
-
-    pub(crate) fn io9_write_8(&mut self, address: u32, value: u8) {
-        // The IPC FIFO and card data ports above the page take no bytes,
-        // and the page is not mirrored there.
-        if address >= 0x0400_2000 {
-            return;
-        }
-        let offset = address & IO_PAGE;
-        match offset {
-            0x240..=0x246 | 0x248 | 0x249 => self.vram.set_control(vram_bank(offset), value),
-            0x247 => self.wramcnt = value & 3,
-            // IF: only this byte's ones clear flags.
-            0x214..=0x217 => self
-                .arm9
-                .interrupts
-                .acknowledge(u32::from(value) << ((offset - 0x214) * 8)),
-            0x300 => self.arm9.postflg = value & 3,
-            0x060..=0x063 | 0x320..=0x6A3 => self.gpu3d.write_register_8(offset, value),
-            _ => {
-                // The halfword's other byte stays as it is: in the device
-                // for a register kept there, else as last written.
-                let half = if kept_by_its_device(Side::Arm9, offset) {
-                    self.io9_page_16(address & !1)
-                } else {
-                    self.raw_16(Side::Arm9, offset & !1)
-                };
-                let mut bytes = half.to_le_bytes();
-                bytes[(offset & 1) as usize] = value;
-                self.io9_write_16(address & !1, u16::from_le_bytes(bytes));
-            }
-        }
-    }
-
-    // The ARM7.
-
-    pub(crate) fn io7_read_32(&mut self, address: u32) -> u32 {
-        if let Some(value) = self.read_wide(Side::Arm7, address) {
-            return value;
-        }
-        u32::from(self.io7_read_16(address)) | u32::from(self.io7_read_16(address + 2)) << 16
-    }
-
-    pub(crate) fn io7_read_16(&mut self, address: u32) -> u16 {
-        if address >= 0x0400_2000 {
-            let word = self.read_wide(Side::Arm7, address & !3).unwrap_or(0);
-            return (word >> ((address & 2) * 8)) as u16;
-        }
-        self.io7_page_16(address)
-    }
-
-    /// Reads a register halfword in the ARM7's 0x04000000 page, where no
-    /// read has side effects.
-    fn io7_page_16(&self, address: u32) -> u16 {
+    fn arm7_page_16(&self, address: u32) -> u16 {
         let offset = address & IO_PAGE;
         if let Some(value) = self.read_common_16(Side::Arm7, offset) {
             return value;
@@ -471,100 +363,304 @@ impl Hardware {
         }
     }
 
-    pub(crate) fn io7_read_8(&mut self, address: u32) -> u8 {
-        (self.io7_read_16(address & !1) >> ((address & 1) * 8)) as u8
+    // Writes.
+
+    /// `side` writes the word at `address`.
+    pub(crate) fn io_write_32(&mut self, side: Side, address: u32, value: u32) {
+        self.io_write(side, address, value, u32::MAX);
     }
 
-    pub(crate) fn io7_write_32(&mut self, address: u32, value: u32) {
-        if self.write_wide(Side::Arm7, address, value) {
-            return;
-        }
-        self.io7_write_16(address, value as u16);
-        self.io7_write_16(address + 2, (value >> 16) as u16);
+    /// `side` writes the halfword at `address`.
+    pub(crate) fn io_write_16(&mut self, side: Side, address: u32, value: u16) {
+        let shift = (address & 2) * 8;
+        self.io_write(
+            side,
+            address & !3,
+            u32::from(value) << shift,
+            0xFFFF << shift,
+        );
     }
 
-    pub(crate) fn io7_write_16(&mut self, address: u32, value: u16) {
-        if address >= 0x0400_2000 {
+    /// `side` writes the byte at `address`.
+    pub(crate) fn io_write_8(&mut self, side: Side, address: u32, value: u8) {
+        let shift = (address & 3) * 8;
+        self.io_write(side, address & !3, u32::from(value) << shift, 0xFF << shift);
+    }
+
+    /// The one path every write takes: `side` writes the bytes of `value`
+    /// that `mask` covers (one byte, a halfword or all four) to the word at
+    /// `address`.
+    fn io_write(&mut self, side: Side, address: u32, value: u32, mask: u32) {
+        // Nothing above the page can be written: the ports there are read.
+        if address >= PAGE_END {
             return;
         }
         let offset = address & IO_PAGE;
-        if offset == 0x300 {
-            self.io7_write_8(address, value as u8);
-            self.io7_write_8(address + 1, (value >> 8) as u8);
+        if self.write_word(side, offset, value, mask) {
             return;
         }
-        self.set_raw_16(Side::Arm7, offset, value);
-        if self.write_common_16(Side::Arm7, offset, value) {
-            return;
+        // Two halfword registers: the low one first, as a word written to
+        // a timer sets its reload before its control starts it.
+        if mask & 0xFFFF != 0 {
+            self.write_half(side, offset, value as u16, mask as u16);
         }
+        if mask >> 16 != 0 {
+            self.write_half(side, offset | 2, (value >> 16) as u16, (mask >> 16) as u16);
+        }
+    }
+
+    /// Writes the bytes `mask` covers of a register that is a whole word.
+    /// Returns whether the word at `offset` is one.
+    fn write_word(&mut self, side: Side, offset: u32, value: u32, mask: u32) -> bool {
+        let arm9 = side == Side::Arm9;
         match offset {
-            0x304 => {
-                self.powcnt2 = value & 3;
-                let now = self.now(Side::Arm7);
-                self.wifi.set_enabled(value & 2 != 0, now);
-                self.sync_wifi();
+            0x0B0..=0x0DF => {
+                self.keep_beside_device(side, offset, value, mask);
+                let register = offset - 0xB0;
+                let dma = &mut self.cpu_mut(side).dma;
+                let merged = merge(dma.read(register), value, mask);
+                dma.write(register, merged);
             }
-            0x138 => {
-                let now = self.now(Side::Arm7);
-                self.rtc.write(value, now);
+            // IPCFIFOSEND takes whole words: anything less sends nothing,
+            // and is kept as for an offset with no register.
+            0x188 if mask == u32::MAX => {
+                let raised = self.ipc.send(side, value);
+                self.raise(raised);
             }
-            0x1C0 => self.spi.write_control(value),
-            0x1C2 => {
-                let now = self.now(Side::Arm7);
-                if let Some(cycles) = self.spi.write_data(value as u8, now) {
-                    self.schedule_after(Side::Arm7, cycles, Event::SpiDone);
+            0x188 => self.keep(side, offset, value, mask),
+            // ROMCTRL, from the CPU the game card belongs to.
+            0x1A4 if self.cart_owner() == side => {
+                self.keep_beside_device(side, offset, value, mask);
+                let merged = merge(self.cart.rom_control(), value, mask);
+                let event = self.cart.write_rom_control(merged);
+                self.rom_event(event);
+            }
+            // From the other CPU it reaches nothing, and a word is kept.
+            0x1A4 if mask == u32::MAX => self.keep(side, offset, value, mask),
+            0x1A4 => self.keep_beside_device(side, offset, value, mask),
+            0x0E0..=0x0EF if arm9 => {
+                self.keep_beside_device(side, offset, value, mask);
+                let fill = &mut self.arm9.dma.fill[((offset >> 2) & 3) as usize];
+                *fill = merge(*fill, value, mask);
+            }
+            0x280..=0x2BF if arm9 => {
+                self.keep_beside_device(side, offset, value, mask);
+                let register = offset - 0x280;
+                let merged = merge(self.math.read(register), value, mask);
+                self.math.write(register, merged);
+            }
+            // The 3D engine takes the bytes written itself. Of its writes
+            // only a halfword was ever kept.
+            0x060 | 0x320..=0x6A3 if arm9 => {
+                if matches!(mask, 0x0000_FFFF | 0xFFFF_0000) {
+                    self.keep(side, offset, value, mask);
+                }
+                self.gpu3d.write(offset, value, mask);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Writes the bytes `mask` covers (0x00FF, 0xFF00 or both) of the
+    /// halfword register at `offset`.
+    fn write_half(&mut self, side: Side, offset: u32, value: u16, mask: u16) {
+        if Self::keeps(side, offset, mask) {
+            self.keep_half(side, offset, value, mask);
+        }
+        let merge = |old: u16| (old & !mask) | (value & mask);
+        match offset {
+            0x004 => {
+                let io = self.cpu_mut(side);
+                io.dispstat = merge(io.dispstat) & 0xFFB8;
+            }
+            0x100..=0x10F => {
+                let index = ((offset - 0x100) / 4) as usize;
+                if offset.is_multiple_of(4) {
+                    let timers = &mut self.cpu_mut(side).timers;
+                    let reload = merge(timers.reload(index));
+                    timers.write_reload(index, reload);
+                } else {
+                    let now = self.now(side);
+                    let timers = &mut self.cpu_mut(side).timers;
+                    let control = merge(timers.control(index));
+                    let requested = timers.write_control(index, control, now);
+                    self.request_timer_interrupts(side, requested);
+                    self.schedule_timer(side, index);
                 }
             }
+            0x132 => {
+                let io = self.cpu_mut(side);
+                io.keycnt = merge(io.keycnt);
+                self.check_keypad_interrupt();
+            }
+            // IPCSYNC: bit 13 sends the interrupt when it is written; it
+            // does not read back, so nothing else sends it again.
+            0x180 => {
+                let sync = merge(self.ipc.read_sync(side));
+                let raised = self.ipc.write_sync(side, sync);
+                self.raise(raised);
+            }
+            // IPCFIFOCNT: its settings are kept; bit 3 flushes and bit 14
+            // acknowledges an error only when a one is written to them.
+            0x184 => {
+                let settings = self.ipc.read_control(side) & FIFO_SETTINGS;
+                let raised = self.ipc.write_control(side, merge(settings));
+                self.raise(raised);
+            }
+            // IME is bit 0.
+            0x208 => {
+                if mask & 1 != 0 {
+                    self.cpu_mut(side).interrupts.master_enable = value & 1 != 0;
+                }
+            }
+            0x210 | 0x212 => {
+                let shift = (offset & 2) * 8;
+                let interrupts = &mut self.cpu_mut(side).interrupts;
+                let mask = u32::from(mask) << shift;
+                interrupts.enable =
+                    (interrupts.enable & !mask) | (u32::from(value) << shift & mask);
+            }
+            // IF: only the ones written clear flags.
+            0x214 | 0x216 => self
+                .cpu_mut(side)
+                .interrupts
+                .acknowledge(u32::from(value & mask) << ((offset & 2) * 8)),
+            // The game card belongs to one CPU at a time; the other's
+            // writes reach nothing.
+            0x1A0..=0x1BB => {
+                if self.cart_owner() == side {
+                    self.write_cart_half(side, offset, value, mask);
+                }
+            }
+            _ => match side {
+                Side::Arm9 => self.write_arm9_half(offset, value, mask),
+                Side::Arm7 => self.write_arm7_half(offset, value, mask),
+            },
+        }
+    }
+
+    /// The game card's halfword registers, from the CPU it belongs to.
+    /// (ROMCTRL is a word: [`Self::write_word`].)
+    fn write_cart_half(&mut self, side: Side, offset: u32, value: u16, mask: u16) {
+        match offset {
+            0x1A0 => {
+                let control = (self.cart.spi_control() & !mask) | (value & mask);
+                self.cart.write_spi_control(control);
+            }
+            // AUXSPIDATA is the low byte: writing it sends it.
+            0x1A2 => {
+                if mask & 0x00FF != 0
+                    && let Some(cycles) = self.cart.write_spi_data(value as u8)
+                {
+                    self.schedule_after(side, cycles, Event::CartSpiDone);
+                }
+            }
+            // The command's eight bytes.
+            0x1A8..=0x1AF => {
+                let index = (offset - 0x1A8) as usize;
+                if mask & 0x00FF != 0 {
+                    self.cart.write_command(index, value as u8);
+                }
+                if mask & 0xFF00 != 0 {
+                    self.cart.write_command(index + 1, (value >> 8) as u8);
+                }
+            }
+            // The encryption seeds are not used.
+            _ => {}
+        }
+    }
+
+    /// The halfword registers only the ARM9 has.
+    fn write_arm9_half(&mut self, offset: u32, value: u16, mask: u16) {
+        let merge = |old: u16| (old & !mask) | (value & mask);
+        match offset {
+            0x000..=0x05F | 0x06C..=0x06F => {
+                self.engine_a.write_register_bytes(offset, value, mask);
+            }
+            0x1000..=0x106F => {
+                self.engine_b
+                    .write_register_bytes(offset - 0x1000, value, mask);
+            }
+            0x204 => self.exmemcnt = merge(self.exmemcnt),
+            // VRAMCNT and WRAMCNT are bytes, the lower address first.
+            0x240..=0x249 => {
+                if mask & 0x00FF != 0 {
+                    self.write_vram_control(offset, value as u8);
+                }
+                if mask & 0xFF00 != 0 {
+                    self.write_vram_control(offset + 1, (value >> 8) as u8);
+                }
+            }
+            // POSTFLG is the low byte.
+            0x300 => {
+                if mask & 0x00FF != 0 {
+                    self.arm9.postflg = (value & 3) as u8;
+                }
+            }
+            0x304 => self.powcnt1 = merge(self.powcnt1) & 0x820F,
+            _ => {}
+        }
+    }
+
+    /// Writes the VRAMCNT or WRAMCNT byte at `offset`.
+    fn write_vram_control(&mut self, offset: u32, value: u8) {
+        match offset {
+            0x247 => self.wramcnt = value & 3,
+            0x240..=0x249 => self.vram.set_control(vram_bank(offset), value),
+            _ => {}
+        }
+    }
+
+    /// The halfword registers only the ARM7 has.
+    fn write_arm7_half(&mut self, offset: u32, value: u16, mask: u16) {
+        let merge = |old: u16| (old & !mask) | (value & mask);
+        match offset {
+            0x138 => {
+                let now = self.now(Side::Arm7);
+                let pins = merge(self.rtc.pins());
+                self.rtc.write(pins, now);
+            }
+            0x1C0 => {
+                let control = merge(self.spi.control());
+                self.spi.write_control(control);
+            }
+            // SPIDATA is the low byte: writing it sends it.
+            0x1C2 => {
+                if mask & 0x00FF != 0 {
+                    let now = self.now(Side::Arm7);
+                    if let Some(cycles) = self.spi.write_data(value as u8, now) {
+                        self.schedule_after(Side::Arm7, cycles, Event::SpiDone);
+                    }
+                }
+            }
+            // Two bytes. POSTFLG can only be set, and only from the BIOS;
+            // HALTCNT above it halts on 2 and sleeps on 3 (treated as
+            // halting).
+            0x300 => {
+                if mask & 0x00FF != 0 {
+                    self.arm7.postflg |= (value & 1) as u8;
+                }
+                if mask & 0xFF00 != 0 && value >> 14 >= 2 {
+                    self.arm7.halted = true;
+                }
+            }
+            0x304 => {
+                self.powcnt2 = merge(self.powcnt2) & 3;
+                let now = self.now(Side::Arm7);
+                self.wifi.set_enabled(self.powcnt2 & 2 != 0, now);
+                self.sync_wifi();
+            }
+            // Sound registers are words that take the bytes written.
             0x400..=0x51F => {
                 let shift = (offset & 2) * 8;
                 self.sound.write(
                     offset & !3 & 0x1FF,
                     u32::from(value) << shift,
-                    0xFFFF << shift,
+                    u32::from(mask) << shift,
                 );
             }
             _ => {}
-        }
-    }
-
-    pub(crate) fn io7_write_8(&mut self, address: u32, value: u8) {
-        if address >= 0x0400_2000 {
-            return;
-        }
-        let offset = address & IO_PAGE;
-        match offset {
-            0x214..=0x217 => self
-                .arm7
-                .interrupts
-                .acknowledge(u32::from(value) << ((offset - 0x214) * 8)),
-            // POSTFLG can only be set, and only from the BIOS.
-            0x300 => self.arm7.postflg |= value & 1,
-            // Sound registers take single bytes without touching neighbours.
-            0x400..=0x51F => {
-                let shift = (offset & 3) * 8;
-                self.sound.write(
-                    offset & !3 & 0x1FF,
-                    u32::from(value) << shift,
-                    0xFF << shift,
-                );
-            }
-            // HALTCNT: 2 halts, 3 sleeps (treated as halting).
-            0x301 => {
-                if value >> 6 >= 2 {
-                    self.arm7.halted = true;
-                }
-            }
-            _ => {
-                // As on the ARM9.
-                let half = if kept_by_its_device(Side::Arm7, offset) {
-                    self.io7_page_16(address & !1)
-                } else {
-                    self.raw_16(Side::Arm7, offset & !1)
-                };
-                let mut bytes = half.to_le_bytes();
-                bytes[(offset & 1) as usize] = value;
-                self.io7_write_16(address & !1, u16::from_le_bytes(bytes));
-            }
         }
     }
 
@@ -573,13 +669,10 @@ impl Hardware {
     /// the IPC FIFO or game card data ports at 0x04100000, whose reads
     /// take a word out.
     pub(crate) fn peek_io(&self, side: Side, address: u32) -> Option<u8> {
-        if address >= 0x0400_2000 {
+        if address >= PAGE_END {
             return None;
         }
-        Some(match side {
-            Side::Arm9 => self.io9_page_8(address),
-            Side::Arm7 => (self.io7_page_16(address & !1) >> ((address & 1) * 8)) as u8,
-        })
+        Some(self.page_8(side, address))
     }
 
     /// Starts DMA channels on both CPUs waiting for `timing`.

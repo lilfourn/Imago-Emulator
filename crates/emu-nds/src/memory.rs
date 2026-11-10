@@ -212,13 +212,7 @@ impl Hardware {
             }
             Place::Arm9Bios(index) => word(&self.arm9_bios, index),
             Place::Arm7Bios(index) => word(&self.arm7_bios, index),
-            Place::Io => {
-                if arm9 {
-                    self.io9_read_32(address)
-                } else {
-                    self.io7_read_32(address)
-                }
-            }
+            Place::Io => self.io_read_32(side(arm9), address),
             Place::GbaRom => {
                 u32::from(self.gba_slot.read_rom(address))
                     | u32::from(self.gba_slot.read_rom(address | 2)) << 16
@@ -247,13 +241,7 @@ impl Hardware {
             Place::Vram(region, offset) => self.vram.read_16(region, offset),
             Place::Arm9Bios(index) => half(&self.arm9_bios, index),
             Place::Arm7Bios(index) => half(&self.arm7_bios, index),
-            Place::Io => {
-                if arm9 {
-                    self.io9_read_16(address)
-                } else {
-                    self.io7_read_16(address)
-                }
-            }
+            Place::Io => self.io_read_16(side(arm9), address),
             Place::GbaRom => self.gba_slot.read_rom(address),
             Place::GbaRam => u16::from(self.gba_slot.read_ram(unaligned)) * 0x0101,
             Place::GbaDeselected => 0,
@@ -273,13 +261,7 @@ impl Hardware {
             Place::Vram(region, offset) => self.vram.read_8(region, offset),
             Place::Arm9Bios(index) => self.arm9_bios[index],
             Place::Arm7Bios(index) => self.arm7_bios[index],
-            Place::Io => {
-                if arm9 {
-                    self.io9_read_8(address)
-                } else {
-                    self.io7_read_8(address)
-                }
-            }
+            Place::Io => self.io_read_8(side(arm9), address),
             Place::GbaRom => (self.gba_slot.read_rom(address & !1) >> ((address & 1) * 8)) as u8,
             Place::GbaRam => self.gba_slot.read_ram(address),
             Place::GbaDeselected => 0,
@@ -310,11 +292,7 @@ impl Hardware {
                 self.vram.write_16(region, offset + 2, (value >> 16) as u16);
             }
             Place::Io => {
-                if arm9 {
-                    self.io9_write_32(address, value);
-                } else {
-                    self.io7_write_32(address, value);
-                }
+                self.io_write_32(side(arm9), address, value);
             }
             Place::GbaRom => {
                 let now = self.now(side(arm9));
@@ -349,11 +327,7 @@ impl Hardware {
             Place::Oam(offset) => self.write_oam(offset, value),
             Place::Vram(region, offset) => self.vram.write_16(region, offset, value),
             Place::Io => {
-                if arm9 {
-                    self.io9_write_16(address, value);
-                } else {
-                    self.io7_write_16(address, value);
-                }
+                self.io_write_16(side(arm9), address, value);
             }
             Place::GbaRom => {
                 let now = self.now(side(arm9));
@@ -376,11 +350,7 @@ impl Hardware {
             Place::Arm7Wram(index) => self.arm7_wram[index] = value,
             Place::Vram(region, offset) => self.vram.write_8(region, offset, value),
             Place::Io => {
-                if arm9 {
-                    self.io9_write_8(address, value);
-                } else {
-                    self.io7_write_8(address, value);
-                }
+                self.io_write_8(side(arm9), address, value);
             }
             Place::GbaRam => self.gba_slot.write_ram(address, value),
             // Palette, OAM, the GBA slot's ROM and wifi ignore byte writes.
