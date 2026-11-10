@@ -280,9 +280,8 @@ impl Huffman {
                 return;
             }
             let node = u32::from(bus.read_8(self.node, Access::NONSEQUENTIAL));
-            let one = (bits >> bit) & 1;
-            let child = (self.node & !1).wrapping_add((node & 0x3F) * 2 + 2 + one);
-            if node & (0x80 >> one) == 0 {
+            let (child, is_symbol) = huffman_child(self.node, node, (bits >> bit) & 1);
+            if !is_symbol {
                 self.node = child;
                 continue;
             }
@@ -295,6 +294,104 @@ impl Huffman {
                 self.symbols_bits -= 8;
             }
             self.node = self.tree.wrapping_add(1);
+        }
+    }
+}
+
+/// One step of a walk through a Huffman tree: from the node at `address`,
+/// whose byte is `node`, bit `one` (0 or 1) of the bitstream leads to the
+/// child at the address returned, which is a symbol if the flag returned
+/// is set and another node if not.
+fn huffman_child(address: u32, node: u32, one: u32) -> (u32, bool) {
+    let child = (address & !1).wrapping_add((node & 0x3F) * 2 + 2 + one);
+    (child, node & (0x80 >> one) != 0)
+}
+
+/// Bitstream words [`huffman`] follows beyond one for each byte it has to
+/// write: room for the longest codes a tree can hold (256 bits) in data
+/// of a few bytes.
+pub const HUFFMAN_SLACK_WORDS: u32 = 64;
+
+/// HuffUnComp, as the GBA has it: the data at `source` (header, tree and
+/// bitstream, read where they lie) unpacked to `destination` in whole
+/// words, all in one call. GBATEK's Huffman format has symbols of 4 or 8
+/// bits. Any size that fills the 32-bit words it writes exactly is
+/// decoded (1 and 2 bits too); data that names another size, which never
+/// fills a word, is left alone.
+///
+/// A node's children lie after it, so a walk only moves on through the
+/// tree. One that leaves the tree (the size byte says where it ends) can
+/// reach no symbol the data holds, and ends the call.
+///
+/// The bitstream followed is at most a word for each byte to write, and
+/// [`HUFFMAN_SLACK_WORDS`] more. That is four times what the bytes take
+/// unpacked, and a Huffman code is at worst as long as fixed-width
+/// symbols; without it, a stream of a tree's longest codes for the
+/// longest length would keep one call going for minutes.
+///
+/// # How this differs from [`Huffman`]
+///
+/// The two decode the same format, but they are two BIOS functions, and
+/// the emulated ones were written apart. They share the step through the
+/// tree and are otherwise kept as they were, since no difference between
+/// them has been checked against a console:
+///
+/// - This one reads a node's byte when the walk arrives at it, and the
+///   root's again after each symbol, before it writes a finished word;
+///   [`Huffman`] reads a node when the next bit needs it. The reads are
+///   of the same bytes, in another order around the bitstream's words and
+///   the writes, and this one ends on a read of the root that the other
+///   never makes.
+/// - This one decodes only sizes that fill a word, and ORs a symbol's
+///   whole byte into the word; [`Huffman`] takes any size below 16 and
+///   keeps only the symbol's own bits.
+/// - This one ends when a walk leaves the tree or its bitstream outruns
+///   the budget above; [`Huffman`] follows a walk wherever it leads, a
+///   word for each call the game's own function answers.
+pub fn huffman<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32) {
+    let header = bus.read_32(source, Access::NONSEQUENTIAL);
+    let symbol_bits = header & 0xF;
+    if !matches!(symbol_bits, 1 | 2 | 4 | 8) {
+        return;
+    }
+    let mut remaining = header >> 8;
+    let tree_size = u32::from(bus.read_8(source.wrapping_add(4), Access::NONSEQUENTIAL));
+    let root = source.wrapping_add(5);
+    // The nodes' bytes, from the root to the bitstream.
+    let tree_length = tree_size * 2 + 1;
+    source = root.wrapping_add(tree_length);
+    let mut node = root;
+    let mut node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
+    let mut out = 0u32;
+    let mut out_bits = 0;
+    let mut words = remaining + HUFFMAN_SLACK_WORDS;
+    while remaining > 0 && words > 0 {
+        words -= 1;
+        let bits = bus.read_32(source, Access::NONSEQUENTIAL);
+        source = source.wrapping_add(4);
+        for bit in (0..32).rev() {
+            let (next, is_symbol) = huffman_child(node, node_value, (bits >> bit) & 1);
+            if next.wrapping_sub(root) >= tree_length {
+                return;
+            }
+            node = next;
+            node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
+            if is_symbol {
+                out |= node_value << out_bits;
+                out_bits += symbol_bits;
+                node = root;
+                node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
+                if out_bits >= 32 {
+                    bus.write_32(destination, out, Access::NONSEQUENTIAL);
+                    destination = destination.wrapping_add(4);
+                    out = 0;
+                    out_bits = 0;
+                    remaining = remaining.saturating_sub(4);
+                    if remaining == 0 {
+                        return;
+                    }
+                }
+            }
         }
     }
 }
