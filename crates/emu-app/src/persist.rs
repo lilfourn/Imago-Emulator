@@ -45,6 +45,8 @@ use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use emu_core::System;
 
@@ -350,11 +352,22 @@ pub struct GameLock {
     _file: File,
 }
 
+/// How long [`GameLock::take`] keeps asking for a lock that is held before
+/// it says so. A program this app starts holds a copy of every file the
+/// app has open, a running game's lock among them, from the moment it is
+/// made until it turns into the program it was started as. A game closed
+/// and opened again inside that moment finds its own lock still held, by
+/// no one who is playing it. The moment is far shorter than this.
+const LOCK_LET_GO_WITHIN: Duration = Duration::from_millis(250);
+
+/// How long [`GameLock::take`] waits between asking twice.
+const LOCK_ASKED_EVERY: Duration = Duration::from_millis(5);
+
 impl GameLock {
     /// Takes the lock on the game whose battery save is `save`, with its
     /// lock file in `folder`, which is made if it is not there. Returns
     /// `None` if another copy of the app, or another game running in this
-    /// one, holds it.
+    /// one, holds it and keeps it for [`LOCK_LET_GO_WITHIN`].
     ///
     /// # Errors
     ///
@@ -378,10 +391,16 @@ impl GameLock {
             .truncate(false)
             .write(true)
             .open(folder.join(name))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(fs::TryLockError::WouldBlock) => Ok(None),
-            Err(fs::TryLockError::Error(error)) => Err(error),
+        let asked = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Some(Self { _file: file })),
+                Err(fs::TryLockError::WouldBlock) if asked.elapsed() < LOCK_LET_GO_WITHIN => {
+                    thread::sleep(LOCK_ASKED_EVERY);
+                }
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(error)) => return Err(error),
+            }
         }
     }
 }
@@ -1376,6 +1395,68 @@ mod tests {
         // A lock folder that cannot be made is an error, not a held game.
         fs::write(dir.join("file"), b"in the way").expect("write");
         assert!(GameLock::take(&dir.join("file/Locks"), &save).is_err());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_lock_let_go_a_moment_after_it_is_asked_for_is_taken() {
+        let dir = temp_dir("game-lock-moment");
+        let locks = dir.join("data/Locks");
+        let save = dir.join("games/Pokemon.sav");
+        // As a program the app has just started holds its copy of the
+        // lock for a moment after the game is closed.
+        let held = GameLock::take(&locks, &save)
+            .expect("usable")
+            .expect("free");
+        let holder = thread::spawn(move || {
+            thread::sleep(LOCK_LET_GO_WITHIN / 5);
+            drop(held);
+        });
+        assert!(GameLock::take(&locks, &save).expect("usable").is_some());
+        holder.join().expect("let go");
+
+        // One that is kept is still refused, after the wait and no more.
+        let held = GameLock::take(&locks, &save).expect("usable");
+        assert!(held.is_some());
+        let asked = Instant::now();
+        assert!(GameLock::take(&locks, &save).expect("usable").is_none());
+        assert!(asked.elapsed() >= LOCK_LET_GO_WITHIN);
+        assert!(asked.elapsed() < LOCK_LET_GO_WITHIN * 20);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The case itself: before the lock waited, a few openings in every
+    /// hundred were refused here.
+    #[cfg(unix)]
+    #[test]
+    fn a_game_closed_while_programs_start_opens_again_at_once() {
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = temp_dir("game-lock-programs");
+        let locks = dir.join("data/Locks");
+        let save = dir.join("games/Pokemon.sav");
+        let done = Arc::new(AtomicBool::new(false));
+        let starters: Vec<_> = (0..2)
+            .map(|_| {
+                let done = Arc::clone(&done);
+                thread::spawn(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        Command::new("true").status().expect("started");
+                    }
+                })
+            })
+            .collect();
+        // Each is let go as the next line asks for it again.
+        let refused = (0..500)
+            .filter(|_| GameLock::take(&locks, &save).expect("usable").is_none())
+            .count();
+        done.store(true, Ordering::Relaxed);
+        for starter in starters {
+            starter.join().expect("stopped");
+        }
+        assert_eq!(refused, 0, "of 500 openings");
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
