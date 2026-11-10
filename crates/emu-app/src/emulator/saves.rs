@@ -781,6 +781,63 @@ mod tests {
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
+    #[test]
+    fn a_state_of_another_system_rom_or_version_is_refused_in_the_words_it_always_was() {
+        let dir = empty_dir("refused");
+        let (mut core, mut saves) = game(&dir, 1);
+        core.poke(0, 1, 5);
+        // What a state of this game's says it is for.
+        let ours = emu_state::Header {
+            system: System::Gba,
+            state_version: 1,
+            rom_crc32: 0,
+        };
+        let mut refused = |header: emu_state::Header| {
+            fs::write(
+                dir.join("game.ss2"),
+                emu_state::encode(&header, &[9, 9], None),
+            )
+            .expect("write");
+            let error = saves.load_state(&mut *core, 2).expect_err("refused");
+            assert_eq!(bytes(&*core), (1, 5), "nothing of it was loaded");
+            format!("{error:#}")
+        };
+        let other_system = emu_state::Header {
+            system: System::Nds,
+            ..ours
+        };
+        assert_eq!(refused(other_system), "it is a nds state");
+        let other_rom = emu_state::Header {
+            rom_crc32: 0xA,
+            ..ours
+        };
+        assert_eq!(refused(other_rom), "it was saved from a different ROM");
+        let other_version = emu_state::Header {
+            state_version: 4,
+            ..ours
+        };
+        assert_eq!(
+            refused(other_version),
+            "it is state version 4, this build reads 1"
+        );
+        // The first of the three is the one said: the system, then the ROM.
+        let nothing_right = emu_state::Header {
+            system: System::Gb,
+            state_version: 4,
+            rom_crc32: 0xA,
+        };
+        assert_eq!(refused(nothing_right), "it is a gb state");
+        let rom_and_version = emu_state::Header {
+            system: System::Gba,
+            ..nothing_right
+        };
+        assert_eq!(
+            refused(rom_and_version),
+            "it was saved from a different ROM"
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
     /// The files in `dir` whose names start with `game.sav`, with what
     /// they hold.
     fn saves_in(dir: &Path) -> Vec<(String, Vec<u8>)> {

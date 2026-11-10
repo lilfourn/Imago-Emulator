@@ -1109,6 +1109,39 @@ mod tests {
     }
 
     #[test]
+    fn a_state_file_is_ours_whatever_its_version_and_however_it_ends() {
+        let dir = temp_dir("state-found-start");
+        let game = GameFiles::of(&dir.join("platinum.nds"));
+        let states = StateFiles::new(game, false, None, System::Nds, 0xA);
+        let path = states.path(1);
+        // Another build's state of the same game is still this session's.
+        let header = emu_state::Header {
+            system: System::Nds,
+            state_version: 9,
+            rom_crc32: 0xA,
+        };
+        let mut state = emu_state::encode(&header, b"payload", None);
+        fs::write(&path, &state).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Ours);
+        // So is one in a container this build cannot load, one cut short
+        // after its header, and one whose bytes have gone bad: only the
+        // header's start is looked at.
+        state[8] = 7;
+        fs::write(&path, &state).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Ours);
+        fs::write(&path, &state[..20]).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Ours);
+        fs::write(&path, &state[..19]).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Another);
+        // A system this build does not know is not this session's.
+        let mut unknown = state_of(System::Nds, 0xA);
+        unknown[10] = 0xEE;
+        fs::write(&path, &unknown).expect("write");
+        assert_eq!(states.found(&path).expect("read"), Found::Another);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
     fn states_left_under_the_shared_names_still_load_in_the_session_that_made_them() {
         let dir = temp_dir("state-former");
         let game = GameFiles::of(&dir.join("platinum.nds"));
