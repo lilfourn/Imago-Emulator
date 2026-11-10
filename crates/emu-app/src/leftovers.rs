@@ -7,27 +7,30 @@
 //!
 //! Each is locked while the app works in it. The system lets go of a lock
 //! when its process ends, crashed or killed, so one that no running app
-//! holds is what an app left behind; at launch, those are removed, and on
-//! macOS any `tar` still unpacking into one is stopped. On quit, the app
+//! holds is what an app left behind; at launch, those are removed, once
+//! any program the dead app left working in one, such as a `tar` still
+//! unpacking, is stopped and gone (macOS and Linux). On quit, the app
 //! removes its own, and stops the programs it started to work in them
 //! (see [`WorkFolder::spawn`]). Files the app writes for a moment and keeps
 //! no lock on, such as a save's `….tmp`, are removed once they are old,
 //! where they are in a folder of the app's own.
 
 #[cfg(unix)]
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, Command, ExitStatus, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
@@ -317,7 +320,7 @@ const REMOVAL_PASSES: u32 = 8;
 /// link when a later entry of its archive has the same name, so whoever
 /// made the archive chooses what is swapped and, with enough entries,
 /// when; and a program left by an app that died can still be unpacking
-/// when its folder is removed, at a later launch ([`remove_left_behind`]).
+/// when its folder is removed (see [`stop_programs_left_working_in`]).
 ///
 /// The standard library's `remove_dir_all` had this fault: it is
 /// CVE-2022-21658, fixed in Rust 1.58.1, and this follows that fix. A
@@ -760,19 +763,44 @@ pub fn remove_left_behind(folders: &[PathBuf]) -> u64 {
     }
 }
 
+/// How a program still working in a folder left behind is stopped at
+/// launch: killed outright. A `tar` the app started ignores being asked
+/// to stop (SIGTERM), which it inherits from the app.
+const STOP: &str = "KILL";
+
+/// How long such a program is given to be gone once it is stopped. A
+/// killed program is gone at once, unless the system is holding it.
+const GONE_WITHIN: Duration = Duration::from_secs(3);
+
+/// [`remove_left_behind`], with the work folders and patches looked for in
+/// `temp`.
 fn remove_left_behind_in(temp: &Path, folders: &[PathBuf]) -> u64 {
+    remove_left_behind_stopping(temp, folders, STOP, GONE_WITHIN)
+}
+
+/// [`remove_left_behind_in`], sending the programs still working in a
+/// folder left behind `signal` and giving them `within` to be gone
+/// ([`stop_programs_left_working_in`]).
+fn remove_left_behind_stopping(
+    temp: &Path,
+    folders: &[PathBuf],
+    signal: &str,
+    within: Duration,
+) -> u64 {
     let mut freed = 0;
     if let Ok(entries) = fs::read_dir(temp) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let path = entry.path();
+            // Removed only once nothing works in it: no running app,
+            // which would hold its lock, and no program that an app
+            // which died left running.
             if KINDS.iter().any(|kind| name.starts_with(kind))
                 && path.is_dir()
                 && !in_use(&path.join(LOCK), &path)
+                && stop_programs_left_working_in(&path, signal, within)
             {
-                #[cfg(target_os = "macos")]
-                stop_tar_left_unpacking_into(&path);
                 freed += size(&path);
                 remove_folder(&path);
             }
@@ -888,43 +916,117 @@ fn changed_lately(path: &Path) -> bool {
         .is_ok_and(|modified| modified.elapsed().map_or(true, |age| age < STALE))
 }
 
-/// Stops any `tar` still unpacking into the folder at `path`, left behind
-/// by an app that crashed or was killed: one whose command line names it.
-/// It is killed outright, as a `tar` the app started ignores being asked to
-/// stop (SIGTERM), which it inherits from the app.
+/// Stops the programs still working in the folder at `path`, which an app
+/// that crashed or was killed left behind, and waits until they are gone.
+/// Says whether none is left, which is when the folder may be removed.
 ///
-/// macOS only: there the app unpacks `.7z` and `.rar` files with `tar`,
-/// which the system gives to launchd, still running, when the app dies,
-/// and nothing ties its life to the app's. Elsewhere `.7z` files unpack in
-/// the app itself, and only a `.rar` file, or a `.7z` one packed in a way
-/// the app can't unpack, has a program unpack it (see `archive`): a crashed
-/// app's one runs to its end, and what it wrote is removed at a later
-/// launch.
-#[cfg(target_os = "macos")]
-fn stop_tar_left_unpacking_into(path: &Path) {
+/// A program counts if its command line names the folder. Those the app
+/// starts to work in one are all given its path: `tar -C <folder>`, `7z
+/// -o<folder>`, `unrar … <folder>/`, and the randomizer's Java. Nothing
+/// ties their lives to the app's: when it dies the system takes them
+/// over, still running, and an unpacker writes on to the end of its
+/// archive. A folder removed under one would be left half there, and it
+/// is a program still unpacking that makes a name in it a folder one
+/// moment and a link the next ([`remove_tree`]).
+///
+/// Each is sent `signal`, and then they are looked for again, every
+/// [`WAIT`], until none is found or `within` has passed. If one is still
+/// there (the system may hold a killed program for a while, and another
+/// user's cannot be stopped at all), or nothing can say (no `pgrep`), the
+/// folder is left as it is, for a later launch to try again.
+///
+/// The folder's name is read from disk and goes into a pattern, so only
+/// one the app gives a folder is used: letters, digits and dashes, which
+/// need no escaping. Any other could be a pattern of its own, and stop
+/// the programs of a folder in use. A folder with such a name is not one
+/// the app made, nothing can say what works in it, and it is left.
+#[cfg(unix)]
+fn stop_programs_left_working_in(path: &Path, signal: &str, within: Duration) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
+        return false;
     };
-    // The name is read from disk and goes into a pattern, so only one the
-    // app gives a folder is used: letters, digits and dashes, which need
-    // no escaping. Any other could be a pattern of its own, and stop the
-    // `tar` of a folder in use. It ends the folder's path, before a slash
-    // or a space.
     if !name
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
-        return;
+        return false;
     }
-    Command::new("/usr/bin/pkill")
-        .arg("-KILL")
-        .arg("-f")
-        .arg(format!("^/usr/bin/tar .*{name}([/ ]|$)"))
+    // Not this app itself: started on a file in the folder, it is at work
+    // in it, and the folder stays.
+    if names_folder(std::env::args_os(), name) {
+        return false;
+    }
+    // The name as a whole part of a path: after a slash, and before one, a
+    // space or the end.
+    let pattern = format!("/{name}([/ ]|$)");
+    let started = Instant::now();
+    loop {
+        match any_program_runs(&pattern) {
+            Some(false) => return true,
+            Some(true) if started.elapsed() < within => {}
+            _ => return false,
+        }
+        system_tool("pkill")
+            .arg(format!("-{signal}"))
+            .arg("-f")
+            .arg(&pattern)
+            .status()
+            .ok();
+        thread::sleep(WAIT);
+    }
+}
+
+/// Windows: no program is looked for or stopped, and the folder may be
+/// removed. An unpacker a crashed app left runs on to its end there, as
+/// it always has. The standard library's removal, which Windows keeps,
+/// follows no link whatever such a program does meanwhile, and a folder
+/// it cannot remove while a file in it is open is tried again at a later
+/// launch.
+#[cfg(not(unix))]
+fn stop_programs_left_working_in(_: &Path, _: &str, _: Duration) -> bool {
+    true
+}
+
+/// Whether one of `arguments`, a program's command line, names the folder
+/// called `name`: has that name in it after a slash.
+#[cfg(unix)]
+fn names_folder(arguments: impl IntoIterator<Item = OsString>, name: &str) -> bool {
+    let named = format!("/{name}");
+    arguments
+        .into_iter()
+        .any(|argument| argument.to_string_lossy().contains(&named))
+}
+
+/// Whether a program is running whose command line matches `pattern`;
+/// `None` if `pgrep` cannot be run, or cannot say.
+///
+/// A program that was killed and is not yet collected by the one that
+/// started it counts as gone: it has no command line any more, and writes
+/// nothing.
+#[cfg(unix)]
+fn any_program_runs(pattern: &str) -> Option<bool> {
+    let found = system_tool("pgrep").arg("-f").arg(pattern).status().ok()?;
+    match found.code()? {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
+}
+
+/// `pgrep` or `pkill`: macOS's own, by its full path, and elsewhere the
+/// one on `PATH` (on Linux, procps's). What it prints is not kept.
+#[cfg(unix)]
+fn system_tool(name: &str) -> Command {
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new(Path::new("/usr/bin").join(name))
+    } else {
+        Command::new(name)
+    };
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok();
+        .stderr(Stdio::null());
+    command
 }
 
 /// For tests: a chain of `levels` folders at `dir/name`, each called
@@ -1145,12 +1247,14 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "Linux, Windows: only macOS unpacks .7z files with tar, and stops a crashed app's one at launch"
+        not(unix),
+        ignore = "Windows: no program an app left running is stopped there"
     )]
     fn a_tar_still_unpacking_into_a_folder_left_behind_is_stopped() {
         let temp = temp_dir("tar");
-        let left = temp.join(format!("ds-emulator-unpack-{}-99", std::process::id()));
+        // A number no work folder of this test run gets: any program
+        // whose command line names the folder is stopped.
+        let left = temp.join(format!("ds-emulator-unpack-{}-900003", std::process::id()));
         fs::create_dir_all(&left).expect("folder");
         fs::write(left.join(LOCK), b"").expect("lock");
         // A `tar` unpacking into it, which waits for the rest of its
@@ -1166,12 +1270,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(tar.try_wait().expect("waits").is_none(), "tar waits");
         remove_left_behind_in(&temp, &[]);
-        let stopped = (0..50).any(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            tar.try_wait().expect("waits").is_some()
-        });
+        // Gone by the time the clean-up is done, not a while after.
+        let stopped = tar.try_wait().expect("waits").is_some();
         if !stopped {
             tar.kill().ok();
+            tar.wait().ok();
         }
         assert!(stopped, "tar is stopped");
         assert!(!left.exists());
@@ -1180,8 +1283,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "Linux, Windows: only macOS unpacks .7z files with tar, and stops a crashed app's one at launch"
+        not(unix),
+        ignore = "Windows: no program an app left running is stopped there"
     )]
     fn a_folder_s_name_is_never_a_pattern_that_stops_another_folder_s_tar() {
         let temp = temp_dir("tar-pattern");
@@ -1200,7 +1303,7 @@ mod tests {
             (lock, tar)
         };
         let (lock, mut tar) =
-            lock_and_tar(&format!("ds-emulator-unpack-{}-97", std::process::id()));
+            lock_and_tar(&format!("ds-emulator-unpack-{}-900004", std::process::id()));
         // Left behind beside it, a folder whose name, read as a pattern,
         // takes in every folder the app unpacks into.
         let odd = temp.join("ds-emulator-unpack-.*");
@@ -1213,10 +1316,9 @@ mod tests {
         tar.kill().ok();
         tar.wait().ok();
         assert!(still_unpacking, "the tar of a folder in use was stopped");
-        assert!(
-            !odd.exists(),
-            "the folder left behind is removed all the same"
-        );
+        // The app gives no folder such a name, and with no pattern to be
+        // had nothing can say whether a program works in it: it stays.
+        assert!(odd.join(LOCK).exists(), "the folder is left as it is");
         drop(lock);
         fs::remove_dir_all(&temp).ok();
     }
@@ -1619,6 +1721,151 @@ mod tests {
                 assert!(!work.exists(), "round {round}: removed");
             }
             remove_folder(&temp);
+        }
+    }
+
+    /// A stand-in program a test started, stopped when the test is done
+    /// with it, however it ends.
+    #[cfg(unix)]
+    struct StandIn(Child);
+
+    #[cfg(unix)]
+    impl StandIn {
+        /// Whether it has ended.
+        fn is_gone(&mut self) -> bool {
+            self.0.try_wait().expect("waits").is_some()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StandIn {
+        fn drop(&mut self) {
+            self.0.kill().ok();
+            self.0.wait().ok();
+        }
+    }
+
+    /// A program still writing into the folder `left`, as an unpacker
+    /// that a crashed app started would be: its command line names the
+    /// folder, it ignores SIGTERM as one the app starts does, and it
+    /// writes file after file for as long as it lives. It is one process,
+    /// so nothing of it lives on to write once it is stopped. Returns
+    /// once it has written its first file.
+    #[cfg(unix)]
+    fn writing_into(left: &Path) -> StandIn {
+        let writes = "trap '' TERM; n=0; while :; do : > \"$0/written-$n\"; n=$((n+1)); \
+                      wait=0; while [ $wait -lt 2000 ]; do wait=$((wait+1)); done; done";
+        fs::remove_file(left.join("written-0")).ok();
+        let program = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(writes)
+            .arg(left)
+            .spawn()
+            .expect("runs");
+        let program = StandIn(program);
+        let written = (0..250).any(|_| {
+            thread::sleep(WAIT);
+            left.join("written-0").exists()
+        });
+        assert!(written, "it writes into the folder");
+        program
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: no program an app left running is stopped there"
+    )]
+    fn a_program_still_writing_into_a_folder_left_behind_is_stopped_before_it_is_removed() {
+        #[cfg(unix)]
+        {
+            let temp = temp_dir("writing");
+            // A number no work folder of this test run gets.
+            let left = temp.join(format!("ds-emulator-unpack-{}-900001", std::process::id()));
+            fs::create_dir_all(&left).expect("folder");
+            fs::write(left.join(LOCK), b"").expect("lock");
+            // Stopping alone: the program is gone when that is said, and
+            // nothing is removed by it.
+            let mut program = writing_into(&left);
+            assert!(
+                stop_programs_left_working_in(&left, STOP, GONE_WITHIN),
+                "none is left"
+            );
+            assert!(program.is_gone(), "gone when that is said");
+            assert!(left.join(LOCK).exists(), "stopping removes nothing");
+            let written = fs::read_dir(&left).expect("folder").count();
+            thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                fs::read_dir(&left).expect("folder").count(),
+                written,
+                "nothing is written once it is gone"
+            );
+            // And at launch: stopped first, then the folder goes, whole.
+            let mut program = writing_into(&left);
+            remove_left_behind_in(&temp, &[]);
+            assert!(
+                program.is_gone(),
+                "it is stopped, and gone, when the clean-up is done"
+            );
+            assert!(!left.exists(), "and the folder removed whole");
+            remove_folder(&temp);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: no program an app left running is stopped there"
+    )]
+    fn a_folder_left_behind_whose_program_cannot_be_stopped_is_left_as_it_is() {
+        #[cfg(unix)]
+        {
+            let temp = temp_dir("unstoppable");
+            let left = temp.join(format!("ds-emulator-unpack-{}-900002", std::process::id()));
+            fs::create_dir_all(&left).expect("folder");
+            fs::write(left.join(LOCK), b"").expect("lock");
+            fs::write(left.join("Game.3ds"), [0; 1000]).expect("game");
+            // The stand-in ignores SIGTERM. Sent that in place of SIGKILL,
+            // it stands for a program that cannot be stopped: another
+            // user's, or one the system is holding.
+            let mut program = writing_into(&left);
+            let patience = Duration::from_millis(300);
+            let freed = remove_left_behind_stopping(&temp, &[], "TERM", patience);
+            assert!(!program.is_gone(), "it runs on");
+            assert_eq!(freed, 0, "nothing is removed");
+            assert!(
+                left.join(LOCK).exists() && left.join("Game.3ds").exists(),
+                "the folder is left as it is"
+            );
+            // A later launch tries again, and stops it as the app does.
+            remove_left_behind_in(&temp, &[]);
+            assert!(program.is_gone(), "stopped");
+            assert!(!left.exists(), "and then the folder goes");
+            remove_folder(&temp);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: no program an app left running is stopped there"
+    )]
+    fn the_app_started_on_a_file_in_a_folder_left_behind_is_not_stopped() {
+        #[cfg(unix)]
+        {
+            let name = "ds-emulator-unpack-7-0";
+            let line =
+                |arguments: &[&str]| arguments.iter().map(OsString::from).collect::<Vec<_>>();
+            let on_a_game_in_it = line(&["ds-emulator", "/tmp/ds-emulator-unpack-7-0/Game.gb"]);
+            assert!(names_folder(on_a_game_in_it, name));
+            let on_a_game_elsewhere = line(&["ds-emulator", "/home/me/Games/Game.gb"]);
+            assert!(!names_folder(on_a_game_elsewhere, name));
+            assert!(!names_folder(line(&["ds-emulator"]), name));
+            // This test's own command line names no such folder, so the
+            // check lets the rest go ahead: nothing runs, and that is said.
+            let left = std::env::temp_dir()
+                .join(format!("ds-emulator-unpack-{}-900005", std::process::id()));
+            assert!(stop_programs_left_working_in(&left, STOP, GONE_WITHIN));
         }
     }
 
