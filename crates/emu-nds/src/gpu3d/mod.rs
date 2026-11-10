@@ -63,28 +63,25 @@ impl Gpu3d {
         Self::default()
     }
 
-    /// A 32-bit write at `offset` from 0x04000000: DISP3DCNT (0x060),
-    /// 0x320–0x3BF, GXFIFO, the command ports, GXSTAT and DISP_1DOT_DEPTH.
+    /// A 32-bit write, for tests.
+    #[cfg(test)]
     pub(crate) fn write_register(&mut self, offset: u32, value: u32) {
         self.write(offset & !3, value, u32::MAX);
     }
 
-    /// A 16-bit write. GXFIFO and the command ports take only 32-bit
-    /// writes; a narrower one counts as a whole word.
+    /// A 16-bit write, for tests.
+    #[cfg(test)]
     pub(crate) fn write_register_16(&mut self, offset: u32, value: u16) {
         let shift = (offset & 2) * 8;
         self.write(offset & !3, u32::from(value) << shift, 0xFFFF << shift);
     }
 
-    /// An 8-bit write; see [`Self::write_register_16`].
-    pub(crate) fn write_register_8(&mut self, offset: u32, value: u8) {
-        let shift = (offset & 3) * 8;
-        self.write(offset & !3, u32::from(value) << shift, 0xFF << shift);
-    }
-
-    /// Writes the bytes of `value` selected by `mask` to the word at
-    /// `offset`.
-    fn write(&mut self, offset: u32, value: u32, mask: u32) {
+    /// Writes the bytes of `value` selected by `mask` (a byte, a halfword
+    /// or all four) to the word at `offset` from 0x04000000: DISP3DCNT
+    /// (0x060), 0x320–0x3BF, GXFIFO, the command ports, GXSTAT and
+    /// DISP_1DOT_DEPTH. GXFIFO and the command ports take only 32-bit
+    /// writes; a narrower one counts as a whole word.
+    pub(crate) fn write(&mut self, offset: u32, value: u32, mask: u32) {
         match offset {
             0x060 => {
                 let (value, mask) = (value as u16, mask as u16);

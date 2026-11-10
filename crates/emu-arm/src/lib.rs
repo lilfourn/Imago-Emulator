@@ -22,11 +22,16 @@
 //! instruction, the same data accesses and internal cycles), which is not
 //! the ARM946E-S's five-stage pipeline and caches but keeps time moving in
 //! proportion; its new instructions spend the internal cycles GBATEK lists.
+//!
+//! [`bios`] holds the BIOS routines the two consoles have in common
+//! (BitUnPack, the Diff unfilters and the decompressors), for the cores'
+//! emulated BIOSes: they need nothing of a console but its [`Bus`].
 
 mod alu;
 mod arm;
 mod arm9;
 mod armv5;
+pub mod bios;
 pub mod cp15;
 mod describe;
 mod disasm;

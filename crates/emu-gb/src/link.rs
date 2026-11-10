@@ -7,9 +7,8 @@
 //! M-cycles to send at the normal rate and 32 at the CGB's fast rate, so the
 //! slice delay never shows. See `docs/decisions/0004-linked-cores.md`.
 
-use emu_core::debug::{
-    CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome, Stop, Stops,
-};
+use emu_core::debug::{RunOutcome, Stop, Stops};
+use emu_core::pair::{self, Pair, Uneven};
 use emu_core::{
     Core, CoreInfo, Debugger, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
     StateError, StereoSample,
@@ -21,11 +20,6 @@ use crate::{CYCLES_PER_FRAME, Gb, INFO, Machine};
 
 /// Clock cycles each machine runs before the cable is serviced.
 const SLICE_CYCLES: u64 = 32;
-
-/// The furthest apart a state's two clocks may be. A slice leaves them
-/// an instruction apart, and the console behind runs until it has caught
-/// up, so a state that put them years apart would hold a frame as long.
-const CLOCKS_APART_MOST: u64 = 1 << 24;
 
 const SCREENS: [ScreenSize; 2] = [ScreenSize::new(160, 144), ScreenSize::new(160, 144)];
 
@@ -115,22 +109,11 @@ impl Linked {
         let mut second = Vec::new();
         self.players[0].machine.bus.apu.drain_samples(&mut first);
         self.players[1].machine.bus.apu.drain_samples(&mut second);
-        let mix = |a: i16, b: i16| ((i32::from(a) + i32::from(b)) / 2) as i16;
-        audio.extend(
-            first
-                .iter()
-                .zip(&second)
-                .map(|(a, b)| [mix(a[0], b[0]), mix(a[1], b[1])]),
-        );
+        pair::mix(&first, &second, Uneven::Dropped, audio);
         RunOutcome {
             frame_done: true,
             stop: None,
         }
-    }
-
-    /// The machine CPU `cpu` (also its player number) is in.
-    fn player(&self, cpu: usize) -> &Gb {
-        &self.players[cpu.min(1)]
     }
 
     /// Hands each started transfer to the other machine.
@@ -187,10 +170,7 @@ impl Core for Linked {
         // Both are checked before either console is changed.
         first.bus.fits(&self.players[0].machine.bus)?;
         second.bus.fits(&self.players[1].machine.bus)?;
-        payload::check(
-            first.bus.cycles().abs_diff(second.bus.cycles()) <= CLOCKS_APART_MOST,
-            "the linked state's two consoles are not at the same time",
-        )?;
+        pair::clocks_together(first.bus.cycles(), second.bus.cycles())?;
         first.bus.take_media_from(&mut self.players[0].machine.bus);
         second.bus.take_media_from(&mut self.players[1].machine.bus);
         self.players[0].machine = first;
@@ -205,13 +185,11 @@ impl Core for Linked {
 
     /// Each player has one cartridge: cartridge `i` is player `i`'s.
     fn backup_generation(&self, cartridge: usize) -> Option<u64> {
-        self.players.get(cartridge)?.backup_generation(0)
+        pair::backup_generation(&self.players, cartridge)
     }
 
     fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
-        if let Some(gb) = self.players.get(cartridge) {
-            gb.save_backup(0, out);
-        }
+        pair::save_backup(&self.players, cartridge, out);
     }
 
     fn peek(&self, player: usize, address: u32) -> Option<u8> {
@@ -247,49 +225,19 @@ impl Core for Linked {
 }
 
 /// CPU `i` is player `i`'s; each is debugged as a lone Game Boy's.
-impl Debugger for Linked {
-    fn cpus(&self) -> Vec<CpuInfo> {
-        (0..self.players.len())
-            .map(|player| CpuInfo {
-                name: "SM83",
-                player,
-            })
-            .collect()
+impl Pair for Linked {
+    type Console = Gb;
+    const CPUS_EACH: usize = 1;
+
+    fn consoles(&self) -> &[Gb; 2] {
+        &self.players
     }
 
-    fn registers(&self, cpu: usize) -> Vec<Register> {
-        Debugger::registers(self.player(cpu), 0)
+    fn consoles_mut(&mut self) -> &mut [Gb; 2] {
+        &mut self.players
     }
 
-    fn status(&self, cpu: usize) -> String {
-        self.player(cpu).status(0)
-    }
-
-    fn pc(&self, cpu: usize) -> u32 {
-        self.player(cpu).pc(0)
-    }
-
-    fn read(&self, cpu: usize, address: u32) -> Option<u8> {
-        Debugger::read(self.player(cpu), 0, address)
-    }
-
-    fn write(&mut self, cpu: usize, address: u32, value: u8) -> bool {
-        Debugger::write(&mut self.players[cpu.min(1)], 0, address, value)
-    }
-
-    fn disassemble(&self, cpu: usize, address: u32) -> Instruction {
-        self.player(cpu).disassemble(0, address)
-    }
-
-    fn io_registers(&self, cpu: usize) -> Vec<IoRegister> {
-        self.player(cpu).io_registers(0)
-    }
-
-    fn graphics(&self, cpu: usize, request: &GraphicsRequest) -> Option<Graphics> {
-        self.player(cpu).graphics(0, request)
-    }
-
-    fn run_until(
+    fn run_pair_until(
         &mut self,
         inputs: &[Input],
         audio: &mut Vec<StereoSample>,

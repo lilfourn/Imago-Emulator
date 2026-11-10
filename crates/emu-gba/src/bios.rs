@@ -10,17 +10,21 @@
 //!
 //! A call runs to its end in one step of the emulation thread, where the
 //! real BIOS spends CPU time with interrupts still served. So no function
-//! here loops on a number the game supplies without a bound, and each
-//! bound is one the real function has: CpuSet's 21-bit count, BitUnPack's
-//! 16-bit length, a decompressor's 24-bit length (each turn of its loop
-//! produces at least a byte). The two without one of their own stop at a
-//! limit set here: the affine functions' count at [`AFFINE_SETS_MAX`],
-//! and Huffman's bitstream at a word for each byte it unpacks to (see
-//! [`huffman`]). Addresses wrap around the 32-bit bus, as the CPU's own
-//! do.
+//! here loops on a number the game supplies without a bound. CpuSet's is
+//! its 21-bit count, and the affine functions, which have none of their
+//! own, stop at [`AFFINE_SETS_MAX`]. BitUnPack, the Diff unfilters and the
+//! decompressors are [`emu_arm::bios`]'s, the DS's too, and that module
+//! says what bounds each. Addresses wrap around the 32-bit bus, as the
+//! CPU's own do.
+//!
+//! The shared functions reach memory only through the bus, in the order
+//! this BIOS's own did, so a call takes the time on the bus it always
+//! took. CpuSet and CpuFastSet stay here: this BIOS does not align the
+//! addresses it is given, and the DS's does.
 
 use std::f64::consts::PI;
 
+use emu_arm::bios::{self, WaitingByte, bit_unpack, diff_unfilter, huffman, run_length};
 use emu_arm::{Access, Bus as _, Cpu, Mode, psr};
 
 use crate::bus::Bus;
@@ -619,255 +623,13 @@ fn obj_affine_set(bus: &mut Bus, mut source: u32, mut destination: u32, count: u
     }
 }
 
-/// BitUnPack: widens packed pixels, adding an offset to non-zero (or all)
-/// values.
-fn bit_unpack(bus: &mut Bus, mut source: u32, mut destination: u32, info: u32) {
-    let length = u32::from(bus.read_16(info, Access::NONSEQUENTIAL));
-    let source_width = u32::from(bus.read_8(info.wrapping_add(2), Access::NONSEQUENTIAL));
-    let destination_width = u32::from(bus.read_8(info.wrapping_add(3), Access::NONSEQUENTIAL));
-    let offset_field = bus.read_32(info.wrapping_add(4), Access::NONSEQUENTIAL);
-    let offset = offset_field & 0x7FFF_FFFF;
-    let offset_zero = offset_field >> 31 != 0;
-    if !matches!(source_width, 1 | 2 | 4 | 8)
-        || !matches!(destination_width, 1 | 2 | 4 | 8 | 16 | 32)
-    {
-        return;
-    }
-    let mut out = 0u32;
-    let mut out_bits = 0;
-    for _ in 0..length {
-        let byte = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-        source = source.wrapping_add(1);
-        for shift in (0..8).step_by(source_width as usize) {
-            let mut value = (byte >> shift) & ((1 << source_width) - 1);
-            if value != 0 || offset_zero {
-                value = value.wrapping_add(offset);
-            }
-            out |= value.checked_shl(out_bits).unwrap_or(0);
-            out_bits += destination_width;
-            if out_bits >= 32 {
-                bus.write_32(destination, out, Access::NONSEQUENTIAL);
-                destination = destination.wrapping_add(4);
-                out = 0;
-                out_bits = 0;
-            }
-        }
-    }
-}
-
-/// Writes decompressed bytes, either byte by byte (WRAM functions) or
-/// a halfword at a time (VRAM functions, which cannot write single bytes).
-struct Output {
-    destination: u32,
-    halfwords: bool,
-    pending: Option<u8>,
-}
-
-impl Output {
-    fn push(&mut self, bus: &mut Bus, byte: u8) {
-        if !self.halfwords {
-            bus.write_8(self.destination, byte, Access::NONSEQUENTIAL);
-            self.destination = self.destination.wrapping_add(1);
-            return;
-        }
-        match self.pending.take() {
-            None => self.pending = Some(byte),
-            Some(low) => {
-                bus.write_16(
-                    self.destination,
-                    u16::from_le_bytes([low, byte]),
-                    Access::NONSEQUENTIAL,
-                );
-                self.destination = self.destination.wrapping_add(2);
-            }
-        }
-    }
-
-    /// The byte written `distance` bytes back, for LZ77 back-references.
-    fn earlier(&self, bus: &mut Bus, distance: u32) -> u8 {
-        let written = self
-            .destination
-            .wrapping_add(u32::from(self.pending.is_some()));
-        let address = written.wrapping_sub(distance);
-        if self.halfwords && self.pending.is_some() && distance == 1 {
-            return self.pending.unwrap_or(0);
-        }
-        bus.read_8(address, Access::NONSEQUENTIAL)
-    }
-}
-
-/// LZ77UnComp: GBATEK's LZ77 format with a 4-byte header.
-fn lz77(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source = source.wrapping_add(4);
-    let mut out = Output {
-        destination,
-        halfwords,
-        pending: None,
-    };
-    while remaining > 0 {
-        let flags = bus.read_8(source, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(1);
-        for bit in (0..8).rev() {
-            if remaining == 0 {
-                break;
-            }
-            if flags & (1 << bit) == 0 {
-                let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source = source.wrapping_add(1);
-                out.push(bus, byte);
-                remaining -= 1;
-            } else {
-                let high = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-                let low = u32::from(bus.read_8(source.wrapping_add(1), Access::NONSEQUENTIAL));
-                source = source.wrapping_add(2);
-                let length = (high >> 4) + 3;
-                let distance = ((high & 0xF) << 8 | low) + 1;
-                for _ in 0..length.min(remaining) {
-                    let byte = out.earlier(bus, distance);
-                    out.push(bus, byte);
-                    remaining -= 1;
-                }
-            }
-        }
-    }
-}
-
-/// RLUnComp: runs of repeated bytes and literal stretches.
-fn run_length(bus: &mut Bus, mut source: u32, destination: u32, halfwords: bool) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source = source.wrapping_add(4);
-    let mut out = Output {
-        destination,
-        halfwords,
-        pending: None,
-    };
-    while remaining > 0 {
-        let flag = bus.read_8(source, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(1);
-        if flag & 0x80 == 0 {
-            for _ in 0..(u32::from(flag & 0x7F) + 1).min(remaining) {
-                let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-                source = source.wrapping_add(1);
-                out.push(bus, byte);
-                remaining -= 1;
-            }
-        } else {
-            let byte = bus.read_8(source, Access::NONSEQUENTIAL);
-            source = source.wrapping_add(1);
-            for _ in 0..(u32::from(flag & 0x7F) + 3).min(remaining) {
-                out.push(bus, byte);
-                remaining -= 1;
-            }
-        }
-    }
-}
-
-/// Bitstream words HuffUnComp follows beyond one for each byte it has to
-/// write: room for the longest codes a tree can hold (256 bits) in data
-/// of a few bytes.
-const HUFFMAN_SLACK_WORDS: u32 = 64;
-
-/// HuffUnComp: GBATEK's Huffman format, whose symbols are 4 or 8 bits.
-/// Any size that fills the 32-bit words it writes exactly is decoded (1
-/// and 2 bits too); data that names another size, which never fills a
-/// word, is left alone.
-///
-/// A node's children lie after it, so a walk only moves on through the
-/// tree. One that leaves the tree (the size byte says where it ends) can
-/// reach no symbol the data holds, and ends the call.
-///
-/// The bitstream followed is at most a word for each byte to write, and
-/// [`HUFFMAN_SLACK_WORDS`] more. That is four times what the bytes take
-/// unpacked, and a Huffman code is at worst as long as fixed-width
-/// symbols; without it, a stream of a tree's longest codes for the
-/// longest length would keep one call going for minutes.
-fn huffman(bus: &mut Bus, mut source: u32, mut destination: u32) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let symbol_bits = header & 0xF;
-    if !matches!(symbol_bits, 1 | 2 | 4 | 8) {
-        return;
-    }
-    let mut remaining = header >> 8;
-    let tree_size = u32::from(bus.read_8(source.wrapping_add(4), Access::NONSEQUENTIAL));
-    let root = source.wrapping_add(5);
-    // The nodes' bytes, from the root to the bitstream.
-    let tree_length = tree_size * 2 + 1;
-    source = root.wrapping_add(tree_length);
-    let mut node = root;
-    let mut node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
-    let mut out = 0u32;
-    let mut out_bits = 0;
-    let mut words = remaining + HUFFMAN_SLACK_WORDS;
-    while remaining > 0 && words > 0 {
-        words -= 1;
-        let bits = bus.read_32(source, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(4);
-        for bit in (0..32).rev() {
-            let right = bits & (1 << bit) != 0;
-            let next = (node & !1).wrapping_add((node_value & 0x3F) * 2 + 2 + u32::from(right));
-            if next.wrapping_sub(root) >= tree_length {
-                return;
-            }
-            let terminal = node_value & if right { 0x40 } else { 0x80 } != 0;
-            node = next;
-            node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
-            if terminal {
-                out |= node_value << out_bits;
-                out_bits += symbol_bits;
-                node = root;
-                node_value = u32::from(bus.read_8(node, Access::NONSEQUENTIAL));
-                if out_bits >= 32 {
-                    bus.write_32(destination, out, Access::NONSEQUENTIAL);
-                    destination = destination.wrapping_add(4);
-                    out = 0;
-                    out_bits = 0;
-                    remaining = remaining.saturating_sub(4);
-                    if remaining == 0 {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Diff8bitUnFilter and Diff16bitUnFilter: running sums.
-fn diff_unfilter(
-    bus: &mut Bus,
-    mut source: u32,
-    mut destination: u32,
-    sixteen: bool,
-    halfwords: bool,
-) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source = source.wrapping_add(4);
-    if sixteen {
-        let mut sum = 0u16;
-        while remaining >= 2 {
-            sum = sum.wrapping_add(bus.read_16(source, Access::NONSEQUENTIAL));
-            bus.write_16(destination, sum, Access::NONSEQUENTIAL);
-            source = source.wrapping_add(2);
-            destination = destination.wrapping_add(2);
-            remaining -= 2;
-        }
-        return;
-    }
-    let mut out = Output {
-        destination,
-        halfwords,
-        pending: None,
-    };
-    let mut sum = 0u8;
-    while remaining > 0 {
-        sum = sum.wrapping_add(bus.read_8(source, Access::NONSEQUENTIAL));
-        out.push(bus, sum);
-        source = source.wrapping_add(1);
-        remaining -= 1;
-    }
+/// LZ77UnComp, a byte at a time (Wram) or two (Vram): GBATEK's LZ77
+/// format with a 4-byte header. A reference of distance 1 made while the
+/// first byte of a halfword waits for its second copies that byte
+/// ([`WaitingByte::Copied`]), which is what this BIOS has always done; the
+/// DS's does otherwise.
+fn lz77(bus: &mut Bus, source: u32, destination: u32, halfwords: bool) {
+    bios::lz77(bus, source, destination, halfwords, WaitingByte::Copied);
 }
 
 /// MidiKey2Freq: the sample rate that plays a wave at a MIDI key.
@@ -879,6 +641,8 @@ fn midi_key_to_frequency(bus: &mut Bus, wave: u32, key: u8, fine: u8) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use emu_arm::bios::HUFFMAN_SLACK_WORDS;
+
     use super::*;
 
     fn ram_bus() -> Bus {
@@ -1055,6 +819,36 @@ mod tests {
             |bus: &mut Bus, word: u32| bus.read_32(0x0300_0000 + word * 4, Access::NONSEQUENTIAL);
         assert_eq!(written(&mut bus, words - 1), 0x5A5A_5A5A);
         assert_eq!(written(&mut bus, words), 0);
+    }
+
+    /// The Vram function writes halfwords, so the first byte of each
+    /// waits for the second. A reference of distance 1 made while one
+    /// waits copies that byte, as if it were written already: "Q", then
+    /// three bytes from distance 1, is "QQQQ". (The DS's function reads
+    /// what the destination held before instead. GBATEK says only that
+    /// these functions need a distance above 1, not what a GBA does with
+    /// 1, so each console keeps what it did.)
+    #[test]
+    fn halfword_lz77_at_distance_1_copies_the_byte_that_is_waiting() {
+        let mut bus = ram_bus();
+        bus.write_32(0x0200_0100, 0xE3E2_E1E0, Access::NONSEQUENTIAL);
+        // Header: type 0x10, 4 bytes. Flags 0b0100_0000: a literal, then
+        // a reference of length 3 at distance 1.
+        bus.write_32(0x0200_0000, 0x0000_0410, Access::NONSEQUENTIAL);
+        bus.write_32(0x0200_0004, 0x0000_5140, Access::NONSEQUENTIAL);
+        lz77(&mut bus, 0x0200_0000, 0x0200_0100, true);
+        assert_eq!(bus.read_32(0x0200_0100, Access::NONSEQUENTIAL), 0x5151_5151);
+
+        // From further back the bytes are read from memory, and a byte at
+        // a time nothing waits: "XYZ", then three from distance 2.
+        bus.write_32(0x0200_0010, 0x0000_0610, Access::NONSEQUENTIAL);
+        bus.write_32(0x0200_0014, 0x5A59_5810, Access::NONSEQUENTIAL);
+        bus.write_16(0x0200_0018, 0x0100, Access::NONSEQUENTIAL);
+        for halfwords in [true, false] {
+            lz77(&mut bus, 0x0200_0010, 0x0200_0200, halfwords);
+            assert_eq!(bus.read_32(0x0200_0200, Access::NONSEQUENTIAL), 0x595A_5958);
+            assert_eq!(bus.read_16(0x0200_0204, Access::NONSEQUENTIAL), 0x595A);
+        }
     }
 
     /// The call a game makes, through the machine: data whose header

@@ -133,6 +133,12 @@ impl Rtc {
         }
     }
 
+    /// 0x04000138 as last written: the pins the CPU drives and their
+    /// directions.
+    pub(crate) fn pins(&self) -> u16 {
+        self.pins
+    }
+
     /// Writes 0x04000138 at cycle `now`.
     pub(crate) fn write(&mut self, value: u16, now: u64) {
         self.sync(now);

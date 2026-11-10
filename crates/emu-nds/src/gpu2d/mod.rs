@@ -133,6 +133,13 @@ impl Engine2d {
         self.registers.write(offset, value);
     }
 
+    /// Writes the bytes `mask` covers (0x00FF, 0xFF00 or both) of the
+    /// register halfword at `offset`; the other byte stays as the
+    /// register holds it.
+    pub(crate) fn write_register_bytes(&mut self, offset: u32, value: u16, mask: u16) {
+        self.registers.write_bytes(offset, value, mask);
+    }
+
     /// The palette halfword at `offset` within this engine's 1 KiB.
     pub(crate) fn read_palette(&self, offset: u32) -> u16 {
         self.palette[(offset as usize & 0x3FF) / 2]

@@ -90,6 +90,17 @@ impl Timers {
         }
     }
 
+    /// TMxCNT_L as written: timer `index`'s reload value, which does not
+    /// read back (the counter does).
+    pub(crate) fn reload(&self, index: usize) -> u16 {
+        self.timers[index].reload
+    }
+
+    /// TMxCNT_H of timer `index`.
+    pub(crate) fn control(&self, index: usize) -> u16 {
+        self.timers[index].control
+    }
+
     /// Writes TMxCNT_L, the reload value, of timer `index`.
     pub(crate) fn write_reload(&mut self, index: usize, value: u16) {
         self.timers[index].reload = value;
