@@ -13,6 +13,7 @@ mod core;
 pub mod debug;
 mod input;
 mod media;
+pub mod pair;
 mod rom_patch;
 mod system;
 pub mod test_pattern;

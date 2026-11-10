@@ -10,6 +10,7 @@
 use emu_core::debug::{
     CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome, Stop, Stops,
 };
+use emu_core::pair::{self, Uneven};
 use emu_core::{
     Core, CoreInfo, Debugger, Frame, Input, LoadError, Media, MemoryRegion, RomPatch, ScreenSize,
     StateError, StereoSample,
@@ -115,13 +116,7 @@ impl Linked {
         let mut second = Vec::new();
         self.players[0].machine.bus.apu.drain_samples(&mut first);
         self.players[1].machine.bus.apu.drain_samples(&mut second);
-        let mix = |a: i16, b: i16| ((i32::from(a) + i32::from(b)) / 2) as i16;
-        audio.extend(
-            first
-                .iter()
-                .zip(&second)
-                .map(|(a, b)| [mix(a[0], b[0]), mix(a[1], b[1])]),
-        );
+        pair::mix(&first, &second, Uneven::Dropped, audio);
         RunOutcome {
             frame_done: true,
             stop: None,
