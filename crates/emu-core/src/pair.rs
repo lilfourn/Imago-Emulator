@@ -5,14 +5,15 @@
 //! what crosses the link between them) is each system's own and stays in
 //! its crate. The plumbing around that is the same for every system and
 //! is here: mixing the two consoles' sound into one stream, checking that
-//! a saved pair's two clocks belong together, and sending what a debugger
-//! asks about a CPU to the console that CPU is in ([`Pair`]).
+//! a saved pair's two clocks belong together, finding the cartridge a
+//! battery save is asked of, and sending what a debugger asks about a CPU
+//! to the console that CPU is in ([`Pair`]).
 
 use crate::debug::{
     CpuInfo, Graphics, GraphicsRequest, Instruction, IoRegister, Register, RunOutcome,
     ScheduledEvent, Stops,
 };
-use crate::{Debugger, Input, StateError, StereoSample};
+use crate::{Core, Debugger, Input, StateError, StereoSample};
 
 /// Two consoles run as one core, for the debugger: a core that implements
 /// this is a [`Debugger`] whose CPUs are player 0's console's and then
@@ -147,6 +148,22 @@ pub fn clocks_together(first: u64, second: u64) -> Result<(), StateError> {
     }
 }
 
+/// [`Core::backup_generation`] for a pair. Each console has one cartridge
+/// of its own, so the pair's cartridge `i` is player `i`'s, which that
+/// console knows as its cartridge 0; there is none past the second. (A
+/// DS's GBA slot, its own cartridge 1, is out of a pair's reach.)
+pub fn backup_generation<C: Core>(consoles: &[C; 2], cartridge: usize) -> Option<u64> {
+    consoles.get(cartridge)?.backup_generation(0)
+}
+
+/// [`Core::save_backup`] for a pair, its cartridges numbered as for
+/// [`backup_generation`]: appends nothing past the second.
+pub fn save_backup<C: Core>(consoles: &[C; 2], cartridge: usize, out: &mut Vec<u8>) {
+    if let Some(console) = consoles.get(cartridge) {
+        console.save_backup(0, out);
+    }
+}
+
 /// What [`mix`] does with the samples one console made and the other did
 /// not, when a frame leaves them with different counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +259,54 @@ mod tests {
         fn run_until(&mut self, _: &[Input], _: &mut Vec<StereoSample>, _: &Stops) -> RunOutcome {
             unreachable!("a pair runs its consoles itself")
         }
+    }
+
+    /// A console whose one cartridge's battery save is this byte, written
+    /// as many times. It has no second cartridge to be asked about.
+    struct Cartridge(u8);
+
+    impl Core for Cartridge {
+        fn info(&self) -> crate::CoreInfo {
+            unreachable!()
+        }
+
+        fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {}
+
+        fn screens(&self) -> &[crate::Frame] {
+            &[]
+        }
+
+        fn reset(&mut self) {}
+
+        fn save_state(&self, _: &mut Vec<u8>) {}
+
+        fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
+            Ok(())
+        }
+
+        fn backup_generation(&self, cartridge: usize) -> Option<u64> {
+            assert_eq!(cartridge, 0, "a console's own cartridge is its first");
+            Some(u64::from(self.0))
+        }
+
+        fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
+            assert_eq!(cartridge, 0, "a console's own cartridge is its first");
+            out.push(self.0);
+        }
+    }
+
+    #[test]
+    fn a_pairs_cartridge_is_the_player_of_that_numbers_own() {
+        let consoles = [Cartridge(5), Cartridge(9)];
+        assert_eq!(backup_generation(&consoles, 0), Some(5));
+        assert_eq!(backup_generation(&consoles, 1), Some(9));
+        assert_eq!(backup_generation(&consoles, 2), None);
+
+        let mut saves = vec![1];
+        save_backup(&consoles, 1, &mut saves);
+        save_backup(&consoles, 0, &mut saves);
+        save_backup(&consoles, 2, &mut saves);
+        assert_eq!(saves, [1, 9, 5], "appended, and nothing past the second");
     }
 
     /// Two [`Fake`]s with `EACH` CPUs each.

@@ -185,13 +185,11 @@ impl Core for Linked {
 
     /// Each player has one cartridge: cartridge `i` is player `i`'s.
     fn backup_generation(&self, cartridge: usize) -> Option<u64> {
-        self.players.get(cartridge)?.backup_generation(0)
+        pair::backup_generation(&self.players, cartridge)
     }
 
     fn save_backup(&self, cartridge: usize, out: &mut Vec<u8>) {
-        if let Some(gb) = self.players.get(cartridge) {
-            gb.save_backup(0, out);
-        }
+        pair::save_backup(&self.players, cartridge, out);
     }
 
     fn peek(&self, player: usize, address: u32) -> Option<u8> {
