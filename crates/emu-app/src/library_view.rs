@@ -168,8 +168,9 @@ struct Pictures {
 }
 
 /// A game's menu, opened by a right click on it: what the library knows
-/// of the game, and what can be done with it.
-struct GameMenu {
+/// of the game, and what can be done with it. Not the menu over a running
+/// game, which is `game_menu::GameMenu`.
+struct ContextMenu {
     /// The game's ROM file, or folder.
     path: PathBuf,
     /// Where it was opened, in the window.
@@ -313,7 +314,7 @@ pub struct LibraryView {
     /// Whether the store shows in the library's place.
     store_open: bool,
     /// The game menu, while it is open.
-    menu: Option<GameMenu>,
+    menu: Option<ContextMenu>,
     /// The game last taken out of the library and where it was, for ⌘Z
     /// to put back.
     removed: Option<(usize, Game)>,
@@ -837,7 +838,7 @@ impl LibraryView {
             }
         });
         self.selected = Some(path.clone());
-        self.menu = Some(GameMenu {
+        self.menu = Some(ContextMenu {
             path,
             at,
             facts: None,
