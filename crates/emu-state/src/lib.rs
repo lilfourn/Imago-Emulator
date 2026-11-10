@@ -54,6 +54,30 @@ pub struct Header {
 }
 
 impl Header {
+    /// How many bytes from the start of a container [`Header::peek`]
+    /// reads.
+    pub const PEEK_LEN: usize = 20;
+
+    /// The header of the container that begins with `start`, read without
+    /// the rest of the file: for telling whose state a file is. Nothing
+    /// else of the container is checked, neither its version, its length
+    /// nor its checksum, so loading it still takes [`decode`].
+    ///
+    /// `None` if `start` is shorter than [`Header::PEEK_LEN`], does not
+    /// begin a save state, or names a system this build does not know.
+    #[must_use]
+    pub fn peek(start: &[u8]) -> Option<Self> {
+        let start = start.get(..Self::PEEK_LEN)?;
+        if &start[..8] != MAGIC {
+            return None;
+        }
+        Some(Self {
+            system: System::from_tag(start[10])?,
+            state_version: u16::from_le_bytes([start[12], start[13]]),
+            rom_crc32: u32::from_le_bytes([start[16], start[17], start[18], start[19]]),
+        })
+    }
+
     /// Checks that a state with this header goes with the game being
     /// played, for which a state saved now would have the header
     /// `playing`: the same system, the same ROM, and the state version
@@ -324,6 +348,38 @@ mod tests {
             rom_and_version.check(&HEADER),
             Err(Mismatch::Rom { .. })
         ));
+    }
+
+    #[test]
+    fn a_header_is_peeked_from_the_start_of_a_container() {
+        for system in System::ALL {
+            let header = Header { system, ..HEADER };
+            let bytes = encode(&header, b"machine state", None);
+            assert_eq!(Header::peek(&bytes), Some(header));
+            // The start is enough, whatever follows it.
+            assert_eq!(Header::peek(&bytes[..Header::PEEK_LEN]), Some(header));
+            assert_eq!(Header::peek(&bytes[..Header::PEEK_LEN - 1]), None);
+        }
+        // The same fields `decode` reads, of a version 1 container too.
+        let mut old = Vec::new();
+        old.extend_from_slice(MAGIC);
+        old.extend_from_slice(&1u16.to_le_bytes());
+        old.extend_from_slice(&[System::Gb.tag(), 0, 7, 0, 0, 0]);
+        old.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+        assert_eq!(
+            Header::peek(&old),
+            Some(Header {
+                system: System::Gb,
+                state_version: 7,
+                rom_crc32: 0x1234_5678,
+            })
+        );
+        let mut bytes = encode(&HEADER, b"machine state", None);
+        bytes[0] ^= 1;
+        assert_eq!(Header::peek(&bytes), None, "not a save state");
+        let mut bytes = encode(&HEADER, b"machine state", None);
+        bytes[10] = 0xEE;
+        assert_eq!(Header::peek(&bytes), None, "an unknown system");
     }
 
     #[test]
