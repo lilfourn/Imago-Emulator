@@ -688,6 +688,10 @@ fn stop_tar_left_unpacking_into(path: &Path) {
 /// the chain so far and the chain renamed into it. So it can be deeper
 /// than any path can name, which no `create_dir_all` could make, and
 /// which is how `tar` leaves one, changing folder as it goes.
+///
+/// Each rename is the one that tries again on Windows, where a virus
+/// scanner may still have the new game open, which holds every folder
+/// above it in place for a moment.
 #[cfg(test)]
 pub(crate) fn deep_tree(dir: &Path, levels: usize, name: &str) -> PathBuf {
     let mut chain = dir.join("level-0");
@@ -696,11 +700,11 @@ pub(crate) fn deep_tree(dir: &Path, levels: usize, name: &str) -> PathBuf {
     for level in 1..levels {
         let outer = dir.join(format!("level-{level}"));
         fs::create_dir(&outer).expect("outer");
-        fs::rename(&chain, outer.join(name)).expect("moved in");
+        persist::rename(&chain, &outer.join(name)).expect("moved in");
         chain = outer;
     }
     let top = dir.join(name);
-    fs::rename(&chain, &top).expect("named");
+    persist::rename(&chain, &top).expect("named");
     top
 }
 
