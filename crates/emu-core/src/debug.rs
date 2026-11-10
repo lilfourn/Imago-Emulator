@@ -22,6 +22,7 @@
 use crate::{Frame, Input, StereoSample};
 
 pub mod draw;
+pub mod gba_video;
 
 /// A CPU a debugger can inspect and stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

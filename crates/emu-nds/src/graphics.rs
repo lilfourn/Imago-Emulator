@@ -11,6 +11,7 @@
 //! OAM, palette RAM and the registers, the way the 2D engines decode them.
 
 use emu_core::debug::draw::{BACKGROUND, blank, fill_checker, fill_rect, set_pixel};
+use emu_core::debug::gba_video::{Flips, draw_tile, read_tile, tile_texel};
 use emu_core::debug::{Graphics, GraphicsRequest, GraphicsView};
 use emu_core::{Frame, rgb};
 
@@ -374,77 +375,6 @@ fn tile_palette(palette: u8, eight_bit: bool) -> (usize, String) {
             OBJ_PALETTE + (palette - 16) * 16,
             format!("OBJ palette {}", palette - 16),
         ),
-    }
-}
-
-// ----- Tiles -------------------------------------------------------------
-
-/// One 8×8 tile's palette indices, row by row.
-type Tile = [[u8; 8]; 8];
-
-/// Which ways a tile or sprite is mirrored.
-#[derive(Debug, Clone, Copy, Default)]
-struct Flips {
-    /// Left to right.
-    x: bool,
-    /// Top to bottom.
-    y: bool,
-}
-
-impl Flips {
-    /// The flips in a text map entry: bit 10 horizontal, bit 11 vertical
-    /// (GBATEK, "LCD VRAM BG Screen Data Format").
-    fn from_entry(entry: u16) -> Self {
-        Self {
-            x: entry & (1 << 10) != 0,
-            y: entry & (1 << 11) != 0,
-        }
-    }
-}
-
-/// Palette index of texel (`x`, `y`) (each 0–7) of the tile at `address`.
-/// 4bpp tiles are 32 bytes, two pixels per byte with the left one in the
-/// low nibble; 8bpp tiles are 64 bytes, one per pixel (GBATEK, "LCD VRAM
-/// Character Data"). `read` gives the byte at an offset.
-fn tile_texel(
-    read: &impl Fn(usize) -> u8,
-    address: usize,
-    eight_bit: bool,
-    x: usize,
-    y: usize,
-) -> u8 {
-    if eight_bit {
-        read(address + y * 8 + x)
-    } else {
-        let byte = read(address + y * 4 + x / 2);
-        if x.is_multiple_of(2) {
-            byte & 0xF
-        } else {
-            byte >> 4
-        }
-    }
-}
-
-/// The whole tile at `address`, read through `read`.
-fn read_tile(read: &impl Fn(usize) -> u8, address: usize, eight_bit: bool) -> Tile {
-    std::array::from_fn(|y| std::array::from_fn(|x| tile_texel(read, address, eight_bit, x, y)))
-}
-
-/// Draws `tile` with its top-left corner at `corner`, mirrored as `flips`
-/// says, painting each palette index with `paint`.
-fn draw_tile(
-    frame: &mut Frame,
-    tile: &Tile,
-    (left, top): (usize, usize),
-    flips: Flips,
-    paint: impl Fn(u8) -> u32,
-) {
-    for (row, indices) in tile.iter().enumerate() {
-        let y = if flips.y { 7 - row } else { row };
-        for (column, &index) in indices.iter().enumerate() {
-            let x = if flips.x { 7 - column } else { column };
-            set_pixel(frame, left + x, top + y, paint(index));
-        }
     }
 }
 
