@@ -29,7 +29,7 @@
 mod callback;
 mod decompress;
 
-use emu_arm::bios::bit_unpack;
+use emu_arm::bios::{bit_unpack, diff_unfilter};
 use emu_arm::{Access, Bus};
 
 pub(crate) use callback::{Decompression, GuestCall, Next};
@@ -211,12 +211,14 @@ pub(crate) fn run<B: Bus>(number: u8, call: &Call, bus: &mut B) -> Effects {
             Effects::default()
         }
         0x15 => by_callback(Format::RunLength, bus),
+        // Diff8bitUnFilterWrite8bit and Diff16bitUnFilter: the DS has no
+        // function that writes bytes two at a time.
         0x16 if !arm7 => {
-            diff_unfilter(bus, r0, r1, false);
+            diff_unfilter(bus, r0, r1, false, false);
             Effects::default()
         }
         0x18 if !arm7 => {
-            diff_unfilter(bus, r0, r1, true);
+            diff_unfilter(bus, r0, r1, true, false);
             Effects::default()
         }
         0x1A if arm7 => set(&[(0, sine_table(r0))]),
@@ -363,32 +365,6 @@ fn cpu_fast_set<B: Bus>(bus: &mut B, source: u32, destination: u32, control: u32
         };
         bus.write_32(destination, value, Access::SEQUENTIAL);
         destination = destination.wrapping_add(4);
-    }
-}
-
-/// Diff8bitUnFilterWrite8bit and Diff16bitUnFilter: running sums.
-fn diff_unfilter<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, sixteen: bool) {
-    let header = bus.read_32(source, Access::NONSEQUENTIAL);
-    let mut remaining = header >> 8;
-    source = source.wrapping_add(4);
-    if sixteen {
-        let mut sum = 0u16;
-        while remaining >= 2 {
-            sum = sum.wrapping_add(bus.read_16(source, Access::NONSEQUENTIAL));
-            bus.write_16(destination, sum, Access::NONSEQUENTIAL);
-            source = source.wrapping_add(2);
-            destination = destination.wrapping_add(2);
-            remaining -= 2;
-        }
-        return;
-    }
-    let mut sum = 0u8;
-    while remaining > 0 {
-        sum = sum.wrapping_add(bus.read_8(source, Access::NONSEQUENTIAL));
-        bus.write_8(destination, sum, Access::NONSEQUENTIAL);
-        source = source.wrapping_add(1);
-        destination = destination.wrapping_add(1);
-        remaining -= 1;
     }
 }
 

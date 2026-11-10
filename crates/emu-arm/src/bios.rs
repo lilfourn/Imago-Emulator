@@ -311,6 +311,44 @@ pub fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, in
     }
 }
 
+/// The Diff8bitUnFilter and Diff16bitUnFilter functions: each unit of the
+/// data at `source`, after its 4-byte header, is a difference, and what is
+/// written to `destination` is the running sum. With `sixteen` the units
+/// are halfwords (the length's odd last byte is left out); otherwise they
+/// are bytes, written one at a time or, with `halfwords`, two at a time as
+/// the "Vram" function does, which never writes an odd last byte.
+///
+/// It reads a unit for each one of the header's 24-bit length.
+pub fn diff_unfilter<B: Bus>(
+    bus: &mut B,
+    mut source: u32,
+    mut destination: u32,
+    sixteen: bool,
+    halfwords: bool,
+) {
+    let header = bus.read_32(source, Access::NONSEQUENTIAL);
+    let mut remaining = header >> 8;
+    source = source.wrapping_add(4);
+    if sixteen {
+        let mut sum = 0u16;
+        while remaining >= 2 {
+            sum = sum.wrapping_add(bus.read_16(source, Access::NONSEQUENTIAL));
+            bus.write_16(destination, sum, Access::NONSEQUENTIAL);
+            source = source.wrapping_add(2);
+            destination = destination.wrapping_add(2);
+            remaining -= 2;
+        }
+        return;
+    }
+    let mut out = Output::new(destination, if halfwords { 2 } else { 1 }, remaining);
+    let mut sum = 0u8;
+    while !out.done() {
+        sum = sum.wrapping_add(bus.read_8(source, Access::NONSEQUENTIAL));
+        out.push(bus, sum);
+        source = source.wrapping_add(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +451,42 @@ mod tests {
             // Only the structure was read: nothing of the data.
             assert_eq!(ram.accesses.len(), 4, "{widths:?}");
         }
+    }
+
+    #[test]
+    fn diff_unfilter_writes_running_sums_of_bytes_one_or_two_at_a_time() {
+        // Header: type 0x81, 5 bytes. Sums: 1, 3, 6, 10, 15.
+        let data = [0x81, 5, 0, 0, 1, 2, 3, 4, 5];
+        let mut bytes = Ram::with(0x100, &data);
+        bytes.bytes[0x200..0x208].fill(0xEE);
+        diff_unfilter(&mut bytes, 0x100, 0x200, false, false);
+        assert_eq!(&bytes.bytes[0x200..0x206], &[1, 3, 6, 10, 15, 0xEE]);
+        let writes = |ram: &Ram| -> Vec<Made> {
+            let writes = ram.accesses.iter().copied();
+            writes
+                .filter(|made| matches!(made, Made::Write { .. }))
+                .collect()
+        };
+        assert_eq!(writes(&bytes).len(), 5);
+
+        // Two at a time, the odd fifth byte is read but never written.
+        let mut halfwords = Ram::with(0x100, &data);
+        halfwords.bytes[0x200..0x208].fill(0xEE);
+        diff_unfilter(&mut halfwords, 0x100, 0x200, false, true);
+        assert_eq!(&halfwords.bytes[0x200..0x206], &[1, 3, 6, 10, 0xEE, 0xEE]);
+        let expected = [0x200, 0x202].map(|address| Made::Write { address, bytes: 2 });
+        assert_eq!(writes(&halfwords), expected);
+        assert_eq!(halfwords.accesses.len(), 1 + 5 + 2, "header, bytes, writes");
+    }
+
+    #[test]
+    fn diff_unfilter_sums_halfwords_and_leaves_out_an_odd_last_byte() {
+        // Header: type 0x82, 5 bytes: two halfwords and a byte left over.
+        let mut ram = Ram::with(0x100, &[0x82, 5, 0, 0, 0xFF, 0xFF, 2, 0, 9]);
+        ram.bytes[0x200..0x206].fill(0xEE);
+        diff_unfilter(&mut ram, 0x100, 0x200, true, true);
+        // 0xFFFF, then 0xFFFF + 2 wrapped.
+        assert_eq!(&ram.bytes[0x200..0x206], &[0xFF, 0xFF, 1, 0, 0xEE, 0xEE]);
+        assert_eq!(ram.accesses.len(), 1 + 2 + 2);
     }
 }
