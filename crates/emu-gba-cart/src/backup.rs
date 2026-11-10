@@ -84,6 +84,27 @@ impl Backup {
         }
     }
 
+    /// Whether this save memory, read from a save state, is of a length
+    /// its kind comes in, with its chip's state within it.
+    pub(crate) fn in_range(&self) -> bool {
+        match self {
+            Self::None => true,
+            Self::Sram(memory) => memory.len() == 0x8000,
+            Self::Flash(flash) => {
+                matches!(flash.memory.len(), 0x1_0000 | 0x2_0000)
+                    && flash.bank < flash.memory.len() / 0x1_0000
+            }
+            Self::Eeprom(eeprom) => {
+                // The longest request, a write to an 8 KiB part, and the
+                // longest answer, a read's.
+                matches!(eeprom.memory.len(), 0x200 | 0x2000)
+                    && matches!(eeprom.address_bits, None | Some(6 | 14))
+                    && eeprom.incoming.len() <= 2 + 14 + 64 + 1
+                    && eeprom.outgoing.len() <= 4 + 64
+            }
+        }
+    }
+
     /// Loads a `.sav` file's contents.
     pub(crate) fn load(&mut self, data: &[u8]) {
         let memory = match self {

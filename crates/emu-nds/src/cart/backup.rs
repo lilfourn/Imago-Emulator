@@ -12,6 +12,7 @@
 //! rest through to the save chip, 08h asks for its version (AAh), and the
 //! infrared commands find nothing to receive.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use super::eeprom::Eeprom;
@@ -92,6 +93,12 @@ const PAGE_ERASE: u8 = 0xDB;
 /// byte reads.
 const IDLE: u8 = 0xFF;
 
+/// The most bytes of one instruction an unknown chip keeps to replay:
+/// three of address and as many of data as the largest chip a write runs
+/// on through holds, 128 KiB (an EEPROM or FRAM here has no pages: see
+/// `eeprom.rs`). Flash takes a page of 256 at a time.
+const WRITTEN_MOST: usize = 3 + 128 * 1024;
+
 /// The game code at header 0x0C, if the ROM is long enough.
 pub(crate) fn game_code(rom: &[u8]) -> Option<&[u8]> {
     rom.get(0x0C..0x10)
@@ -115,12 +122,21 @@ fn size(kind: Kind) -> usize {
     }
 }
 
-/// The smallest chip that holds a save of `length` bytes.
+/// The smallest chip that holds a save of `length` bytes. For a save
+/// longer than the largest chip there is, that is a flash chip that never
+/// was, of the next power of two: the game finds no save it knows in it,
+/// but the file, which is not one of this game's, is written back whole.
 fn from_save_size(length: usize) -> Option<Kind> {
     if length == 0 {
         return None;
     }
-    SIZES.into_iter().find(|&kind| size(kind) >= length)
+    let larger = Kind::Flash(length.next_power_of_two());
+    Some(
+        SIZES
+            .into_iter()
+            .find(|&kind| size(kind) >= length)
+            .unwrap_or(larger),
+    )
 }
 
 fn listed(rom: &[u8]) -> Option<Kind> {
@@ -140,8 +156,9 @@ fn listed(rom: &[u8]) -> Option<Kind> {
 /// instead the save fills the start of the chip and the rest reads as
 /// erased. melonDS also lets its game list win, but it truncates a save
 /// that is too big. Here a save too big for the listed chip gets the
-/// smallest chip that holds all of it, so no byte of the file is dropped
-/// when it is written back. Other games go by the save's size.
+/// smallest chip that holds all of it ([`from_save_size`]), whatever its
+/// length, so no byte of the file is dropped when it is written back.
+/// Other games go by the save's size.
 fn chip_kind(rom: &[u8], length: usize) -> Option<Kind> {
     match listed(rom) {
         Some(kind) if length <= size(kind) => Some(kind),
@@ -245,8 +262,9 @@ struct Detector {
     command: Option<u8>,
     /// Bytes received after the instruction.
     count: u32,
-    /// Those bytes, for an instruction that changes the chip.
-    #[serde(with = "crate::bytes")]
+    /// The first [`WRITTEN_MOST`] of those bytes, for an instruction that
+    /// changes the chip.
+    #[serde(with = "payload::bytes")]
     written: Vec<u8>,
 }
 
@@ -262,15 +280,19 @@ impl Detector {
             self.command = Some(input);
             return IDLE;
         };
-        self.count += 1;
+        // A game may hold chip select and clock on for as long as it
+        // likes, and a save state hold any count.
+        self.count = self.count.saturating_add(1);
         match command {
             READ_STATUS => u8::from(self.write_enabled) << 1,
             READ_ID => flash_id(FLASH_SIZE)
-                .get(self.count as usize - 1)
+                .get((self.count as usize).wrapping_sub(1))
                 .copied()
                 .unwrap_or(IDLE),
             WRITE | WRITE_HIGH_OR_PAGE | SECTOR_ERASE | PAGE_ERASE => {
-                self.written.push(input);
+                if self.written.len() < WRITTEN_MOST {
+                    self.written.push(input);
+                }
                 IDLE
             }
             _ => IDLE,
@@ -368,6 +390,16 @@ impl Backup {
         }
     }
 
+    /// Whether this chip, read from a save state, has memory of a size
+    /// its addresses can wrap in.
+    pub(crate) fn in_range(&self) -> bool {
+        match &self.chip {
+            Chip::Eeprom(eeprom) => eeprom.in_range(),
+            Chip::Flash(flash) => flash.in_range(),
+            Chip::Unknown(_) => true,
+        }
+    }
+
     /// The `.sav` file contents: the raw chip memory, or nothing while the
     /// type is unknown.
     pub(crate) fn data(&self) -> &[u8] {
@@ -397,7 +429,7 @@ impl Backup {
             infrared.command = Some(input);
             return 0;
         };
-        infrared.count += 1;
+        infrared.count = infrared.count.saturating_add(1);
         let count = infrared.count;
         match command {
             IR_SAVE => self.chip_transfer(input),
@@ -536,6 +568,48 @@ mod tests {
         assert_eq!(backup.data()[0x20..0x30], [0x5A; 16]);
     }
 
+    /// Bytes clocked into an unknown chip were all kept for as long as
+    /// chip select was held, megabytes of them, in every save state and
+    /// rewind snapshot. No chip a write runs on through holds more than
+    /// 128 KiB.
+    #[test]
+    fn an_unknown_chip_keeps_no_more_of_an_instruction_than_a_chip_holds() {
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x06]);
+        backup.transfer(0x0A);
+        for byte in 0..300_000u32 {
+            backup.transfer(byte as u8);
+        }
+        let Chip::Unknown(detector) = &backup.chip else {
+            panic!("still unknown while select is held");
+        };
+        assert_eq!(detector.written.len(), WRITTEN_MOST);
+        assert_eq!(detector.count, 300_000, "every byte is counted");
+
+        // A write longer than a page, as a chip without pages takes, is
+        // replayed whole into the chip it shows: none of it is dropped.
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x03, 0x00, 0x01, 0x00, 0]);
+        command(&mut backup, &[0x06]);
+        let long: Vec<u8> = (0..1000u32).map(|byte| (byte % 251) as u8 + 1).collect();
+        let mut write = vec![0x02, 0x00, 0x00, 0x10];
+        write.extend_from_slice(&long);
+        command(&mut backup, &write);
+        assert_eq!(backup.data().len(), 128 * KIB);
+        assert!(backup.data()[0x10..0x10 + long.len()] == long[..]);
+
+        // A whole page, the longest write a chip takes, is kept whole:
+        // three address bytes and 256 of data.
+        let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
+        command(&mut backup, &[0x06]);
+        let mut write = vec![0x0A, 0x00, 0x02, 0x00];
+        write.extend((0..=255u8).rev());
+        command(&mut backup, &write);
+        assert!(matches!(backup.chip, Chip::Flash(_)));
+        let page: Vec<u8> = (0..=255u8).rev().collect();
+        assert!(backup.data()[0x200..0x300] == page[..]);
+    }
+
     #[test]
     fn detection_survives_a_save_state() {
         let mut backup = Backup::new(&rom_with_code(b"ZZZE"), None);
@@ -573,6 +647,28 @@ mod tests {
         let backup = Backup::new(&rom_with_code(b"ASME"), Some(&file));
         assert!(matches!(backup.chip, Chip::Eeprom(_)));
         assert_eq!(backup.data(), file, "not cut to the listed 8 KiB");
+    }
+
+    /// A save longer than the largest chip there is, 8 MiB, matched no
+    /// size: a game in the table had it cut to its listed chip, and any
+    /// other got a blank chip of a type not known yet, whose first write
+    /// replaced the file.
+    #[test]
+    fn a_save_longer_than_any_chip_is_kept_whole() {
+        let mut file = vec![0x34; 9 * 1024 * KIB];
+        file[0] = 0x12;
+        *file.last_mut().expect("not empty") = 0x56;
+        // A game not in the table, and one listed with an 8 KiB EEPROM.
+        for code in [b"ZZZE", b"ASME"] {
+            let backup = Backup::new(&rom_with_code(code), Some(&file));
+            assert!(
+                matches!(backup.chip, Chip::Flash(_)),
+                "a chip that holds it"
+            );
+            let data = backup.data();
+            assert_eq!(data.len(), 16 * 1024 * KIB);
+            assert!(data[..file.len()] == file[..], "every byte of the file");
+        }
     }
 
     #[test]

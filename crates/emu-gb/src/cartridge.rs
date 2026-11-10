@@ -3,6 +3,7 @@
 //! "MBC5"; Gekkio, "Game Boy: Complete Technical Reference", "MBC1M").
 
 use emu_core::{LoadError, RomPatch, System};
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// Clock cycles per second, for the MBC3 real-time clock.
@@ -18,6 +19,9 @@ pub(crate) struct Cartridge {
     /// bank. Like the ROM, never saved in states.
     #[serde(skip)]
     rom_patches: Box<[RomPatch]>,
+    /// As long as the header says; see [`Cartridge::in_range`] for a
+    /// save state's.
+    #[serde(with = "payload::bytes")]
     ram: Box<[u8]>,
     mbc: Mbc,
     has_battery: bool,
@@ -177,6 +181,13 @@ impl Cartridge {
                 ram_bank,
             } => (*ram_enabled, *rom_bank, *ram_bank) = (false, 1, 0),
         }
+    }
+
+    /// Whether this cartridge, read from a save state, has the RAM its
+    /// controller reads without asking: an MBC2's 512 bytes. The others
+    /// wrap their banks at whatever length the RAM has.
+    pub(crate) fn in_range(&self) -> bool {
+        !matches!(self.mbc, Mbc::Mbc2 { .. }) || self.ram.len() >= 0x200
     }
 
     /// Moves the ROM and its patches out of `other` into `self`; used after
@@ -443,12 +454,12 @@ impl Cartridge {
         } = &mut self.mbc
         {
             rtc.write(*register, value);
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
             return;
         }
         if let Some(index) = self.ram_index(address) {
             self.ram[index] = value;
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 
@@ -461,7 +472,7 @@ impl Cartridge {
         }
         if let Some(index) = self.ram_index_in(usize::from(bank), address) {
             self.ram[index] = value;
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 }
@@ -493,17 +504,23 @@ fn is_mbc1_multicart(rom: &[u8]) -> bool {
 /// wall-clock time that passed since the save's timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Rtc {
+    #[serde(with = "payload::Below::<64>")]
     seconds: u8,
+    #[serde(with = "payload::Below::<64>")]
     minutes: u8,
+    #[serde(with = "payload::Below::<32>")]
     hours: u8,
     /// Nine-bit day counter.
+    #[serde(with = "payload::Below::<512>")]
     days: u16,
     halted: bool,
     /// Set when the day counter overflows; cleared only by the game.
     day_carry: bool,
     /// Clock cycles into the current RTC second. Frozen while halted.
+    #[serde(with = "payload::Below::<{ CYCLES_PER_SECOND as u64 }>")]
     subsecond: u32,
     /// Clock cycles into the current wall-clock second, for `unix_time`.
+    #[serde(with = "payload::Below::<{ CYCLES_PER_SECOND as u64 }>")]
     wall_subsecond: u32,
     /// Seconds, minutes, hours, DL, DH as last latched.
     latched: [u8; 5],
@@ -540,7 +557,8 @@ impl Rtc {
         self.wall_subsecond += cycles;
         if self.wall_subsecond >= CYCLES_PER_SECOND {
             self.wall_subsecond -= CYCLES_PER_SECOND;
-            self.unix_time += 1;
+            // A save state may hold any time.
+            self.unix_time = self.unix_time.wrapping_add(1);
         }
         if self.halted {
             return;
@@ -641,7 +659,8 @@ impl Rtc {
             *latched = word(5 + index);
         }
         if !self.halted && now > timestamp {
-            for _ in 0..(now - timestamp).min(MAX_CATCH_UP_SECONDS) {
+            // A trailer may hold any timestamp, as far back as there is.
+            for _ in 0..now.saturating_sub(timestamp).min(MAX_CATCH_UP_SECONDS) {
                 self.advance_second();
             }
         }
@@ -768,6 +787,25 @@ mod tests {
         assert_eq!(cart.read_ram(0xA010), 0x00, "bank 0 is still selected");
         cart.write_rom(0x4000, 2);
         assert_eq!(cart.read_ram(0xA010), 0x55);
+    }
+
+    /// A save whose trailer says it was written at the start of time: the
+    /// seconds since overflowed, which in a debug build stopped the game
+    /// loading and in a release build skipped the clock's catching up.
+    #[test]
+    fn a_save_from_the_start_of_time_catches_the_clock_up() {
+        let mut save = vec![0; 0x2000 + 48];
+        save[0x2000 + 40..].copy_from_slice(&i64::MIN.to_le_bytes());
+        let mut cart = Cartridge::new(&rom(0x10, 2, 4), Some(&save), 1_000).expect("valid");
+        cart.write_rom(0x0000, 0x0A);
+        cart.write_rom(0x6000, 0);
+        cart.write_rom(0x6000, 1);
+        // As far as the clock catches up: a second past 512 days, with
+        // the day counter's carry set.
+        cart.write_rom(0x4000, 0x08);
+        assert_eq!(cart.read_ram(0xA000), 1, "seconds");
+        cart.write_rom(0x4000, 0x0C);
+        assert_eq!(cart.read_ram(0xA000) & 0x81, 0x80, "the day carry");
     }
 
     #[test]

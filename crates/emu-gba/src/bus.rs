@@ -7,9 +7,10 @@
 //! audio samples at the exact cycle they are due.
 
 use emu_arm::{Access, Bus as CpuBus};
-use emu_core::RomPatch;
+use emu_core::{RomPatch, StateError};
 use emu_gba_cart::Cartridge;
 use emu_sched::Scheduler;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::apu::{self, Apu};
@@ -30,11 +31,11 @@ pub(crate) enum Event {
     /// The PPU starts the next line.
     LineStart,
     /// A timer counts past 0xFFFF.
-    TimerOverflow(u8),
+    TimerOverflow(#[serde(with = "payload::Below::<4>")] u8),
     /// A value written to a timer's reload register lands.
-    TimerReload(u8),
+    TimerReload(#[serde(with = "payload::Below::<4>")] u8),
     /// A value written to a timer's control register lands.
-    TimerControl(u8),
+    TimerControl(#[serde(with = "payload::Below::<4>")] u8),
     /// Interrupt requests and writes to IE, IF and IME land.
     InterruptSync,
     /// HALT learns whether an enabled interrupt is requested.
@@ -46,8 +47,14 @@ pub(crate) enum Event {
     /// The serial transfer in progress ends.
     SerialDone,
     /// A triggered DMA channel starts.
-    DmaStart(u8),
+    DmaStart(#[serde(with = "payload::Below::<4>")] u8),
 }
+
+/// The most events a state's scheduler may hold, far more than the dozen
+/// or so the machine ever has pending, and how long overdue one may be:
+/// events run as they come due, so about not at all.
+const EVENTS_MOST: usize = 256;
+const EVENT_BEHIND: u64 = 1 << 16;
 
 /// Interrupt request bits outside the PPU's.
 pub(crate) mod irq {
@@ -70,7 +77,9 @@ pub(crate) struct Bus {
     /// in states.
     #[serde(skip)]
     rom_patches: Box<[RomPatch]>,
+    #[serde(with = "payload::Exact::<0x4_0000>")]
     ewram: Box<[u8]>,
+    #[serde(with = "payload::Exact::<0x8000>")]
     iwram: Box<[u8]>,
     pub(crate) ppu: Ppu,
     dma: Dma,
@@ -79,6 +88,7 @@ pub(crate) struct Bus {
     pub(crate) sio: Sio,
     /// Raw values written to I/O registers, for byte merges and reading back
     /// registers without side effects.
+    #[serde(with = "payload::Exact::<0x400>")]
     io: Box<[u8]>,
     interrupts: Interrupts,
     waitcnt: u16,
@@ -176,6 +186,37 @@ impl Bus {
         let mut bus = Self::new(cartridge, std::mem::take(&mut other.bios));
         bus.rom_patches = std::mem::take(&mut other.rom_patches);
         bus
+    }
+
+    /// Checks that this bus, read from a save state, is one the machine
+    /// could have left: beyond what each field checks as it is read, that
+    /// the sound registers and the cartridge hold what they can, and that
+    /// the scheduler has a handful of events due about now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Malformed`] saying which of those failed.
+    pub(crate) fn fits(&self) -> Result<(), StateError> {
+        payload::check(
+            self.apu.in_range(),
+            "the state's sound registers hold values they cannot",
+        )?;
+        payload::check(
+            self.cartridge.in_range(),
+            "the state's cartridge holds what its chips cannot",
+        )?;
+        payload::check(
+            self.timers.in_range(self.cycles) && self.dma.in_range() && self.prefetch.in_range(),
+            "the state's timers, DMA or prefetch hold counts they cannot",
+        )?;
+        payload::check(
+            self.scheduler.now() == self.cycles,
+            "the state's two clocks disagree",
+        )?;
+        payload::check(
+            self.scheduler.plausible(EVENTS_MOST, EVENT_BEHIND),
+            "the state's events are not ones the machine schedules",
+        )
     }
 
     /// Moves the ROM, its patches and the BIOS out of `other`, which is

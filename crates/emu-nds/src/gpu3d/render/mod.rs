@@ -48,7 +48,8 @@ use self::pixel::{Buffers, Kind, PixelAttr, PolygonTarget};
 use self::raster::{Area, HEIGHT, WIDTH};
 use self::shade::Shader;
 use self::texture::TextureMemory;
-use self::workers::{Job, Workers};
+pub(crate) use self::workers::Job;
+use self::workers::Workers;
 use super::color;
 use super::polygon::{Mode, Polygon, PolygonList};
 use super::registers::{RenderConfig, RenderRegisters, expand_depth};
@@ -193,7 +194,7 @@ impl Renderer {
 
     /// Draws `list` with the rendering registers in `config`, reading
     /// textures from `vram` now. The drawing finishes on the workers;
-    /// [`Renderer::line`] and [`Renderer::scaled_frame`] wait for it.
+    /// [`Renderer::line`] and [`Renderer::take_scaled_frame`] wait for it.
     pub(crate) fn render(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) {
         self.finish();
         if self.native.is_empty() {
@@ -238,11 +239,35 @@ impl Renderer {
     }
 
     /// The last larger frame drawn, waiting for it if it is still drawing.
+    #[cfg(test)]
     pub(crate) fn scaled_frame(&mut self) -> ScaledFrame<'_> {
         while self.larger.iter().any(|band| band.buffers.is_none()) {
             self.receive();
         }
         ScaledFrame(&self.larger)
+    }
+
+    /// Takes the last larger frame drawn out of the renderer, waiting for
+    /// it if it is still drawing, so that jobs on its threads can read
+    /// it. Until [`Renderer::put_scaled_frame`] puts it back the renderer
+    /// has none, and must not be asked to draw.
+    pub(crate) fn take_scaled_frame(&mut self) -> LentFrame {
+        while self.larger.iter().any(|band| band.buffers.is_none()) {
+            self.receive();
+        }
+        LentFrame(std::mem::take(&mut self.larger))
+    }
+
+    /// Puts back the frame [`Renderer::take_scaled_frame`] took.
+    pub(crate) fn put_scaled_frame(&mut self, frame: LentFrame) {
+        self.larger = frame.0;
+    }
+
+    /// Runs `jobs` on the renderer's threads ([`Workers::run`]), for work
+    /// that goes with its frames: the screen drawn around the larger one.
+    /// They take their turn behind any bands still drawing.
+    pub(crate) fn run(&mut self, jobs: Vec<Job>) {
+        self.workers.run(jobs);
     }
 
     /// Waits for every band out with the workers.
@@ -290,6 +315,18 @@ fn draw_job(
             panic: drawing.err(),
         });
     })
+}
+
+/// A larger frame out of the renderer for a while
+/// ([`Renderer::take_scaled_frame`]), for jobs to read.
+#[derive(Debug, Default)]
+pub(crate) struct LentFrame(Vec<Band>);
+
+impl LentFrame {
+    /// Its rows.
+    pub(crate) fn rows(&self) -> ScaledFrame<'_> {
+        ScaledFrame(&self.0)
+    }
 }
 
 /// The rows of a larger frame, which several threads can read at once.

@@ -429,6 +429,33 @@ impl Psg {
         }
     }
 
+    /// Whether every value here is one its register can hold. The code
+    /// indexes tables and shifts by them, which a write keeps in range and
+    /// a save state, read as it comes, does not: the cores ask before they
+    /// run one.
+    #[must_use]
+    pub fn in_range(&self) -> bool {
+        let pulse = |pulse: &Pulse| {
+            pulse.duty < 4
+                && pulse.duty_step < 8
+                && pulse.frequency < 2048
+                && pulse
+                    .sweep
+                    .as_ref()
+                    .is_none_or(|sweep| sweep.shift < 8 && sweep.shadow < 2048)
+        };
+        self.registers.len() == 0x20
+            && self.wave_ram.len() == 0x20
+            && pulse(&self.pulse1)
+            && pulse(&self.pulse2)
+            && self.wave.frequency < 2048
+            && self.wave.position < 64
+            && self.wave.sample < 16
+            && self.noise.divisor_code < 8
+            && self.noise.shift < 16
+            && self.frame_step < 8
+    }
+
     /// Whether the master power (NR52 bit 7) is on.
     #[must_use]
     pub fn powered(&self) -> bool {

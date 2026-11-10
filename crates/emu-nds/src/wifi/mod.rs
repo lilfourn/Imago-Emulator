@@ -44,6 +44,7 @@ mod send;
 
 use std::collections::VecDeque;
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use baseband::Baseband;
@@ -57,6 +58,11 @@ use send::{Phase, Slot, Tx};
 
 /// Bytes of MAC RAM.
 const RAM_SIZE: usize = 0x2000;
+
+/// Where the bus-cycle times in a save state must stop short of: the
+/// radio plans ahead from them, and the sums must not run off the end of
+/// the count.
+const TIME_END: u64 = 1 << 62;
 /// Halfword registers in the 0x000-0xFFF page.
 const REGISTERS: usize = 0x800;
 /// Microseconds the radio takes to wake after W_MODE_RST or W_POWERFORCE
@@ -108,8 +114,9 @@ enum Beacon {
 pub(crate) struct Wifi {
     /// The 0x000-0xFFF register page as halfwords, as written or as the
     /// hardware last set them.
+    #[serde(with = "payload::ExactList::<REGISTERS>")]
     registers: Vec<u16>,
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::Exact::<RAM_SIZE>")]
     ram: Vec<u8>,
     baseband: Baseband,
     rf: Rf,
@@ -317,6 +324,38 @@ impl Wifi {
         self.incoming.insert(at, frame);
     }
 
+    /// Whether the radio, read from a save state whose clock is at
+    /// `now`, has only frames, sent, arriving and waiting, that fit the
+    /// RAM and the lengths it counts by, and a clock of its own that has
+    /// kept up: it is no further on than a CPU's clock runs `ahead` of
+    /// `now`, and its millisecond timer is not seconds overdue. The radio
+    /// catches up on that timer a millisecond at a time
+    /// ([`Wifi::advance`]), which for years of them would never end.
+    pub(crate) fn in_range(&self, now: u64, ahead: u64) -> bool {
+        /// A second of microseconds.
+        const OVERDUE_MOST: u64 = 1 << 20;
+        let now = now.saturating_add(ahead);
+        let clock = self.now <= now
+            && (!self.us_count.running()
+                || self.us_count.value(now).saturating_sub(self.millisecond_at) <= OVERDUE_MOST);
+        let times = [self.wake_at, self.scheduled, Some(self.random_mark)]
+            .into_iter()
+            .flatten()
+            .all(|time| time < TIME_END)
+            && [self.us_count, self.cmd_count, self.content_free]
+                .iter()
+                .all(Counter::in_range);
+        clock
+            && times
+            && self.tx.as_ref().is_none_or(Tx::in_range)
+            && self.rx.as_ref().is_none_or(Rx::in_range)
+            && self
+                .incoming
+                .iter()
+                .chain(&self.outgoing)
+                .all(Transmission::in_range)
+    }
+
     /// The wifi state as one `key=value` line, for debugging.
     pub(crate) fn describe(&self) -> String {
         let mac = self.address(W_MACADDR);
@@ -392,6 +431,9 @@ impl Wifi {
         }
         self.catch_up_rx(now);
         self.now = now;
+        // Whatever the radio is doing, a state saved now loads.
+        #[cfg(test)]
+        assert!(self.in_range(now, 0), "a state of the radio now is refused");
     }
 
     // Interrupts.
@@ -472,14 +514,17 @@ impl Wifi {
     /// W_BEACON_COUNT reaches zero. Called whenever the count or those
     /// registers change.
     fn plan_timers(&mut self, now: u64) {
-        self.millisecond_at = (self.us_count.value(now) | 0x3FF) + 1;
+        // W_US_COUNT is 64 bits, all of them the game's to set.
+        self.millisecond_at = (self.us_count.value(now) | 0x3FF).wrapping_add(1);
         self.pre_beacon_at = None;
         let count = u64::from(self.reg(W_BEACON_COUNT));
         if count == 0 || !self.us_count.running() {
             return;
         }
         let value = self.us_count.value(now);
-        let beacon = (value | 0x3FF) + 1 + (count - 1) * 1024;
+        let beacon = (value | 0x3FF)
+            .wrapping_add(1)
+            .wrapping_add((count - 1) * 1024);
         self.pre_beacon_at = beacon
             .checked_sub(u64::from(self.reg(W_PRE_BEACON)))
             .filter(|&at| at > value);
@@ -498,7 +543,7 @@ impl Wifi {
 
     /// The low 10 bits of W_US_COUNT wrapped: the beacon timers count.
     fn millisecond(&mut self, now: u64) {
-        self.millisecond_at += 0x400;
+        self.millisecond_at = self.millisecond_at.wrapping_add(0x400);
         let post = self.reg(W_POST_BEACON);
         if post != 0 {
             *self.reg_mut(W_POST_BEACON) = post - 1;

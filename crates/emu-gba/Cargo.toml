@@ -12,11 +12,13 @@ emu-core.workspace = true
 emu-gba-cart.workspace = true
 emu-psg.workspace = true
 emu-sched.workspace = true
-postcard.workspace = true
+emu-state.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
 png.workspace = true
+# States are written with emu-state; tests compare them with postcard's own.
+postcard.workspace = true
 
 [lints]
 workspace = true

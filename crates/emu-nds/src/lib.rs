@@ -10,7 +10,6 @@
 mod bios;
 mod boot;
 mod bus;
-mod bytes;
 mod capture;
 mod cart;
 mod debug;
@@ -41,6 +40,7 @@ use emu_core::{
     ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge as GbaCartridge;
+use emu_state::payload;
 pub use link::Linked;
 
 use cart::Cart;
@@ -73,6 +73,48 @@ pub const INFO: CoreInfo = CoreInfo {
 pub struct Nds {
     machine: Machine,
     screens: [Frame; 2],
+    bios: Bios,
+}
+
+/// The BIOS a session has: the emulated one, always, and the user's dumps
+/// if `Media` held both.
+///
+/// The session decides which a machine powers on and resets with: the
+/// dumps if it has them. A save state decides nothing, but it is of a
+/// machine that ran one way, part-way through whatever it was doing: a
+/// CPU may be inside a BIOS routine or an interrupt it will return from
+/// to an address in the image it had. So a loaded state runs with the
+/// images it was made with ([`Nds::install`]), and one made with dumps is
+/// refused where there are none ([`Nds::check_state`]).
+#[derive(Debug)]
+struct Bios {
+    /// The emulated BIOS's images, the ARM9's and the ARM7's, whose
+    /// system calls the machine catches and runs itself.
+    emulated: [Box<[u8]>; 2],
+    /// The user's dumps.
+    dumps: Option<[Box<[u8]>; 2]>,
+}
+
+impl Bios {
+    /// Whether the session emulates BIOS calls: it has no dumps.
+    fn emulated(&self) -> bool {
+        self.dumps.is_none()
+    }
+
+    /// The images a machine runs when BIOS calls are `emulated`, or from
+    /// the dumps: `None` for dumps the session does not have.
+    fn images(&self, emulated: bool) -> Option<[Box<[u8]>; 2]> {
+        if emulated {
+            Some(self.emulated.clone())
+        } else {
+            self.dumps.clone()
+        }
+    }
+
+    /// The images the session powers on and resets with.
+    fn session(&self) -> [Box<[u8]>; 2] {
+        self.dumps.as_ref().unwrap_or(&self.emulated).clone()
+    }
 }
 
 impl Nds {
@@ -81,7 +123,10 @@ impl Nds {
     /// GBA game and its save.
     ///
     /// The BIOS is emulated unless `media` holds both the ARM9 (4 KiB) and
-    /// ARM7 (16 KiB) BIOS dumps.
+    /// ARM7 (16 KiB) BIOS dumps. That holds for the session: at power-on
+    /// and at every reset. A save state made without dumps keeps its BIOS
+    /// calls emulated wherever it is loaded, and one made with dumps
+    /// loads only where there are dumps.
     ///
     /// # Errors
     ///
@@ -120,17 +165,18 @@ impl Nds {
                     .system_file(SystemFileKind::NdsBios7)
                     .filter(|bios| bios.len() == 0x4000),
             );
-        let hle_bios = dumps.is_none();
-        let (mut arm9_bios, arm7_bios) = dumps.map_or_else(
-            || (bios::arm9_image(), bios::arm7_image()),
-            |(arm9, arm7)| (arm9.into(), arm7.into()),
-        );
         let mut gba_slot = GbaSlot::new(media.second_slot.map(|cartridge| {
             GbaCartridge::new(cartridge.rom.into(), cartridge.backup, media.start_time)
         }));
-        if hle_bios && let Some(logo) = gba_slot.bios_logo() {
-            arm9_bios[gba_slot::BIOS_LOGO].copy_from_slice(&logo);
+        let mut emulated = [bios::arm9_image(), bios::arm7_image()];
+        if let Some(logo) = gba_slot.bios_logo() {
+            emulated[0][gba_slot::BIOS_LOGO].copy_from_slice(&logo);
         }
+        let bios = Bios {
+            emulated,
+            dumps: dumps.map(|(arm9, arm7)| [arm9.into(), arm7.into()]),
+        };
+        let [arm9_bios, arm7_bios] = bios.session();
         let mut hw = Hardware::new(arm9_bios, arm7_bios);
         hw.cart = Cart::new(media.rom.into(), media.backup);
         hw.gba_slot = gba_slot;
@@ -138,8 +184,9 @@ impl Nds {
         hw.wifi = Wifi::new(hw.spi.wifi_settings());
         hw.rtc = Rtc::new(media.start_time);
         Ok(Self {
-            machine: Machine::boot(hw, hle_bios),
+            machine: Machine::boot(hw, bios.emulated()),
             screens: [Frame::new(SCREEN), Frame::new(SCREEN)],
+            bios,
         })
     }
 
@@ -171,20 +218,20 @@ impl Nds {
     /// upscaled 3D, into the frames.
     fn present(&mut self) {
         let hw = &self.machine.hw;
-        let (a, b) = if hw.scaled.scale > 1 {
-            (&hw.scaled.a, &hw.scaled.b)
-        } else {
-            (&hw.screen_a, &hw.screen_b)
-        };
+        let [top, bottom] = &mut self.screens;
         // POWCNT1 bit 15 puts engine A on the top screen.
-        let (top, bottom) = if hw.powcnt1 & 0x8000 != 0 {
-            (a, b)
+        let (a, b) = if hw.powcnt1 & 0x8000 != 0 {
+            (top, bottom)
         } else {
-            (b, a)
+            (bottom, top)
         };
-        let [top_frame, bottom_frame] = &mut self.screens;
-        top_frame.pixels_mut().copy_from_slice(top);
-        bottom_frame.pixels_mut().copy_from_slice(bottom);
+        if hw.scaled.scale > 1 {
+            hw.scaled.copy_a(a.pixels_mut());
+            b.pixels_mut().copy_from_slice(&hw.scaled.b);
+        } else {
+            a.pixels_mut().copy_from_slice(&hw.screen_a);
+            b.pixels_mut().copy_from_slice(&hw.screen_b);
+        }
     }
 
     /// Both CPUs' program counters, modes and halt states, and the
@@ -274,21 +321,41 @@ impl Nds {
         ]
     }
 
-    /// Whether a saved `machine` fits this session.
-    fn check_state(&self, machine: &Machine) -> Result<(), StateError> {
-        if machine.hw.gba_slot.is_occupied() == self.machine.hw.gba_slot.is_occupied() {
-            Ok(())
-        } else {
-            Err(StateError::Malformed(
-                "the state's GBA slot does not match this session's",
-            ))
-        }
+    /// Whether a saved `machine` is one the DS could have left and fits
+    /// this session. Leaves it ready to install ([`Machine::settle`]).
+    ///
+    /// A state made with BIOS dumps does not fit a session without them:
+    /// its CPUs may be part-way through the BIOS's own code, which is not
+    /// here to run. (The other way round fits: see [`Nds::install`].)
+    fn check_state(&self, machine: &mut Machine) -> Result<(), StateError> {
+        machine.settle()?;
+        payload::check(
+            machine.hw.gba_slot.is_occupied() == self.machine.hw.gba_slot.is_occupied(),
+            "the state's GBA slot does not match this session's",
+        )?;
+        payload::check(
+            machine.hle_bios || self.bios.dumps.is_some(),
+            "the state was made with BIOS dumps, which this session does not have: \
+             add the BIOS files to load it",
+        )
     }
 
     /// Replaces the machine with a saved one that [`Nds::check_state`]
     /// accepted, keeping the media and display settings.
+    ///
+    /// The machine runs with the BIOS images it was made with, whichever
+    /// the session powers on with, so the flag that says its BIOS calls
+    /// are emulated and the images it runs always go together: a state
+    /// made without dumps goes on with its calls emulated where there are
+    /// dumps too, until a reset.
     fn install(&mut self, mut machine: Machine) {
         machine.hw.take_media_from(&mut self.machine.hw);
+        if machine.hle_bios != self.machine.hle_bios
+            && let Some([arm9, arm7]) = self.bios.images(machine.hle_bios)
+        {
+            machine.hw.arm9_bios = arm9;
+            machine.hw.arm7_bios = arm7;
+        }
         machine.hw.take_display_from(&mut self.machine.hw);
         self.machine = machine;
         // The rendered 3D image is not saved.
@@ -368,11 +435,10 @@ impl Core for Nds {
 
     fn reset(&mut self) {
         // The cartridges (with their saves), firmware and clock carry over.
+        // The BIOS is the session's, whatever a loaded state ran with.
         let old = &mut self.machine.hw;
-        let mut hw = Hardware::new(
-            std::mem::take(&mut old.arm9_bios),
-            std::mem::take(&mut old.arm7_bios),
-        );
+        let [arm9_bios, arm7_bios] = self.bios.session();
+        let mut hw = Hardware::new(arm9_bios, arm7_bios);
         let now = old.scheduler.now();
         std::mem::swap(&mut hw.cart, &mut old.cart);
         std::mem::swap(&mut hw.spi, &mut old.spi);
@@ -382,17 +448,16 @@ impl Core for Nds {
         hw.rtc.restart_cycles(now);
         hw.gba_slot.restart_cycles(now);
         hw.take_display_from(old);
-        self.machine = Machine::boot(hw, self.machine.hle_bios);
+        self.machine = Machine::boot(hw, self.bios.emulated());
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
-        bytes::append(&self.machine, out);
+        payload::append(&self.machine, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let machine: Machine = postcard::from_bytes(state)
-            .map_err(|_| StateError::Malformed("not a Nintendo DS state"))?;
-        self.check_state(&machine)?;
+        let mut machine: Machine = payload::load(state, "not a Nintendo DS state")?;
+        self.check_state(&mut machine)?;
         self.install(machine);
         Ok(())
     }
@@ -450,6 +515,8 @@ impl Core for Nds {
 
 #[cfg(test)]
 mod tests {
+    use emu_state::mutation;
+
     use super::*;
 
     /// A cartridge whose ARM9 and ARM7 programs each store a value in main
@@ -482,6 +549,417 @@ mod tests {
             put(0x300 + index * 4, word);
         }
         rom
+    }
+
+    /// A cartridge whose two programs each start a BIOS decompression
+    /// that reads through callbacks, Huffman on the ARM9 and LZ77 on the
+    /// ARM7, and never return from the callback that reads a byte: the
+    /// calls wait, part-way, in every state.
+    fn rom_waiting_in_the_bios() -> Vec<u8> {
+        let mut rom = vec![0; 0x400];
+        let mut put = |offset: usize, value: u32| {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        // SWI 13h with a header of 8-bit symbols, SWI 12h with an LZ77 one.
+        for (header, at, base, swi, data_header) in [
+            (0x20, 0x200, 0x0200_4000u32, 0xEF13_0000u32, 0xE3A0_0F4Au32),
+            (0x30, 0x300, 0x0238_0000, 0xEF12_0000, 0xE3A0_0E11),
+        ] {
+            put(header, at as u32);
+            put(header + 4, base);
+            put(header + 8, base);
+            put(header + 12, 0x3C);
+            let program = [
+                0xE28F_3010, // ADD R3, PC, #16  (the callbacks below)
+                0xE3A0_0000, // MOV R0, #0
+                0xE3A0_1402, // MOV R1, #0x02000000
+                0xE3A0_2402, // MOV R2, #0x02000000
+                swi,         // SWI 12h or 13h
+                0xEAFF_FFFE, // B .
+                base + 0x30, // Open
+                0,           // Close: none
+                base + 0x38, // Get_8bit
+                0,           // Get_16bit: never called
+                base + 0x38, // Get_32bit
+                0,
+                data_header, // Open: MOV R0, #header
+                0xE12F_FF1E, //       BX LR
+                0xEAFF_FFFE, // Get_8bit: B .
+            ];
+            for (index, word) in program.into_iter().enumerate() {
+                put(at + index * 4, word);
+            }
+        }
+        rom
+    }
+
+    /// Puts every part of the machine that a state holds to use, through
+    /// the registers a game would write: polygons drawn and more waiting
+    /// behind a buffer swap, half a triangle strip, sound channels
+    /// playing, words in both IPC FIFOs and timers counting.
+    fn keep_busy(nds: &mut Nds) {
+        let quad = |hw: &mut Hardware, kind: u32, corners: &[(i32, i32)]| {
+            hw.arm9_write_32(0x0400_0500, kind); // BEGIN_VTXS
+            for &(x, y) in corners {
+                // VTX_16: X and Y, then Z.
+                hw.arm9_write_32(0x0400_048C, (x as u32 & 0xFFFF) | (y as u32) << 16);
+                hw.arm9_write_32(0x0400_048C, 0);
+            }
+        };
+        let hw = &mut nds.machine.hw;
+        hw.arm9_write_16(0x0400_0304, 0x820F); // POWCNT1: everything on
+        hw.arm9_write_32(0x0400_0000, 0x0001_0108); // DISPCNT: BG0 as 3D
+        hw.arm9_write_8(0x0400_0240, 0x83); // VRAMCNT_A: textures
+        hw.arm9_write_16(0x0400_0354, 0x7FFF); // CLEAR_DEPTH: farthest
+        hw.arm9_write_32(0x0400_0454, 0); // MTX_IDENTITY
+        hw.arm9_write_32(0x0400_0580, 0xBFFF_0000); // VIEWPORT: the screen
+        hw.arm9_write_32(0x0400_04A4, 31 << 16 | 0xC0); // POLYGON_ATTR
+        hw.arm9_write_32(0x0400_0480, 0x7FFF); // COLOR
+        quad(
+            hw,
+            1,
+            &[
+                (-0x800, 0x800),
+                (-0x800, -0x800),
+                (0x800, -0x800),
+                (0x800, 0x800),
+            ],
+        );
+        quad(hw, 0, &[(0, 0x400), (-0x400, -0x400), (0x400, -0x400)]);
+        hw.arm9_write_32(0x0400_0540, 0); // SWAP_BUFFERS
+        // After the swap, which waits for VBlank: these stay in the FIFO.
+        quad(
+            hw,
+            2,
+            &[(0, 0), (0x200, 0), (0, 0x200), (0x200, 0x200), (0x400, 0)],
+        );
+        // Timers 0 and 3 on each CPU.
+        for timer in [0x0400_0100, 0x0400_010C] {
+            hw.arm9_write_32(timer, 0x00C0_F000);
+            hw.arm7_write_32(timer, 0x00C1_FF00);
+        }
+        // The wifi: power, its microsecond clock counting, the radio
+        // awake and listening, and a beacon timer.
+        hw.arm7_write_16(0x0400_0304, 0x0003); // POWCNT2: speakers, wifi
+        let wifi = |hw: &mut Hardware, register: u32, value: u16| {
+            hw.arm7_write_16(0x0480_8000 + register, value);
+        };
+        wifi(hw, 0x036, 0); // W_POWER_US: on
+        wifi(hw, 0x006, 2); // W_MODE_WEP
+        wifi(hw, 0x004, 1); // W_MODE_RST: wake
+        wifi(hw, 0x050, 0x4C00); // W_RXBUF_BEGIN
+        wifi(hw, 0x052, 0x5F60); // W_RXBUF_END
+        wifi(hw, 0x030, 0x8001); // W_RXCNT: receive
+        wifi(hw, 0x08C, 100); // W_BEACONINT
+        wifi(hw, 0x0EA, 1); // W_US_COMPARECNT
+        wifi(hw, 0x0E8, 1); // W_US_COUNTCNT: count
+        wifi(hw, 0x012, 0xFFFF); // W_IE
+        // IPC: both FIFOs on, three words each way.
+        hw.arm9_write_16(0x0400_0184, 0x8000);
+        hw.arm7_write_16(0x0400_0184, 0x8000);
+        for word in [0x1234_5678, 0x9ABC_DEF0, 3] {
+            hw.arm9_write_32(0x0400_0188, word);
+            hw.arm7_write_32(0x0400_0188, word);
+        }
+        // Sound: an ADPCM loop on channel 0, a square wave on 8, noise
+        // on 14, and a capture.
+        hw.arm7_write_16(0x0400_0500, 0x807F); // SOUNDCNT: master on
+        hw.arm7_write_32(0x0400_0404, 0x0200_1000); // SOUND0SAD
+        hw.arm7_write_16(0x0400_0408, 0xFE00); // SOUND0TMR
+        hw.arm7_write_32(0x0400_040C, 0x40); // SOUND0LEN
+        hw.arm7_write_32(0x0400_0400, 0xC840_007F); // SOUND0CNT: ADPCM, loop
+        hw.arm7_write_16(0x0400_0488, 0xFC00);
+        hw.arm7_write_32(0x0400_0480, 0xE340_0040); // SOUND8CNT: PSG
+        hw.arm7_write_16(0x0400_04E8, 0xFC00);
+        hw.arm7_write_32(0x0400_04E0, 0xE040_0040); // SOUND14CNT: noise
+        hw.arm7_write_32(0x0400_0510, 0x0200_2000); // SNDCAP0DAD
+        hw.arm7_write_16(0x0400_0514, 0x20); // SNDCAP0LEN
+        hw.arm7_write_8(0x0400_0508, 0x80); // SNDCAP0CNT: start
+    }
+
+    /// Loads into a DS playing `rom` the wrong states made from its own
+    /// after `frames` frames ([`mutation::try_each`]), at render scale
+    /// `scale`, and runs each it takes: a frame, the memory a debugger
+    /// reads, a save, a reset and a frame more. `busy` first puts the
+    /// whole machine to use ([`keep_busy`]).
+    fn try_wrong_states(
+        rom: &[u8],
+        (frames, busy, scale): (usize, bool, u32),
+        every: usize,
+    ) -> mutation::Outcome {
+        let mut nds = Nds::new(&Media::new(rom)).expect("valid header");
+        nds.set_render_scale(scale);
+        let mut audio = Vec::new();
+        for frame in 0..frames {
+            // Two frames before the end, so that a swap has drawn.
+            if busy && frame + 2 == frames {
+                keep_busy(&mut nds);
+            }
+            nds.run_frame(&[Input::default()], &mut audio);
+            audio.clear();
+        }
+        let mut good = Vec::new();
+        nds.save_state(&mut good);
+        nds.load_state(&good).expect("its own state loads");
+        let machine: Machine = payload::load(&good, "its own state").expect("reads");
+        if busy {
+            let list = &machine.hw.gpu3d;
+            assert!(list.polygons_drawn() >= 2, "polygons are in the state");
+            assert!(machine.hw.wifi.powered(), "the wifi is on in the state");
+        }
+        if rom == rom_waiting_in_the_bios() {
+            assert_eq!(machine.calls_waiting(), [1, 1], "BIOS calls wait");
+        }
+        mutation::try_each(&machine, every, |wrong| {
+            if nds.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            nds.run_frame(&[Input::default()], &mut audio);
+            for address in (0..0x1000_0000u32).step_by(0x7_7771) {
+                let _ = nds.peek(0, address);
+            }
+            let _ = nds.memory(MemoryRegion::MainRam);
+            let _ = nds.memory(MemoryRegion::VideoRam);
+            let _ = (nds.debug_state(), nds.debug_video(), nds.debug_wifi());
+            let mut saved = Vec::new();
+            nds.save_state(&mut saved);
+            let mut backup = Vec::new();
+            nds.save_backup(0, &mut backup);
+            nds.reset();
+            nds.run_frame(&[Input::default()], &mut audio);
+        })
+    }
+
+    /// A state with bytes after it is not that state: a linked pair's
+    /// begins with one console's, and used to load into a console on its
+    /// own, dropping the second player.
+    #[test]
+    fn a_state_with_bytes_left_over_is_refused() {
+        let rom = rom();
+        let media = Media::new(&rom);
+        let mut one = Nds::new(&media).expect("valid rom");
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let (mut alone, mut together) = (Vec::new(), Vec::new());
+        one.save_state(&mut alone);
+        pair.save_state(&mut together);
+        assert!(one.load_state(&alone).is_ok() && pair.load_state(&together).is_ok());
+        // As they are after a load, which counts as a write to the save.
+        let (mut before, mut before_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut before);
+        pair.save_state(&mut before_pair);
+        let refused =
+            |result: Result<(), StateError>| matches!(result, Err(StateError::Malformed(_)));
+        assert!(refused(one.load_state(&together)), "a pair's into one");
+        assert!(refused(pair.load_state(&alone)), "one's into a pair");
+        for state in [&mut alone, &mut together] {
+            state.push(0);
+        }
+        assert!(refused(one.load_state(&alone)), "one more byte");
+        assert!(refused(pair.load_state(&together)), "one more byte");
+        // A refused state changes nothing.
+        let (mut after, mut after_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut after);
+        pair.save_state(&mut after_pair);
+        assert!(after == before, "the console is as it was");
+        assert!(after_pair == before_pair, "the pair is as it was");
+    }
+
+    /// As [`try_wrong_states`], for two DSes playing `rom` in wireless range:
+    /// the wrong states are made from the pair's own, and each one the
+    /// pair takes runs a frame, saves, resets and runs a frame more.
+    fn try_wrong_pair_states(rom: &[u8], frames: usize, every: usize) -> mutation::Outcome {
+        let media = Media::new(rom);
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let inputs = [Input::default(); 2];
+        let mut audio = Vec::new();
+        for _ in 0..frames {
+            pair.run_frame(&inputs, &mut audio);
+            audio.clear();
+        }
+        let mut good = Vec::new();
+        pair.save_state(&mut good);
+        pair.load_state(&good).expect("its own state loads");
+        let machines: (Machine, Machine) = payload::load(&good, "its own state").expect("reads");
+        mutation::try_each(&machines, every, |wrong| {
+            if pair.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            pair.run_frame(&inputs, &mut audio);
+            let mut saved = Vec::new();
+            pair.save_state(&mut saved);
+            pair.reset();
+            pair.run_frame(&inputs, &mut audio);
+        })
+    }
+
+    /// A state that is wrong in one place is refused, or loads and runs:
+    /// it never panics or hangs the core. This tries a sample of the
+    /// places; `every_wrong_state_is_refused_or_runs` tries them all.
+    #[test]
+    fn a_wrong_state_is_refused_or_runs() {
+        let outcome = try_wrong_states(&rom_waiting_in_the_bios(), (4, true, 1), 79);
+        assert!(outcome.tried > 100, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+        let outcome = try_wrong_pair_states(&rom(), 3, 401);
+        assert!(outcome.tried > 10, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+    }
+
+    /// Every place in the states of a busy machine, at the native scale
+    /// and enlarged, and of the test ROMs, if they are there
+    /// (`scripts/fetch-test-roms.sh`), each on a thread of its own.
+    /// Several minutes.
+    #[test]
+    #[ignore = "minutes: every byte of several states' structure"]
+    fn every_wrong_state_is_refused_or_runs() {
+        let waiting = rom_waiting_in_the_bios();
+        let plain = rom();
+        let mut machines: Vec<(String, Box<dyn FnOnce() -> mutation::Outcome + Send + '_>)> = vec![
+            (
+                "busy".to_owned(),
+                Box::new(|| try_wrong_states(&waiting, (4, true, 1), 1)),
+            ),
+            (
+                "busy at 2x".to_owned(),
+                Box::new(|| try_wrong_states(&waiting, (4, true, 2), 3)),
+            ),
+            (
+                "idle".to_owned(),
+                Box::new(|| try_wrong_states(&plain, (3, false, 1), 2)),
+            ),
+        ];
+        machines.push((
+            "a linked pair".to_owned(),
+            Box::new(|| try_wrong_pair_states(&plain, 3, 3)),
+        ));
+        let roms = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-roms");
+        for (name, frames) in [
+            ("rockwrestler/rockwrestler.nds", 300),
+            ("armwrestler-ds/armwrestler.nds", 200),
+        ] {
+            let Ok(rom) = std::fs::read(roms.join(name)) else {
+                eprintln!("skipping {name}: run scripts/fetch-test-roms.sh");
+                continue;
+            };
+            machines.push((
+                name.to_owned(),
+                Box::new(move || try_wrong_states(&rom, (frames, false, 1), 2)),
+            ));
+        }
+        mutation::sweep(machines).assert_no_panics();
+    }
+
+    /// A cartridge whose ARM9 divides 100 by 7 with the BIOS (SWI 09h)
+    /// and stores the quotient at 0x02000000, then loops. The ARM7 loops.
+    fn rom_that_divides() -> Vec<u8> {
+        let mut rom = vec![0; 0x400];
+        let mut put = |offset: usize, value: u32| {
+            rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        for (header, at, base) in [(0x20, 0x200, 0x0200_4000), (0x30, 0x300, 0x0238_0000)] {
+            put(header, at as u32);
+            put(header + 4, base);
+            put(header + 8, base);
+            put(header + 12, 0x18);
+        }
+        let program = [
+            0xE3A0_0064, // MOV R0, #100
+            0xE3A0_1007, // MOV R1, #7
+            0xEF09_0000, // SWI 09h  (Div)
+            0xE3A0_2402, // MOV R2, #0x02000000
+            0xE582_0000, // STR R0, [R2]
+            0xEAFF_FFFE, // B .
+        ];
+        for (index, word) in program.into_iter().enumerate() {
+            put(0x200 + index * 4, word);
+        }
+        put(0x300, 0xEAFF_FFFE); // B .
+        rom
+    }
+
+    /// BIOS dumps that are not Nintendo's: every vector returns at once,
+    /// so a system call does nothing.
+    fn dumps() -> (Vec<u8>, Vec<u8>) {
+        let image = |size: usize| {
+            let mut image = vec![0; size];
+            for vector in (0..0x20).step_by(4) {
+                // MOVS PC, LR
+                image[vector..vector + 4].copy_from_slice(&0xE1B0_F00Eu32.to_le_bytes());
+            }
+            image
+        };
+        (image(0x1000), image(0x4000))
+    }
+
+    /// A DS playing `rom`, with `dumps` as its BIOS if given.
+    fn nds_with(rom: &[u8], dumps: Option<&(Vec<u8>, Vec<u8>)>) -> Nds {
+        let files: Vec<emu_core::SystemFile<'_>> = dumps
+            .iter()
+            .flat_map(|(arm9, arm7)| {
+                [
+                    (SystemFileKind::NdsBios9, arm9),
+                    (SystemFileKind::NdsBios7, arm7),
+                ]
+            })
+            .map(|(kind, data)| emu_core::SystemFile { kind, data })
+            .collect();
+        Nds::new(&Media {
+            system_files: &files,
+            ..Media::new(rom)
+        })
+        .expect("valid header")
+    }
+
+    /// The quotient [`rom_that_divides`] stored after one frame: 14 where
+    /// the BIOS call was emulated, 100 where [`dumps`] did nothing.
+    fn quotient(nds: &mut Nds) -> u32 {
+        nds.run_frame(&[Input::default()], &mut Vec::new());
+        u32::from_le_bytes([0, 1, 2, 3].map(|byte| nds.peek(0, 0x0200_0000 + byte).unwrap_or(0)))
+    }
+
+    /// The flag that says BIOS calls are emulated came from the state and
+    /// the images from the session: a state made without dumps kept
+    /// trapping calls over the user's BIOS, for good, and one made with
+    /// dumps ran the emulated BIOS's empty vectors.
+    #[test]
+    fn the_session_decides_the_bios_and_a_state_keeps_the_one_it_was_made_with() {
+        let rom = rom_that_divides();
+        let dumps = dumps();
+        let mut emulating = nds_with(&rom, None);
+        let mut with_dumps = nds_with(&rom, Some(&dumps));
+        // Each one's state at power-on, before the call.
+        let (mut emulated_state, mut dump_state) = (Vec::new(), Vec::new());
+        emulating.save_state(&mut emulated_state);
+        with_dumps.save_state(&mut dump_state);
+        assert_eq!(quotient(&mut emulating), 14);
+        assert_eq!(quotient(&mut with_dumps), 100);
+
+        // A state made without dumps loads where there are dumps, and its
+        // calls are still emulated, by the emulated BIOS's own images.
+        with_dumps.load_state(&emulated_state).expect("loads");
+        assert_eq!(quotient(&mut with_dumps), 14);
+        // The machine is still one whose calls are emulated, as a state
+        // saved from it will say.
+        assert!(with_dumps.machine.hle_bios);
+        // A reset goes back to the session's BIOS: the dumps.
+        with_dumps.reset();
+        assert!(!with_dumps.machine.hle_bios);
+        assert_eq!(quotient(&mut with_dumps), 100);
+        // And its own states still load.
+        with_dumps.load_state(&dump_state).expect("loads");
+        assert_eq!(quotient(&mut with_dumps), 100);
+
+        // A state made with dumps is refused where there are none, and
+        // says why; the session carries on as it was.
+        let refused = emulating.load_state(&dump_state);
+        let Err(StateError::Malformed(why)) = refused else {
+            panic!("{refused:?}");
+        };
+        assert!(why.contains("BIOS dumps"), "{why}");
+        emulating.reset();
+        assert_eq!(quotient(&mut emulating), 14);
     }
 
     /// A halfword through [`Core::peek`].

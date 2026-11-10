@@ -101,6 +101,15 @@ impl Decompression {
         (decompression, open)
     }
 
+    /// Whether this decompression, read from a save state, holds only
+    /// counts it could have reached ([`Decoder::in_range`]).
+    pub(crate) fn in_range(&self) -> bool {
+        match &self.stage {
+            Stage::Opening | Stage::Closing => true,
+            Stage::Reading(decoder, out) => decoder.in_range(out),
+        }
+    }
+
     /// Takes the R0 the last game function returned, decompresses as far
     /// as that allows, and says what comes next.
     pub(crate) fn resume<B: Bus>(&mut self, bus: &mut B, value: u32) -> Next {

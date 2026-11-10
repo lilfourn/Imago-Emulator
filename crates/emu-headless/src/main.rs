@@ -38,7 +38,8 @@
 //! change nothing:
 //!
 //! - `--state FILE` starts from a save state, such as a game's `.ss0`
-//!   checkpoint, after checking it is for this system and ROM;
+//!   checkpoint, after checking it is for this system and ROM and of the
+//!   state version this build's core reads;
 //! - `--scale N` draws the DS's 3D at N times its resolution;
 //! - `--time` adds a line with how long the frames took to run:
 //!   `elapsed_ms=… ms_per_frame=… fps=…`;
@@ -243,7 +244,8 @@ fn take_audio(
 }
 
 /// Loads the save-state container at `path` into `core`, refusing one made
-/// by another system or for another ROM.
+/// by another system, for another ROM, or of a state version the core
+/// does not read ([`emu_state::Header::check`]).
 fn load_state_file(
     path: &Path,
     system: System,
@@ -252,12 +254,6 @@ fn load_state_file(
 ) -> anyhow::Result<()> {
     let bytes = fs::read(path)?;
     let decoded = emu_state::decode(&bytes)?;
-    if decoded.header.system != system {
-        bail!(
-            "it is a {} state, not a {system} one",
-            decoded.header.system
-        );
-    }
     // The app names a 3DS game, which can be gigabytes, by its first MiB
     // and length, as states made in the app say.
     let rom_crc32 = if system == System::N3ds {
@@ -265,12 +261,13 @@ fn load_state_file(
     } else {
         crc32fast::hash(&fs::read(rom)?)
     };
-    if decoded.header.rom_crc32 != rom_crc32 {
-        bail!(
-            "it was saved with another ROM (CRC-32 {:08x}, not {rom_crc32:08x})",
-            decoded.header.rom_crc32
-        );
-    }
+    // The header a state of this game saved now would have.
+    let playing = emu_state::Header {
+        system,
+        state_version: core.info().state_version,
+        rom_crc32,
+    };
+    decoded.header.check(&playing)?;
     core.load_state(decoded.payload)?;
     Ok(())
 }

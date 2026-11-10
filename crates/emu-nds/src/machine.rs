@@ -9,6 +9,8 @@
 //! ones would do nothing different.
 
 use emu_arm::{Bus, Cpu, Mode, Model, Processor, Registers, cp15, psr};
+use emu_core::StateError;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::bios::{self, Call, Decompression, Effects, Next};
@@ -20,6 +22,11 @@ use crate::dma::Timing;
 use crate::hardware::{CpuIo, Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
+
+/// The most emulated BIOS calls a state may have waiting on a game's
+/// callback, per CPU. A game has one: a callback would have to call the
+/// BIOS's decompression itself to add another.
+const SUSPENDED_MOST: usize = 16;
 
 /// The longest slice, in bus cycles.
 const SLICE_CYCLES: u64 = 64;
@@ -40,6 +47,9 @@ pub(crate) struct Machine {
     pub(crate) arm7: Cpu,
     pub(crate) hw: Hardware,
     /// System calls are emulated in Rust rather than run from BIOS dumps.
+    /// It goes with the BIOS images in `hw`, which states leave out: the
+    /// core gives a loaded machine the images its flag asks for
+    /// (`Nds::install`).
     pub(crate) hle_bios: bool,
     /// Emulated BIOS calls waiting for a game function they called to
     /// return, per CPU (ARM9, ARM7), the innermost last.
@@ -157,6 +167,36 @@ impl Machine {
             system_calls: [[0; 0x20]; 2],
             slice_target: None,
         }
+    }
+
+    /// Makes this machine, read from a save state, ready to use
+    /// ([`Hardware::settle`]), checking too that no CPU waits on more
+    /// decompression callbacks than a game nests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Malformed`] saying which part is wrong.
+    pub(crate) fn settle(&mut self) -> Result<(), StateError> {
+        payload::check(
+            self.suspended
+                .iter()
+                .all(|calls| calls.len() <= SUSPENDED_MOST),
+            "the state has more BIOS calls waiting than a game nests",
+        )?;
+        payload::check(
+            self.suspended
+                .iter()
+                .flatten()
+                .all(|call| call.decompression.in_range()),
+            "the state has a BIOS decompression part-way that it cannot be",
+        )?;
+        self.hw.settle()
+    }
+
+    /// How many emulated BIOS calls each CPU has waiting on a callback.
+    #[cfg(test)]
+    pub(crate) fn calls_waiting(&self) -> [usize; 2] {
+        [self.suspended[0].len(), self.suspended[1].len()]
     }
 
     /// Bus cycles since power-on, as the scheduler counts them.
@@ -316,7 +356,7 @@ impl Machine {
             let trap = Trap::read(
                 &self.arm9,
                 Side::Arm9,
-                dtcm + 0x3FF8,
+                dtcm.wrapping_add(0x3FF8),
                 self.vblank_wait_swi[0],
             );
             let effects = {

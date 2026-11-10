@@ -27,6 +27,7 @@ use emu_core::{
     ScreenSize, StateError, StereoSample, System, SystemFileKind,
 };
 use emu_gba_cart::Cartridge;
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use bus::Bus;
@@ -251,13 +252,12 @@ impl Core for Gba {
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
-        let bytes = postcard::to_stdvec(&self.machine).expect("machine state always serializes");
-        out.extend_from_slice(&bytes);
+        payload::append(&self.machine, out);
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
-        let mut machine: Machine = postcard::from_bytes(state)
-            .map_err(|_| StateError::Malformed("not a Game Boy Advance state"))?;
+        let mut machine: Machine = payload::load(state, "not a Game Boy Advance state")?;
+        machine.bus.fits()?;
         machine.bus.take_media_from(&mut self.machine.bus);
         self.machine = machine;
         self.present();
@@ -316,7 +316,197 @@ impl Core for Gba {
 
 #[cfg(test)]
 mod tests {
+    use emu_state::mutation;
+
     use super::*;
+
+    /// Loads into a GBA playing `rom` the wrong states made from its own
+    /// after `frames` frames ([`mutation::try_each`]), and runs each it
+    /// takes: a frame, the memory a debugger reads, a save, a reset and
+    /// a frame more.
+    fn try_wrong_states(rom: &[u8], frames: usize, every: usize) -> mutation::Outcome {
+        let mut gba = Gba::new(&Media::new(rom)).expect("valid rom");
+        let mut audio = Vec::new();
+        for _ in 0..frames {
+            gba.run_frame(&[], &mut audio);
+            audio.clear();
+        }
+        let mut good = Vec::new();
+        gba.save_state(&mut good);
+        gba.load_state(&good).expect("its own state loads");
+        let machine = gba.machine.clone();
+        mutation::try_each(&machine, every, |wrong| {
+            if gba.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            gba.run_frame(&[], &mut audio);
+            for address in (0..0x1000_0000u32).step_by(0x3_3331) {
+                let _ = gba.peek(0, address);
+            }
+            let _ = gba.memory(MemoryRegion::MainRam);
+            let _ = gba.memory(MemoryRegion::VideoRam);
+            let mut saved = Vec::new();
+            gba.save_state(&mut saved);
+            let mut backup = Vec::new();
+            gba.save_backup(0, &mut backup);
+            gba.reset();
+            gba.run_frame(&[], &mut audio);
+        })
+    }
+
+    /// A ROM that spins after writing a byte to save memory, with `code`
+    /// as its game code and `library` as its save library's name: what
+    /// picks its save chip and clock.
+    fn rom_with_a_save(code: &[u8; 4], library: &[u8]) -> Vec<u8> {
+        // MOV R0, #0x0E000000; STRB R0, [R0]; B .
+        let mut rom = rom(&[0xE3A0_040E, 0xE5C0_0000, 0xEAFF_FFFE]);
+        rom[0xAC..0xB0].copy_from_slice(code);
+        rom[0x100..0x100 + library.len()].copy_from_slice(library);
+        rom
+    }
+
+    /// A state is written after whatever the caller's buffer holds, as
+    /// the app's rewind snapshot counts on, and is the same bytes at any
+    /// place in it.
+    #[test]
+    fn a_state_is_appended_to_what_the_buffer_holds() {
+        let rom = rom(&[0xEAFF_FFFE]);
+        let mut core = Gba::new(&Media::new(&rom)).expect("valid rom");
+        core.run_frame(&[Input::default()], &mut Vec::new());
+        let mut alone = Vec::new();
+        core.save_state(&mut alone);
+        let mut after = vec![0xAA, 0xBB, 0xCC];
+        core.save_state(&mut after);
+        assert_eq!(after[..3], [0xAA, 0xBB, 0xCC]);
+        assert!(after[3..] == alone[..], "the same state");
+        // As postcard writes the machine.
+        let plain = postcard::to_stdvec(&core.machine).expect("serializes");
+        assert!(alone == plain, "the bytes postcard writes");
+    }
+
+    /// A state with bytes after it is not that state: a linked pair's
+    /// begins with one console's, and used to load into a console on its
+    /// own, dropping the second player.
+    #[test]
+    fn a_state_with_bytes_left_over_is_refused() {
+        let rom = rom(&[0xEAFF_FFFE]);
+        let media = Media::new(&rom);
+        let mut one = Gba::new(&media).expect("valid rom");
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let (mut alone, mut together) = (Vec::new(), Vec::new());
+        one.save_state(&mut alone);
+        pair.save_state(&mut together);
+        assert!(one.load_state(&alone).is_ok() && pair.load_state(&together).is_ok());
+        // As they are after a load, which counts as a write to the save.
+        let (mut before, mut before_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut before);
+        pair.save_state(&mut before_pair);
+        let refused =
+            |result: Result<(), StateError>| matches!(result, Err(StateError::Malformed(_)));
+        assert!(refused(one.load_state(&together)), "a pair's into one");
+        assert!(refused(pair.load_state(&alone)), "one's into a pair");
+        for state in [&mut alone, &mut together] {
+            state.push(0);
+        }
+        assert!(refused(one.load_state(&alone)), "one more byte");
+        assert!(refused(pair.load_state(&together)), "one more byte");
+        // A refused state changes nothing.
+        let (mut after, mut after_pair) = (Vec::new(), Vec::new());
+        one.save_state(&mut after);
+        pair.save_state(&mut after_pair);
+        assert!(after == before, "the console is as it was");
+        assert!(after_pair == before_pair, "the pair is as it was");
+    }
+
+    /// As [`try_wrong_states`], for two GBAs playing `rom` on a link cable:
+    /// the wrong states are made from the pair's own, and each one the
+    /// pair takes runs a frame, saves, resets and runs a frame more.
+    fn try_wrong_pair_states(rom: &[u8], frames: usize, every: usize) -> mutation::Outcome {
+        let media = Media::new(rom);
+        let mut pair = Linked::new(&[media, media]).expect("two games");
+        let inputs = [Input::default(); 2];
+        let mut audio = Vec::new();
+        for _ in 0..frames {
+            pair.run_frame(&inputs, &mut audio);
+            audio.clear();
+        }
+        let mut good = Vec::new();
+        pair.save_state(&mut good);
+        pair.load_state(&good).expect("its own state loads");
+        let machines: (Machine, Machine) = payload::load(&good, "its own state").expect("reads");
+        mutation::try_each(&machines, every, |wrong| {
+            if pair.load_state(wrong).is_err() {
+                return;
+            }
+            let mut audio = Vec::new();
+            pair.run_frame(&inputs, &mut audio);
+            let mut saved = Vec::new();
+            pair.save_state(&mut saved);
+            pair.reset();
+            pair.run_frame(&inputs, &mut audio);
+        })
+    }
+
+    /// A state that is wrong in one place is refused, or loads and runs:
+    /// it never panics or hangs the core. This tries a sample of the
+    /// places; `every_wrong_state_is_refused_or_runs` tries them all.
+    #[test]
+    fn a_wrong_state_is_refused_or_runs() {
+        // Pokémon Emerald's code: 128 KiB of Flash and the clock.
+        let outcome = try_wrong_states(&rom_with_a_save(b"BPEE", b""), 3, 5);
+        assert!(outcome.tried > 300, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+        let outcome = try_wrong_pair_states(&rom_with_a_save(b"BPEE", b""), 3, 29);
+        assert!(outcome.tried > 100, "{} states", outcome.tried);
+        outcome.assert_no_panics();
+    }
+
+    /// Every place in the states of a cartridge of each kind, and of the
+    /// test ROMs that use the most of the machine, if they are there
+    /// (`scripts/fetch-test-roms.sh`, `scripts/fetch-mgba-suite.sh`), each
+    /// on a thread of its own. Several minutes.
+    #[test]
+    #[ignore = "minutes: every byte of several states' structure"]
+    fn every_wrong_state_is_refused_or_runs() {
+        let mut machines: Vec<(String, Box<dyn FnOnce() -> mutation::Outcome + Send>)> = Vec::new();
+        for (code, library) in [
+            (b"BPEE", &b""[..]),
+            (b"TEST", b"SRAM_V"),
+            (b"TEST", b"EEPROM_V"),
+            (b"TEST", b"FLASH_V"),
+            (b"TEST", b""),
+        ] {
+            let name = format!(
+                "{} {}",
+                String::from_utf8_lossy(code),
+                String::from_utf8_lossy(library)
+            );
+            let rom = rom_with_a_save(code, library);
+            machines.push((name, Box::new(move || try_wrong_states(&rom, 3, 1))));
+        }
+        let linked = rom_with_a_save(b"BPEE", b"");
+        machines.push((
+            "a linked pair".to_owned(),
+            Box::new(move || try_wrong_pair_states(&linked, 3, 1)),
+        ));
+        let roms = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-roms");
+        for (name, frames) in [
+            ("mgba-suite/suite.gba", 200),
+            ("armwrestler-gba/armwrestler-gba-fixed.gba", 300),
+            ("gba-tests/bios/bios.gba", 20),
+        ] {
+            let Ok(rom) = std::fs::read(roms.join(name)) else {
+                eprintln!("skipping {name}: run scripts/fetch-test-roms.sh");
+                continue;
+            };
+            machines.push((
+                name.to_owned(),
+                Box::new(move || try_wrong_states(&rom, frames, 1)),
+            ));
+        }
+        mutation::sweep(machines).assert_no_panics();
+    }
 
     /// A ROM whose code at 0x08000000 is `program` (ARM), with a valid
     /// header fixed value.

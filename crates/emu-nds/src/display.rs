@@ -6,8 +6,12 @@
 //!
 //! With upscaled 3D (NDS-9), the screens are also drawn larger into
 //! [`ScaledScreens`], for display only: engine B's lines as they are
-//! drawn, engine A's all at once at VBlank, on several threads, from
-//! copies taken as they were drawn.
+//! drawn, engine A's all at once at VBlank, in bands on the 3D renderer's
+//! threads, from copies taken as they were drawn.
+
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, mpsc};
 
 use crate::capture::{self, Control};
 use crate::dma::Timing;
@@ -24,8 +28,8 @@ pub(crate) const LINE_CYCLES: u64 = 2130;
 pub(crate) const HBLANK_START: u64 = 256 * 6;
 /// Lines per frame.
 pub(crate) const LINES: u16 = 263;
-/// Engine A lines drawn larger on each thread at VBlank.
-const SCALED_LINES_PER_THREAD: usize = 24;
+/// Engine A lines in each band drawn larger at VBlank.
+const SCALED_LINES_PER_BAND: usize = 24;
 /// Lines shown.
 pub(crate) const VISIBLE_LINES: u16 = 192;
 /// The line where the 3D engine renders the coming frame.
@@ -45,8 +49,10 @@ pub(crate) const FRAME_CYCLES: u64 = LINE_CYCLES * LINES as u64;
 pub(crate) struct ScaledScreens {
     /// 1 when off; the screens are then empty.
     pub(crate) scale: usize,
-    /// Engine A's screen, `256 * scale` pixels by `192 * scale`.
-    pub(crate) a: Box<[u32]>,
+    /// Engine A's screen, `256 * scale` pixels by `192 * scale`, in
+    /// bands of [`SCALED_LINES_PER_BAND`] lines from the top: each goes
+    /// to a thread to be drawn and comes back.
+    a: Vec<Box<[u32]>>,
     /// Engine B's screen.
     pub(crate) b: Box<[u32]>,
     /// Engine A's lines as drawn this frame, to draw larger at VBlank.
@@ -55,11 +61,51 @@ pub(crate) struct ScaledScreens {
     fresh: Vec<bool>,
 }
 
+/// What every band of engine A's larger screen is drawn from, shared by
+/// the threads drawing them.
+struct BandSource {
+    scale: usize,
+    lines: Vec<LineCopy>,
+    fresh: Vec<bool>,
+    /// The 3D engine's larger frame, which the lines showing 3D are drawn
+    /// around.
+    three_d: gpu3d::LentFrame,
+}
+
+impl BandSource {
+    /// Draws band `index` of the screen into `out`: each of its lines
+    /// drawn since the last VBlank.
+    fn draw(&self, index: usize, out: &mut [u32]) {
+        #[cfg(test)]
+        tests::note_band_thread();
+        let scale = self.scale;
+        let first = index * SCALED_LINES_PER_BAND;
+        let three_d = self.three_d.rows();
+        let lines = self.lines.iter().zip(&self.fresh).enumerate().skip(first);
+        for ((line, (copy, fresh)), out) in lines.zip(out.chunks_mut(WIDTH * scale * scale)) {
+            if *fresh {
+                copy.draw(scale, |row| three_d.row(line * scale + row), out);
+            }
+        }
+    }
+}
+
+/// A band a thread has drawn, handed back with its share of the source,
+/// so that once every band is back the source is this thread's alone.
+struct DrawnBand {
+    index: usize,
+    out: Box<[u32]>,
+    source: Arc<BandSource>,
+    /// The panic that stopped the drawing, to raise on the machine's
+    /// thread.
+    panic: Option<Box<dyn Any + Send>>,
+}
+
 impl Default for ScaledScreens {
     fn default() -> Self {
         Self {
             scale: 1,
-            a: Box::default(),
+            a: Vec::new(),
             b: Box::default(),
             lines: Vec::new(),
             fresh: Vec::new(),
@@ -69,31 +115,48 @@ impl Default for ScaledScreens {
 
 impl ScaledScreens {
     /// Screens `scale` times larger showing `a` and `b`, two native
-    /// screens, enlarged.
+    /// screens, enlarged. They are a screen's size times the scale
+    /// squared whatever length `a` and `b` are; lines those lack stay
+    /// black.
     fn enlarged(scale: usize, a: &[u32], b: &[u32]) -> Self {
         if scale == 1 {
             return Self::default();
         }
-        let enlarge = |native: &[u32]| {
-            let mut out = vec![0; native.len() * scale * scale].into_boxed_slice();
-            let line_size = WIDTH * scale * scale;
+        let lines = usize::from(VISIBLE_LINES);
+        let line_size = WIDTH * scale * scale;
+        // `lines` of `native`, from `first`, enlarged.
+        let enlarge = |native: &[u32], first: usize, lines: usize| {
+            let mut out = vec![0; lines * line_size].into_boxed_slice();
             for (line, out) in native
                 .as_chunks()
                 .0
                 .iter()
+                .skip(first)
                 .zip(out.chunks_exact_mut(line_size))
             {
                 gpu2d::enlarge_line(line, scale, out);
             }
             out
         };
-        let lines = usize::from(VISIBLE_LINES);
         Self {
             scale,
-            a: enlarge(a),
-            b: enlarge(b),
+            a: (0..lines)
+                .step_by(SCALED_LINES_PER_BAND)
+                .map(|first| enlarge(a, first, SCALED_LINES_PER_BAND.min(lines - first)))
+                .collect(),
+            b: enlarge(b, 0, lines),
             lines: vec![LineCopy::default(); lines],
             fresh: vec![false; lines],
+        }
+    }
+
+    /// Copies engine A's screen into `out`, which is its size.
+    pub(crate) fn copy_a(&self, out: &mut [u32]) {
+        let mut rest = out;
+        for band in &self.a {
+            let (out, after) = rest.split_at_mut(band.len().min(rest.len()));
+            out.copy_from_slice(&band[..out.len()]);
+            rest = after;
         }
     }
 }
@@ -179,32 +242,60 @@ impl Hardware {
     }
 
     /// Draws engine A's lines taken this frame into its larger screen,
-    /// around the 3D engine's larger frame, a few lines to a thread.
+    /// around the 3D engine's larger frame: a band to a job on the 3D
+    /// renderer's threads ([`gpu3d::Gpu3d::run_jobs`]), which start none
+    /// of their own for it. Waits for them all.
     fn finish_scaled_screens(&mut self) {
         let scaled = &mut self.scaled;
-        let scale = scaled.scale;
-        let size = WIDTH * scale * scale;
-        let three_d = self.gpu3d.scaled_frame();
-        let lines = scaled.lines.chunks(SCALED_LINES_PER_THREAD);
-        let fresh = scaled.fresh.chunks(SCALED_LINES_PER_THREAD);
-        let screen = scaled.a.chunks_mut(SCALED_LINES_PER_THREAD * size);
-        std::thread::scope(|scope| {
-            for (first, ((lines, fresh), screen)) in (0..)
-                .step_by(SCALED_LINES_PER_THREAD)
-                .zip(lines.zip(fresh).zip(screen))
-            {
-                scope.spawn(move || {
-                    for (line, (copy, out)) in
-                        (first..).zip(lines.iter().zip(screen.chunks_mut(size)))
-                    {
-                        if fresh[line - first] {
-                            copy.draw(scale, |row| three_d.row(line * scale + row), out);
-                        }
-                    }
-                });
-            }
+        // What the bands read moves into the source the jobs share, and
+        // each band into its job; everything is back before this returns.
+        let source = Arc::new(BandSource {
+            scale: scaled.scale,
+            lines: std::mem::take(&mut scaled.lines),
+            fresh: std::mem::take(&mut scaled.fresh),
+            three_d: self.gpu3d.take_scaled_frame(),
         });
+        let (sender, receiver) = mpsc::channel();
+        let jobs: Vec<gpu3d::Job> = scaled
+            .a
+            .iter_mut()
+            .enumerate()
+            .map(|(index, band)| {
+                let mut out = std::mem::take(band);
+                let source = Arc::clone(&source);
+                let sender = sender.clone();
+                Box::new(move || {
+                    let drawing =
+                        std::panic::catch_unwind(AssertUnwindSafe(|| source.draw(index, &mut out)));
+                    // Nobody is waiting only if the machine's thread has
+                    // itself panicked.
+                    let _ = sender.send(DrawnBand {
+                        index,
+                        out,
+                        source,
+                        panic: drawing.err(),
+                    });
+                }) as gpu3d::Job
+            })
+            .collect();
+        let bands = jobs.len();
+        self.gpu3d.run_jobs(jobs);
+        let mut panic = None;
+        for drawn in receiver.iter().take(bands) {
+            scaled.a[drawn.index] = drawn.out;
+            panic = panic.or(drawn.panic);
+            // The job's share of the source ends here, on this thread.
+            drop(drawn.source);
+        }
+        // Every job has handed its share back, so this is the only one.
+        let source = Arc::into_inner(source).expect("every band is back");
+        scaled.lines = source.lines;
+        scaled.fresh = source.fresh;
         scaled.fresh.fill(false);
+        self.gpu3d.put_scaled_frame(source.three_d);
+        if let Some(panic) = panic {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     /// Draws the screens `scale` times larger too (clamped to 1 to
@@ -296,7 +387,43 @@ impl Hardware {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// The names of the threads that have drawn bands of a larger screen.
+    static BAND_THREADS: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
+
+    /// Notes the thread a band is being drawn on.
+    pub(super) fn note_band_thread() {
+        let name = std::thread::current().name().map(str::to_owned);
+        BAND_THREADS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(name);
+    }
+
+    /// Engine A's larger screen was drawn on eight threads started for it
+    /// at every VBlank, 480 a second, beside the renderer's own, past its
+    /// cap and outside its scheduling class.
+    #[test]
+    fn the_larger_screen_is_drawn_on_the_renderers_threads() {
+        let mut hw = Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into());
+        hw.set_render_scale(2);
+        hw.start_display();
+        run_events(&mut hw, FRAME_CYCLES * 3);
+        let names = BAND_THREADS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        // Three frames of eight bands, and any other test's.
+        assert!(names.len() >= 24, "{} bands", names.len());
+        let strangers: Vec<_> = names
+            .iter()
+            .filter(|name| name.as_deref() != Some("3D renderer"))
+            .collect();
+        assert!(strangers.is_empty(), "drawn on {strangers:?}");
+    }
 
     fn run_events(hw: &mut Hardware, until: u64) -> Vec<Moment> {
         let mut moments = Vec::new();

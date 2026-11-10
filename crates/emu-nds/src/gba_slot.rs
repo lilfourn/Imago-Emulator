@@ -75,6 +75,12 @@ impl GbaSlot {
         self.cartridge.is_some()
     }
 
+    /// Whether the cartridge, read from a save state, holds only what
+    /// its chips can ([`Cartridge::in_range`]).
+    pub(crate) fn in_range(&self) -> bool {
+        self.cartridge.as_ref().is_none_or(Cartridge::in_range)
+    }
+
     /// Moves the ROM out of `other`, which is about to be replaced by this
     /// slot from a loaded save state.
     pub(crate) fn take_rom_from(&mut self, other: &mut Self) {

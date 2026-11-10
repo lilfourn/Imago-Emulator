@@ -10,6 +10,49 @@ use crate::Memory;
 /// Fills and slides stop after this many writes: the GBA's whole EWRAM.
 const MAX_SLIDE: u32 = 0x4_0000;
 
+/// Bytes one cheat may write in a frame through the codes that write many
+/// at once: all of the DS's main RAM, the largest memory a cheat has to
+/// fill.
+pub(crate) const WRITE_BUDGET: u32 = 0x40_0000;
+
+/// What one cheat has left of its [`WRITE_BUDGET`] this frame.
+///
+/// Fills, slides and the Action Replay DS's `E` and `F` copies take every
+/// byte they are to write from it first, writable or not. Each has a
+/// limit of its own, but a list can hold many of them and a `FOR` loop
+/// repeats them, which without this kept the emulation thread in one
+/// frame for minutes. Codes that write a value or two are bounded by the
+/// list's length, or by the loop's step limit, and take nothing.
+#[derive(Debug)]
+pub(crate) struct Budget {
+    left: u32,
+    exceeded: bool,
+}
+
+impl Budget {
+    /// A cheat's budget at the start of a frame.
+    pub(crate) const fn new() -> Self {
+        Self {
+            left: WRITE_BUDGET,
+            exceeded: false,
+        }
+    }
+
+    /// Takes `bytes` and returns how many of them the budget had.
+    pub(crate) fn take(&mut self, bytes: u32) -> u32 {
+        let granted = bytes.min(self.left);
+        self.left -= granted;
+        self.exceeded |= granted < bytes;
+        granted
+    }
+
+    /// Whether a code asked for more than was left. The cheat stops there
+    /// for the frame.
+    pub(crate) const fn exceeded(&self) -> bool {
+        self.exceeded
+    }
+}
+
 /// How many bytes an operation reads or writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Width {
@@ -165,10 +208,15 @@ pub(crate) fn patch_rom_half(address: u32, value: u16) -> Op {
     ])
 }
 
-/// Runs `ops` in order against `memory`.
+/// Runs `ops` in order against `memory`, as far as one cheat's [`Budget`]
+/// goes.
 pub(crate) fn run(ops: &[Op], memory: &mut (impl Memory + ?Sized)) {
+    let mut budget = Budget::new();
     let mut next = 0;
     while let Some(op) = ops.get(next) {
+        if budget.exceeded() {
+            break;
+        }
         next += 1;
         match op {
             &Op::Write {
@@ -184,7 +232,9 @@ pub(crate) fn run(ops: &[Op], memory: &mut (impl Memory + ?Sized)) {
                 step,
                 increment,
             } => {
-                for index in 0..count.min(MAX_SLIDE) {
+                let bytes = width as u32;
+                let writes = budget.take(count.min(MAX_SLIDE) * bytes) / bytes;
+                for index in 0..writes {
                     let at = address.wrapping_add(index.wrapping_mul(step));
                     let value = value.wrapping_add(index.wrapping_mul(increment));
                     write(memory, at, value, width);

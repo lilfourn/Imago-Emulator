@@ -54,12 +54,22 @@ impl Cartridge {
         &self.rom
     }
 
+    /// Whether this cartridge, read from a save state, holds only what
+    /// its chips can: save memory of a length its kind comes in, a Flash
+    /// bank it has, and counters within the widths the code shifts and
+    /// indexes by. A write keeps them so; a state is read as it comes, so
+    /// the cores ask before they run one.
+    #[must_use]
+    pub fn in_range(&self) -> bool {
+        self.backup.in_range() && self.rtc.as_ref().is_none_or(Rtc::in_range)
+    }
+
     /// Moves the ROM out of `other`, which is about to be replaced by this
     /// cartridge from a loaded save state. Counts the swap as a save write,
     /// since the state may hold different save memory than was last flushed.
     pub fn take_rom_from(&mut self, other: &mut Self) {
         self.rom = std::mem::take(&mut other.rom);
-        self.generation = other.generation + 1;
+        self.generation = other.generation.wrapping_add(1);
     }
 
     /// The console was reset at cycle `now` with this cartridge in, and
@@ -133,7 +143,7 @@ impl Cartridge {
             && let Backup::Eeprom(eeprom) = &mut self.backup
         {
             if eeprom.write(value) {
-                self.generation += 1;
+                self.generation = self.generation.wrapping_add(1);
             }
             return;
         }
@@ -157,7 +167,7 @@ impl Cartridge {
     /// it, Flash takes it as part of a command.
     pub fn write_backup(&mut self, address: u32, value: u8) {
         if self.backup.write(address & 0x00FF_FFFF, value) {
-            self.generation += 1;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 }

@@ -80,6 +80,25 @@ pub(crate) enum Staged {
 }
 
 impl Timers {
+    /// Whether these, read from a save state whose clock is at `now`,
+    /// are timers the machine could have left: each one that counts with
+    /// time began about now or before, and its overflow is still to come.
+    /// The machine handles an overflow as its cycle arrives, so one long
+    /// overdue is not a count the code allows for.
+    pub(crate) fn in_range(&self, now: u64) -> bool {
+        /// More than the cycle a timer waits to start and the access an
+        /// overflow can wait for.
+        const SLACK: u64 = 1 << 16;
+        (0..4).all(|index| {
+            let timer = &self.timers[index];
+            !timer.running
+                || (timer.started <= now.saturating_add(SLACK)
+                    && self
+                        .overflow_time(index)
+                        .is_some_and(|time| time.saturating_add(SLACK) >= now))
+        })
+    }
+
     /// Reads a register at `offset` from 0x04000100 at cycle `now`.
     pub(crate) fn read(&self, offset: u32, now: u64) -> u16 {
         let index = (offset / 4) as usize;

@@ -27,14 +27,17 @@
 //!   melonDS's extended `D4` operations are parse errors;
 //! - unreadable memory reads as zero, and fails every `IF`;
 //! - word and halfword accesses ignore the low address bits, as the ARM's
-//!   do.
+//!   do;
+//! - a cheat stops for the frame once it has run 2²⁰ codes, or once its
+//!   `E` and `F` codes have copied 4 MiB between them (`ops::Budget`).
 
 use crate::Memory;
 use crate::codes::Item;
 use crate::decode::halves;
-use crate::ops::{self, Width};
+use crate::ops::{self, Budget, Width};
 
-/// Steps one cheat may run per frame; a runaway loop stops here.
+/// Steps one cheat may run per frame; a runaway loop stops here. What its
+/// `E` and `F` codes may copy on the way is a [`Budget`].
 const STEP_LIMIT: u32 = 1 << 20;
 
 /// The most bytes one `F` code copies: all of main RAM.
@@ -115,15 +118,20 @@ impl Program {
         Ok(Self { codes })
     }
 
-    /// Runs the cheat once against `memory`.
+    /// Runs the cheat once against `memory`, as far as its step limit and
+    /// its [`Budget`] go.
     pub(crate) fn run(&self, memory: &mut (impl Memory + ?Sized)) {
         let mut machine = Machine::new();
+        let mut budget = Budget::new();
         let mut next = 0;
         for _ in 0..STEP_LIMIT {
             let Some(&[left, right]) = self.codes.get(next) else {
                 break;
             };
-            next = machine.step(left, right, next + 1, &self.codes, memory);
+            next = machine.step(left, right, next + 1, &self.codes, memory, &mut budget);
+            if budget.exceeded() {
+                break;
+            }
         }
     }
 }
@@ -224,7 +232,8 @@ impl Machine {
     }
 
     /// Runs one code, `next` being the index after it. Returns the index of
-    /// the code to run next.
+    /// the code to run next. `E` and `F` copy as many bytes as `budget`
+    /// has.
     fn step(
         &mut self,
         left: u32,
@@ -232,6 +241,7 @@ impl Machine {
         next: usize,
         codes: &[[u32; 2]],
         memory: &mut (impl Memory + ?Sized),
+        budget: &mut Budget,
     ) -> usize {
         // D0, D1 and D2 run whatever the execution status.
         match left >> 24 {
@@ -309,13 +319,13 @@ impl Machine {
                         let [e, f, g, h] = high.to_le_bytes();
                         [a, b, c, d, e, f, g, h]
                     });
-                for (index, byte) in (0..right).zip(bytes) {
+                for (index, byte) in (0..budget.take(right)).zip(bytes) {
                     memory.poke(at.wrapping_add(index), byte);
                 }
                 return next + lines;
             }
             _ => {
-                for index in 0..right.min(MAX_COPY) {
+                for index in 0..budget.take(right.min(MAX_COPY)) {
                     if let Some(byte) = memory.peek(self.offset.wrapping_add(index)) {
                         memory.poke(x.wrapping_add(index), byte);
                     }

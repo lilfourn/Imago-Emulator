@@ -30,6 +30,7 @@ mod objects;
 mod registers;
 mod scaled;
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::vram::{Engine, EngineMemory};
@@ -76,9 +77,11 @@ pub(crate) struct Engine2d {
     engine: Engine,
     registers: Registers,
     /// 256 BG colours, then 256 OBJ colours, BGR555.
+    #[serde(with = "payload::ExactList::<0x200>")]
     palette: Box<[u16]>,
     /// 128 sprites of four halfwords: attributes 0–2, then one affine
     /// parameter (every fourth sprite's group of four makes PA–PD).
+    #[serde(with = "payload::ExactList::<0x200>")]
     oam: Box<[u16]>,
     /// The last graphics line before master brightness, for display
     /// capture. Rebuilt every line, so not saved.
@@ -99,6 +102,12 @@ fn blank_line() -> [u16; WIDTH] {
 }
 
 impl Engine2d {
+    /// Whether this engine's registers, read from a save state, hold
+    /// only the bits their writes keep.
+    pub(crate) fn in_range(&self) -> bool {
+        self.registers.in_range()
+    }
+
     pub(crate) fn new(engine: Engine) -> Self {
         Self {
             engine,

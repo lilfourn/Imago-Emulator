@@ -72,12 +72,17 @@ the script: it keeps its variables and its `emu.frame()` count.
 | `emu.on_exec(address, fn [, cpu])` | Calls `fn(address, cpu)` each time the CPU is about to run the instruction at `address`, mid-frame. |
 | `emu.registers([cpu])` | The CPU's registers as a table of names to values, as the debugger names them: `R0` to `R12`, `SP`, `LR`, `PC`, `CPSR` and `SPSR` on ARM CPUs, `AF`, `BC`, `DE`, `HL`, `SP` and `PC` on the Game Boy. |
 | `emu.pause()` | Pauses after this frame (in emu-headless, ends the run). |
-| `emu.save_state(slot)` | Saves a state to slot 1–9: the same `game.ss1` to `game.ss9` files as ⌘S, in memory in emu-headless. |
+| `emu.save_state(slot)` | Saves a state to slot 1–9. In the app these are the files `game.ss1` to `game.ss9` beside the game, the first four of them the slots its own Save State and Load State use; in emu-headless they are kept in memory. |
 | `emu.load_state(slot)` | Loads one. |
 
 Saving, loading and pausing happen once the script's call returns,
 before the next frame: memory read after `emu.load_state` in the same
-callback is still the old.
+callback is still the old. The machine stands still meanwhile, so asking
+for the same thing twice in a row asks once. At most 18 saves and loads
+are kept between two frames, enough to save and to load every slot: the
+first 18, in the order they were asked for, so a load never runs without
+the save asked for before it. The rest are left out, and the log says so
+once.
 
 `emu.on_exec` stops at the instruction's address, without the Thumb bit,
 as a debugger breakpoint does, and runs the frame instruction by

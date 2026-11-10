@@ -7,6 +7,7 @@
 
 use emu_core::StereoSample;
 use emu_psg::{Psg, Variant};
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 use crate::model::Model;
@@ -20,9 +21,11 @@ pub(crate) struct Apu {
     psg: Psg,
     /// Sums of the mixed output since the last sample was emitted.
     accumulated: (i32, i32),
+    #[serde(with = "payload::Below::<{ CLOCK_HZ as u64 }>")]
     accumulated_cycles: u32,
     /// Fractional progress towards the next output sample, in units of
     /// 1 / `CLOCK_HZ` samples.
+    #[serde(with = "payload::Below::<{ CLOCK_HZ as u64 }>")]
     sample_clock: u32,
     /// High-pass filter capacitor charge, per side.
     capacitor: (f32, f32),
@@ -77,6 +80,12 @@ impl Apu {
         }
     }
 
+    /// Whether the sound generator, read from a save state, holds only
+    /// values its registers can ([`Psg::in_range`]).
+    pub(crate) fn in_range(&self) -> bool {
+        self.psg.in_range()
+    }
+
     /// Moves the samples produced so far into `out`.
     pub(crate) fn drain_samples(&mut self, out: &mut Vec<StereoSample>) {
         out.append(&mut self.samples);
@@ -117,8 +126,9 @@ impl Apu {
             Some(mixed) => mixed,
             None => *self.mixed.insert(self.mix_channels()),
         };
-        self.accumulated.0 += left;
-        self.accumulated.1 += right;
+        // A save state may hold any sums; the game's own stay small.
+        self.accumulated.0 = self.accumulated.0.wrapping_add(left);
+        self.accumulated.1 = self.accumulated.1.wrapping_add(right);
         self.accumulated_cycles += 1;
 
         self.sample_clock += cycles * SAMPLE_RATE;

@@ -8,6 +8,7 @@
 //! need the write-enable latch, which they clear when the chip is released.
 //! They finish at once, so the status register never reports busy.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 const WRITE_ENABLE: u8 = 0x06;
@@ -34,7 +35,7 @@ const IDLE: u8 = 0xFF;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Flash {
     /// A power-of-two size, so addresses wrap with a mask.
-    #[serde(with = "crate::bytes")]
+    #[serde(with = "payload::bytes")]
     memory: Vec<u8>,
     /// JEDEC manufacturer, memory type and capacity.
     id: [u8; 3],
@@ -69,6 +70,12 @@ impl Flash {
         &self.memory
     }
 
+    /// Whether this chip, read from a save state, has memory of a size
+    /// its addresses can wrap in.
+    pub(crate) fn in_range(&self) -> bool {
+        self.memory.len().is_power_of_two()
+    }
+
     pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
         &mut self.memory
     }
@@ -84,7 +91,8 @@ impl Flash {
             self.start(input);
             return IDLE;
         };
-        self.count += 1;
+        // A game may clock on for as long as it holds chip select.
+        self.count = self.count.saturating_add(1);
         if self.count <= 3 && matches!(command, READ | FAST_READ | PAGE_WRITE | PAGE_PROGRAM) {
             self.address = self.address << 8 | u32::from(input);
             return IDLE;

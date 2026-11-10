@@ -53,6 +53,12 @@ impl Counter {
         }
     }
 
+    /// Whether this count, read from a save state, was last set at a
+    /// time the clock can reach.
+    pub(super) fn in_range(&self) -> bool {
+        self.mark < super::TIME_END
+    }
+
     /// The value at bus cycle `now`.
     pub(super) fn value(&self, now: u64) -> u64 {
         if !self.running {
@@ -89,7 +95,9 @@ impl Counter {
     /// it is running and has not passed it.
     pub(super) fn time_of(&self, target: u64) -> Option<u64> {
         let to_go = target.checked_sub(self.value)?;
-        (self.running && !self.down).then(|| self.mark + cycles(to_go))
+        // A game can set the count, and so how far the target is, to
+        // anything.
+        (self.running && !self.down).then(|| self.mark.saturating_add(cycles(to_go)))
     }
 }
 

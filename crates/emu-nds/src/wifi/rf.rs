@@ -12,6 +12,7 @@
 //! Writing DATA2 runs the exchange, which finishes at once. There is no
 //! radio to tune, so the registers only remember their values.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 /// The DS Lite's chip, with 8-bit registers.
@@ -21,6 +22,7 @@ const TYPE_3: u8 = 3;
 pub(super) struct Rf {
     /// The chip type from the firmware (2 or 3).
     kind: u8,
+    #[serde(with = "payload::ExactList::<0x40>")]
     registers: Vec<u32>,
 }
 

@@ -10,6 +10,7 @@
 //! runs stay deterministic. Writing the date or time sets the clock; the
 //! alarms are kept but never fire.
 
+use emu_state::payload;
 use serde::{Deserialize, Serialize};
 
 const DATA: u16 = 0x01;
@@ -55,6 +56,7 @@ pub(crate) struct Rtc {
     output: bool,
     /// The byte being shifted in, and how many bits have moved.
     shift: u8,
+    #[serde(with = "payload::Below::<8>")]
     bits: u8,
     /// The command since select went high, and the register bytes since.
     command: Option<u8>,
@@ -104,9 +106,14 @@ impl Rtc {
 
     /// Brings the clock up to cycle `now`.
     fn sync(&mut self, now: u64) {
-        self.subsecond += now.saturating_sub(self.synced);
+        // A save state may hold any time and any cycle it was read at.
+        self.subsecond = self
+            .subsecond
+            .saturating_add(now.saturating_sub(self.synced));
         self.synced = now;
-        self.unix_time += i64::try_from(self.subsecond / CYCLES_PER_SECOND).unwrap_or(0);
+        self.unix_time = self
+            .unix_time
+            .wrapping_add(i64::try_from(self.subsecond / CYCLES_PER_SECOND).unwrap_or(0));
         self.subsecond %= CYCLES_PER_SECOND;
     }
 
@@ -181,7 +188,9 @@ impl Rtc {
                 if command & READ == 0 {
                     self.receive_byte((command >> 4) & 7, byte);
                 }
-                self.index += 1;
+                // A game may clock on past a register's end for as long
+                // as it holds select, and a save state hold any count.
+                self.index = self.index.wrapping_add(1);
             }
         }
     }
