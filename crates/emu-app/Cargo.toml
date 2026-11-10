@@ -54,6 +54,14 @@ sevenz-rust2 = { version = "0.24", default-features = false }
 # compressor the plain `deflate` feature adds.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+# macOS and Linux: removing a work folder by descriptors, each step by one
+# name relative to an open folder, so that nothing in it, a link above all,
+# leads the removal out of it (leftovers.rs). Safe wrappers over `openat`,
+# `unlinkat` and `renameat`, so no `unsafe` there; MIT or Apache-2.0, and
+# the version already used through GPUI and tempfile.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 # The versions GPUI already uses. On Linux: the display's refresh rate
 # (window_chrome), RandR on X11 and wl_output on Wayland through
 # connections of the app's own, and GPUI's names for Wayland displays (a

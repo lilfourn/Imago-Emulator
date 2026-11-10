@@ -14,8 +14,12 @@
 //! no lock on, such as a save's `….tmp`, are removed once they are old,
 //! where they are in a folder of the app's own.
 
+#[cfg(unix)]
+use std::ffi::{CStr, CString};
 use std::fs::{self, File};
 use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
@@ -24,6 +28,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(unix)]
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+#[cfg(unix)]
+use rustix::io::Errno;
 
 use crate::persist;
 
@@ -229,18 +238,23 @@ impl Drop for WorkFolder {
 }
 
 /// Removes the work folder at `path` with everything in it, as far as it
-/// can. What is in it came out of an archive, which may hold anything:
+/// can. What is in it came out of an archive, which may hold anything, and
+/// a program may still be writing into it:
 ///
 /// - Folders thousands deep, deeper than a path can name (`tar` makes
 ///   them by changing folder as it goes). The standard library's removal
 ///   calls itself once for each folder down, with a folder held open at
 ///   each, and so overflows a small thread's stack, which ends the app,
 ///   or runs out of open files. On macOS and Linux the app therefore
-///   removes the folder itself ([`remove_tree`]), by a list and by short
-///   paths. Windows's own removal is a loop over a list already, takes a
-///   path of any length and removes read-only files, so it stays.
+///   removes the folder itself ([`remove_tree`]), by a list. Windows's own
+///   removal is a loop over a list already, takes a path of any length and
+///   removes read-only files, so it stays.
 /// - Folders nobody may open or write in (mode 000, say), under which
 ///   nothing could be listed or removed: each is first made its owner's.
+/// - Links to anywhere, and names that are a folder one moment and a link
+///   the next. Nothing is reached through one: [`remove_tree`] says how,
+///   and the standard library's removal, on Windows too, has not followed
+///   one since Rust 1.58.1.
 ///
 /// Whatever cannot be removed is left, and the rest still removed: this
 /// never fails and never ends the app, when work is done, at quit, or at
@@ -260,6 +274,17 @@ pub(crate) fn remove_folder(path: &Path) {
 #[cfg(unix)]
 const MAX_REMOVED_FOLDERS: u64 = 10_000_000;
 
+/// The most folders one removal keeps the names of at a time, waiting to
+/// be emptied. A folder moved up past that many stays where it was moved
+/// to, and is found there the next time the work folder is gone through.
+#[cfg(unix)]
+const MAX_LISTED_FOLDERS: usize = 1_000_000;
+
+/// How many names are read from a folder before they are dealt with, so
+/// that a folder of millions of files is never held in memory whole.
+#[cfg(unix)]
+const NAMES_AT_A_TIME: usize = 1024;
+
 /// How the names of folders moved up into a work folder to be removed
 /// start, followed by a number.
 #[cfg(unix)]
@@ -267,113 +292,336 @@ const REMOVING: &str = ".ds-emulator-removing-";
 
 /// How many times over a folder is gone through to remove it. Once does
 /// it, unless reading a folder while removing what is in it passed over
-/// something, which a system may do.
+/// something, which a system may do, or more was moved up than is listed.
 #[cfg(unix)]
 const REMOVAL_PASSES: u32 = 8;
 
 /// Removes the folder at `root` with everything in it, as far as it can,
-/// however deep it goes and whatever its folders' permissions.
+/// however deep it goes and whatever its folders' permissions, and never
+/// anything else: nothing outside `root` is removed, moved or changed,
+/// whatever `root` holds and whatever a program still writing into it
+/// does meanwhile.
 ///
-/// It keeps a list of folders to empty, each of them directly in `root`.
-/// A folder is emptied by removing its files and moving each folder in it
-/// up into `root`, under a name of the app's, to be emptied in its turn;
-/// then it is empty, and removed. So every path used is short, a folder a
-/// thousand down is reached in a thousand steps of one, and nothing calls
-/// itself. A folder that cannot be moved or removed is skipped, and what
+/// # By descriptors, never by paths
+///
+/// Every step names what it acts on by one name, in a folder that is
+/// already open: `openat`, `unlinkat` and `renameat`, relative to that
+/// folder's descriptor. No step is given a path of several names. That is
+/// what keeps the removal inside `root`, and it must stay so.
+///
+/// A path is looked up afresh each time it is used. Were this done by
+/// paths, then between `root/x` being listed as a folder and what is in
+/// it being listed and removed, `x` could become a link to, say, the
+/// user's documents: listing `root/x` follows the link, and every file
+/// there is removed. An unpacking program replaces an empty folder with a
+/// link when a later entry of its archive has the same name, so whoever
+/// made the archive chooses what is swapped and, with enough entries,
+/// when; and a program left by an app that died can still be unpacking
+/// when its folder is removed, at a later launch ([`remove_left_behind`]).
+///
+/// The standard library's `remove_dir_all` had this fault: it is
+/// CVE-2022-21658, fixed in Rust 1.58.1, and this follows that fix. A
+/// folder is opened by its name in its parent's descriptor with
+/// `O_NOFOLLOW`, so a name that has become a link is not opened as a
+/// folder; and things are removed with `unlinkat`, which removes a link
+/// itself and never what it leads to. A descriptor, once open, is of
+/// that one folder, whatever becomes of its name.
+///
+/// # A list, and folders moved up
+///
+/// It keeps a list of the names of folders to empty, each of them
+/// directly in `root`. A folder is emptied by removing its files and
+/// moving each folder in it up into `root`, under a name of the app's
+/// (`.ds-emulator-removing-<n>`), to be emptied in its turn; then it is
+/// empty, and removed. So a folder a thousand down is reached in a
+/// thousand steps of one name each, nothing calls itself, and four
+/// descriptors are open at most, however deep the folders go: the folder
+/// `root` is in, `root`, the folder being emptied, and for a moment one
+/// folder in it.
+///
+/// The names folders are moved up to need not be secret, or free. A move
+/// is from one open folder to another, `root`, and so cannot leave it.
+/// Onto a name that a file, a link or a folder with something in it has,
+/// a folder cannot be moved, and the next name is tried; and whatever has
+/// one of those names when its turn comes is opened as a folder only if
+/// it is one, and removed as a file or a link otherwise.
+///
+/// A folder that cannot be opened, moved or removed is skipped, and what
 /// can be is still removed.
 #[cfg(unix)]
 fn remove_tree(root: &Path) {
-    match fs::symlink_metadata(root) {
-        Ok(found) if found.is_dir() => {}
-        // A file or a link by the name: it alone, as a folder would be.
-        Ok(_) => {
-            fs::remove_file(root).ok();
-            return;
-        }
-        Err(_) => return,
-    }
-    make_own(root);
-    let mut moved_up = 0u64;
-    let mut emptied = 0u64;
-    for _ in 0..REMOVAL_PASSES {
-        // What is directly in `root`: its files go, its folders are listed.
-        let mut removed = false;
-        let mut folders = Vec::new();
-        if let Ok(entries) = fs::read_dir(root) {
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    folders.push(entry.path());
-                } else {
-                    removed |= fs::remove_file(entry.path()).is_ok();
-                }
-            }
-        }
-        while let Some(folder) = folders.pop() {
-            emptied += 1;
-            if emptied > MAX_REMOVED_FOLDERS {
-                return;
-            }
-            make_own(&folder);
-            if let Ok(entries) = fs::read_dir(&folder) {
-                for entry in entries.flatten() {
-                    let inner = entry.path();
-                    if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                        removed |= fs::remove_file(&inner).is_ok();
-                        continue;
-                    }
-                    // Its own to write in, as moving a folder to another
-                    // changes what is in it: where `..` leads.
-                    make_own(&inner);
-                    if let Some(up) = move_up(&inner, root, &mut moved_up) {
-                        folders.push(up);
-                    }
-                }
-            }
-            removed |= fs::remove_dir(&folder).is_ok();
-        }
-        // Gone, or nothing of what is left can be removed.
-        if fs::remove_dir(root).is_ok() || !removed {
-            return;
-        }
-    }
-}
+    use std::os::unix::ffi::OsStrExt as _;
 
-/// Moves the folder `inner` up into `root` under a name not taken there,
-/// and returns where it is now; `None` if it cannot be moved.
-#[cfg(unix)]
-fn move_up(inner: &Path, root: &Path, moved_up: &mut u64) -> Option<PathBuf> {
-    // A name may be taken by what an earlier removal, cut short, left.
-    for _ in 0..1000 {
-        let up = root.join(format!("{REMOVING}{moved_up}"));
-        *moved_up += 1;
-        match fs::rename(inner, &up) {
-            Ok(()) => return Some(up),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::DirectoryNotEmpty
-                        | io::ErrorKind::AlreadyExists
-                        | io::ErrorKind::NotADirectory
-                ) => {}
-            Err(_) => return None,
-        }
-    }
-    None
-}
-
-/// Makes the folder at `path` its owner's to read, write and search, if
-/// it is not: an archive can hold one that nobody may open. A link is not
-/// followed.
-#[cfg(unix)]
-fn make_own(path: &Path) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let Ok(found) = fs::symlink_metadata(path) else {
+    let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else {
         return;
     };
-    let mode = found.permissions().mode();
-    if found.is_dir() && mode & 0o700 != 0o700 {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700)).ok();
+    let Ok(name) = CString::new(name.as_bytes()) else {
+        return;
+    };
+    // The folder `root` is in is the one thing reached by a path: it is
+    // the system's or the app's own, not something an archive unpacked.
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let reading = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let Ok(parent) = rustix::fs::open(parent, reading, Mode::empty()) else {
+        return;
+    };
+    let Some(root) = open_folder(parent.as_fd(), &name) else {
+        // A file or a link by the name: it alone, as a folder would be.
+        rustix::fs::unlinkat(&parent, &*name, AtFlags::empty()).ok();
+        return;
+    };
+    let Ok(mut listing) = Dir::new(root) else {
+        return;
+    };
+    let mut removal = Removal::default();
+    for _ in 0..REMOVAL_PASSES {
+        removal.removed = false;
+        listing.rewind();
+        loop {
+            let names = next_names(&mut listing);
+            if names.is_empty() {
+                break;
+            }
+            let Ok(root) = listing.fd() else {
+                return;
+            };
+            for (entry, is_folder) in names {
+                if !removal.remove(root, entry, is_folder) {
+                    return;
+                }
+            }
+        }
+        // Gone, or nothing of what is left can be removed.
+        let gone = rustix::fs::unlinkat(&parent, &*name, AtFlags::REMOVEDIR).is_ok();
+        if gone || !removal.removed {
+            return;
+        }
     }
+}
+
+/// How far one removal of a work folder has got ([`remove_tree`]).
+#[cfg(unix)]
+#[derive(Default)]
+struct Removal {
+    /// How many names folders have been moved up to, or tried to be: the
+    /// number in the next one.
+    moved_up: u64,
+    /// How many folders have been emptied.
+    emptied: u64,
+    /// Whether anything has been removed or moved since the work folder
+    /// was last begun on.
+    removed: bool,
+}
+
+#[cfg(unix)]
+impl Removal {
+    /// Removes what has the name `name` directly in `root`: a file or a
+    /// link itself; a folder once it is emptied, and so are the folders
+    /// moved up out of it, and out of those, each in its turn. `false`
+    /// once as many folders have been emptied as one removal may.
+    fn remove(&mut self, root: BorrowedFd<'_>, name: CString, is_folder: bool) -> bool {
+        if !is_folder && rustix::fs::unlinkat(root, &*name, AtFlags::empty()).is_ok() {
+            self.removed = true;
+            return true;
+        }
+        let mut folders = vec![name];
+        while let Some(name) = folders.pop() {
+            self.emptied += 1;
+            if self.emptied > MAX_REMOVED_FOLDERS {
+                return false;
+            }
+            let removed = match open_folder(root, &name) {
+                Some(folder) => {
+                    self.empty(root, folder, &mut folders);
+                    rustix::fs::unlinkat(root, &*name, AtFlags::REMOVEDIR)
+                }
+                // No folder by now, whatever it was when it was listed
+                // or moved: a file or a link, removed as one.
+                None => rustix::fs::unlinkat(root, &*name, AtFlags::empty()),
+            };
+            self.removed |= removed.is_ok();
+        }
+        true
+    }
+
+    /// Empties `folder`, which is directly in `root`: removes the files
+    /// and links in it, and moves each folder in it up into `root`,
+    /// adding the name it has there to `folders`.
+    fn empty(&mut self, root: BorrowedFd<'_>, folder: OwnedFd, folders: &mut Vec<CString>) {
+        let Ok(mut listing) = Dir::new(folder) else {
+            return;
+        };
+        loop {
+            let names = next_names(&mut listing);
+            if names.is_empty() {
+                return;
+            }
+            let Ok(folder) = listing.fd() else {
+                return;
+            };
+            for (name, is_folder) in names {
+                if !is_folder && rustix::fs::unlinkat(folder, &*name, AtFlags::empty()).is_ok() {
+                    self.removed = true;
+                    continue;
+                }
+                // Opened before it is moved. That makes it its owner's
+                // to write in, as moving a folder to another changes what
+                // is in it: where `..` leads. And what is no folder by
+                // now, a link above all, is not moved but removed.
+                if open_folder(folder, &name).is_none() {
+                    let removed = rustix::fs::unlinkat(folder, &*name, AtFlags::empty());
+                    self.removed |= removed.is_ok();
+                    continue;
+                }
+                if let Some(up) = self.move_up(folder, &name, root)
+                    && folders.len() < MAX_LISTED_FOLDERS
+                {
+                    folders.push(up);
+                }
+            }
+        }
+    }
+
+    /// Moves what has the name `name` in `folder` up into `root`, under a
+    /// name not taken there, and returns that name; `None` if it cannot
+    /// be moved.
+    fn move_up(
+        &mut self,
+        folder: BorrowedFd<'_>,
+        name: &CStr,
+        root: BorrowedFd<'_>,
+    ) -> Option<CString> {
+        // A name may be taken: by what an earlier removal, cut short,
+        // left, or by anything an archive put there.
+        for _ in 0..1000 {
+            let up = CString::new(format!("{REMOVING}{}", self.moved_up)).ok()?;
+            self.moved_up += 1;
+            match rustix::fs::renameat(folder, name, root, &*up) {
+                Ok(()) => {
+                    self.removed = true;
+                    return Some(up);
+                }
+                Err(Errno::NOTEMPTY | Errno::EXIST | Errno::NOTDIR | Errno::ISDIR) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+/// The next names in the folder `listing` reads, [`NAMES_AT_A_TIME`] at
+/// most, and for each whether the folder says it names a folder. None at
+/// the end, or if the folder cannot be read further.
+#[cfg(unix)]
+fn next_names(listing: &mut Dir) -> Vec<(CString, bool)> {
+    let mut names = Vec::new();
+    while names.len() < NAMES_AT_A_TIME {
+        let Some(Ok(entry)) = listing.read() else {
+            break;
+        };
+        let name = entry.file_name();
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            let is_folder = entry.file_type() == FileType::Directory;
+            names.push((name.to_owned(), is_folder));
+        }
+    }
+    names
+}
+
+/// Opens the folder that has the name `name` in the folder `parent` is
+/// the descriptor of, and makes it its owner's to read, write and search
+/// if it is not: an archive can hold a folder that nobody may open.
+/// `None` if there is no folder by that name now, or it cannot be opened.
+///
+/// A link is never followed (`O_NOFOLLOW` with `O_DIRECTORY`): if the
+/// name is a link by now, even to a folder, this opens nothing. Nor does
+/// it wait on a pipe by the name.
+///
+/// The mode is changed through the descriptor, once the folder is open,
+/// so it is that folder's mode that changes, whatever its name leads to
+/// by then. Only a folder its owner may not read cannot be opened first
+/// ([`make_readable`]).
+#[cfg(unix)]
+fn open_folder(parent: BorrowedFd<'_>, name: &CStr) -> Option<OwnedFd> {
+    let open = || {
+        let folder = OFlags::RDONLY
+            | OFlags::DIRECTORY
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK
+            | OFlags::CLOEXEC;
+        rustix::fs::openat(parent, name, folder, Mode::empty())
+    };
+    let folder = match open() {
+        Ok(folder) => folder,
+        Err(Errno::ACCESS) => {
+            make_readable(parent, name);
+            open().ok()?
+        }
+        Err(_) => return None,
+    };
+    // To write and search in as well, or nothing in it could be removed
+    // or moved out of it.
+    if let Ok(found) = rustix::fs::fstat(&folder) {
+        let mode = Mode::from_raw_mode(found.st_mode);
+        if !mode.contains(Mode::RWXU) {
+            rustix::fs::fchmod(&folder, mode | Mode::RWXU).ok();
+        }
+    }
+    Some(folder)
+}
+
+/// Makes the folder that has the name `name` in `parent`, which its owner
+/// may not read, its owner's to read, write and search. A link by the
+/// name is not followed, and only a folder's mode is changed.
+///
+/// Linux can open a descriptor that only names a folder (`O_PATH`), for
+/// which no leave to read it is needed, and change the mode of what that
+/// descriptor is of through its entry in `/proc`. So here too it is the
+/// folder found whose mode changes, whatever its name leads to by then.
+/// Without `/proc` the folder stays as it is, and is skipped.
+#[cfg(target_os = "linux")]
+fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
+    use std::os::fd::AsRawFd as _;
+
+    let naming = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(folder) = rustix::fs::openat(parent, name, naming, Mode::empty()) else {
+        return;
+    };
+    let Ok(found) = rustix::fs::fstat(&folder) else {
+        return;
+    };
+    let mode = Mode::from_raw_mode(found.st_mode) | Mode::RWXU;
+    rustix::fs::chmod(format!("/proc/self/fd/{}", folder.as_raw_fd()), mode).ok();
+}
+
+/// Makes the folder that has the name `name` in `parent`, which its owner
+/// may not read, its owner's to read, write and search. A link by the
+/// name is not followed, and only a folder's mode is changed.
+///
+/// macOS gives no descriptor for a folder its owner may not read (not
+/// with `O_EVTONLY` either), so this is the one step taken by a name
+/// after a look at it: the mode is changed by the folder's name in its
+/// open parent, with `AT_SYMLINK_NOFOLLOW`, straight after a look, not
+/// following either, that found a folder there. Were the name to change
+/// hands in between, the mode would go to what has the name then, in that
+/// same folder: a link's own mode, which means nothing, or a file's. It
+/// cannot reach a folder elsewhere, nothing is read, written or removed
+/// by it, and it happens only for a folder unpacked with no leave to
+/// read it.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn make_readable(parent: BorrowedFd<'_>, name: &CStr) {
+    let Ok(found) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
+        return;
+    };
+    if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
+        return;
+    }
+    let mode = Mode::from_raw_mode(found.st_mode) | Mode::RWXU;
+    rustix::fs::chmodat(parent, name, mode, AtFlags::SYMLINK_NOFOLLOW).ok();
 }
 
 /// A game being written, `….partial`, locked while it is and removed when
@@ -1194,6 +1442,184 @@ mod tests {
         // And again, as at every later launch: nothing to trip on.
         assert_eq!(on_a_small_stack(|| remove_left_behind_in(&temp, &[])), 0);
         remove_folder(&temp);
+    }
+
+    /// A folder outside any work folder, as one of the user's own would
+    /// be: `files` files in it, and a folder of two more.
+    #[cfg(unix)]
+    fn outside_folder(dir: &Path, files: usize) -> PathBuf {
+        let outside = dir.join("outside");
+        fs::create_dir_all(outside.join("kept")).expect("folders");
+        for number in 0..files {
+            fs::write(outside.join(format!("file-{number}")), b"the user's own").expect("file");
+        }
+        fs::write(outside.join("kept/one"), b"the user's own").expect("file");
+        fs::write(outside.join("kept/two"), b"the user's own").expect("file");
+        outside
+    }
+
+    /// Fails unless `outside`, from [`outside_folder`], holds every file
+    /// it was made with, each as it was written.
+    #[cfg(unix)]
+    fn assert_untouched(outside: &Path, files: usize, when: &str) {
+        let names = (0..files)
+            .map(|number| format!("file-{number}"))
+            .chain(["kept/one".to_owned(), "kept/two".to_owned()]);
+        let missing: Vec<String> = names
+            .filter(|name| fs::read(outside.join(name)).ok().as_deref() != Some(b"the user's own"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{when}: {} of the user's own files are gone, {} the first",
+            missing.len(),
+            missing[0]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: its own removal stays, and making a link there needs a privilege"
+    )]
+    fn links_in_a_work_folder_are_removed_and_never_followed() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+            let temp = temp_dir("links");
+            let outside = outside_folder(&temp, 40);
+            // One more of the user's, which its owner may not write in:
+            // its mode is not the app's to change either.
+            let read_only = temp.join("read-only");
+            fs::create_dir(&read_only).expect("folder");
+            fs::write(read_only.join("file"), b"the user's own").expect("file");
+            fs::set_permissions(&read_only, fs::Permissions::from_mode(0o500)).expect("mode");
+            // As an archive can unpack: links to the folders outside where
+            // a folder would be, at the top and further down, a link to a
+            // file, and links under the very names the removal moves
+            // folders up to.
+            let fill = |work: &Path| {
+                symlink(&outside, work.join("x")).expect("link");
+                fs::create_dir_all(work.join("Game/inner/deeper")).expect("folders");
+                fs::write(work.join("Game/inner/deeper/Game.gb"), [0; 10]).expect("game");
+                symlink(&outside, work.join("Game/link")).expect("link");
+                symlink(&outside, work.join("Game/inner/link")).expect("link");
+                symlink(outside.join("file-0"), work.join("Game/file")).expect("link");
+                symlink(&read_only, work.join("Game/read-only")).expect("link");
+                for number in 0..10 {
+                    let taken = work.join(format!(".ds-emulator-removing-{number}"));
+                    symlink(&outside, taken).expect("link");
+                }
+                // And more files and folders in one folder than are read
+                // from it at a time.
+                let many = work.join("Many");
+                fs::create_dir(&many).expect("folder");
+                for number in 0..1_500 {
+                    fs::write(many.join(format!("file-{number}")), b"").expect("file");
+                    fs::create_dir(many.join(format!("folder-{number}"))).expect("folder");
+                }
+            };
+            // When the work is done, or stopped.
+            let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
+            let path = folder.path().to_owned();
+            fill(&path);
+            drop(folder);
+            assert!(!path.exists(), "removed when done");
+            assert_untouched(&outside, 40, "when done");
+            // And one an app that was killed left behind, at a later launch.
+            let left = temp.join("ds-emulator-unpack-1-0");
+            fs::create_dir_all(&left).expect("folder");
+            fs::write(left.join(LOCK), b"").expect("lock");
+            fill(&left);
+            remove_left_behind_in(&temp, &[]);
+            assert!(!left.exists(), "removed at launch");
+            assert_untouched(&outside, 40, "at launch");
+            let mode = fs::metadata(&read_only)
+                .expect("there")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o500, "its mode is as it was");
+            assert!(read_only.join("file").exists());
+            // A link where a work folder itself would be goes, alone.
+            let linked = temp.join("ds-emulator-unpack-1-1");
+            symlink(&outside, &linked).expect("link");
+            remove_folder(&linked);
+            assert!(fs::symlink_metadata(&linked).is_err(), "the link is gone");
+            assert_untouched(&outside, 40, "a link for a work folder");
+            fs::set_permissions(&read_only, fs::Permissions::from_mode(0o700)).expect("mode");
+            remove_folder(&temp);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "Windows: its own removal stays, and making a link there needs a privilege"
+    )]
+    fn a_name_that_becomes_a_link_while_a_work_folder_is_removed_is_never_followed() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            use std::sync::atomic::AtomicBool;
+
+            /// How many work folders are removed, each with names changing
+            /// under the removal the whole time.
+            const ROUNDS: usize = 8;
+            /// How many folders each holds, so that removing it takes a
+            /// while: one in ten has a folder in it, to be moved up.
+            const FOLDERS: usize = 2_000;
+
+            let temp = temp_dir("swapped");
+            let outside = outside_folder(&temp, 200);
+            for round in 0..ROUNDS {
+                let work = temp.join(format!("work-{round}"));
+                fs::create_dir(&work).expect("folder");
+                for number in 0..FOLDERS {
+                    let folder = work.join(format!("folder-{number}"));
+                    fs::create_dir(&folder).expect("folder");
+                    if number % 10 == 0 {
+                        fs::create_dir(folder.join("inner")).expect("folder");
+                        fs::write(folder.join("inner/Game.gb"), b"12345").expect("game");
+                    }
+                }
+                // As a program still unpacking does when a later entry of
+                // its archive has an earlier one's name: an empty folder
+                // gives way to a link, here to the folder outside, and the
+                // link to a folder again. At the top, down in a folder,
+                // and under the names the removal moves folders up to.
+                let swapped = [
+                    work.join("x"),
+                    work.join("folder-1000/inner"),
+                    work.join("folder-1990/inner"),
+                    work.join(".ds-emulator-removing-0"),
+                    work.join(".ds-emulator-removing-7"),
+                    work.join(".ds-emulator-removing-150"),
+                ];
+                let removed = AtomicBool::new(false);
+                thread::scope(|scope| {
+                    scope.spawn(|| {
+                        while !removed.load(Ordering::Relaxed) {
+                            for name in &swapped {
+                                fs::remove_dir(name).ok();
+                                symlink(&outside, name).ok();
+                            }
+                            for name in &swapped {
+                                // Not a folder's removal: a link's own.
+                                fs::remove_file(name).ok();
+                                fs::create_dir(name).ok();
+                            }
+                        }
+                    });
+                    remove_folder(&work);
+                    removed.store(true, Ordering::Relaxed);
+                });
+                assert_untouched(&outside, 200, &format!("round {round}"));
+                // What was put back after the removal had passed it.
+                remove_folder(&work);
+                assert!(!work.exists(), "round {round}: removed");
+            }
+            remove_folder(&temp);
+        }
     }
 
     #[test]
