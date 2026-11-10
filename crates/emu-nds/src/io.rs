@@ -590,6 +590,9 @@ impl Hardware {
 }
 
 #[cfg(test)]
+mod widths;
+
+#[cfg(test)]
 mod tests {
     use crate::hardware::Hardware;
     use crate::interrupt::irq;
