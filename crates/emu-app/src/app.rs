@@ -2,16 +2,19 @@
 
 use std::path::PathBuf;
 
+use emu_core::DmgColors;
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, Pixels, SystemMenuType, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
+    Action, App, Application, Bounds, KeyBinding, Menu, MenuItem, Pixels, SystemMenuType,
+    TitlebarOptions, WindowBounds, WindowOptions, actions, point, prelude::*, px, size,
 };
 
 use crate::about_window;
+use crate::bindings::Shortcut;
 use crate::chrome;
 use crate::fonts;
 use crate::icons;
-use crate::layout;
+use crate::layout::{self, Arrangement};
+use crate::picture::{self, Picture, Resolution3d};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::speed::{self, Speed, Speeds};
 use crate::view::EmulatorView;
@@ -51,40 +54,17 @@ actions!(
         PreviousStateSlot,
         ToggleFastForward,
         ToggleSlowMotion,
-        FastForward2x,
-        FastForward3x,
-        FastForward4x,
-        FastForwardUnlimited,
         ToggleFps,
-        LayoutVertical,
-        LayoutHorizontal,
-        LayoutSingle,
-        LayoutHybrid,
         SwapScreens,
         RotateClockwise,
         RotateAnticlockwise,
         NextScreenGap,
         ToggleColorCorrection,
-        DmgColorsGrey,
-        DmgColorsGameBoyColor,
-        PictureAuto,
-        PictureSharpPixels,
-        PictureRoundedPixels,
-        PictureSmooth,
-        PictureLcdGrid,
-        PictureScanlines,
         ShowDebugger,
         DebugStep,
         DebugStepOver,
         DebugNextFrame,
         ToggleFullScreen,
-        Resolution3dMatchDisplay,
-        Resolution3d1x,
-        Resolution3d2x,
-        Resolution3d3x,
-        Resolution3d4x,
-        Resolution3d6x,
-        Resolution3d8x,
         ToggleMicrophone,
         ToggleGuide,
         ScreenshotForGuide,
@@ -95,6 +75,78 @@ actions!(
         ShowAppMenu,
     ]
 );
+
+// The actions that choose one of several: each carries what it chooses,
+// so a menu lists its choices from the list the choices are kept in, and
+// one handler in the window serves them all. A menu item's shortcut and
+// its tick are found by the value it carries. None is built from JSON:
+// the app's bindings are made here, in code.
+
+/// Lays the screens out in this arrangement.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct Arrange(pub Arrangement);
+
+/// Runs fast-forward at this speed from now on.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetFastForward(pub Speed);
+
+/// Draws DS and 3DS 3D at this resolution.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetResolution3d(pub Resolution3d);
+
+/// Shows the screens as this picture.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetPicture(pub Picture);
+
+/// Shows games made for the original Game Boy in these colours, from the
+/// next one opened.
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = ds_emulator, no_json)]
+pub struct SetDmgColors(pub DmgColors);
+
+/// The screen arrangements, in the View menu's order: each with its
+/// item's title there and its shortcut. The menu's items and the key
+/// bindings are both made from this.
+const ARRANGEMENTS: [(Arrangement, &str, &str); 4] = [
+    (Arrangement::Vertical, "Screens Stacked", "secondary-1"),
+    (
+        Arrangement::Horizontal,
+        "Screens Side by Side",
+        "secondary-2",
+    ),
+    (Arrangement::Single, "One Screen", "secondary-3"),
+    (Arrangement::Hybrid, "One Large, Both Small", "secondary-4"),
+];
+
+/// How games made for the original Game Boy can be shown, as View >
+/// Original Game Boy Games offers them. The button combinations a Game Boy
+/// Color takes are the settings file's alone.
+const DMG_COLORS: [(DmgColors, &str); 2] = [
+    (DmgColors::Grey, "In Grey, as on a Game Boy"),
+    (DmgColors::ByTitle, "In Colour, as on a Game Boy Color"),
+];
+
+/// The action a gamepad hotkey runs: the one its menu item and its
+/// shortcut run.
+pub fn hotkey_action(shortcut: Shortcut) -> Box<dyn Action> {
+    match shortcut {
+        Shortcut::SaveState => Box::new(SaveState),
+        Shortcut::LoadState => Box::new(LoadState),
+        Shortcut::NextSlot => Box::new(NextStateSlot),
+        Shortcut::PreviousSlot => Box::new(PreviousStateSlot),
+        Shortcut::Pause => Box::new(TogglePause),
+        Shortcut::Reset => Box::new(Reset),
+        Shortcut::ToggleFastForward => Box::new(ToggleFastForward),
+        Shortcut::ToggleSlowMotion => Box::new(ToggleSlowMotion),
+        Shortcut::SwapScreens => Box::new(SwapScreens),
+        Shortcut::SwitchPlayer => Box::new(SwitchPlayer),
+        Shortcut::FullScreen => Box::new(ToggleFullScreen),
+    }
+}
 
 /// Two DS screens stacked, in emulated pixels: the shape the window opens
 /// in.
@@ -338,10 +390,13 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(shortcut::FAST_FORWARD, ToggleFastForward, None),
         KeyBinding::new(shortcut::SLOW_MOTION, ToggleSlowMotion, None),
         KeyBinding::new("secondary-alt-f", ToggleFps, None),
-        KeyBinding::new("secondary-1", LayoutVertical, None),
-        KeyBinding::new("secondary-2", LayoutHorizontal, None),
-        KeyBinding::new("secondary-3", LayoutSingle, None),
-        KeyBinding::new("secondary-4", LayoutHybrid, None),
+    ];
+    bindings.extend(
+        ARRANGEMENTS
+            .iter()
+            .map(|&(arrangement, _, keys)| KeyBinding::new(keys, Arrange(arrangement), None)),
+    );
+    bindings.extend([
         KeyBinding::new("secondary-e", SwapScreens, None),
         KeyBinding::new(shortcut::ROTATE_CLOCKWISE, RotateClockwise, None),
         KeyBinding::new(shortcut::ROTATE_ANTICLOCKWISE, RotateAnticlockwise, None),
@@ -356,7 +411,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         // F11, as in every Linux and Windows app.
         KeyBinding::new(shortcut::FULL_SCREEN, ToggleFullScreen, None),
         KeyBinding::new("secondary-q", Quit, None),
-    ];
+    ]);
     if cfg!(target_os = "macos") {
         bindings.extend([
             KeyBinding::new("cmd-h", HideApp, None),
@@ -535,11 +590,11 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
             MenuItem::action("Previous State Slot", PreviousStateSlot),
         ],
     });
-    let mut view = vec![
-        MenuItem::action("Screens Stacked", LayoutVertical),
-        MenuItem::action("Screens Side by Side", LayoutHorizontal),
-        MenuItem::action("One Screen", LayoutSingle),
-        MenuItem::action("One Large, Both Small", LayoutHybrid),
+    let mut view: Vec<MenuItem> = ARRANGEMENTS
+        .iter()
+        .map(|&(arrangement, title, _)| MenuItem::action(title, Arrange(arrangement)))
+        .collect();
+    view.extend([
         MenuItem::separator(),
         MenuItem::action("Swap Screens", SwapScreens),
         MenuItem::action("Rotate Clockwise", RotateClockwise),
@@ -548,41 +603,34 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::submenu(Menu {
             name: "3D Resolution".into(),
-            items: vec![
-                MenuItem::action("Match Display", Resolution3dMatchDisplay),
-                MenuItem::action("Native (1×)", Resolution3d1x),
-                MenuItem::action("2×", Resolution3d2x),
-                MenuItem::action("3×", Resolution3d3x),
-                MenuItem::action("4×", Resolution3d4x),
-                MenuItem::action("6×", Resolution3d6x),
-                MenuItem::action("8×", Resolution3d8x),
-            ],
+            items: picture::RESOLUTIONS_3D
+                .iter()
+                .map(|&resolution| {
+                    MenuItem::action(resolution.label(), SetResolution3d(resolution))
+                })
+                .collect(),
         }),
         MenuItem::submenu(Menu {
             name: "Picture".into(),
-            items: vec![
-                MenuItem::action("Auto", PictureAuto),
-                MenuItem::action("Sharp Pixels", PictureSharpPixels),
-                MenuItem::action("Smooth", PictureSmooth),
-                MenuItem::action("Rounded Pixels", PictureRoundedPixels),
-                MenuItem::action("LCD Grid", PictureLcdGrid),
-                MenuItem::action("Scanlines", PictureScanlines),
-            ],
+            items: Picture::ALL
+                .iter()
+                .map(|&picture| MenuItem::action(picture.label(), SetPicture(picture)))
+                .collect(),
         }),
         MenuItem::action("Colour Correction", ToggleColorCorrection),
         MenuItem::action(fps, ToggleFps),
         MenuItem::submenu(Menu {
             name: "Original Game Boy Games".into(),
-            items: vec![
-                MenuItem::action("In Grey, as on a Game Boy", DmgColorsGrey),
-                MenuItem::action("In Colour, as on a Game Boy Color", DmgColorsGameBoyColor),
-            ],
+            items: DMG_COLORS
+                .iter()
+                .map(|&(colors, title)| MenuItem::action(title, SetDmgColors(colors)))
+                .collect(),
         }),
         MenuItem::separator(),
         MenuItem::action("Guide", ToggleGuide),
         MenuItem::action("Show / Hide Window Controls", ToggleWindowControls),
         MenuItem::action("Debugger", ShowDebugger),
-    ];
+    ]);
     if !mac {
         // AppKit adds Enter Full Screen to macOS's View menu itself.
         view.push(MenuItem::separator());
@@ -611,16 +659,15 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
 
 /// Emulation > Fast-Forward Speed, with `current` checked.
 fn fast_forward_menu(current: Speed) -> Menu {
-    let [twice, three_times, four_times, unlimited] = speed::FAST_FORWARD_CHOICES;
-    let item = |speed: Speed| checked(&speed.label(), speed == current);
     Menu {
         name: "Fast-Forward Speed".into(),
-        items: vec![
-            MenuItem::action(item(twice), FastForward2x),
-            MenuItem::action(item(three_times), FastForward3x),
-            MenuItem::action(item(four_times), FastForward4x),
-            MenuItem::action(item(unlimited), FastForwardUnlimited),
-        ],
+        items: speed::FAST_FORWARD_CHOICES
+            .iter()
+            .map(|&speed| {
+                let name = checked(&speed.label(), speed == current);
+                MenuItem::action(name, SetFastForward(speed))
+            })
+            .collect(),
     }
 }
 
@@ -781,10 +828,10 @@ mod tests {
             KeyBinding::new("cmd-f", ToggleFastForward, None),
             KeyBinding::new("cmd-shift-f", ToggleSlowMotion, None),
             KeyBinding::new("cmd-alt-f", ToggleFps, None),
-            KeyBinding::new("cmd-1", LayoutVertical, None),
-            KeyBinding::new("cmd-2", LayoutHorizontal, None),
-            KeyBinding::new("cmd-3", LayoutSingle, None),
-            KeyBinding::new("cmd-4", LayoutHybrid, None),
+            KeyBinding::new("cmd-1", Arrange(Arrangement::Vertical), None),
+            KeyBinding::new("cmd-2", Arrange(Arrangement::Horizontal), None),
+            KeyBinding::new("cmd-3", Arrange(Arrangement::Single), None),
+            KeyBinding::new("cmd-4", Arrange(Arrangement::Hybrid), None),
             KeyBinding::new("cmd-e", SwapScreens, None),
             KeyBinding::new("cmd-alt-right", RotateClockwise, None),
             KeyBinding::new("cmd-alt-left", RotateAnticlockwise, None),

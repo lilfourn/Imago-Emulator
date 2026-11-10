@@ -19,27 +19,20 @@ use gpui::{
 
 use crate::ambient::{self, Backdrop};
 use crate::app::{
-    AddGameFolders, OpenGameFolder, ScreenshotForGuide, ShowAppMenu, ToggleGuide, shortcut,
-};
-use crate::app::{
-    AddToLibrary, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep, DebugStepOver,
-    EditCheats, GameInfo, InsertGbaCartridge, LayoutHorizontal, LayoutHybrid, LayoutSingle,
-    LayoutVertical, LoadState, NextScreenGap, NextStateSlot, OpenRom, OpenSettings, OpenStore,
-    PictureAuto, PictureLcdGrid, PictureRoundedPixels, PictureScanlines, PictureSharpPixels,
-    PictureSmooth, PreviousStateSlot, Randomize, RemoveFromLibrary, Reset, Resolution3d1x,
-    Resolution3d2x, Resolution3d3x, Resolution3d4x, Resolution3d6x, Resolution3d8x,
-    Resolution3dMatchDisplay, RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot,
-    SaveState, ShowDebugger, StopScript, SwapScreens, SwitchPlayer, TOP_BAR, ToggleColorCorrection,
-    ToggleFastForward, ToggleFullScreen, ToggleMicrophone, TogglePause, ToggleRecording,
-    ToggleSlowMotion, ToggleWindowControls,
-};
-use crate::app::{
-    FastForward2x, FastForward3x, FastForward4x, FastForwardUnlimited, MenuChecks, ToggleFps,
+    AddGameFolders, AddToLibrary, Arrange, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep,
+    DebugStepOver, EditCheats, GameInfo, InsertGbaCartridge, LoadState, MenuChecks, NextScreenGap,
+    NextStateSlot, OpenGameFolder, OpenRom, OpenSettings, OpenStore, PreviousStateSlot, Randomize,
+    RemoveFromLibrary, Reset, RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot,
+    SaveState, ScreenshotForGuide, SetDmgColors, SetFastForward, SetPicture, SetResolution3d,
+    ShowAppMenu, ShowDebugger, StopScript, SwapScreens, SwitchPlayer, TOP_BAR,
+    ToggleColorCorrection, ToggleFastForward, ToggleFps, ToggleFullScreen, ToggleGuide,
+    ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion, ToggleWindowControls,
+    hotkey_action, shortcut,
 };
 use crate::app_menu::{AppMenu, AppMenuEvent};
 use crate::archive;
 use crate::audio::{self, AudioOutput};
-use crate::bindings::{self, Bindings, Shortcut};
+use crate::bindings::{self, Bindings};
 use crate::cheats;
 use crate::chrome::{self, Tone};
 use crate::color::Correction;
@@ -69,7 +62,7 @@ use crate::romhack::{self, MakeError};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
-use crate::speed::{self, Pace, Speed};
+use crate::speed::{Pace, Speed};
 use crate::store_view::pulse;
 use crate::theme::{BACKGROUND, INSET, STAGE};
 use crate::trace;
@@ -898,7 +891,7 @@ impl EmulatorView {
                 for shortcut in shortcuts {
                     // Its handler updates this view, which is busy until
                     // this event is done, so it runs just after.
-                    let action = shortcut_action(shortcut);
+                    let action = hotkey_action(shortcut);
                     let focus = self.focus.clone();
                     window.defer(cx, move |window, cx| {
                         focus.dispatch_action(action.as_ref(), window, cx);
@@ -2266,18 +2259,7 @@ impl Render for EmulatorView {
                 cx.listener(|this, _: &ToggleFastForward, _, cx| this.toggle_fast_forward(cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSlowMotion, _, cx| this.toggle_slow_motion(cx)))
-            .on_action(cx.listener(|this, _: &LayoutVertical, _, cx| {
-                this.arrange(Arrangement::Vertical, cx);
-            }))
-            .on_action(cx.listener(|this, _: &LayoutHorizontal, _, cx| {
-                this.arrange(Arrangement::Horizontal, cx);
-            }))
-            .on_action(cx.listener(|this, _: &LayoutSingle, _, cx| {
-                this.arrange(Arrangement::Single, cx);
-            }))
-            .on_action(cx.listener(|this, _: &LayoutHybrid, _, cx| {
-                this.arrange(Arrangement::Hybrid, cx);
-            }))
+            .on_action(cx.listener(|this, action: &Arrange, _, cx| this.arrange(action.0, cx)))
             .on_action(cx.listener(|this, _: &SwapScreens, _, cx| this.swap_screens(cx)))
             .on_action(cx.listener(|this, _: &RotateClockwise, _, cx| {
                 this.rotate(this.settings.layout.rotation.clockwise(), cx);
@@ -2290,17 +2272,8 @@ impl Render for EmulatorView {
                 this.toggle_color_correction(cx);
             }))
             .on_action(cx.listener(|this, _: &ShowDebugger, _, cx| this.show_debugger(cx)))
-            .on_action(cx.listener(|this, _: &FastForward2x, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[0], cx);
-            }))
-            .on_action(cx.listener(|this, _: &FastForward3x, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[1], cx);
-            }))
-            .on_action(cx.listener(|this, _: &FastForward4x, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[2], cx);
-            }))
-            .on_action(cx.listener(|this, _: &FastForwardUnlimited, _, cx| {
-                this.set_fast_forward(speed::FAST_FORWARD_CHOICES[3], cx);
+            .on_action(cx.listener(|this, action: &SetFastForward, _, cx| {
+                this.set_fast_forward(action.0, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFps, _, cx| this.toggle_fps(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
@@ -2310,26 +2283,8 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleWindowControls, _, cx| {
                 this.set_window_controls(!this.settings.window_controls, cx);
             }))
-            .on_action(cx.listener(|this, _: &Resolution3dMatchDisplay, _, cx| {
-                this.set_resolution_3d(Resolution3d::MatchDisplay, cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d1x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(1), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d2x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(2), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d3x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(3), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d4x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(4), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d6x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(6), cx);
-            }))
-            .on_action(cx.listener(|this, _: &Resolution3d8x, _, cx| {
-                this.set_resolution_3d(Resolution3d::Times(8), cx);
+            .on_action(cx.listener(|this, action: &SetResolution3d, _, cx| {
+                this.set_resolution_3d(action.0, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleMicrophone, _, cx| {
                 this.toggle_microphone(cx);
@@ -2346,31 +2301,11 @@ impl Render for EmulatorView {
             .on_action(cx.listener(|this, _: &ToggleRecording, _, _| {
                 this.send(Command::ToggleRecording);
             }))
-            .on_action(cx.listener(|this, _: &crate::app::DmgColorsGrey, _, cx| {
-                this.set_dmg_colors(emu_core::DmgColors::Grey, cx);
+            .on_action(cx.listener(|this, action: &SetDmgColors, _, cx| {
+                this.set_dmg_colors(action.0, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &crate::app::DmgColorsGameBoyColor, _, cx| {
-                    this.set_dmg_colors(emu_core::DmgColors::ByTitle, cx);
-                }),
-            )
-            .on_action(cx.listener(|this, _: &PictureAuto, _, cx| {
-                this.set_picture(Picture::Auto, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureSharpPixels, _, cx| {
-                this.set_picture(Picture::SharpPixels, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureRoundedPixels, _, cx| {
-                this.set_picture(Picture::RoundedPixels, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureSmooth, _, cx| {
-                this.set_picture(Picture::Smooth, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureLcdGrid, _, cx| {
-                this.set_picture(Picture::LcdGrid, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PictureScanlines, _, cx| {
-                this.set_picture(Picture::Scanlines, cx);
+            .on_action(cx.listener(|this, action: &SetPicture, _, cx| {
+                this.set_picture(action.0, cx);
             }))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| {
                 window.toggle_fullscreen();
@@ -3046,23 +2981,6 @@ fn speed_readout(text: SharedString) -> Div {
         .text_color(rgb(READOUT))
         .child(text)
         .children(probe::part("speed"))
-}
-
-/// The menu action a gamepad hotkey runs.
-fn shortcut_action(shortcut: Shortcut) -> Box<dyn gpui::Action> {
-    match shortcut {
-        Shortcut::SaveState => Box::new(SaveState),
-        Shortcut::LoadState => Box::new(LoadState),
-        Shortcut::NextSlot => Box::new(NextStateSlot),
-        Shortcut::PreviousSlot => Box::new(PreviousStateSlot),
-        Shortcut::Pause => Box::new(TogglePause),
-        Shortcut::Reset => Box::new(Reset),
-        Shortcut::ToggleFastForward => Box::new(ToggleFastForward),
-        Shortcut::ToggleSlowMotion => Box::new(ToggleSlowMotion),
-        Shortcut::SwapScreens => Box::new(SwapScreens),
-        Shortcut::SwitchPlayer => Box::new(SwitchPlayer),
-        Shortcut::FullScreen => Box::new(ToggleFullScreen),
-    }
 }
 
 /// The 3D resolution to draw `info`'s game at: the one chosen, or for
