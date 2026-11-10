@@ -2190,6 +2190,64 @@ fn a_game_s_files_are_named_as_its_session_names_them() {
 }
 
 #[test]
+fn the_library_names_a_game_s_files_as_its_session_does() {
+    use crate::library::{self, Game};
+    use crate::rom_info::{Platform, RomInfo};
+
+    let dir = empty_dir("files-of-listed");
+    // An RPG Maker game in a folder with a dot in its name, read by its
+    // folder or by the player app in it.
+    let folder = dir.join("Fan Game 1.2");
+    fs::create_dir_all(folder.join("Player.app")).expect("the player's folder");
+    fs::write(folder.join("Game.ini"), b"Title=Fan Game").expect("write");
+    fs::write(folder.join("Game.exe"), b"player").expect("write");
+    let listed = Game::rpg_maker(&folder, None);
+    assert_eq!(library::files_of(&listed), files_of(&folder));
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("Fan Game 1.2.ss0")
+    );
+    // Its files keep their names once the folder holds no game, or has
+    // gone: no session can start to name them, but they are still there.
+    fs::remove_file(folder.join("Game.ini")).expect("no game now");
+    assert_eq!(files_of(&folder), GameFiles::of(&folder));
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("Fan Game 1.2.ss0")
+    );
+    fs::remove_dir_all(&folder).expect("gone");
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("Fan Game 1.2.ss0")
+    );
+
+    // A ROM: plain names, or with its extension once a namesake for
+    // another system sits beside it, in the library as in a session.
+    let info = |platform| RomInfo {
+        platform,
+        crc32: 1,
+        serial: None,
+        header_title: None,
+        banner_title: None,
+    };
+    let rom = dir.join("platinum.nds");
+    let listed = Game::new(&rom, &info(Platform::Nds));
+    assert_eq!(library::files_of(&listed), files_of(&rom));
+    assert_eq!(library::checkpoint_path(&listed), dir.join("platinum.ss0"));
+    fs::write(dir.join("platinum.gba"), b"rom").expect("a namesake");
+    assert_eq!(library::files_of(&listed), files_of(&rom));
+    assert_eq!(
+        library::checkpoint_path(&listed),
+        dir.join("platinum.nds.ss0")
+    );
+    assert_eq!(
+        files_of_listed(&rom, false).backup(),
+        dir.join("platinum.nds.sav")
+    );
+    fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[test]
 fn a_game_in_a_folder_that_refuses_files_is_found_out_as_it_loads() {
     let dir = empty_dir("unwritable");
     let here = [GameFiles::of(&dir.join("game.gba"))];

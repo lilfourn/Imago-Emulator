@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::emulator;
 use crate::game_db;
 use crate::persist;
 use crate::rom_info::{Platform, RomInfo};
@@ -400,17 +401,18 @@ impl PlayClock {
     }
 }
 
+/// `game`'s own files, next to its ROM or folder, named as a session that
+/// plays it names them ([`emulator::files_of_listed`]).
+pub fn files_of(game: &Game) -> persist::GameFiles {
+    emulator::files_of_listed(&game.path, game.platform == Platform::RpgMaker)
+}
+
 /// Where `game` was left off: the save state of its checkpoint, which it
 /// picks up from when it next starts, next to its ROM or folder. Its
 /// time is when the game was last played, and the picture beside it
 /// ([`persist::state_picture_path`]) shows where.
 pub fn checkpoint_path(game: &Game) -> PathBuf {
-    let files = if game.platform == Platform::RpgMaker {
-        persist::GameFiles::of_folder(&game.path)
-    } else {
-        persist::GameFiles::of(&game.path)
-    };
-    files.state(crate::emulator::CHECKPOINT, false)
+    files_of(game).state(emulator::CHECKPOINT, false)
 }
 
 /// Where the library file lives, next to the settings, e.g.

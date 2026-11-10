@@ -2601,7 +2601,7 @@ fn read_facts(game: &Game) -> Facts {
             ..Facts::default()
         };
     }
-    let files = persist::GameFiles::of(&game.path);
+    let files = library::files_of(game);
     let saved = fs::metadata(files.backup())
         .and_then(|metadata| metadata.modified())
         .ok();

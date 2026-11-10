@@ -368,6 +368,19 @@ pub fn files_of(path: &Path) -> GameFiles {
     }
 }
 
+/// The files of a game the library lists at `path`: those a session gives
+/// it ([`files_of`]), so what the library says of a game is said of the
+/// files a session reads and writes. An RPG Maker game's stay named after
+/// its folder once the folder has gone, or holds no game now: nothing on
+/// disk says then what it was, but the library knows (`rpg_maker`), and
+/// its files are still beside where the folder was.
+pub fn files_of_listed(path: &Path, rpg_maker: bool) -> GameFiles {
+    match rpg_maker::game_folder(path) {
+        None if rpg_maker => GameFiles::of_folder(path),
+        _ => files_of(path),
+    }
+}
+
 /// Takes the lock of each game at `rom_paths`, with their lock files in
 /// `folder`. A game named twice is held once. If the locks cannot be used
 /// at all, as when `folder` cannot be written to, the games play without:
