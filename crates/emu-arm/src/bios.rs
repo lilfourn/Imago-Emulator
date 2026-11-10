@@ -269,3 +269,149 @@ impl Huffman {
         }
     }
 }
+
+/// BitUnPack: widens the packed pixels at `source` to `destination`,
+/// adding an offset to non-zero (or all) values, as the structure at
+/// `info` says: a 16-bit length in bytes, the two widths in bits and the
+/// offset. Widths the BIOS does not know are left alone.
+///
+/// It reads at most the 65,535 bytes its length can name, and each makes
+/// eight units at most.
+pub fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, info: u32) {
+    let length = u32::from(bus.read_16(info, Access::NONSEQUENTIAL));
+    let source_width = u32::from(bus.read_8(info.wrapping_add(2), Access::NONSEQUENTIAL));
+    let destination_width = u32::from(bus.read_8(info.wrapping_add(3), Access::NONSEQUENTIAL));
+    let offset_field = bus.read_32(info.wrapping_add(4), Access::NONSEQUENTIAL);
+    let offset = offset_field & 0x7FFF_FFFF;
+    let offset_zero = offset_field >> 31 != 0;
+    if !matches!(source_width, 1 | 2 | 4 | 8)
+        || !matches!(destination_width, 1 | 2 | 4 | 8 | 16 | 32)
+    {
+        return;
+    }
+    let mut out = 0u32;
+    let mut out_bits = 0;
+    for _ in 0..length {
+        let byte = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
+        source = source.wrapping_add(1);
+        for shift in (0..8).step_by(source_width as usize) {
+            let mut value = (byte >> shift) & ((1 << source_width) - 1);
+            if value != 0 || offset_zero {
+                value = value.wrapping_add(offset);
+            }
+            out |= value.checked_shl(out_bits).unwrap_or(0);
+            out_bits += destination_width;
+            if out_bits >= 32 {
+                bus.write_32(destination, out, Access::NONSEQUENTIAL);
+                destination = destination.wrapping_add(4);
+                out = 0;
+                out_bits = 0;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 64 KiB of flat memory that repeats through the whole bus, and
+    /// every access made to it, in order.
+    struct Ram {
+        bytes: Vec<u8>,
+        accesses: Vec<Made>,
+    }
+
+    /// One bus access: a read or a write of `bytes` bytes at `address`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Made {
+        Read { address: u32, bytes: u32 },
+        Write { address: u32, bytes: u32 },
+    }
+
+    impl Ram {
+        fn new() -> Self {
+            Self {
+                bytes: vec![0; 0x1_0000],
+                accesses: Vec::new(),
+            }
+        }
+
+        /// RAM with `data` at `address`.
+        fn with(address: usize, data: &[u8]) -> Self {
+            let mut ram = Self::new();
+            ram.bytes[address..address + data.len()].copy_from_slice(data);
+            ram
+        }
+
+        fn read(&mut self, address: u32, bytes: u32) -> u32 {
+            self.accesses.push(Made::Read { address, bytes });
+            let start = (address & 0xFFFF & !(bytes - 1)) as usize;
+            let mut value = [0; 4];
+            value[..bytes as usize].copy_from_slice(&self.bytes[start..start + bytes as usize]);
+            u32::from_le_bytes(value)
+        }
+
+        fn write(&mut self, address: u32, bytes: u32, value: u32) {
+            self.accesses.push(Made::Write { address, bytes });
+            let start = (address & 0xFFFF & !(bytes - 1)) as usize;
+            self.bytes[start..start + bytes as usize]
+                .copy_from_slice(&value.to_le_bytes()[..bytes as usize]);
+        }
+    }
+
+    impl Bus for Ram {
+        fn read_32(&mut self, address: u32, _: Access) -> u32 {
+            self.read(address, 4)
+        }
+        fn read_16(&mut self, address: u32, _: Access) -> u16 {
+            self.read(address, 2) as u16
+        }
+        fn read_8(&mut self, address: u32, _: Access) -> u8 {
+            self.read(address, 1) as u8
+        }
+        fn write_32(&mut self, address: u32, value: u32, _: Access) {
+            self.write(address, 4, value);
+        }
+        fn write_16(&mut self, address: u32, value: u16, _: Access) {
+            self.write(address, 2, u32::from(value));
+        }
+        fn write_8(&mut self, address: u32, value: u8, _: Access) {
+            self.write(address, 1, u32::from(value));
+        }
+        fn idle(&mut self) {}
+    }
+
+    #[test]
+    fn bit_unpack_widens_pixels_and_adds_its_offset_to_the_ones_that_are_not_zero() {
+        // Two bytes of 4-bit pixels to 8 bits, offset 0x10: 0x30 is the
+        // pixels 0 and 3, 0x21 the pixels 1 and 2.
+        let mut ram = Ram::with(0x100, &[0x30, 0x21]);
+        ram.bytes[0x300..0x308].copy_from_slice(&[2, 0, 4, 8, 0x10, 0, 0, 0]);
+        bit_unpack(&mut ram, 0x100, 0x200, 0x300);
+        assert_eq!(&ram.bytes[0x200..0x205], &[0, 0x13, 0x11, 0x12, 0]);
+
+        // With the offset's top bit set, zero pixels get it too.
+        let mut ram = Ram::with(0x100, &[0x30, 0x21]);
+        ram.bytes[0x300..0x308].copy_from_slice(&[2, 0, 4, 8, 0x10, 0, 0, 0x80]);
+        bit_unpack(&mut ram, 0x100, 0x200, 0x300);
+        assert_eq!(&ram.bytes[0x200..0x204], &[0x10, 0x13, 0x11, 0x12]);
+    }
+
+    #[test]
+    fn bit_unpack_leaves_widths_the_bios_does_not_know_alone() {
+        for widths in [[3, 8], [4, 12], [0, 8], [8, 0]] {
+            let mut ram = Ram::with(0x100, &[0xFF; 4]);
+            ram.bytes[0x300..0x304].copy_from_slice(&[4, 0, widths[0], widths[1]]);
+            bit_unpack(&mut ram, 0x100, 0x200, 0x300);
+            assert!(
+                ram.accesses
+                    .iter()
+                    .all(|made| matches!(made, Made::Read { .. })),
+                "{widths:?}"
+            );
+            // Only the structure was read: nothing of the data.
+            assert_eq!(ram.accesses.len(), 4, "{widths:?}");
+        }
+    }
+}

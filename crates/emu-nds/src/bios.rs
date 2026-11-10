@@ -29,6 +29,7 @@
 mod callback;
 mod decompress;
 
+use emu_arm::bios::bit_unpack;
 use emu_arm::{Access, Bus};
 
 pub(crate) use callback::{Decompression, GuestCall, Next};
@@ -362,42 +363,6 @@ fn cpu_fast_set<B: Bus>(bus: &mut B, source: u32, destination: u32, control: u32
         };
         bus.write_32(destination, value, Access::SEQUENTIAL);
         destination = destination.wrapping_add(4);
-    }
-}
-
-/// BitUnPack: widens packed pixels, adding an offset to non-zero (or all)
-/// values.
-fn bit_unpack<B: Bus>(bus: &mut B, mut source: u32, mut destination: u32, info: u32) {
-    let length = u32::from(bus.read_16(info, Access::NONSEQUENTIAL));
-    let source_width = u32::from(bus.read_8(info.wrapping_add(2), Access::NONSEQUENTIAL));
-    let destination_width = u32::from(bus.read_8(info.wrapping_add(3), Access::NONSEQUENTIAL));
-    let offset_field = bus.read_32(info.wrapping_add(4), Access::NONSEQUENTIAL);
-    let offset = offset_field & 0x7FFF_FFFF;
-    let offset_zero = offset_field >> 31 != 0;
-    if !matches!(source_width, 1 | 2 | 4 | 8)
-        || !matches!(destination_width, 1 | 2 | 4 | 8 | 16 | 32)
-    {
-        return;
-    }
-    let mut out = 0u32;
-    let mut out_bits = 0;
-    for _ in 0..length {
-        let byte = u32::from(bus.read_8(source, Access::NONSEQUENTIAL));
-        source = source.wrapping_add(1);
-        for shift in (0..8).step_by(source_width as usize) {
-            let mut value = (byte >> shift) & ((1 << source_width) - 1);
-            if value != 0 || offset_zero {
-                value = value.wrapping_add(offset);
-            }
-            out |= value.checked_shl(out_bits).unwrap_or(0);
-            out_bits += destination_width;
-            if out_bits >= 32 {
-                bus.write_32(destination, out, Access::NONSEQUENTIAL);
-                destination = destination.wrapping_add(4);
-                out = 0;
-                out_bits = 0;
-            }
-        }
     }
 }
 
