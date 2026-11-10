@@ -578,3 +578,596 @@ impl GameInput {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use emu_core::Buttons;
+
+    use super::*;
+    use crate::speed::Speed;
+    use crate::turbo;
+
+    /// A controller, by its UUID, and another.
+    const PAD: &str = "030000005e0400008e02000000007200";
+    const OTHER_PAD: &str = "050000004c050000c405000000783f00";
+
+    /// A DS game: its touchscreen is the second screen.
+    fn ds() -> Stage {
+        Stage {
+            touchscreen: Some((1, ScreenSize::new(256, 192))),
+            speeds: Speeds::default(),
+        }
+    }
+
+    /// A game with no touchscreen.
+    fn gba() -> Stage {
+        Stage {
+            touchscreen: None,
+            ..ds()
+        }
+    }
+
+    /// The first player told it holds `input`.
+    fn told(input: Input) -> Command {
+        Command::SetInput { player: 0, input }
+    }
+
+    /// The first player told it holds `buttons` and nothing else.
+    fn holds(buttons: &[Button]) -> Command {
+        told(Input {
+            buttons: buttons.iter().copied().collect(),
+            ..Input::default()
+        })
+    }
+
+    /// The first player told the screen is touched at (`x`, `y`).
+    fn touches(x: u16, y: u16) -> Command {
+        told(Input {
+            touch: Some(TouchPoint { x, y }),
+            ..Input::default()
+        })
+    }
+
+    /// The first player told its turbo `buttons`, at the default pace.
+    fn turbo(buttons: &[Button]) -> Command {
+        Command::SetTurbo {
+            player: 0,
+            buttons: buttons.iter().copied().collect(),
+            frames: turbo::DEFAULT_FRAMES,
+        }
+    }
+
+    /// What letting go of everything tells a first player who held
+    /// buttons: the buttons gone, the release at once, and the input once
+    /// more for the microphone.
+    fn let_go() -> Vec<Command> {
+        vec![holds(&[]), Command::ReleaseInput { player: 0 }, holds(&[])]
+    }
+
+    /// A key pressed afresh in the game, with nothing else held down.
+    fn press(input: &mut GameInput, key: &str) -> Pressed {
+        input.key_down(key, Modifiers::default(), false, Route::Game, false, &ds())
+    }
+
+    /// A key down again as it repeats, as GPUI says of keys that type:
+    /// `route` and `game_menu` are where keys go by then.
+    fn repeat(input: &mut GameInput, key: &str, route: Route, game_menu: bool) -> Pressed {
+        input.key_down(key, Modifiers::default(), true, route, game_menu, &ds())
+    }
+
+    #[test]
+    fn a_key_held_across_the_game_menu_counts_again_only_once_pressed_again() {
+        let mut input = GameInput::default();
+        assert_eq!(
+            press(&mut input, "w"),
+            Pressed::Game(vec![holds(&[Button::Up])])
+        );
+        // Escape opens the menu, which lets go of everything at once.
+        assert_eq!(press(&mut input, "escape"), Pressed::OpensMenu);
+        assert_eq!(input.release_all(&ds()), let_go());
+
+        // W is still down and repeats: it is not the menu's.
+        assert_eq!(
+            repeat(&mut input, "w", Route::Menu, true),
+            Pressed::Elsewhere
+        );
+        // Nor is Escape's own repeat, which GPUI passes on as a press: the
+        // menu does not close under the key that opened it.
+        let escape_again = |input: &mut GameInput, route, game_menu| {
+            input.key_down(
+                "escape",
+                Modifiers::default(),
+                false,
+                route,
+                game_menu,
+                &ds(),
+            )
+        };
+        assert_eq!(
+            escape_again(&mut input, Route::Menu, true),
+            Pressed::Elsewhere
+        );
+        assert_eq!(input.key_up("escape", &ds()), []);
+        // Pressed again, it is the menu's, which closes; its repeats then
+        // do not open the menu again.
+        assert_eq!(
+            escape_again(&mut input, Route::Menu, true),
+            Pressed::Menu { repeat: false }
+        );
+        assert_eq!(
+            escape_again(&mut input, Route::Game, false),
+            Pressed::Elsewhere
+        );
+        assert_eq!(input.key_up("escape", &ds()), []);
+
+        // Back in the game with W down all along: its repeats add
+        // nothing, and the game is told nothing until it is pressed again.
+        assert_eq!(
+            repeat(&mut input, "w", Route::Game, false),
+            Pressed::Game(Vec::new())
+        );
+        assert_eq!(input.key_up("w", &ds()), []);
+        assert_eq!(
+            press(&mut input, "w"),
+            Pressed::Game(vec![holds(&[Button::Up])])
+        );
+    }
+
+    #[test]
+    fn a_key_held_to_choose_goes_only_where_its_press_went() {
+        let mut input = GameInput::default();
+        // Return chooses a game in the library, and is still down as the
+        // game starts: it never presses A there.
+        let enter = |input: &mut GameInput, held, route| {
+            input.key_down("enter", Modifiers::default(), held, route, false, &gba())
+        };
+        assert_eq!(
+            enter(&mut input, false, Route::Library),
+            Pressed::Library { repeat: false }
+        );
+        assert_eq!(
+            enter(&mut input, true, Route::Library),
+            Pressed::Library { repeat: true }
+        );
+        assert_eq!(enter(&mut input, true, Route::Game), Pressed::Elsewhere);
+        assert_eq!(input.key_up("enter", &gba()), []);
+        assert_eq!(
+            enter(&mut input, false, Route::Game),
+            Pressed::Game(vec![holds(&[Button::A])])
+        );
+        // W held to walk never types into Guide once its composer has the
+        // caret, and what is typed there is not the game's.
+        assert_eq!(
+            press(&mut input, "w"),
+            Pressed::Game(vec![holds(&[Button::A, Button::Up])])
+        );
+        assert_eq!(
+            repeat(&mut input, "w", Route::Guide, false),
+            Pressed::Elsewhere
+        );
+        assert_eq!(
+            input.key_down(
+                "j",
+                Modifiers::default(),
+                false,
+                Route::Guide,
+                false,
+                &gba()
+            ),
+            Pressed::Guide
+        );
+    }
+
+    #[test]
+    fn focus_lost_with_keys_down_lets_go_of_them_and_forgets_them() {
+        let mut input = GameInput::default();
+        press(&mut input, "w");
+        press(&mut input, "k");
+        assert_eq!(
+            press(&mut input, "left"),
+            Pressed::Game(vec![holds(&[Button::Up, Button::A, Button::Left])])
+        );
+        // Another window comes to the front.
+        assert_eq!(input.focus_lost(&ds()), let_go());
+
+        // W was let go of meanwhile, and no key-up came. Pressed again, it
+        // is a press, not a repeat of the one that was never let go of.
+        assert_eq!(
+            press(&mut input, "w"),
+            Pressed::Game(vec![holds(&[Button::Up])])
+        );
+        // K is still down as focus comes back: its repeats are not
+        // presses, so it counts once pressed again.
+        assert_eq!(
+            repeat(&mut input, "k", Route::Game, false),
+            Pressed::Elsewhere
+        );
+        assert_eq!(input.key_up("k", &ds()), []);
+        assert_eq!(
+            press(&mut input, "k"),
+            Pressed::Game(vec![holds(&[Button::Up, Button::A])])
+        );
+        // An arrow still down counts from its next repeat, which GPUI
+        // passes on as a press.
+        assert_eq!(
+            press(&mut input, "left"),
+            Pressed::Game(vec![holds(&[Button::Up, Button::A, Button::Left])])
+        );
+    }
+
+    #[test]
+    fn the_command_key_going_down_lets_go_of_every_key_but_nothing_else() {
+        let mut input = GameInput::default();
+        press(&mut input, "w");
+        assert_eq!(
+            input.pad_control(PAD, "East", true, &ds()).0,
+            [holds(&[Button::Up, Button::A])]
+        );
+        // ⌘ goes down: macOS may never say W came up. The gamepad's A
+        // stays held.
+        assert_eq!(input.release_keys(&ds()), [holds(&[Button::A])]);
+        assert_eq!(
+            repeat(&mut input, "w", Route::Game, false),
+            Pressed::Elsewhere
+        );
+        // A ⌘ shortcut's key is no game input, and is not taken for down:
+        // S pressed after ⌘S is a press.
+        let command = Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            input.key_down("s", command, false, Route::Game, false, &ds()),
+            Pressed::Game(Vec::new())
+        );
+        assert_eq!(
+            press(&mut input, "s"),
+            Pressed::Game(vec![holds(&[Button::A, Button::Down])])
+        );
+        // Nor is a Control chord's key, nor Escape with ⌘ the menu's key.
+        let control = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            input.key_down("k", control, false, Route::Game, false, &ds()),
+            Pressed::Game(Vec::new())
+        );
+        assert_eq!(
+            input.key_down("escape", command, false, Route::Game, false, &ds()),
+            Pressed::Game(Vec::new())
+        );
+    }
+
+    #[test]
+    fn shift_holds_what_it_is_bound_to_and_a_key_it_renames_comes_up_as_itself() {
+        let mut input = GameInput::default();
+        let slow = Command::SetSpeed(Speeds::default().speed(Pace::SlowMotion));
+        // `1` runs slow motion while held.
+        assert_eq!(press(&mut input, "1"), Pressed::Game(vec![slow]));
+        // Shift, which tilts gently, goes down for the game.
+        let gently = told(Input {
+            gentle: true,
+            ..Input::default()
+        });
+        assert_eq!(input.shift(true, &ds()), [gently]);
+        // `1` comes up under the name Shift gives it.
+        assert_eq!(input.key_up("!", &ds()), [Command::SetSpeed(Speed::NORMAL)]);
+        assert_eq!(input.shift(false, &ds()), [holds(&[])]);
+        // Shift down while keys go elsewhere holds nothing.
+        assert_eq!(input.shift(false, &ds()), []);
+    }
+
+    #[test]
+    fn a_gamepad_unplugged_with_buttons_down_lets_go_of_them() {
+        let mut input = GameInput::default();
+        let fast = Command::SetSpeed(Speeds::default().speed(Pace::FastForward));
+        assert_eq!(
+            input.pad_control(PAD, "East", true, &ds()),
+            (vec![holds(&[Button::A])], Vec::new())
+        );
+        assert_eq!(
+            input.pad_control(PAD, "RightTrigger2", true, &ds()),
+            (vec![fast], Vec::new())
+        );
+        // A second controller holds A too.
+        assert_eq!(
+            input.pad_control(OTHER_PAD, "East", true, &ds()),
+            (Vec::new(), Vec::new())
+        );
+        // The first is unplugged: the gamepad thread sends a release for
+        // each control it held. The other controller's A stays down.
+        assert_eq!(
+            input.pad_control(PAD, "East", false, &ds()),
+            (Vec::new(), Vec::new())
+        );
+        assert_eq!(
+            input.pad_control(PAD, "RightTrigger2", false, &ds()),
+            (vec![Command::SetSpeed(Speed::NORMAL)], Vec::new())
+        );
+        // Then the other.
+        assert_eq!(
+            input.pad_control(OTHER_PAD, "East", false, &ds()),
+            (vec![holds(&[])], Vec::new())
+        );
+
+        // Unplugged with only the hotkey modifier down, that reaches the
+        // game as the tap letting go of it is.
+        assert_eq!(
+            input.pad_control(PAD, "Select", true, &ds()),
+            (Vec::new(), Vec::new())
+        );
+        assert_eq!(
+            input.pad_control(PAD, "Select", false, &ds()),
+            (vec![holds(&[Button::Select]), holds(&[])], Vec::new())
+        );
+
+        // A controller unplugged under the game menu: everything was let
+        // go of as the menu opened, so its releases change nothing.
+        input.pad_control(PAD, "East", true, &ds());
+        assert_eq!(input.release_all(&ds()), let_go());
+        assert_eq!(
+            input.pad_control(PAD, "East", false, &ds()),
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn hotkey_chords_and_turbo_buttons_keep_out_of_each_other_s_way() {
+        let mut input = GameInput::default();
+        let bindings = Bindings::default()
+            .overlay("[gamepad]\nturbo_a = [\"North\"]\n\n[hotkeys]\nturbo_b = [\"West\"]\n")
+            .expect("valid bindings");
+        input.set_bindings(bindings);
+        let nothing = (Vec::new(), Vec::new());
+
+        // Turbo A held, then Select+R1 saves a state: the game sees
+        // neither Select nor R, and the turbo goes on.
+        assert_eq!(
+            input.pad_control(PAD, "North", true, &ds()),
+            (vec![turbo(&[Button::A])], Vec::new())
+        );
+        assert_eq!(input.pad_control(PAD, "Select", true, &ds()), nothing);
+        assert_eq!(
+            input.pad_control(PAD, "RightTrigger", true, &ds()),
+            (Vec::new(), vec![Shortcut::SaveState])
+        );
+        assert_eq!(
+            input.pad_control(PAD, "RightTrigger", false, &ds()),
+            nothing
+        );
+        // Select+West holds turbo B, a hotkey that is held, beside it.
+        assert_eq!(
+            input.pad_control(PAD, "West", true, &ds()),
+            (vec![turbo(&[Button::A, Button::B])], Vec::new())
+        );
+        assert_eq!(
+            input.pad_control(PAD, "West", false, &ds()),
+            (vec![turbo(&[Button::A])], Vec::new())
+        );
+        assert_eq!(input.pad_control(PAD, "Select", false, &ds()), nothing);
+        assert_eq!(
+            input.pad_control(PAD, "North", false, &ds()),
+            (vec![turbo(&[])], Vec::new())
+        );
+
+        // Select down, then a control that is no hotkey: Select is the
+        // game's from then on, with the turbo, and hotkeys are off until
+        // it comes up.
+        assert_eq!(input.pad_control(PAD, "Select", true, &ds()), nothing);
+        assert_eq!(
+            input.pad_control(PAD, "North", true, &ds()),
+            (
+                vec![holds(&[Button::Select]), turbo(&[Button::A])],
+                Vec::new()
+            )
+        );
+        assert_eq!(
+            input.pad_control(PAD, "RightTrigger", true, &ds()),
+            (vec![holds(&[Button::Select, Button::R])], Vec::new())
+        );
+        // The menu opens: buttons and turbo are let go of at once, and
+        // the chord in progress is forgotten with them.
+        assert_eq!(
+            input.release_all(&ds()),
+            [
+                holds(&[]),
+                turbo(&[]),
+                Command::ReleaseInput { player: 0 },
+                holds(&[]),
+            ]
+        );
+        assert_eq!(input.pad_control(PAD, "Select", false, &ds()), nothing);
+        assert_eq!(
+            input.pad_control(PAD, "RightTrigger", false, &ds()),
+            nothing
+        );
+
+        // The modifier down on its own as the menu opens is forgotten too.
+        // Still down after, it makes no hotkey of R1, which is the game's;
+        // and let go of then, it is no tap.
+        assert_eq!(input.pad_control(PAD, "Select", true, &ds()), nothing);
+        assert_eq!(
+            input.release_all(&ds()),
+            [Command::ReleaseInput { player: 0 }, holds(&[])]
+        );
+        assert_eq!(
+            input.pad_control(PAD, "RightTrigger", true, &ds()),
+            (vec![holds(&[Button::R])], Vec::new())
+        );
+        assert_eq!(input.pad_control(PAD, "Select", false, &ds()), nothing);
+    }
+
+    #[test]
+    fn the_mouse_touches_before_the_gamepad_cursor_does() {
+        let mut input = GameInput::default();
+        // A stick's click touches where the cursor is: the middle, at
+        // first.
+        assert_eq!(
+            input.pad_control(PAD, "RightThumb", true, &ds()).0,
+            [touches(128, 96)]
+        );
+        assert_eq!(
+            input.cursor_look(),
+            (Some(Cursor::centre(ScreenSize::new(256, 192))), true)
+        );
+        // Half a second of the stick held fully right, on upright
+        // screens, and on screens turned a quarter clockwise.
+        assert_eq!(
+            input.move_cursor((0.5, 0.0), Rotation::Upright, &ds()),
+            [touches(224, 96)]
+        );
+        assert_eq!(
+            input.move_cursor((0.25, 0.0), Rotation::Clockwise, &ds()),
+            [touches(224, 48)]
+        );
+        // The mouse presses on the touchscreen: the stylus is what
+        // touches, and the cursor stays where it is, as it is touching.
+        assert_eq!(
+            input.mouse_down(Some((0, TouchPoint { x: 10, y: 20 })), &ds()),
+            [touches(10, 20)]
+        );
+        assert_eq!(input.stylus(), Some((0, TouchPoint { x: 10, y: 20 })));
+        assert_eq!(
+            input.drag_stylus(Some(TouchPoint { x: 11, y: 20 }), &ds()),
+            [touches(11, 20)]
+        );
+        assert_eq!(
+            input.drag_stylus(Some(TouchPoint { x: 11, y: 20 }), &ds()),
+            []
+        );
+        // The screen pressed on goes from the window: the stylus lifts,
+        // and the cursor touches again.
+        assert_eq!(input.drag_stylus(None, &ds()), [touches(224, 48)]);
+        assert_eq!(input.stylus(), None);
+        assert_eq!(
+            input.drag_stylus(Some(TouchPoint { x: 1, y: 1 }), &ds()),
+            []
+        );
+        assert_eq!(
+            input.pad_control(PAD, "RightThumb", false, &ds()).0,
+            [holds(&[])]
+        );
+        assert!(input.cursor().is_some(), "shown where it was left");
+
+        // A click off the touchscreen presses A while held, and hides the
+        // cursor, which is not touching.
+        assert_eq!(input.mouse_down(None, &ds()), [holds(&[Button::A])]);
+        assert_eq!(input.cursor(), None);
+        assert_eq!(input.mouse_up(&ds()), [holds(&[])]);
+
+        // A game with no touchscreen has nothing to touch or to point at.
+        assert_eq!(input.pad_control(PAD, "RightThumb", true, &gba()).0, []);
+        assert_eq!(input.move_cursor((0.5, 0.0), Rotation::Upright, &gba()), []);
+        assert_eq!(input.cursor(), None);
+    }
+
+    #[test]
+    fn a_new_game_is_told_all_that_is_held_and_left_on() {
+        let mut input = GameInput::default();
+        // Fast-forward was left on last time.
+        input.latch(true, false);
+        assert!(input.fast_forward_latched() && !input.slow_motion_latched());
+        let fast = Command::SetSpeed(Speeds::default().speed(Pace::FastForward));
+        input.game_started();
+        assert_eq!(input.resend(&ds()), std::slice::from_ref(&fast));
+        assert_eq!(input.pace(), Pace::FastForward);
+        assert_eq!(input.resend(&ds()), [], "told once");
+
+        // The next game starts with W held and a turbo key down: it is
+        // told of them, and of the speed again.
+        input.set_bindings(
+            Bindings::default()
+                .overlay("[keys]\nturbo_b = [\"l\"]\n")
+                .expect("valid bindings"),
+        );
+        press(&mut input, "w");
+        press(&mut input, "l");
+        input.game_started();
+        assert_eq!(
+            input.resend(&ds()),
+            [holds(&[Button::Up]), turbo(&[Button::B]), fast]
+        );
+        // Turned off, and on again, with the notice's answer.
+        assert_eq!(
+            input.toggle_fast_forward(&ds()),
+            (false, vec![Command::SetSpeed(Speed::NORMAL)])
+        );
+        let slow = Command::SetSpeed(Speeds::default().speed(Pace::SlowMotion));
+        assert_eq!(input.toggle_slow_motion(&ds()), (true, vec![slow]));
+    }
+
+    #[test]
+    fn the_next_player_starts_with_nothing_held_under_its_own_bindings() {
+        let mut input = GameInput::default();
+        press(&mut input, "w");
+        let theirs = Bindings::default()
+            .overlay("[turbo]\nframes = 5\n")
+            .expect("valid bindings");
+        let empty = Input::default();
+        assert_eq!(
+            input.switch_player(1, Some(theirs), &ds()),
+            [
+                holds(&[]),
+                Command::ReleaseInput { player: 0 },
+                Command::SetInput {
+                    player: 1,
+                    input: empty
+                },
+                Command::SetTurbo {
+                    player: 1,
+                    buttons: Buttons::NONE,
+                    frames: 5
+                },
+            ]
+        );
+        assert_eq!(input.player(), 1);
+        assert_eq!(input.bindings().turbo_frames(), 5);
+        // W was pressed for the first player: it counts for the second
+        // once pressed again.
+        assert_eq!(
+            repeat(&mut input, "w", Route::Game, false),
+            Pressed::Game(Vec::new())
+        );
+        assert_eq!(input.key_up("w", &ds()), []);
+        let up: Buttons = [Button::Up].into_iter().collect();
+        assert_eq!(
+            press(&mut input, "w"),
+            Pressed::Game(vec![Command::SetInput {
+                player: 1,
+                input: Input {
+                    buttons: up,
+                    ..empty
+                }
+            }])
+        );
+        // A player with no bindings of its own keeps those in force.
+        input.switch_player(0, None, &ds());
+        assert_eq!(input.bindings().turbo_frames(), 5);
+    }
+
+    #[test]
+    fn the_microphone_is_heard_with_whatever_is_held() {
+        let mut input = GameInput::default();
+        let hears = |microphone| {
+            told(Input {
+                microphone,
+                ..Input::default()
+            })
+        };
+        assert_eq!(input.hear(40), Some(hears(40)));
+        assert_eq!(input.hear(40), None, "no change");
+        // B blows into it, as loud as it reads, whatever it hears.
+        assert_eq!(
+            press(&mut input, "b"),
+            Pressed::Game(vec![hears(Input::LOUDEST)])
+        );
+        assert_eq!(input.key_up("b", &ds()), [hears(40)]);
+        // Everything let go of: the microphone goes on being heard.
+        assert_eq!(
+            input.release_all(&ds()),
+            [Command::ReleaseInput { player: 0 }, hears(40)]
+        );
+        assert_eq!(input.stop_hearing(), hears(0));
+    }
+}
