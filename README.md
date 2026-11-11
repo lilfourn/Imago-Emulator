@@ -577,6 +577,22 @@ a hack whose patch has the same name makes a different game, numbered as in
 xdelta3's old DJW or FGK compression, which it uses only when asked to, are
 not read ([decision 0009](docs/decisions/0009-rom-hack-patches.md)).
 
+### Archipelago
+
+[Archipelago](https://archipelago.gg) randomizes where a game's items and
+key items are, and gives you a patch for your own ROM: `.apemerald` for
+Pokémon Emerald, `.apred` and `.apblue` for Red and Blue (and
+`.apfirered`, `.apleafgreen` and `.apcrystal` from the community's
+worlds). Open the patch as you would a ROM hack's. It names its game by
+MD5, so the app finds your copy among the library's games, and says which
+release it wants if yours is another.
+
+The game it makes plays on its own, which is all a single-player seed
+needs: what you find is in the ROM. The app is not an Archipelago client,
+so in a game shared with other players, items for them and from them do
+not arrive. A patch whose game has steps of its own beyond Archipelago's
+two is refused, saying so.
+
 ## Randomizer
 
 A Pokémon game can be played randomized: the same game with new wild

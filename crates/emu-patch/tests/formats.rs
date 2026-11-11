@@ -1,10 +1,10 @@
 //! Patches made by the tools hack authors use, Floating IPS and xdelta3,
-//! applied to the made-up ROMs they were made from.
-//! `scripts/make-patch-fixtures.sh` makes them again.
+//! and by Archipelago's own code, applied to the made-up ROMs they were
+//! made from. `scripts/make-patch-fixtures.sh` makes them again.
 
 use std::path::Path;
 
-use emu_patch::{Format, PatchError, apply, source_crc32};
+use emu_patch::{Format, PatchError, apply, md5, source_crc32, source_md5, target_extension};
 
 const LIMIT: usize = 1 << 20;
 
@@ -227,4 +227,68 @@ fn applies_ups_patches() {
     let mut damaged = patch.clone();
     damaged[10] ^= 1;
     assert_eq!(apply(&damaged, &source(), LIMIT), Err(PatchError::Damaged));
+}
+
+/// The target as the edits of the Archipelago patch leave it: those
+/// `scripts/make-archipelago-fixtures.py` writes after its bsdiff, one of
+/// each kind, the last past the game's end.
+fn archipelago_target() -> Vec<u8> {
+    let mut rom = target();
+    rom[0x10..0x15].copy_from_slice(b"IMAGO");
+    rom.copy_within(0x4000..0x4040, 0x200);
+    rom[0x300..0x320].fill(0x5A);
+    rom[0x400] &= 0x0F;
+    rom[0x401] |= 0x80;
+    rom[0x402] ^= 0xFF;
+    rom.extend_from_slice(b"END");
+    rom
+}
+
+#[test]
+fn applies_patches_from_archipelago() {
+    let patch = fixture("archipelago.apemerald");
+    assert_eq!(Format::of(&patch), Some(Format::Archipelago));
+    assert_eq!(source_crc32(&patch), None);
+    let named = source_md5(&patch).expect("names its ROM");
+    assert_eq!(named, "dc59b2e2918eca7d7187c16cc8201c68");
+    assert_eq!(md5(&source()), named);
+    assert_eq!(target_extension(&patch).as_deref(), Some("gba"));
+    let made = apply(&patch, &source(), LIMIT).expect("applied");
+    // What Archipelago's own code made of the patch, as the script said.
+    assert_eq!(crc32fast::hash(&made), 0xA3B4_5298);
+    assert!(made == archipelago_target(), "the bsdiff, then each edit");
+
+    // A patch from before procedures: one bsdiff.
+    let delta = fixture("archipelago-delta.apred");
+    assert_eq!(target_extension(&delta).as_deref(), Some("gb"));
+    let made = apply(&delta, &source(), LIMIT).expect("applied");
+    assert_eq!(crc32fast::hash(&made), 0x5D12_2CF0);
+    assert!(made == target());
+
+    // For another ROM, by its MD5; too big; cut short; and a zip that is
+    // no patch.
+    assert_eq!(
+        apply(&patch, &target(), LIMIT),
+        Err(PatchError::WrongRom {
+            expected: named,
+            actual: md5(&target()),
+        })
+    );
+    assert_eq!(
+        apply(&patch, &source(), 4096),
+        Err(PatchError::TooBig { limit: 4096 })
+    );
+    assert_eq!(
+        apply(&patch[..patch.len() / 2], &source(), LIMIT),
+        Err(PatchError::Damaged)
+    );
+    assert_eq!(source_md5(&patch[..patch.len() / 2]), None);
+    // An empty zip: its end record alone.
+    let mut empty = b"PK\x05\x06".to_vec();
+    empty.resize(22, 0);
+    assert_eq!(Format::of(&empty), None);
+    let mut not_a_patch = b"PK\x03\x04".to_vec();
+    not_a_patch.extend_from_slice(&empty);
+    assert_eq!(Format::of(&not_a_patch), Some(Format::Archipelago));
+    assert!(apply(&not_a_patch, &source(), LIMIT).is_err());
 }

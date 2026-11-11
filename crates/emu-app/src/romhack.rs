@@ -8,6 +8,13 @@
 //! among the library's games. IPS and xdelta patches don't, so the user
 //! chooses it.
 //!
+//! An Archipelago patch is made into a game the same way: the patch
+//! [Archipelago](https://archipelago.gg) hands a player for their own
+//! ROM, with the game's items moved about. It names its game by MD5,
+//! which is looked for among the library's games of its kind. The game
+//! plays on its own; items for and from other players' games need
+//! Archipelago's client, which the app is not.
+//!
 //! Everything here blocks; run it off the UI thread.
 
 use std::fmt::Display;
@@ -18,8 +25,22 @@ use std::path::{Path, PathBuf};
 use crate::archive;
 use crate::persist::file_name;
 
-/// The patches the app makes games from, by extension.
-const PATCHES: [&str; 5] = ["ips", "ups", "bps", "xdelta", "vcdiff"];
+/// The patches the app makes games from, by extension: ROM hacks', then
+/// Archipelago's for the Pokémon games it has worlds for (Emerald, Red
+/// and Blue, and the community's FireRed, LeafGreen and Crystal).
+const PATCHES: [&str; 11] = [
+    "ips",
+    "ups",
+    "bps",
+    "xdelta",
+    "vcdiff",
+    "apemerald",
+    "apred",
+    "apblue",
+    "apfirered",
+    "apleafgreen",
+    "apcrystal",
+];
 
 /// Where games made from patches are kept, e.g.
 /// `~/Library/Application Support/ds-emulator/Hacks` on macOS.
@@ -85,14 +106,7 @@ fn make_into(
         .map_err(|error| MakeError::Failed(format!("Cannot read {}: {error}", patch.display())))?;
     let base = match base {
         Some(base) => base.to_owned(),
-        None => emu_patch::source_crc32(&bytes)
-            .and_then(|crc32| {
-                known
-                    .iter()
-                    .find(|(known, path)| *known == crc32 && path.is_file())
-            })
-            .map(|(_, path)| path.clone())
-            .ok_or_else(|| MakeError::NoBase(patch.to_owned()))?,
+        None => source_of(&bytes, known).ok_or_else(|| MakeError::NoBase(patch.to_owned()))?,
     };
     let failed = |error: &dyn Display| {
         MakeError::Failed(format!(
@@ -121,6 +135,47 @@ fn make_into(
         rom.as_slice(),
     )
     .map_err(|error| failed(&error))
+}
+
+/// The game among `known` (checksum and path) that the patch `patch` was
+/// made from, if it names one: by CRC-32, as UPS and BPS do, or by MD5, as
+/// an Archipelago patch does. The library keeps no MD5, so each game of
+/// the kind the patch makes is read for its own.
+fn source_of(patch: &[u8], known: &[(u32, PathBuf)]) -> Option<PathBuf> {
+    if let Some(crc32) = emu_patch::source_crc32(patch) {
+        let named = |(known, path): &&(u32, PathBuf)| *known == crc32 && path.is_file();
+        return known.iter().find(named).map(|(_, path)| path.clone());
+    }
+    let md5 = emu_patch::source_md5(patch)?;
+    let makes = emu_patch::target_extension(patch);
+    known
+        .iter()
+        .map(|(_, path)| path)
+        .filter(|path| same_kind(path, makes.as_deref()))
+        .find(|path| {
+            read_capped(path, "it is too big to be a game")
+                .is_ok_and(|rom| emu_patch::md5(&rom) == md5)
+        })
+        .cloned()
+}
+
+/// Whether the game at `path` is of the kind a patch makes, which is of
+/// the kind it is for: a cartridge game with the extension `makes`, where
+/// a Game Boy game may be named `.gb` or `.gbc`. Any cartridge game, if
+/// the patch does not say.
+fn same_kind(path: &Path, makes: Option<&str>) -> bool {
+    if emu_3ds::is_game(path) || emu_cores::system_for_path(path).is_none() {
+        return false;
+    }
+    let game_boy = |extension: &str| ["gb", "gbc"].contains(&extension);
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    match (extension.map(str::to_ascii_lowercase), makes) {
+        (_, None) => true,
+        (Some(extension), Some(makes)) => {
+            extension == makes || (game_boy(&extension) && game_boy(makes))
+        }
+        (None, Some(_)) => false,
+    }
 }
 
 /// All of the file at `path`, a patch or the game it patches, unless it is
@@ -228,6 +283,13 @@ mod tests {
         for name in ["a.ips", "a.UPS", "a.bps", "a.xdelta", "a.vcdiff"] {
             assert!(is_patch(Path::new(name)), "{name}");
         }
+        // Archipelago's, for the Pokémon games.
+        for name in ["AP_1_P1.apemerald", "a.apred", "a.APBLUE", "a.apcrystal"] {
+            assert!(is_patch(Path::new(name)), "{name}");
+        }
+        // Not its worlds, nor a Mac app.
+        assert!(!is_patch(Path::new("emerald.apworld")));
+        assert!(!is_patch(Path::new("Game.app")));
         assert!(!is_patch(Path::new("a.gba")));
         assert!(!is_patch(Path::new("bps")));
     }
@@ -287,6 +349,68 @@ mod tests {
         assert_eq!(fs::read(&base).expect("base"), b"original", "left as it is");
         // Again: the same game.
         assert_eq!(make_into(&patch, Some(&base), &[], &hacks), Ok(made));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The made-up ROM `emu-patch`'s fixtures are for: its tests' `source`.
+    fn fixture_rom() -> Vec<u8> {
+        let mut state: u32 = 1;
+        let mut rom: Vec<u8> = (0..96 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        rom[0x9000..0xA000].fill(0xFF);
+        rom
+    }
+
+    #[test]
+    fn an_archipelago_patch_finds_its_game_by_md5() {
+        let dir = temp_dir("romhack-archipelago");
+        let patch = dir.join("AP_52413_P1_Player.apemerald");
+        let fixture = include_bytes!("../../emu-patch/tests/fixtures/archipelago.apemerald");
+        fs::write(&patch, fixture).expect("patch");
+        let hacks = dir.join("Hacks");
+        // Another game of its kind, its game under another kind's name,
+        // and its game.
+        let (other, misnamed, emerald) = (
+            dir.join("Other.gba"),
+            dir.join("Emerald.nds"),
+            dir.join("Emerald.gba"),
+        );
+        fs::write(&other, b"another game").expect("other");
+        fs::write(&misnamed, fixture_rom()).expect("misnamed");
+        let known = |paths: &[&PathBuf]| -> Vec<(u32, PathBuf)> {
+            paths.iter().map(|path| (0, (*path).clone())).collect()
+        };
+        assert_eq!(
+            make_into(&patch, None, &known(&[&other, &misnamed, &emerald]), &hacks),
+            Err(MakeError::NoBase(patch.clone())),
+            "its game is not in the library"
+        );
+        fs::write(&emerald, fixture_rom()).expect("emerald");
+        let made =
+            make_into(&patch, None, &known(&[&other, &misnamed, &emerald]), &hacks).expect("made");
+        assert_eq!(made, hacks.join("AP_52413_P1_Player.gba"));
+        // What Archipelago's own code makes of it (emu-patch's tests).
+        assert_eq!(
+            crc32fast::hash(&fs::read(&made).expect("made")),
+            0xA3B4_5298
+        );
+        // Given another game, it says which it is for.
+        let wrong = make_into(&patch, Some(&other), &[], &hacks).expect_err("another game");
+        let MakeError::Failed(why) = wrong else {
+            panic!("{wrong:?}");
+        };
+        assert!(
+            why.starts_with(
+                "Cannot patch Other.gba with AP_52413_P1_Player.apemerald: the patch is for a different ROM: one with MD5 dc59b2e2918eca7d7187c16cc8201c68"
+            ),
+            "{why}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
