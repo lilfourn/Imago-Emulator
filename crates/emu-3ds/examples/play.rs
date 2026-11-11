@@ -49,7 +49,7 @@ fn play(game: &Path, frames: u64, out: Option<&Path>) -> Result<(), String> {
         }
     };
     let started = Instant::now();
-    let mut core = emu_3ds::ThreeDs::open_with(game, &data, &helper, &parts)
+    let mut core = emu_3ds::ThreeDs::open_with(game, &data, &data, &helper, &parts)
         .map_err(|error| error.to_string())?;
     println!("started in {:.2} s", started.elapsed().as_secs_f64());
     if let Some(scale) = std::env::var("DS_EMULATOR_3DS_SCALE")

@@ -98,6 +98,108 @@ pub fn data_dir() -> Option<PathBuf> {
     Some(emu_os::data_dir()?.join("ds-emulator").join("3DS"))
 }
 
+/// The folder of the console a game has to itself, if it is given one:
+/// beside the game, named as it is with `console` for its extension, as
+/// `Game (Random 123456).console` is beside `Game (Random 123456).3ds`.
+/// The core keeps a console's files in `Azahar` there: its NAND, its SD
+/// card with the games' saves, and the mods it loads over a game
+/// (`Azahar/load/mods/<title ID>/`). Every game shares the one console in
+/// [`data_dir`] but a game with a folder of this name, which plays on that
+/// console instead ([`console_of`]): so two copies of one game, which the
+/// core would give one save by their title ID, each keep their own, and a
+/// mod is loaded over one and not the other.
+#[must_use]
+pub fn own_console(game: &Path) -> PathBuf {
+    game.with_extension("console")
+}
+
+/// The folder of the console the game at `game` plays on: its own, if it
+/// has one ([`own_console`]), or else the one everything shares, in
+/// `data` ([`data_dir`]).
+#[must_use]
+pub fn console_of(game: &Path, data: &Path) -> PathBuf {
+    let own = own_console(game);
+    if own.is_dir() { own } else { data.to_owned() }
+}
+
+/// Makes a console in the folder `to` that is the one in `from` without
+/// its SD card: its NAND with the console's settings, its system files
+/// and the shaders it has compiled, so games start there as they do on
+/// that one, but none of the games' saves, nor its mods. Nothing already
+/// in `to` is replaced.
+///
+/// # Errors
+///
+/// Fails if a file cannot be read or written.
+pub fn new_console(from: &Path, to: &Path) -> std::io::Result<()> {
+    let (from, to) = (from.join("Azahar"), to.join("Azahar"));
+    std::fs::create_dir_all(&to)?;
+    for part in subfolders(&from) {
+        let Some(name) = part.file_name() else {
+            continue;
+        };
+        if name != "sdmc" && name != "load" {
+            copy_tree(&part, &to.join(name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Where the console in the folder `console` keeps the mods it loads over
+/// its games, each in a folder named for the game's title ID.
+fn mods_dir(console: &Path) -> PathBuf {
+    console.join("Azahar").join("load").join("mods")
+}
+
+/// Gives the console in the folder `console` a mod of a game, which the
+/// core loads over the game each time it starts there: the folder `written`,
+/// named for the game's title ID (`000400000011C400`), with the game's
+/// changed code (`code.bin`) and files (`romfs/`) in it, is copied into
+/// `Azahar/load/mods/`.
+///
+/// # Errors
+///
+/// Fails if `written` has no name, or a file cannot be read or written.
+pub fn add_mod(console: &Path, written: &Path) -> std::io::Result<()> {
+    let Some(title) = written.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the mod's folder has no name",
+        ));
+    };
+    copy_tree(written, &mods_dir(console).join(title))
+}
+
+/// Whether any game has saved on the console in the folder `console`:
+/// whether there is a file on its SD card.
+#[must_use]
+pub fn has_saves(console: &Path) -> bool {
+    !files_under(&console.join("Azahar").join("sdmc")).is_empty()
+}
+
+/// Whether the console in the folder `console` has a mod of any game.
+#[must_use]
+pub fn has_mod(console: &Path) -> bool {
+    subfolders(&mods_dir(console)).next().is_some()
+}
+
+/// Copies the folder `from`, and all in it, to `to`, replacing no file
+/// that is already there.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let (from, to) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if kind.is_file() && !to.exists() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Where the core keeps one game's own saves on the emulated SD card: the
 /// save data Azahar gives the title,
 /// `Azahar/sdmc/Nintendo 3DS/<ID0>/<ID1>/title/<high>/<low>/data/` (beside
@@ -121,7 +223,7 @@ pub struct SaveData {
 
 impl SaveData {
     /// The save data of the game at `game`, whose console's files are in
-    /// `data` ([`data_dir`]).
+    /// `data` ([`console_of`]).
     #[must_use]
     pub fn of(game: &Path, data: &Path) -> Self {
         let header = header::read(game).ok();
@@ -174,6 +276,23 @@ impl SaveData {
             .flat_map(|ids| self.folders.iter().map(move |folder| ids.join(folder)))
             .filter(|folder| folder.is_dir())
             .collect()
+    }
+
+    /// Copies the game's save data and extdata to the console in the
+    /// folder `console`, where the same game then goes on from them.
+    /// Nothing already there is replaced.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a file cannot be read or written.
+    pub fn copy_to(&self, console: &Path) -> std::io::Result<()> {
+        let sd = console.join("Azahar").join("sdmc").join("Nintendo 3DS");
+        for folder in self.folders() {
+            if let Ok(within) = folder.strip_prefix(&self.sd) {
+                copy_tree(&folder, &sd.join(within))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -256,9 +375,10 @@ pub struct ThreeDs {
 impl ThreeDs {
     /// Starts `game` in a helper process. `helper` is the executable to
     /// start with [`HELPER_FLAG`] (the app's own, which calls
-    /// [`run_helper_if_asked`] first thing), and `data` is where the core
-    /// and the console's files are kept ([`data_dir`]); the core is
-    /// downloaded there first if it is missing.
+    /// [`run_helper_if_asked`] first thing), `data` is where the core is
+    /// kept ([`data_dir`]) and downloaded first if it is missing, and
+    /// `console` is the folder of the console the game plays on
+    /// ([`console_of`]): `data` itself, but for a game with its own.
     ///
     /// Blocks until the game's first frame can run: call it off the UI
     /// thread.
@@ -268,12 +388,17 @@ impl ThreeDs {
     /// Fails if 3DS games don't play on this system ([`UNSUPPORTED`]), the
     /// core cannot be installed, the helper cannot start, or the core
     /// refuses the game, as it does an encrypted one.
-    pub fn open(game: &Path, data: &Path, helper: &Path) -> Result<Self, OpenError> {
+    pub fn open(
+        game: &Path,
+        data: &Path,
+        console: &Path,
+        helper: &Path,
+    ) -> Result<Self, OpenError> {
         if let Some(why) = UNSUPPORTED {
             return Err(OpenError::Unsupported(why));
         }
         let parts = install::ensure(data)?;
-        Self::open_with(game, data, helper, &parts)
+        Self::open_with(game, data, console, helper, &parts)
     }
 
     /// Starts `game` as [`ThreeDs::open`] does, on the core (and on macOS
@@ -286,13 +411,14 @@ impl ThreeDs {
     pub fn open_with(
         game: &Path,
         data: &Path,
+        console: &Path,
         helper: &Path,
         parts: &install::Parts,
     ) -> Result<Self, OpenError> {
         if let Some(why) = UNSUPPORTED {
             return Err(OpenError::Unsupported(why));
         }
-        let link = link::Client::start(helper, game, data, parts)?;
+        let link = link::Client::start(helper, game, data, console, parts)?;
         Ok(Self {
             link: std::cell::RefCell::new(link),
             screens: SCREENS.map(Frame::new),
@@ -520,6 +646,80 @@ mod tests {
         };
         assert_eq!(saves.files(), [mine.join("main")]);
         assert!(SaveData::default().files().is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_game_with_a_console_of_its_own_plays_on_it_with_a_copy_of_its_saves() {
+        let root = std::env::temp_dir().join(format!("emu-3ds-own-console-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: PathBuf, bytes: &[u8]| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        let icon = header::tests::smdh(&[(1, "Test Game")]);
+        let (game, copy) = (
+            root.join("game.cxi"),
+            root.join("Hacks/game (Random 5).cxi"),
+        );
+        for path in [&game, &copy] {
+            write(path.clone(), &header::tests::ncch(true, &icon));
+        }
+        let data = root.join("3DS");
+        let ids = "Azahar/sdmc/Nintendo 3DS/0000/1111";
+        let save = Path::new(ids).join("title/00040000/00123400/data/00000001/main");
+        let extdata = Path::new(ids).join("extdata/00000000/000123AB/user/progress");
+        write(data.join(&save), b"save");
+        write(data.join(&extdata), b"extra");
+        write(
+            data.join(ids).join("title/00040000/00055d00/data/main"),
+            b"other",
+        );
+        write(data.join("Azahar/nand/config"), b"settings");
+        write(data.join("Azahar/shaders/vulkan/cache.bin"), b"shaders");
+        write(
+            data.join("Azahar/load/mods/0004000000123400/code.bin"),
+            b"mod",
+        );
+
+        // No folder of its own: the console everything shares.
+        let own = own_console(&copy);
+        assert_eq!(own, root.join("Hacks/game (Random 5).console"));
+        assert_eq!(console_of(&copy, &data), data);
+        new_console(&data, &own).unwrap();
+        assert_eq!(console_of(&copy, &data), own);
+        assert_eq!(console_of(&game, &data), data);
+        // That console's settings and shaders, none of its saves or mods.
+        assert_eq!(
+            std::fs::read(own.join("Azahar/nand/config")).unwrap(),
+            b"settings"
+        );
+        assert!(own.join("Azahar/shaders/vulkan/cache.bin").is_file());
+        assert!(!own.join("Azahar/sdmc").exists() && !own.join("Azahar/load").exists());
+        assert!(SaveData::of(&copy, &own).files().is_empty());
+        assert!(has_saves(&data) && !has_saves(&own));
+
+        // The game's saves, and no other game's, copied; never replaced.
+        SaveData::of(&game, &data).copy_to(&own).unwrap();
+        assert_eq!(
+            SaveData::of(&copy, &own).files(),
+            [own.join(&extdata), own.join(&save)]
+        );
+        write(own.join(&save), b"played on");
+        SaveData::of(&game, &data).copy_to(&own).unwrap();
+        // A mod goes where the core looks for the title's.
+        assert!(!has_mod(&own));
+        let written = root.join("work/0004000000123400");
+        write(written.join("romfs/a/0/1"), b"changed");
+        add_mod(&own, &written).unwrap();
+        assert!(has_mod(&own));
+        assert_eq!(
+            std::fs::read(own.join("Azahar/load/mods/0004000000123400/romfs/a/0/1")).unwrap(),
+            b"changed"
+        );
+        assert_eq!(std::fs::read(own.join(&save)).unwrap(), b"played on");
+        assert_eq!(std::fs::read(data.join(&save)).unwrap(), b"save");
+        assert!(has_saves(&own));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

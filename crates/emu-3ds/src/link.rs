@@ -252,11 +252,13 @@ pub struct Client {
 }
 
 impl Client {
-    /// Starts the helper on `game` and waits for its hello.
+    /// Starts the helper on `game`, to play on the console in the folder
+    /// `console`, and waits for its hello. Its log is kept in `data`.
     pub fn start(
         helper: &Path,
         game: &Path,
         data: &Path,
+        console: &Path,
         parts: &Parts,
     ) -> Result<Self, OpenError> {
         let mut command = Command::new(helper);
@@ -267,7 +269,7 @@ impl Client {
             // Vulkan loader.
             .arg(parts.moltenvk.as_deref().unwrap_or(Path::new("")))
             .arg(game)
-            .arg(data);
+            .arg(console);
         if parts.moltenvk.is_some() && std::env::var_os("MVK_CONFIG_LOG_LEVEL").is_none() {
             // MoltenVK's errors only: its notes on every pipeline would
             // fill the log.

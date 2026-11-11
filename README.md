@@ -600,7 +600,8 @@ SHA-256) into `~/Library/Application Support/ds-emulator/Randomizer`.
 
 It offers your copies of Red, Blue, Yellow, Gold, Silver, Crystal, Ruby,
 Sapphire, Emerald, FireRed, LeafGreen, Diamond, Pearl, Platinum, HeartGold,
-SoulSilver, Black, White, Black 2 and White 2. Choose what changes:
+SoulSilver, Black, White, Black 2, White 2, X, Y, Omega Ruby, Alpha
+Sapphire, Sun, Moon, Ultra Sun and Ultra Moon. Choose what changes:
 
 | Choice | What changes |
 |---|---|
@@ -621,9 +622,13 @@ Version (Random 482913).nds`, with its saves and its spoiler log beside it
 (Spoiler Log opens it). Your copy and its save are left as they are. The
 six digits are the seed: the same seed and settings in FVX make the same
 game. One game is made at a time; closing the window doesn't stop it, and
-the main window says when it is done. The 3DS games
-are not offered yet, because a randomized copy would share its save with
-the game it came from ([decision 0012](docs/decisions/0012-randomizer.md)).
+the main window says when it is done.
+
+A 3DS game is not written out again. Its run is a folder in the hacks
+folder, `Pokemon Omega Ruby (Random 482913).console`, with what the
+randomizer changed (about 30 MB) and the run's own save in it, beside the
+game under the run's name, which takes no room on the same disk
+([decision 0012](docs/decisions/0012-randomizer.md)).
 
 ## Cheats
 

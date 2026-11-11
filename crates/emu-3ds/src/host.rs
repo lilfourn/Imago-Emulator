@@ -227,7 +227,7 @@ fn shared() -> MutexGuard<'static, Shared> {
 ///
 /// The helper's arguments are the core, MoltenVK (empty off macOS, where
 /// the helper loads the system's Vulkan loader), the game and the folder
-/// for the core's files.
+/// of the console it plays on, where the core keeps its files.
 #[must_use]
 pub fn run_helper_if_asked() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
@@ -236,7 +236,7 @@ pub fn run_helper_if_asked() -> Option<i32> {
     }
     let paths: Vec<PathBuf> = args.map(PathBuf::from).collect();
     let [core, moltenvk, game, data] = paths.as_slice() else {
-        eprintln!("usage: {} CORE MOLTENVK GAME DATA", crate::HELPER_FLAG);
+        eprintln!("usage: {} CORE MOLTENVK GAME CONSOLE", crate::HELPER_FLAG);
         return Some(2);
     };
     let moltenvk = (!moltenvk.as_os_str().is_empty()).then_some(moltenvk.as_path());

@@ -520,14 +520,17 @@ fn load_rpg_maker(game: &Path) -> anyhow::Result<Loaded> {
 /// folder first if it is not there yet. An installable title (`.cia`)
 /// plays as the executable it holds, written into the games folder the
 /// first time; the session is still the `.cia`'s, so its states and
-/// checkpoint sit beside it and are known by its checksum.
+/// checkpoint sit beside it and are known by its checksum. A game with a
+/// console of its own beside it, as a randomized run has, plays on that
+/// one, with its own saves and its mod (`emu_3ds::own_console`).
 fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
     let data = emu_3ds::data_dir().context("there is no folder to keep the 3DS core in")?;
+    let console = emu_3ds::console_of(path, &data);
     let helper = std::env::current_exe().context("cannot find the app to start the 3DS core")?;
     let rom_crc32 = emu_3ds::header::identity(path)
         .with_context(|| format!("cannot read {}", path.display()))?;
     let game = playable_3ds(path)?;
-    let core = emu_3ds::ThreeDs::open(&game, &data, &helper)?;
+    let core = emu_3ds::ThreeDs::open(&game, &data, &console, &helper)?;
     Ok(Loaded {
         core: Box::new(core),
         rom_paths: vec![path.to_owned()],
@@ -536,7 +539,7 @@ fn load_3ds(path: &Path) -> anyhow::Result<Loaded> {
         files: vec![GameFiles::of(path)],
         rom_crc32,
         live_sound: None,
-        own_saves: OwnSaves::ThreeDs(emu_3ds::SaveData::of(path, &data)),
+        own_saves: OwnSaves::ThreeDs(emu_3ds::SaveData::of(path, &console)),
     })
 }
 
@@ -586,7 +589,7 @@ pub fn erase_progress(
 /// The file the 3DS core opens for the game at `path`: the game itself,
 /// or for an installable title, the executable it holds, written into the
 /// games folder.
-fn playable_3ds(path: &Path) -> anyhow::Result<PathBuf> {
+pub fn playable_3ds(path: &Path) -> anyhow::Result<PathBuf> {
     if !emu_3ds::cia::is_cia(path) {
         return Ok(path.to_owned());
     }

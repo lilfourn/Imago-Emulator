@@ -167,16 +167,21 @@ Asked whether randomizing could be a switch on a running game:
 - So the app keeps making a ROM, and makes it the game's run, with a
   switch ([decision 0012](../decisions/0012-randomizer.md)).
 
-What else there is, for later:
-
-- **The 3DS games.** FVX 1.6.2's command line refuses them
-  (`EXTRA_MEMORY_NOT_AVAILABLE`): only its window calls
+- **The 3DS games** (built the same day, decision 0012's second update).
+  FVX's command line refuses them (`EXTRA_MEMORY_NOT_AVAILABLE`), in 1.6.2
+  and 1.6.3 alike: only its window calls
   `RomOpener.setExtraMemoryAvailable(true)`. With that flag set by a
   ten-line launcher class, `-d` wrote Omega Ruby's randomized files as a
-  31 MB folder, `<title ID>/romfs` and `code.bin`, in 4 s: the layout
-  Azahar loads from `load/mods/<title ID>/`. Azahar's libretro core keeps
-  its files under the save folder it is given, so a folder per run would
-  keep the saves apart (read in its source, not run).
+  33 MB folder, `<title ID>/romfs` and `code.bin`, in 5 s. Azahar's
+  libretro core loads that from `Azahar/load/mods/<title ID>/` in the
+  folder it is given, and keeps its saves there too. Checked by running,
+  on a copy of Omega Ruby and its save: with an "Everything" mod there
+  the party's Gyarados was Ground, as the spoiler log said, and Water and
+  Flying without; with the mod's `code.bin` blanked the game did not
+  start.
+
+What else there is, for later:
+
 - **Key items and progression**: [Archipelago](https://archipelago.gg)
   patches (`.apemerald`, `.apred`, and community worlds for Crystal,
   FireRed, Platinum and HeartGold). A single-player seed plays in any
