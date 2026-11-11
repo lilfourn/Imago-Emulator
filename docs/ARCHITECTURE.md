@@ -11,6 +11,7 @@ How the workspace fits together. The *why* behind the big choices lives in
                     │        │                                 │
       emu-patch ◄───┤  emu-state, emu-cheats, emu-script ◄─────┤
       emu-guide ◄───┤        │                                 │
+  emu-supporter ◄───┤        │                                 │
                     │        │                                 │
                     └──── emu-cores ───────────────────────────┘
                      ┌───────┼────────┬──────────┬──────────────┐
@@ -40,6 +41,7 @@ How the workspace fits together. The *why* behind the big choices lives in
 | `emu-patch` | Applies ROM-hack patches: IPS, UPS, BPS and xdelta's VCDIFF, with its LZMA compression, checked by each format's own checksums and held to a size limit before anything is allocated. Bytes in, bytes out: knows formats, not files ([decision 0009](decisions/0009-rom-hack-patches.md)). |
 | `emu-script` | Runs a Lua script against a core between frames (Lua 5.4 through `mlua`, built from its bundled sources). Reads and writes memory through the debugger interface; buttons for the next frame, drawing, log lines, state-slot and pause requests come back as plain data (`Output`) for the frontend to act on. Sandboxed: no files, clock or modules, with memory and instruction limits. Knows no frontend. See [scripting.md](scripting.md). |
 | `emu-guide` | Guide, the chat about the game being played ([PRD](PRD-game-chat.md)): connecting an OpenRouter account by OAuth PKCE through the browser and a loopback port, as Imago does; the key in a 0600 file, with `OPENROUTER_API_KEY` over it; OpenRouter's API through `curl`, the key and the request on its standard input; answers streamed as server-sent events; the source map (`sources.toml`) and the system prompt; Markdown parsed block by block as it streams; answers' pictures found by page title on the game's wiki and kept in the cache ([decision 0015](decisions/0015-guide-pictures-from-wikis.md)); each game's chats and screenshots on disk. Knows no window. The panel itself is `emu-app`'s `guide` module, drawn as a cached view beside the screens ([decision 0014](decisions/0014-guide-through-openrouter.md)). |
+| `emu-supporter` | Supporter keys ([decision 0017](decisions/0017-supporter-keys.md)): the signed text a supporter is sent, read and checked against the public keys built in, with no network; and `supporter-key`, the tool that makes the signing key and issues keys with it. The app's side is `emu-app`'s `supporter` module: the key's file, and the looks it turns on. |
 | `emu-os` | What differs by system, for the app and the runners: the folders the app keeps its files in; running other programs (`process`); downloads through curl, the one place it is started (`fetch`); downloads checked against a pinned digest before they are put in place (`install`); lock files (`lock`); atomic writes (`file`); and where temporary files go (`temp`). |
 | `emu-headless` | Runs a core without a window, or an RPG Maker game in a hidden player of its own; prints `key=value` lines. |
 | `emu-app` | The GPUI desktop app. The only crate that knows about GPUI. |
@@ -466,6 +468,7 @@ other long-lived polychrome images. Memory measured flat over a 20 s run.
 | Key bindings | `~/Library/Application Support/ds-emulator/bindings.toml` | TOML, see `emu-app/src/bindings.rs` |
 | One game's bindings | next to the ROM, `game.bindings.toml` | The same TOML, laid over the key bindings |
 | Layout, speeds, 3D resolution, picture | `~/Library/Application Support/ds-emulator/settings.toml` | TOML written by the app, see `emu-app/src/settings.rs` |
+| A supporter's key | `~/Library/Application Support/ds-emulator/supporter.key` | The key as it was pasted, on one line, read and checked again at each launch, see `emu-supporter` |
 | Screenshot | next to the ROM, `game 2026-10-07 at 18.58.12.png` | 8-bit RGB PNG of the screens as the core drew them |
 | Recording | next to the ROM, `game 2026-10-07 at 18.58.12.mov` | QuickTime movie: Photo-JPEG video, 16-bit stereo PCM sound, see `emu-app/src/mov.rs` |
 | Unpacked game | `~/Library/Application Support/ds-emulator/Games/` | The ROM from a `.zip`, `.7z` or `.rar`, see `emu-app/src/archive.rs` |

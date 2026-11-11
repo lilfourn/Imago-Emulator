@@ -58,8 +58,8 @@ use crate::store_view::{StoreEvent, StoreView, platform_name, pulse};
 use crate::ui::{self, Section};
 
 use crate::theme::{
-    ACCENT as CARET, BACKGROUND as TOP, CHOSEN, DANGER, HOVER, INSET, LINE, MUTED as DIM,
-    ON_ACCENT, PANEL, TEXT, tint, with_alpha,
+    BACKGROUND as TOP, CHOSEN, DANGER, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT,
+    accent, tint, with_alpha,
 };
 
 mod draw;

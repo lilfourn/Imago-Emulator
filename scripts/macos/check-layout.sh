@@ -10,13 +10,15 @@
 set -uo pipefail
 root=${0:A:h:h:h}
 tools=$root/target/macos-tools
+# Where the app and `supporter-key` are built.
+bin=$root/target/release
 out=${1:-/tmp/ds-emulator-layout}
 ax=$tools/ax
 mkdir -p $tools $out
 for tool in ax layout; do
   [[ $tools/$tool -nt $root/scripts/macos/$tool.swift ]] || swiftc -O $root/scripts/macos/$tool.swift -o $tools/$tool || exit 1
 done
-cargo build --release -p emu-app --quiet --manifest-path $root/Cargo.toml || exit 1
+cargo build --release -p emu-app -p emu-supporter --quiet --manifest-path $root/Cargo.toml || exit 1
 
 # A home of its own, so the user's library and settings stay as they are.
 # A test ROM stands in for a game; the library's games are made up, already
@@ -78,6 +80,21 @@ seed_pokemon() {
   done
 }
 
+# A supporter's key and the look chosen with it, so Settings shows a
+# supporter's rows. The key is issued here with the owner's signing key,
+# which only the owner's Mac has; without it the state is skipped.
+seed_supporter() {
+  local key
+  key=$($bin/supporter-key issue --name "Layout Check" 2>/dev/null) || return 1
+  print -r -- $key >"$config/supporter.key"
+  cat >>"$config/settings.toml" <<EOF
+
+[look]
+accent = "violet"
+app_icon = "night"
+EOF
+}
+
 # The store's catalogs, as if fetched just now so they are not fetched
 # again: made-up games whose screenshots can't be had, so each shows its
 # system's plate and nothing is downloaded.
@@ -104,11 +121,12 @@ seed_store() {
 # empty; context is the chosen game's menu, opened with ⌘I. Game
 # runs a test ROM with the speed readout; menu, cheats and restart are its
 # game menu's pages, the first with the key guide; settings is the settings
-# window; store
+# window, opened with its shortcut as a menu item can't be pressed behind
+# other windows, and supporter is that window with a supporter's key in; store
 # and page are the store and a game's page in it; randomize is the randomize
 # window, listing the library's Pokémon games.
 failed=0
-for state in ${=STATES:-empty library search context settings game menu cheats restart store page randomize}; do
+for state in ${=STATES:-empty library search context settings supporter game menu cheats restart store page randomize}; do
   # The main window is the only one; its title names the game.
   rom=() steps=() window=main title=''
   case $state in
@@ -116,7 +134,11 @@ for state in ${=STATES:-empty library search context settings game menu cheats r
     library) seed library ;;
     search) seed library; steps=(key p key o) ;;
     context) seed library; steps=(key cmd-i) ;;
-    settings) seed library; steps=(press '=Settings…'); window=settings title=Settings ;;
+    settings) seed library; steps=(key cmd-,); window=settings title=Settings ;;
+    supporter)
+      seed library
+      seed_supporter || { echo "SKIP  supporter: no signing key to issue a key with"; continue; }
+      steps=(key cmd-,); window=settings title=Settings ;;
     game) seed library; rom=($game) ;;
     menu) seed library; rom=($game); steps=(key escape) ;;
     cheats) seed library; rom=($game); steps=(key escape key right key return) ;;
@@ -127,7 +149,7 @@ for state in ${=STATES:-empty library search context settings game menu cheats r
   esac
   [[ -f $tools/desktop.pid ]] && kill $(<$tools/desktop.pid) 2>/dev/null && sleep 0.5
   front=$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true')
-  HOME=$home DS_EMULATOR_PROBE=$out/probe $root/target/release/ds-emulator $rom >$out/app.log 2>&1 &
+  HOME=$home DS_EMULATOR_PROBE=$out/probe $bin/ds-emulator $rom >$out/app.log 2>&1 &
   pid=$!
   echo $pid >$tools/desktop.pid
   # The app activates itself on launch; hand the front back right away.

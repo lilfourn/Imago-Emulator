@@ -3,7 +3,10 @@
 The app's look is Imago Light (`crates/emu-app/src/theme.rs`), shared with
 its sibling app Imago: white paper, ink type, cool grey hairlines, Imago's
 blue for what to press, and the four colour blocks of the app icon (blue,
-coral, amber, green) for systems' plates. The app icon (`assets/icon.svg`)
+coral, amber, green) for systems' plates. The blue is the one colour that
+can change: a supporter may choose another accent
+(`theme::accent()`, [decision 0017](decisions/0017-supporter-keys.md)),
+each dark enough for white type and none a red or an ink. The app icon (`assets/icon.svg`)
 builds a handheld from those blocks and stands over the empty library. A
 running game sits on a dark stage instead, so its colours and the ambient
 glow read as they would on a dark screen. `scripts/macos/check-layout.sh` checks the
@@ -44,7 +47,8 @@ to `scripts/macos/layout.swift`.
   last-played game's) is covered at the corners by a band in the colour
   behind it (`corners` in `library_view/draw.rs`).
 - **Colour carries meaning.** The accent marks what to press (Resume,
-  Play, Get) and where the caret is; the chosen tab, filter or setting is an
+  Play, Get) and where the caret is, and is read with `theme::accent()`,
+  never fixed in a constant; the chosen tab, filter or setting is an
   ink pill with white type; the chosen game sits on a grey tile. Red
   marks only the action that destroys something.
 - **Every game has a picture.** Its box art; or else the screen where it
@@ -65,7 +69,9 @@ minimum window size: the library, empty and searched, and with a game's
 menu open (at the default size, as the menu is taller than the smallest
 window); a running game with the speed readout; the game menu with the key
 guide under its tiles, and its Cheats and Restart pages; the settings
-window; and the randomize window, listing the
+window, and again with a supporter's key in and a look chosen (a key
+issued on the spot, so only where the signing key is); and the randomize
+window, listing the
 library's Pokémon games. Captures and reports are left in
 `/tmp/ds-emulator-layout`; look at them as well, since the checks catch
 geometry, not taste.

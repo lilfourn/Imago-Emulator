@@ -1,0 +1,19 @@
+[package]
+name = "emu-supporter"
+description = "Supporter keys: the signed thank-you a supporter gets, checked without the network."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# A key travels as text, in the URL-safe alphabet; the version the app uses.
+base64 = "0.22"
+# Ed25519 signatures. MIT and pure Rust, with no dependencies of its own
+# but getrandom (`random`, for new signing keys), which GPUI already brings.
+# Without `x25519` and `pem`, which nothing here uses.
+ed25519-compact = { version = "2.6", default-features = false, features = ["std", "random"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true

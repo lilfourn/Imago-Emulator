@@ -14,7 +14,7 @@ use gpui::{
 use crate::app::{APP_ICON, CloseGame, top_bar};
 use crate::chrome::{self, Tone};
 use crate::probe;
-use crate::theme::{ACCENT, BACKGROUND, MUTED, TEXT};
+use crate::theme::{BACKGROUND, MUTED, TEXT, accent};
 
 /// The window's size, in logical pixels.
 const WIDTH: f32 = 360.0;
@@ -143,7 +143,7 @@ impl gpui::Render for AboutWindow {
         let link = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
-                .text_color(rgb(ACCENT))
+                .text_color(rgb(accent()))
                 .cursor_pointer()
                 .hover(|link| link.underline())
                 .child(label)

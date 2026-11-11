@@ -9,7 +9,10 @@ from your own cartridge dumps, and free homebrew from its built-in store.
 3DS games play too, on Azahar's core, which the app downloads the first
 time ([below](#3ds-games)).
 
-The app is free; its source is private ([license](#legal)). Imago Emulator
+The app is free; its source is private ([license](#legal)). Everything
+that plays a game is in the one build everyone gets. People who pay to
+support it get a key that turns on an accent colour and a Dock icon of
+their choosing, and nothing else ([below](#supporters)). Imago Emulator
 is not affiliated with, endorsed by or sponsored by Nintendo.
 
 **Status: Phase 4 (Nintendo DS).** The DS core direct-boots retail games
@@ -73,7 +76,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [Games we can't run](docs/research/games-we-cant-run.md): store games and homebrew for other systems that the cores can't run yet, with leads
 - [Fan games](docs/research/fan-games.md): famous ROM hacks, randomizers and PC fan games, what each needs, and the plan to run them all
 - [3DS games](docs/research/3ds.md): what hosting Azahar's core takes, what was measured, and what is left
-- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store, 3DS games, the randomizer, the public release
+- [Decisions](docs/decisions/): why Rust and GPUI, Game Boy timing, frame pacing, linked cores, video filters, the GBA slot, DS local wireless, RPG Maker games, ROM hacks, the game store, 3DS games, the randomizer, the public release, supporter keys
 
 ## Build and run
 
@@ -756,8 +759,32 @@ unmaintained crate the workspace depends on directly.
 | `emu-guide` | Guide's OpenRouter connection: sign-in, the key, the API |
 | `emu-cores` | Picks the core for a ROM |
 | `emu-os` | What differs by system: folders, other programs, downloads, locks |
+| `emu-supporter` | Supporter keys: checked offline against a built-in public key; `supporter-key` issues them |
 | `emu-headless` | Windowless runner for test ROMs |
 | `emu-app` | The GPUI app (`ds-emulator` binary) |
+
+## Supporters
+
+Settings has a Supporter section (Imago Emulator > Support Imago
+Emulator… opens it). Copy the key from its email and press Paste Key, or
+⌘V anywhere in Settings. Accent then offers five colours for the buttons
+and the caret, and App Icon five icons for the Dock while the app runs.
+Remove Key puts the app's own look back. The key is checked on your Mac
+and never sent anywhere; it is kept in
+`~/Library/Application Support/ds-emulator/supporter.key`
+([decision 0017](docs/decisions/0017-supporter-keys.md)).
+
+Keys are made with `supporter-key`, by whoever holds the signing key:
+
+```sh
+cargo run -p emu-supporter --bin supporter-key -- issue --name "Ada Lovelace"
+cargo run -p emu-supporter --bin supporter-key -- issue --count 100   # no names, one a line
+cargo run -p emu-supporter --bin supporter-key -- check IMAGO-…
+```
+
+The signing key is `~/.config/imago-emulator/supporter-signing.key`. It is
+not in this repository and must never be: keep a copy somewhere safe.
+`scripts/make-app-icons.sh` draws the Dock icons from `assets/app-icon.svg`.
 
 ## Legal
 

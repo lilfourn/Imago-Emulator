@@ -37,7 +37,7 @@ use crate::probe;
 use crate::rom_info::Platform;
 use crate::store::{self, Kind, Offer};
 use crate::theme::{
-    ACCENT, BACKGROUND, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT,
+    BACKGROUND, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT, accent,
     with_alpha,
 };
 use crate::ui::{self, Section, choice, fit, track};
@@ -630,11 +630,15 @@ impl StoreView {
                 .child(SharedString::from(self.query.clone()))
         };
         let caret = self.searching.then(|| {
-            div().w(px(1.5)).h(px(16.0)).bg(rgb(ACCENT)).with_animation(
-                "caret",
-                Animation::new(Duration::from_millis(1060)).repeat(),
-                |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
-            )
+            div()
+                .w(px(1.5))
+                .h(px(16.0))
+                .bg(rgb(accent()))
+                .with_animation(
+                    "caret",
+                    Animation::new(Duration::from_millis(1060)).repeat(),
+                    |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
+                )
         });
         let (caret_before, caret_after) = if self.query.is_empty() {
             (caret, None)
@@ -654,7 +658,7 @@ impl StoreView {
             .bg(rgb(PANEL))
             .border_1()
             .border_color(rgba(if self.searching {
-                with_alpha(ACCENT, 0xAA)
+                with_alpha(accent(), 0xAA)
             } else {
                 0
             }))
@@ -938,7 +942,7 @@ impl StoreView {
         pill.cursor_pointer()
             .bg(rgba(with_alpha(BACKGROUND, 0xE6)))
             .text_color(rgb(TEXT))
-            .hover(|pill| pill.bg(rgb(ACCENT)).text_color(rgb(ON_ACCENT)))
+            .hover(|pill| pill.bg(rgb(accent())).text_color(rgb(ON_ACCENT)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.selected = Some(this.offers[index].id());
@@ -1056,7 +1060,7 @@ impl StoreView {
             } else {
                 button
                     .cursor_pointer()
-                    .bg(rgb(ACCENT))
+                    .bg(rgb(accent()))
                     .text_color(rgb(ON_ACCENT))
                     .hover(|button| button.opacity(0.9))
                     .on_click(cx.listener(move |this, _, _, cx| this.get(index, cx)))
@@ -1232,7 +1236,7 @@ impl StoreView {
                 .items_center()
                 .rounded_lg()
                 .cursor_pointer()
-                .bg(rgb(ACCENT))
+                .bg(rgb(accent()))
                 .text_color(rgb(ON_ACCENT))
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)

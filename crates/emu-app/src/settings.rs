@@ -43,6 +43,10 @@
 //! y = 120.0               # full screen, in logical pixels; left out
 //! width = 640.0           # until the window has been moved or resized
 //! height = 960.0
+//!
+//! [look]                  # a supporter's choices; left out while both are the app's own
+//! accent = "violet"       # "blue", "teal", "green", "gold" or "violet"
+//! app_icon = "night"      # in the Dock: "classic", "night", "ink", "chalk" or "blueprint"
 //! ```
 //!
 //! Settings missing from the file keep their defaults. Files saved before
@@ -61,6 +65,8 @@ use crate::persist;
 use crate::picture::{Picture, Resolution3d};
 use crate::slots::STATE_SLOTS;
 use crate::speed::{MIN_RATE, Rate, Speed, Speeds};
+use crate::supporter::AppIcon;
+use crate::theme::Accent;
 
 /// Each arrangement and its name in the file.
 const ARRANGEMENTS: [(Arrangement, &str); 4] = [
@@ -114,6 +120,11 @@ pub struct Settings {
     pub guide_thinking: Effort,
     /// Whether Guide looks answers up on the game's fan sites.
     pub guide_lookups: bool,
+    /// The accent a supporter chose. It shows only while the app holds a
+    /// supporter's key (`supporter::look`).
+    pub accent: Accent,
+    /// The Dock icon a supporter chose, shown on the same terms.
+    pub app_icon: AppIcon,
 }
 
 /// Where the main window was and how large, to open it there again.
@@ -152,6 +163,8 @@ impl Default for Settings {
             window_place: None,
             guide_thinking: Effort::Low,
             guide_lookups: true,
+            accent: Accent::default(),
+            app_icon: AppIcon::default(),
         }
     }
 }
@@ -166,6 +179,26 @@ struct SettingsFile {
     states: StatesSection,
     window: WindowSection,
     guide: GuideSection,
+    /// Left out of the file while it holds only defaults, so that the
+    /// file of someone who is not a supporter stays as it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    look: Option<LookSection>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct LookSection {
+    accent: String,
+    app_icon: String,
+}
+
+impl Default for LookSection {
+    fn default() -> Self {
+        Self {
+            accent: Accent::default().name().to_owned(),
+            app_icon: AppIcon::default().name().to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -534,6 +567,11 @@ impl Settings {
             .find(|(_, name)| *name == file.guide.thinking)
             .map(|(effort, _)| *effort)
             .ok_or_else(|| SettingsError::UnknownThinking(file.guide.thinking.clone()))?;
+        let look = file.look.unwrap_or_default();
+        let accent =
+            Accent::from_name(&look.accent).ok_or(SettingsError::UnknownAccent(look.accent))?;
+        let app_icon = AppIcon::from_name(&look.app_icon)
+            .ok_or(SettingsError::UnknownAppIcon(look.app_icon))?;
         Ok(Self {
             layout: file.layout.to_layout()?,
             speed: file.speed.to_speeds()?,
@@ -550,6 +588,8 @@ impl Settings {
             window_place: file.window.place(),
             guide_thinking,
             guide_lookups: file.guide.lookups,
+            accent,
+            app_icon,
         })
     }
 
@@ -570,6 +610,12 @@ impl Settings {
                 thinking: thinking_name(self.guide_thinking).to_owned(),
                 lookups: self.guide_lookups,
             },
+            look: ((self.accent, self.app_icon) != (Accent::default(), AppIcon::default())).then(
+                || LookSection {
+                    accent: self.accent.name().to_owned(),
+                    app_icon: self.app_icon.name().to_owned(),
+                },
+            ),
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
         format!("# Saved by ds-emulator whenever a setting changes.\n\n{body}")
@@ -640,6 +686,12 @@ pub enum SettingsError {
     /// The colours for original Game Boy games are not one of the names.
     #[error("unknown Game Boy colours {0:?} in settings")]
     UnknownDmgColors(String),
+    /// The accent is not one of the five names.
+    #[error("unknown accent {0:?} in settings; use blue, teal, green, gold or violet")]
+    UnknownAccent(String),
+    /// The app icon is not one of the five names.
+    #[error("unknown app icon {0:?} in settings; use classic, night, ink, chalk or blueprint")]
+    UnknownAppIcon(String),
     /// Guide's Thinking is not "off", "low", "medium" or "high".
     #[error("unknown Guide thinking {0:?} in settings; use off, low, medium or high")]
     UnknownThinking(String),
@@ -715,8 +767,13 @@ mod tests {
             }),
             guide_thinking: Effort::High,
             guide_lookups: false,
+            accent: Accent::Teal,
+            app_icon: AppIcon::Chalk,
         };
         let text = settings.to_toml();
+        assert!(text.contains("[look]"), "{text}");
+        assert!(text.contains("accent = \"teal\""), "{text}");
+        assert!(text.contains("app_icon = \"chalk\""), "{text}");
         assert!(text.contains("[guide]"), "{text}");
         assert!(text.contains("thinking = \"high\""), "{text}");
         assert!(text.contains("lookups = false"), "{text}");
@@ -1049,11 +1106,14 @@ mod tests {
             }),
             guide_thinking: Effort::High,
             guide_lookups: false,
+            accent: Accent::Violet,
+            app_icon: AppIcon::Night,
         }
     }
 
     /// [`every_setting_changed`] as the build before the window held its
-    /// settings as one value wrote it, byte for byte.
+    /// settings as one value wrote it, byte for byte, and after it a
+    /// supporter's look, which that build did not have.
     const EVERY_SETTING_CHANGED: &str = r#"# Saved by ds-emulator whenever a setting changes.
 
 [layout]
@@ -1093,6 +1153,10 @@ display = "37d8832a000040008000000000000001"
 [guide]
 thinking = "high"
 lookups = false
+
+[look]
+accent = "violet"
+app_icon = "night"
 "#;
 
     #[test]
@@ -1119,6 +1183,8 @@ lookups = false
         assert_ne!(settings.window_place, default.window_place);
         assert_ne!(settings.guide_thinking, default.guide_thinking);
         assert_ne!(settings.guide_lookups, default.guide_lookups);
+        assert_ne!(settings.accent, default.accent);
+        assert_ne!(settings.app_icon, default.app_icon);
 
         assert_eq!(Settings::from_toml(EVERY_SETTING_CHANGED), Ok(settings));
         assert_eq!(settings.to_toml(), EVERY_SETTING_CHANGED);
@@ -1181,6 +1247,36 @@ lookups = true
             Settings::from_toml(DEFAULT_SETTINGS),
             Ok(Settings::default())
         );
+    }
+
+    #[test]
+    fn a_supporters_look_is_in_the_file_only_once_one_is_chosen() {
+        assert!(!Settings::default().to_toml().contains("[look]"));
+        // One of the two is enough, and the other is written beside it.
+        let gold = Settings {
+            accent: Accent::Gold,
+            ..Settings::default()
+        };
+        let text = gold.to_toml();
+        assert!(
+            text.ends_with("[look]\naccent = \"gold\"\napp_icon = \"classic\"\n"),
+            "{text}"
+        );
+        assert_eq!(Settings::from_toml(&text), Ok(gold));
+        let ink = Settings::from_toml("[look]\napp_icon = \"ink\"\n").expect("valid file");
+        assert_eq!((ink.accent, ink.app_icon), (Accent::Blue, AppIcon::Ink));
+        assert_eq!(
+            Settings::from_toml("[look]\naccent = \"red\"\n"),
+            Err(SettingsError::UnknownAccent("red".to_owned()))
+        );
+        assert_eq!(
+            Settings::from_toml("[look]\napp_icon = \"gold\"\n"),
+            Err(SettingsError::UnknownAppIcon("gold".to_owned()))
+        );
+        assert!(matches!(
+            Settings::from_toml("[look]\ntheme = \"dark\"\n"),
+            Err(SettingsError::Syntax(_))
+        ));
     }
 
     #[test]

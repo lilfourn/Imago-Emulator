@@ -1569,6 +1569,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9547879431a90e352a35863a54416d92898a787b9af09e6ae2e09a96bd78be80"
+dependencies = [
+ "getrandom 0.4.3",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1636,6 +1645,7 @@ dependencies = [
  "emu-patch",
  "emu-script",
  "emu-state",
+ "emu-supporter",
  "gilrs",
  "gpui",
  "image",
@@ -1840,6 +1850,15 @@ dependencies = [
  "emu-core",
  "postcard",
  "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "emu-supporter"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-compact",
  "thiserror 2.0.21",
 ]
 
