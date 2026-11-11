@@ -86,6 +86,7 @@ mod slots;
 mod speed;
 mod store;
 mod store_view;
+mod supporter;
 mod theme;
 mod trace;
 mod turbo;

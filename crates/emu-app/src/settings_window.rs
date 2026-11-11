@@ -5,13 +5,19 @@
 //!
 //! Keyboard first: the arrow keys (or WASD) move up and down the rows and
 //! change the choice in the row the keyboard is on; Return or Space
-//! presses the OpenRouter row's first button; Escape closes the window.
+//! presses the first button of a row of buttons; Escape closes the window.
 //!
 //! Under the settings, the Guide section connects an OpenRouter account
 //! ([`OpenRouter`]): its buttons sit in a track as the choices do, with a
 //! line under them saying how the connection stands.
+//!
+//! Last, the Supporter section ([`crate::supporter`]): a row of buttons to
+//! become a supporter or paste a supporter's key, which Paste's shortcut
+//! does too from anywhere in the window, and, once a key is in, the looks
+//! it is thanked with. Nothing else in the app asks for support.
 
 use emu_guide::chat::Effort;
+use emu_supporter::KeyError;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ScrollHandle,
     SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
@@ -26,8 +32,9 @@ use crate::openrouter::{self, OpenRouter, Status, Usage};
 use crate::picture::{Picture, RESOLUTIONS_3D};
 use crate::probe;
 use crate::settings::Settings;
+use crate::supporter::{self, AppIcon, EnterError};
 use crate::theme::{
-    ACCENT, BACKGROUND, DANGER, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT, with_alpha,
+    Accent, BACKGROUND, DANGER, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT, accent, with_alpha,
 };
 use crate::view::EmulatorView;
 
@@ -47,6 +54,17 @@ const MIN_SIDE: f32 = 24.0;
 /// The OpenRouter row's name, which also names its parts for the layout
 /// checks.
 const ACCOUNT: &str = "OpenRouter";
+/// The supporter's row's name, which names its parts too.
+const KEY: &str = "Key";
+/// The window's size, in logical pixels: wide enough for the widest row,
+/// and tall enough for the rows everyone has.
+const SIZE: (f32, f32) = (720.0, 800.0);
+/// How much taller each of a supporter's rows makes it: a row and the gap
+/// before it.
+const LOOK_ROW: f32 = 43.0;
+/// Room left above and below the window on a display too short for it,
+/// for the system's bars; the rows then scroll.
+const DISPLAY_MARGIN: f32 = 120.0;
 
 /// The settings window's root view.
 pub struct SettingsWindow {
@@ -59,6 +77,8 @@ pub struct SettingsWindow {
     scroll: ScrollHandle,
     /// The app's OpenRouter connection, for Guide.
     openrouter: Entity<OpenRouter>,
+    /// Why the key last pasted was not taken, until one is.
+    key_problem: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -158,6 +178,120 @@ fn account_caption(status: &Status) -> (String, bool) {
             (words, false)
         }
         Status::Failed(reason) => (reason.clone(), true),
+    }
+}
+
+/// A button in the supporter's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Support {
+    Become,
+    PasteKey,
+    RemoveKey,
+}
+
+impl Support {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Become => "Become a Supporter",
+            Self::PasteKey => "Paste Key",
+            Self::RemoveKey => "Remove Key",
+        }
+    }
+
+    /// Whether it is what to press, which the accent marks.
+    fn primary(self) -> bool {
+        self == Self::Become
+    }
+}
+
+/// The supporter's row's buttons, with a key in or without.
+fn support_buttons(supporter: bool) -> Vec<Support> {
+    if supporter {
+        vec![Support::RemoveKey]
+    } else {
+        vec![Support::Become, Support::PasteKey]
+    }
+}
+
+/// The line under the supporter's row, and whether it tells of a problem:
+/// why the key last pasted was not taken, or thanks to the supporter by
+/// the `name` in their key (which may be empty), or what supporting is.
+fn support_caption(supporter: Option<&str>, problem: Option<&str>) -> (String, bool) {
+    match (problem, supporter) {
+        (Some(problem), _) => (problem.to_owned(), true),
+        (None, Some("")) => ("Thank you for supporting Imago Emulator.".to_owned(), false),
+        (None, Some(name)) => (format!("Thank you, {name}."), false),
+        (None, None) if supporter::CHOOSES_ICON => (
+            "Imago Emulator is free. Supporters get accent colours and Dock icons as thanks."
+                .to_owned(),
+            false,
+        ),
+        (None, None) => (
+            "Imago Emulator is free. Supporters get accent colours as thanks.".to_owned(),
+            false,
+        ),
+    }
+}
+
+/// Why a pasted key was not taken, for the line under the row.
+fn key_problem(error: &EnterError) -> String {
+    match error {
+        EnterError::Key(KeyError::NotAKey) => {
+            "Copy the key from your email first, then press Paste Key.".to_owned()
+        }
+        EnterError::Key(KeyError::Damaged) => {
+            "Part of that key is missing. Copy all of it, then press Paste Key.".to_owned()
+        }
+        EnterError::Key(KeyError::Forged) => {
+            "That key wasn\u{2019}t issued for Imago Emulator.".to_owned()
+        }
+        EnterError::Key(KeyError::Newer) => "That key needs a newer Imago Emulator.".to_owned(),
+        EnterError::Key(KeyError::Revoked) => "That key is no longer valid.".to_owned(),
+        EnterError::Io(error) => {
+            format!("That key is good, but it couldn\u{2019}t be saved: {error}")
+        }
+    }
+}
+
+/// What pressing a button in a row of buttons does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Press {
+    Account(Account),
+    Support(Support),
+}
+
+/// A row of buttons where choices go, with a line under them.
+struct Buttons {
+    /// The heading over the row, if it starts a group.
+    heading: Option<&'static str>,
+    name: &'static str,
+    /// Each button's label, whether the accent marks it, and what it does.
+    buttons: Vec<(&'static str, bool, Press)>,
+    caption: String,
+    /// Whether the caption tells of a problem.
+    problem: bool,
+}
+
+/// A row of the window.
+enum Entry {
+    Choices(Row),
+    Buttons(Buttons),
+}
+
+impl Entry {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Choices(row) => row.name,
+            Self::Buttons(row) => row.name,
+        }
+    }
+
+    /// What its choices or buttons are called, in order.
+    fn labels(&self) -> Vec<&str> {
+        match self {
+            Self::Choices(row) => row.labels.iter().map(SharedString::as_ref).collect(),
+            Self::Buttons(row) => row.buttons.iter().map(|&(label, ..)| label).collect(),
+        }
     }
 }
 
@@ -290,10 +424,64 @@ fn rows(settings: &Settings) -> Vec<Row> {
     ]
 }
 
+/// The rows a supporter gets, after the supporter's row, for `settings`:
+/// the accent, and the Dock icon where there is a Dock.
+fn look_rows(settings: &Settings) -> Vec<Row> {
+    let mut rows = vec![Row::new(
+        "Accent",
+        Accent::ALL
+            .into_iter()
+            .map(|accent| (accent.label().into(), accent))
+            .collect(),
+        settings.accent,
+        |settings, accent| settings.accent = accent,
+    )];
+    if supporter::CHOOSES_ICON {
+        rows.push(Row::new(
+            "App Icon",
+            AppIcon::ALL
+                .into_iter()
+                .map(|icon| (icon.label().into(), icon))
+                .collect(),
+            settings.app_icon,
+            |settings, icon| settings.app_icon = icon,
+        ));
+    }
+    rows
+}
+
+/// How tall the window is with `look_rows` of a supporter's rows, on a
+/// display `display` tall, if known: tall enough for every row, or what
+/// the display has room for.
+fn window_height(display: Option<f32>, look_rows: usize) -> f32 {
+    let wanted = SIZE.1 + LOOK_ROW * look_rows as f32;
+    display.map_or(wanted, |display| {
+        wanted.min((display - DISPLAY_MARGIN).max(320.0))
+    })
+}
+
+/// How many of a supporter's rows the window shows: none without a key.
+fn shown_look_rows(cx: &App) -> usize {
+    if supporter::current(cx).is_some() {
+        look_rows(&Settings::default()).len()
+    } else {
+        0
+    }
+}
+
 impl SettingsWindow {
-    /// Opens a settings window for `main`.
-    pub fn open(main: Entity<EmulatorView>, cx: &mut App) -> anyhow::Result<WindowHandle<Self>> {
-        let bounds = Bounds::centered(None, size(px(720.0), px(640.0)), cx);
+    /// Opens a settings window for `main`, with the keyboard on the
+    /// supporter's row if `supporter`.
+    pub fn open(
+        main: Entity<EmulatorView>,
+        supporter: bool,
+        cx: &mut App,
+    ) -> anyhow::Result<WindowHandle<Self>> {
+        let display = cx
+            .primary_display()
+            .map(|display| f32::from(display.bounds().size.height));
+        let height = window_height(display, shown_look_rows(cx));
+        let bounds = Bounds::centered(None, size(px(SIZE.0), px(height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(top_bar("Settings")),
@@ -304,7 +492,15 @@ impl SettingsWindow {
             ..WindowOptions::default()
         };
         cx.open_window(options, |window, cx| {
-            cx.new(|cx| Self::new(main, window, cx))
+            cx.new(|cx| {
+                let mut settings = Self::new(main, window, cx);
+                if supporter {
+                    settings.focused = settings.key_row();
+                    // Scrolled to once the rows have been laid out.
+                    cx.on_next_frame(window, |this, _, cx| this.focus_supporter(cx));
+                }
+                settings
+            })
         })
     }
 
@@ -337,8 +533,61 @@ impl SettingsWindow {
             focus,
             scroll: ScrollHandle::new(),
             openrouter,
+            key_problem: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Which row the supporter's is: after the settings' and OpenRouter's.
+    fn key_row(&self) -> usize {
+        rows(&self.settings).len() + 1
+    }
+
+    /// Puts the keyboard on the supporter's row and scrolls to it.
+    pub fn focus_supporter(&mut self, cx: &mut Context<Self>) {
+        self.focused = self.key_row();
+        self.scroll.scroll_to_item(self.focused);
+        cx.notify();
+    }
+
+    /// The window's rows, top to bottom: the settings, OpenRouter's
+    /// buttons, the supporter's, and with a key in, a supporter's looks.
+    fn entries(&self, cx: &App) -> Vec<Entry> {
+        let mut entries: Vec<Entry> = rows(&self.settings)
+            .into_iter()
+            .map(Entry::Choices)
+            .collect();
+        let status = self.openrouter.read(cx).status();
+        let (caption, problem) = account_caption(status);
+        entries.push(Entry::Buttons(Buttons {
+            heading: None,
+            name: ACCOUNT,
+            buttons: account_buttons(status)
+                .into_iter()
+                .map(|button| (button.label(), button.primary(), Press::Account(button)))
+                .collect(),
+            caption,
+            problem,
+        }));
+        let supporter = supporter::current(cx);
+        let (caption, problem) = support_caption(
+            supporter.map(|supporter| supporter.name.as_str()),
+            self.key_problem.as_deref(),
+        );
+        entries.push(Entry::Buttons(Buttons {
+            heading: Some("Supporter"),
+            name: KEY,
+            buttons: support_buttons(supporter.is_some())
+                .into_iter()
+                .map(|button| (button.label(), button.primary(), Press::Support(button)))
+                .collect(),
+            caption,
+            problem,
+        }));
+        if supporter.is_some() {
+            entries.extend(look_rows(&self.settings).into_iter().map(Entry::Choices));
+        }
+        entries
     }
 
     /// Changes the main window's settings by `edit`.
@@ -356,7 +605,7 @@ impl SettingsWindow {
     /// Puts the keyboard on the `index`th row and picks its choice `at`.
     fn pick(&mut self, index: usize, at: usize, cx: &mut Context<Self>) {
         self.focused = index;
-        if let Some(row) = rows(&self.settings).get(index) {
+        if let Some(Entry::Choices(row)) = self.entries(cx).get(index) {
             self.change(|settings| (row.choose)(settings, at), cx);
         }
         cx.notify();
@@ -373,6 +622,9 @@ impl SettingsWindow {
                 .px(px(CHOICE_PADDING))
                 .py(px(3.0))
                 .rounded(px(CHOICE_RADIUS))
+                // Layout rounds the plate up to a whole point: the label
+                // sits in the middle of it, not at its left.
+                .text_center()
                 .cursor_pointer()
                 // White, as the library's and the store's chosen filters are.
                 .when(chosen, |button| {
@@ -406,7 +658,11 @@ impl SettingsWindow {
                     .rounded(px(TRACK_RADIUS))
                     .bg(rgb(PANEL))
                     .border_1()
-                    .border_color(rgba(if focused { with_alpha(ACCENT, 0xAA) } else { 0 }))
+                    .border_color(rgba(if focused {
+                        with_alpha(accent(), 0xAA)
+                    } else {
+                        0
+                    }))
                     .children(buttons)
                     .children(probe::bordered_part(format!("track:{}", row.name), 1.0)),
             );
@@ -419,61 +675,98 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// Does what the OpenRouter row's `button` says.
-    fn press(&mut self, button: Account, cx: &mut Context<Self>) {
-        match button {
-            Account::Connect | Account::TryAgain => {
+    /// Does what the button that does `press` says.
+    fn press(&mut self, press: Press, window: &mut Window, cx: &mut Context<Self>) {
+        match press {
+            Press::Account(Account::Connect | Account::TryAgain) => {
                 self.openrouter
                     .update(cx, |openrouter, cx| openrouter.connect(cx));
             }
-            Account::Cancel => self
+            Press::Account(Account::Cancel) => self
                 .openrouter
                 .update(cx, |openrouter, cx| openrouter.cancel(cx)),
-            Account::Disconnect => {
+            Press::Account(Account::Disconnect) => {
                 self.openrouter
                     .update(cx, |openrouter, cx| openrouter.disconnect(cx));
             }
-            Account::ManageKeys => {
+            Press::Account(Account::ManageKeys) => {
                 crate::links::open_web_url(cx, openrouter::KEYS_PAGE);
+            }
+            Press::Support(Support::Become) => {
+                crate::links::open_web_url(cx, supporter::PAGE);
+            }
+            Press::Support(Support::PasteKey) => self.paste_key(window, cx),
+            Press::Support(Support::RemoveKey) => {
+                self.key_problem = supporter::remove(cx)
+                    .err()
+                    .map(|error| format!("The key couldn\u{2019}t be removed: {error}"));
+                self.look_changed(window, cx);
             }
         }
     }
 
-    /// The OpenRouter row, the `index`th, under the Guide heading: its
-    /// buttons where choices go, and how the connection stands under
-    /// them, at most `width` wide.
-    fn account_row(
+    /// Takes the clipboard's text as the supporter's key, if it is one.
+    /// The clipboard is read here alone, when asked to.
+    fn paste_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        self.key_problem = supporter::enter(&text, cx)
+            .err()
+            .map(|error| key_problem(&error));
+        self.focused = self.key_row();
+        self.look_changed(window, cx);
+    }
+
+    /// Shows the look the app has now that a key was put in or taken out,
+    /// and makes room for a supporter's rows or takes it back.
+    fn look_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(main) = self.main.upgrade() {
+            main.update(cx, |main, cx| main.apply_look(cx));
+        }
+        let display = window
+            .display(cx)
+            .map(|display| f32::from(display.bounds().size.height));
+        let height = window_height(display, shown_look_rows(cx));
+        window.resize(size(px(SIZE.0), px(height)));
+        cx.notify();
+    }
+
+    /// `row`, the `index`th, ringed if the keyboard is on it: its buttons
+    /// where choices go, and its caption under them, at most `width` wide.
+    fn button_row(
         &self,
         index: usize,
+        row: Buttons,
         name_width: f32,
         width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let focused = index == self.focused;
-        let status = self.openrouter.read(cx).status().clone();
-        let (caption, problem) = account_caption(&status);
-        let buttons = account_buttons(&status)
+        let name = row.name;
+        let buttons = row
+            .buttons
             .into_iter()
             .enumerate()
-            .map(|(at, button)| {
+            .map(|(at, (label, primary, press))| {
                 div()
-                    .id((ACCOUNT, at))
+                    .id((name, at))
                     .px(px(CHOICE_PADDING))
                     .py(px(3.0))
                     .rounded(px(CHOICE_RADIUS))
+                    .text_center()
                     .cursor_pointer()
-                    .when(button.primary(), |this| {
-                        this.bg(rgb(ACCENT)).text_color(rgb(ON_ACCENT))
+                    .when(primary, |this| {
+                        this.bg(rgb(accent())).text_color(rgb(ON_ACCENT))
                     })
-                    .when(!button.primary(), |this| {
-                        this.hover(|this| this.bg(rgb(LINE)))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .when(!primary, |this| this.hover(|this| this.bg(rgb(LINE))))
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.focused = index;
-                        this.press(button, cx);
+                        this.press(press, window, cx);
                     }))
-                    .child(button.label())
-                    .children(probe::part(format!("segment:{ACCOUNT}.{at}")))
+                    .child(label)
+                    .children(probe::part(format!("segment:{name}.{at}")))
             });
         let control = div()
             .flex()
@@ -485,8 +778,8 @@ impl SettingsWindow {
                     .flex_none()
                     .text_right()
                     .text_color(rgb(if focused { TEXT } else { DIM }))
-                    .child(ACCOUNT)
-                    .children(probe::part(format!("name:{ACCOUNT}"))),
+                    .child(name)
+                    .children(probe::part(format!("name:{name}"))),
             )
             .child(
                 div()
@@ -496,23 +789,28 @@ impl SettingsWindow {
                     .rounded(px(TRACK_RADIUS))
                     .bg(rgb(PANEL))
                     .border_1()
-                    .border_color(rgba(if focused { with_alpha(ACCENT, 0xAA) } else { 0 }))
+                    .border_color(rgba(if focused {
+                        with_alpha(accent(), 0xAA)
+                    } else {
+                        0
+                    }))
                     .children(buttons)
-                    .children(probe::bordered_part(format!("track:{ACCOUNT}"), 1.0)),
+                    .children(probe::bordered_part(format!("track:{name}"), 1.0)),
             );
         div()
             .flex()
             .flex_col()
             .gap_2()
+            .children(row.heading.map(|heading| section(heading, name_width)))
             .child(control)
             .child(
                 div().pl(px(name_width + NAME_GAP)).child(
                     div()
                         .max_w(px(width))
                         .text_xs()
-                        .text_color(rgb(if problem { DANGER } else { DIM }))
-                        .child(caption)
-                        .children(probe::part(format!("caption:{ACCOUNT}"))),
+                        .text_color(rgb(if row.problem { DANGER } else { DIM }))
+                        .child(row.caption)
+                        .children(probe::part(format!("caption:{name}"))),
                 ),
             )
             .into_any_element()
@@ -524,31 +822,37 @@ impl SettingsWindow {
             window.remove_window();
             return;
         }
-        // Command and Control chords are menu shortcuts.
         let modifiers = keystroke.modifiers;
+        // Paste, wherever the keyboard is: a key copied from its email.
+        if pastes(&keystroke.key, modifiers) {
+            self.paste_key(window, cx);
+            self.scroll.scroll_to_item(self.focused);
+            return;
+        }
+        // Other Command and Control chords are menu shortcuts.
         if modifiers.platform || modifiers.control || modifiers.alt {
             return;
         }
-        let rows = rows(&self.settings);
-        // The OpenRouter row comes after the settings' rows.
-        let account = rows.len();
-        if self.focused == account && matches!(keystroke.key.as_str(), "enter" | "space") {
-            let status = self.openrouter.read(cx).status().clone();
-            if let Some(&button) = account_buttons(&status).first() {
-                self.press(button, cx);
+        let entries = self.entries(cx);
+        if let Some(Entry::Buttons(row)) = entries.get(self.focused)
+            && matches!(keystroke.key.as_str(), "enter" | "space")
+        {
+            if let Some(&(_, _, press)) = row.buttons.first() {
+                self.press(press, window, cx);
             }
             return;
         }
-        let focused = moved_row(self.focused, account + 1, &keystroke.key);
+        let focused = moved_row(self.focused, entries.len(), &keystroke.key);
         if focused != self.focused {
             self.focused = focused;
             self.scroll.scroll_to_item(focused);
             cx.notify();
             return;
         }
-        let picked = rows
-            .get(focused)
-            .and_then(|row| moved_choice(row.chosen, row.labels.len(), &keystroke.key));
+        let picked = match entries.get(focused) {
+            Some(Entry::Choices(row)) => moved_choice(row.chosen, row.labels.len(), &keystroke.key),
+            _ => None,
+        };
         if let Some(at) = picked {
             self.scroll.scroll_to_item(focused);
             self.pick(focused, at, cx);
@@ -560,25 +864,22 @@ impl gpui::Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The rows are centred as one form: the widest name, then the
         // widest row of choices.
-        let rows = rows(&self.settings);
-        let widest = |width: &dyn Fn(&Row) -> f32| rows.iter().map(width).fold(0.0, f32::max);
-        let name_width = widest(&|row| text_width(row.name, window))
-            .max(text_width(ACCOUNT, window))
-            .ceil();
-        let choices_width =
-            widest(&|row| track_width(row.labels.iter().map(SharedString::as_ref), window));
-        let account = account_buttons(self.openrouter.read(cx).status());
-        let account_width = track_width(account.iter().map(|button| button.label()), window);
-        let choices_width = choices_width.max(account_width);
+        let entries = self.entries(cx);
+        // A key taken out takes its rows with it.
+        self.focused = self.focused.min(entries.len().saturating_sub(1));
+        let widest = |width: &dyn Fn(&Entry) -> f32| entries.iter().map(width).fold(0.0, f32::max);
+        let name_width = widest(&|entry| text_width(entry.name(), window)).ceil();
+        let choices_width = widest(&|entry| track_width(entry.labels().into_iter(), window));
         let room = f32::from(window.viewport_size().width) - name_width - NAME_GAP - choices_width;
         let side = (room / 2.0).max(MIN_SIDE);
-        let count = rows.len();
-        let mut rows: Vec<AnyElement> = rows
+        let rows: Vec<AnyElement> = entries
             .into_iter()
             .enumerate()
-            .map(|(index, row)| self.row(index, row, name_width, cx))
+            .map(|(index, entry)| match entry {
+                Entry::Choices(row) => self.row(index, row, name_width, cx),
+                Entry::Buttons(row) => self.button_row(index, row, name_width, choices_width, cx),
+            })
             .collect();
-        rows.push(self.account_row(count, name_width, choices_width, cx));
         let header = div()
             .h(px(TOP_BAR))
             .flex()
@@ -619,6 +920,12 @@ impl gpui::Render for SettingsWindow {
             .children(chrome::window_edges(window, Tone::Paper, false))
             .children(probe::end("settings"))
     }
+}
+
+/// Whether `key` with `modifiers` is Paste: ⌘V on macOS, Control-V
+/// elsewhere.
+fn pastes(key: &str, modifiers: gpui::Modifiers) -> bool {
+    key == "v" && modifiers.secondary() && !modifiers.alt && !modifiers.shift
 }
 
 /// How wide `text` is drawn in the window's words, in logical pixels.
@@ -804,6 +1111,108 @@ mod tests {
             account_caption(&Status::Connecting { returned: false }).0,
             "Finish connecting in your browser."
         );
+    }
+
+    #[test]
+    fn the_supporters_row_offers_a_key_or_its_removal() {
+        assert_eq!(support_buttons(false), [Support::Become, Support::PasteKey]);
+        assert_eq!(support_buttons(true), [Support::RemoveKey]);
+        // Only becoming one is what to press.
+        assert!(Support::Become.primary());
+        assert!(!Support::PasteKey.primary() && !Support::RemoveKey.primary());
+    }
+
+    #[test]
+    fn the_supporters_row_thanks_a_supporter_and_says_why_a_key_was_refused() {
+        let (words, problem) = support_caption(None, None);
+        assert!(words.starts_with("Imago Emulator is free."), "{words}");
+        assert_eq!(words.contains("Dock icons"), supporter::CHOOSES_ICON);
+        assert!(!problem);
+        assert_eq!(
+            support_caption(Some("Ada"), None),
+            ("Thank you, Ada.".to_owned(), false)
+        );
+        assert_eq!(
+            support_caption(Some(""), None),
+            ("Thank you for supporting Imago Emulator.".to_owned(), false)
+        );
+        // A key refused says so, whether or not another is in.
+        for supporter in [None, Some("Ada")] {
+            assert_eq!(
+                support_caption(supporter, Some("That key is no longer valid.")),
+                ("That key is no longer valid.".to_owned(), true)
+            );
+        }
+        let refused = [
+            KeyError::NotAKey,
+            KeyError::Damaged,
+            KeyError::Forged,
+            KeyError::Newer,
+            KeyError::Revoked,
+        ]
+        .map(|error| key_problem(&EnterError::Key(error)));
+        for (at, words) in refused.iter().enumerate() {
+            assert!(!refused[at + 1..].contains(words), "{words}");
+        }
+        assert!(refused[0].contains("Paste Key"), "{}", refused[0]);
+        let unsaved = key_problem(&EnterError::Io(std::io::Error::other("disk full")));
+        assert!(unsaved.ends_with("disk full"), "{unsaved}");
+    }
+
+    #[test]
+    fn a_supporters_rows_mark_and_store_the_look() {
+        let mut settings = Settings::default();
+        let rows = look_rows(&settings);
+        let names: Vec<_> = rows.iter().map(|row| row.name).collect();
+        if supporter::CHOOSES_ICON {
+            assert_eq!(names, ["Accent", "App Icon"]);
+        } else {
+            assert_eq!(names, ["Accent"]);
+        }
+        let accent = &rows[0];
+        assert_eq!(accent.heading, None, "under the supporter's heading");
+        assert_eq!(accent.labels.len(), Accent::ALL.len());
+        assert_eq!(accent.chosen, Some(0), "blue by default");
+        (accent.choose)(&mut settings, 4);
+        assert_eq!(settings.accent, Accent::Violet);
+        if let Some(icon) = rows.get(1) {
+            assert_eq!(icon.chosen, Some(0), "the app's own by default");
+            (icon.choose)(&mut settings, 1);
+            assert_eq!(settings.app_icon, AppIcon::Night);
+        }
+        // None of them is among the settings everyone has.
+        for row in super::rows(&settings) {
+            assert!(!names.contains(&row.name), "{}", row.name);
+            assert_ne!(row.name, KEY);
+        }
+    }
+
+    #[test]
+    fn paste_is_the_systems_shortcut_and_nothing_else() {
+        let secondary = if cfg!(target_os = "macos") {
+            gpui::Modifiers::command()
+        } else {
+            gpui::Modifiers::control()
+        };
+        assert!(pastes("v", secondary));
+        assert!(!pastes("v", gpui::Modifiers::none()));
+        assert!(!pastes("c", secondary));
+        let shifted = gpui::Modifiers {
+            shift: true,
+            ..secondary
+        };
+        assert!(!pastes("v", shifted));
+    }
+
+    #[test]
+    fn the_window_fits_its_rows_and_is_no_taller_than_the_display_has_room_for() {
+        assert_eq!(window_height(None, 0), 800.0);
+        assert_eq!(window_height(Some(1080.0), 0), 800.0);
+        // A supporter's rows make it taller, each by a row and its gap.
+        assert_eq!(window_height(Some(1080.0), 2), 886.0);
+        assert_eq!(window_height(Some(982.0), 2), 862.0);
+        assert_eq!(window_height(Some(768.0), 0), 648.0);
+        assert_eq!(window_height(Some(300.0), 2), 320.0);
     }
 
     /// The row called `name` for `settings`.

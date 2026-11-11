@@ -236,7 +236,9 @@ they are project policy, not legal advice.
    adopts a compatible license (see open question Q1). MIT, BSD, zlib and
    MPL-2.0 code may be reused under its terms, with attribution.
 5. No decryption tooling, no 3DS or Switch keys, no builds tied to
-   unreleased games, no paywalled builds.
+   unreleased games, no paid or early builds, and nothing a game needs
+   behind payment. A supporter's key unlocks looks only: an accent colour
+   and a Dock icon ([decision 0017](decisions/0017-supporter-keys.md)).
 6. Tests and docs never embed copyrighted game assets. Test ROMs used in CI
    are freely redistributable homebrew, downloaded at test time.
 

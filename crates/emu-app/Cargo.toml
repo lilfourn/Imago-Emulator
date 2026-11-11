@@ -26,6 +26,7 @@ emu-os.workspace = true
 emu-patch.workspace = true
 emu-script.workspace = true
 emu-state.workspace = true
+emu-supporter.workspace = true
 gilrs.workspace = true
 gpui.workspace = true
 # Reads store screenshots (PNG, JPEG, GIF, BMP or WebP, as GPUI already

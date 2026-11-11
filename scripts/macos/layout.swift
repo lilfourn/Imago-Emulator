@@ -140,6 +140,13 @@ func firstGlyph(in rect: CGRect, on: RGB? = nil, tolerance: Int = 24) -> CGRect?
     }
     return ink(in: CGRect(x: all.minX, y: all.minY, width: x - all.minX, height: all.height), on: back, tolerance: tolerance)
 }
+/// Where a top bar's title is looked for in its part `bar`. Where the part
+/// is the whole bar, as in the settings and randomize windows, that is
+/// clear of the traffic lights, which end 80pt in, and of the window's
+/// rounded corners: the first ink in the bar is otherwise a corner's.
+func titleArea(_ bar: CGRect) -> CGRect {
+    bar.minX >= 90 ? bar : CGRect(x: 90, y: bar.minY, width: max(bar.width - 180, 0), height: bar.height)
+}
 /// The lines of text inked in `rect`, top to bottom, split at blank rows.
 func lines(in rect: CGRect) -> [CGRect] {
     let back = background(rect)
@@ -264,7 +271,7 @@ for (name, box) in parts("button:") {
 //    as the close button starts from the left, mirroring them.
 if let close = closeButton, let lights = ink(in: close.insetBy(dx: -2, dy: -2)) {
     let midline = lights.midY
-    if let bar = part("header.title"), let letter = firstGlyph(in: bar) {
+    if let bar = part("header.title"), let letter = firstGlyph(in: titleArea(bar)) {
         even("top bar title sits on the traffic lights' midline", letter.midY, midline, ("title", "lights"), textTolerance)
     }
     // The tabs between the library and the store: each label centred on

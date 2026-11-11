@@ -23,7 +23,7 @@ use crate::icons;
 use crate::key_guide::{self, Control};
 use crate::probe;
 use crate::theme::{
-    ACCENT, BACKGROUND, DANGER, INSET, LINE, MUTED as DIM, ON_ACCENT, TEXT, with_alpha,
+    BACKGROUND, DANGER, INSET, LINE, MUTED as DIM, ON_ACCENT, TEXT, accent, with_alpha,
 };
 
 /// The sheet: white, a touch see-through.
@@ -31,9 +31,13 @@ const SHEET: u32 = with_alpha(BACKGROUND, 0xF2);
 const TILE: u32 = with_alpha(TEXT, 0x0A);
 const TILE_HOVER: u32 = with_alpha(TEXT, 0x14);
 const DANGER_FILL: u32 = DANGER;
-/// The ring around whatever the keyboard is on, and how thick it is.
-const FOCUS: u32 = with_alpha(ACCENT, 0xCC);
+/// How thick the ring around whatever the keyboard is on is.
 const RING: f32 = 2.0;
+
+/// The colour of that ring.
+fn focus_ring() -> u32 {
+    with_alpha(accent(), 0xCC)
+}
 
 /// Widest the sheet gets, in logical pixels.
 const MAX_WIDTH: f32 = 420.0;
@@ -270,7 +274,7 @@ impl GameMenu {
         div()
             .id(id)
             .border(px(RING))
-            .border_color(rgba(if self.page == page { FOCUS } else { 0 }))
+            .border_color(rgba(if self.page == page { focus_ring() } else { 0 }))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(page, cx)))
     }
@@ -318,7 +322,7 @@ impl GameMenu {
             .justify_center()
             .gap_2()
             .bg(rgba(if resume {
-                with_alpha(ACCENT, 0xFF)
+                with_alpha(accent(), 0xFF)
             } else {
                 TILE
             }))
@@ -549,7 +553,7 @@ fn switch(on: bool) -> Div {
         .p(px(3.0))
         .rounded_full()
         .flex()
-        .when(on, |track| track.justify_end().bg(rgb(ACCENT)))
+        .when(on, |track| track.justify_end().bg(rgb(accent())))
         .when(!on, |track| {
             track.justify_start().bg(rgba(with_alpha(TEXT, 0x26)))
         })

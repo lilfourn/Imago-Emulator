@@ -128,11 +128,15 @@ impl LibraryView {
         };
         // The caret goes before the placeholder, as in a Mac search field.
         let caret = self.searching.then(|| {
-            div().w(px(1.5)).h(px(16.0)).bg(rgb(CARET)).with_animation(
-                "caret",
-                Animation::new(Duration::from_millis(1060)).repeat(),
-                |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
-            )
+            div()
+                .w(px(1.5))
+                .h(px(16.0))
+                .bg(rgb(accent()))
+                .with_animation(
+                    "caret",
+                    Animation::new(Duration::from_millis(1060)).repeat(),
+                    |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
+                )
         });
         let (caret_before, caret_after) = if self.query.is_empty() {
             (caret, None)
@@ -153,7 +157,7 @@ impl LibraryView {
             .bg(rgb(PANEL))
             .border_1()
             .border_color(rgba(if self.searching {
-                with_alpha(CARET, 0xAA)
+                with_alpha(accent(), 0xAA)
             } else {
                 with_alpha(LINE, 0xFF)
             }))
@@ -243,7 +247,7 @@ impl LibraryView {
             .pr(px(16.0))
             .rounded_full()
             .cursor_pointer()
-            .bg(rgb(CARET))
+            .bg(rgb(accent()))
             .text_color(rgb(ON_ACCENT))
             .text_size(px(13.0))
             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -566,7 +570,7 @@ impl LibraryView {
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
-                    .bg(rgb(CARET))
+                    .bg(rgb(accent()))
                     .shadow_md()
                     .hover(|button| button.opacity(0.9))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -999,7 +1003,7 @@ impl LibraryView {
                 .gap_2()
                 .child(
                     button("browse-store")
-                        .bg(rgb(CARET))
+                        .bg(rgb(accent()))
                         .text_color(rgb(ON_ACCENT))
                         .hover(|button| button.opacity(0.9))
                         .on_click(cx.listener(|this, _, _, cx| this.open_store(cx)))

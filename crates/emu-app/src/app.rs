@@ -25,6 +25,7 @@ actions!(
     [
         About,
         OpenSettings,
+        OpenSupporter,
         HideApp,
         HideOtherApps,
         ShowAllApps,
@@ -221,6 +222,8 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             });
             cx.bind_keys(bindings());
             cx.bind_keys(crate::guide::composer::bindings());
+            // Before the window, which draws in the supporter's colours.
+            crate::supporter::load(cx);
             cx.set_menus(menus(MenuChecks::default()));
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
@@ -263,11 +266,13 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                 window_decorations: chrome::window_decorations(),
                 ..WindowOptions::default()
             };
-            cx.open_window(options, |window, cx| {
-                cx.new(|cx| EmulatorView::new(roms, script, window, cx))
-            })
-            .expect("opening the main window");
-            window_chrome::set_dock_icon(APP_ICON);
+            let main = cx
+                .open_window(options, |window, cx| {
+                    cx.new(|cx| EmulatorView::new(roms, script, window, cx))
+                })
+                .expect("opening the main window");
+            // The Dock icon, which is a supporter's to choose.
+            main.update(cx, |view, _, cx| view.apply_look(cx)).ok();
             cx.activate(true);
         });
 }
@@ -494,6 +499,11 @@ impl Default for MenuChecks {
     }
 }
 
+/// The menu item that opens Settings at the supporter's key: the one
+/// place outside Settings where the app says it can be supported
+/// ([decision 0017](../../../docs/decisions/0017-supporter-keys.md)).
+const SUPPORT: &str = "Support Imago Emulator…";
+
 /// The menu bar, with `checks` checked: macOS's, and off macOS the menu
 /// the window draws (`app_menu.rs`) from the same list, laid out as Linux
 /// and Windows apps lay theirs out.
@@ -512,6 +522,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
                 MenuItem::action("About Imago Emulator", About),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action(SUPPORT, OpenSupporter),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
@@ -651,7 +662,10 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
     if !mac {
         menus.push(Menu {
             name: "Help".into(),
-            items: vec![MenuItem::action("About Imago Emulator", About)],
+            items: vec![
+                MenuItem::action("About Imago Emulator", About),
+                MenuItem::action(SUPPORT, OpenSupporter),
+            ],
         });
     }
     menus
@@ -1045,6 +1059,7 @@ mod tests {
   About Imago Emulator
   -
   Settings…  [cmd-,]
+  Support Imago Emulator…
   -
   Services (system)
   -
@@ -1273,6 +1288,7 @@ Window
   Maximize
 Help
   About Imago Emulator
+  Support Imago Emulator…
 "#;
 
     /// Linux's and Windows's bindings, from the same build.
@@ -1501,6 +1517,7 @@ f10  ->  (ds_emulator::ShowAppMenu)
                 "About Imago Emulator",
                 "-",
                 "Settings…",
+                "Support Imago Emulator…",
                 "-",
                 "Services (system)",
                 "-",
@@ -1615,6 +1632,9 @@ f10  ->  (ds_emulator::ShowAppMenu)
         assert_eq!(file[file.len() - 3..], ["Settings…", "-", quit]);
         assert_eq!(outline[2].1.last().map(String::as_str), Some("Full Screen"));
         assert_eq!(outline[3].1, ["Minimize", "Maximize"]);
-        assert_eq!(outline[4].1, ["About Imago Emulator"]);
+        assert_eq!(
+            outline[4].1,
+            ["About Imago Emulator", "Support Imago Emulator…"]
+        );
     }
 }

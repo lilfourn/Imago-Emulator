@@ -29,7 +29,7 @@ use crate::probe;
 use crate::randomizer::{self, Made, Preset};
 use crate::romhack;
 use crate::theme::{
-    ACCENT, BACKGROUND, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT,
+    BACKGROUND, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT, accent,
     with_alpha,
 };
 use crate::ui;
@@ -674,7 +674,7 @@ impl RandomizeWindow {
                 .rounded_lg()
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .bg(rgb(ACCENT))
+                .bg(rgb(accent()))
                 .text_color(rgb(ON_ACCENT))
                 .children(icon.map(|icon| icons::icon(icon, ICON, ON_ACCENT)))
                 .child(label)

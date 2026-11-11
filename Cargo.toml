@@ -26,6 +26,7 @@ emu-patch = { path = "crates/emu-patch" }
 emu-script = { path = "crates/emu-script" }
 emu-guide = { path = "crates/emu-guide" }
 emu-os = { path = "crates/emu-os" }
+emu-supporter = { path = "crates/emu-supporter" }
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

@@ -21,11 +21,11 @@ use crate::ambient::{self, Backdrop};
 use crate::app::{
     AddGameFolders, AddToLibrary, Arrange, CloseGame, ConnectLinkCable, DebugNextFrame, DebugStep,
     DebugStepOver, EditCheats, GameInfo, InsertGbaCartridge, LoadState, MenuChecks, NextScreenGap,
-    NextStateSlot, OpenGameFolder, OpenRom, OpenSettings, OpenStore, PreviousStateSlot, Randomize,
-    RemoveFromLibrary, Reset, RotateAnticlockwise, RotateClockwise, RunScript, SaveScreenshot,
-    SaveState, ScreenshotForGuide, SetDmgColors, SetFastForward, SetPicture, SetResolution3d,
-    ShowAppMenu, ShowDebugger, StopScript, SwapScreens, SwitchPlayer, TOP_BAR,
-    ToggleColorCorrection, ToggleFastForward, ToggleFps, ToggleFullScreen, ToggleGuide,
+    NextStateSlot, OpenGameFolder, OpenRom, OpenSettings, OpenStore, OpenSupporter,
+    PreviousStateSlot, Randomize, RemoveFromLibrary, Reset, RotateAnticlockwise, RotateClockwise,
+    RunScript, SaveScreenshot, SaveState, ScreenshotForGuide, SetDmgColors, SetFastForward,
+    SetPicture, SetResolution3d, ShowAppMenu, ShowDebugger, StopScript, SwapScreens, SwitchPlayer,
+    TOP_BAR, ToggleColorCorrection, ToggleFastForward, ToggleFps, ToggleFullScreen, ToggleGuide,
     ToggleMicrophone, TogglePause, ToggleRecording, ToggleSlowMotion, ToggleWindowControls,
     hotkey_action, shortcut,
 };
@@ -64,6 +64,8 @@ use crate::settings_window::SettingsWindow;
 use crate::slots::{self, STATE_SLOTS, SlotPreview};
 use crate::speed::{Pace, Speed};
 use crate::store_view::pulse;
+use crate::supporter;
+use crate::theme;
 use crate::theme::{BACKGROUND, INSET, STAGE};
 use crate::trace;
 use crate::video;
@@ -429,6 +431,9 @@ impl EmulatorView {
         match loaded_settings {
             Some(Ok(settings)) => {
                 view.settings = settings;
+                // Before the first frame is drawn in it.
+                let supporter = supporter::current(cx).is_some();
+                theme::set_accent(supporter::look(&settings, supporter).0);
                 view.input
                     .latch(settings.fast_forward_on, settings.slow_motion_on);
             }
@@ -1782,6 +1787,12 @@ impl EmulatorView {
         if settings.window_controls != self.settings.window_controls {
             self.set_window_controls(settings.window_controls, cx);
         }
+        if (settings.accent, settings.app_icon) != (self.settings.accent, self.settings.app_icon) {
+            self.settings.accent = settings.accent;
+            self.settings.app_icon = settings.app_icon;
+            self.apply_look(cx);
+            self.save_settings(cx);
+        }
         if (settings.guide_thinking, settings.guide_lookups)
             != (self.settings.guide_thinking, self.settings.guide_lookups)
         {
@@ -1790,6 +1801,17 @@ impl EmulatorView {
             self.tell_guide_settings(cx);
             self.save_settings(cx);
         }
+    }
+
+    /// Shows the accent and the Dock icon the settings choose, if the app
+    /// holds a supporter's key, and its own otherwise, in every window:
+    /// after either is chosen, and after a key is put in or taken out.
+    pub fn apply_look(&self, cx: &mut App) {
+        let supporter = supporter::current(cx).is_some();
+        let (accent, icon) = supporter::look(&self.settings, supporter);
+        theme::set_accent(accent);
+        crate::window_chrome::set_dock_icon(icon.png());
+        cx.refresh_windows();
     }
 
     /// Hands Guide's settings to its panel.
@@ -1931,9 +1953,20 @@ impl EmulatorView {
 
     /// Opens the settings window, or brings it to the front.
     fn show_settings(&mut self, cx: &mut Context<Self>) {
+        self.show_settings_at(false, cx);
+    }
+
+    /// Opens the settings window, or brings it to the front, with the
+    /// keyboard on the supporter's key if `supporter`.
+    fn show_settings_at(&mut self, supporter: bool, cx: &mut Context<Self>) {
         if let Some(handle) = self.settings_window
             && handle
-                .update(cx, |_, window, _| window.activate_window())
+                .update(cx, |settings, window, cx| {
+                    if supporter {
+                        settings.focus_supporter(cx);
+                    }
+                    window.activate_window();
+                })
                 .is_ok()
         {
             return;
@@ -1942,7 +1975,7 @@ impl EmulatorView {
         // once this update is over.
         let main = cx.entity();
         cx.defer(move |cx| {
-            let opened = SettingsWindow::open(main.clone(), cx);
+            let opened = SettingsWindow::open(main.clone(), supporter, cx);
             main.update(cx, |this, cx| match opened {
                 Ok(handle) => this.settings_window = Some(handle),
                 Err(error) => this.show_notice(format!("Cannot open settings: {error:#}"), cx),
@@ -2277,6 +2310,9 @@ impl Render for EmulatorView {
             }))
             .on_action(cx.listener(|this, _: &ToggleFps, _, cx| this.toggle_fps(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
+            .on_action(cx.listener(|this, _: &OpenSupporter, _, cx| {
+                this.show_settings_at(true, cx);
+            }))
             .on_action(cx.listener(|this, _: &Randomize, window, cx| {
                 this.show_randomizer(None, window, cx);
             }))
