@@ -16,12 +16,33 @@
 //! Then each game is made by running it as a separate program, on its
 //! command line.
 //!
-//! It randomizes generations 1 to 5: Red, Blue and Yellow; Gold, Silver and
+//! It randomizes generations 1 to 7: Red, Blue and Yellow; Gold, Silver and
 //! Crystal; Ruby, Sapphire, Emerald, FireRed and LeafGreen; Diamond, Pearl,
-//! Platinum, HeartGold and SoulSilver; Black, White, Black 2 and White 2.
-//! FVX also randomizes the 3DS games, but those are not offered: every 3DS
-//! game keeps its save by its title ID, which a randomized copy shares
-//! with the game it was made from.
+//! Platinum, HeartGold and SoulSilver; Black, White, Black 2 and White 2;
+//! X, Y, Omega Ruby and Alpha Sapphire; Sun, Moon, Ultra Sun and Ultra
+//! Moon.
+//!
+//! # 3DS games
+//!
+//! The 3DS core keeps a game's save by its title ID, which a randomized
+//! copy would share with the game it was made from. So the run of a 3DS
+//! game is not a new ROM. FVX writes only what it changed, the game's
+//! code and some of its files (about 30 MB), and the run is:
+//!
+//! - a console of its own (`emu_3ds::own_console`), a folder in the hacks
+//!   folder with that mod in it, which the core loads over the game, and
+//!   an SD card of its own for the run's save;
+//! - the game itself under the run's name beside that folder, a second
+//!   name for the same file that takes no room, which is what plays on
+//!   that console, and what the run's states and checkpoint sit beside.
+//!
+//! FVX's command line refuses 3DS games: only its window tells it that
+//! Java has the memory they need. A ten-line program,
+//! `assets/randomizer/Launch3ds.java`, tells it so and runs its command
+//! line. It links to FVX, so it is GPL too, the only part of the app that
+//! is: the app carries it compiled, since FVX's Java has no compiler, and
+//! writes it with its source into the randomizer's folder, where FVX's
+//! Java runs it as a program of its own.
 //!
 //! Everything here blocks; run it off the UI thread.
 
@@ -40,7 +61,7 @@ use zip::ZipArchive;
 use crate::archive;
 use crate::leftovers::WorkFolder;
 use crate::library::{file_title, random_name};
-use crate::persist::GameFiles;
+use crate::persist::{self, GameFiles};
 use crate::romhack;
 use crate::slots::LAST_FILE_SLOT;
 
@@ -166,6 +187,37 @@ impl Randomizer {
     fn jar(&self) -> PathBuf {
         self.folder.join(JAR)
     }
+
+    /// Where the program that runs FVX for a 3DS game is kept
+    /// ([`write_launcher`]): beside FVX's folder, which holds only what was
+    /// downloaded.
+    fn launcher(&self) -> PathBuf {
+        self.folder.with_file_name("launcher")
+    }
+}
+
+/// The program that runs FVX's command line for a 3DS game, which FVX
+/// itself refuses (see the module's notes), compiled, and its source.
+const LAUNCHER_CLASS: &[u8] = include_bytes!("../../../assets/randomizer/Launch3ds.class");
+const LAUNCHER_SOURCE: &str = include_str!("../../../assets/randomizer/Launch3ds.java");
+/// Its name, as Java is told it.
+const LAUNCHER: &str = "Launch3ds";
+
+/// Writes the launcher and its source into `folder`, unless they are
+/// there as the app has them.
+fn write_launcher(folder: &Path) -> io::Result<()> {
+    fs::create_dir_all(folder)?;
+    let files = [
+        ("Launch3ds.class", LAUNCHER_CLASS),
+        ("Launch3ds.java", LAUNCHER_SOURCE.as_bytes()),
+    ];
+    for (name, bytes) in files {
+        let path = folder.join(name);
+        if fs::read(&path).ok().as_deref() != Some(bytes) {
+            emu_os::file::write_atomic(&path, bytes)?;
+        }
+    }
+    Ok(())
 }
 
 /// The randomizer installed in `data`, if it is.
@@ -334,14 +386,34 @@ const GEN_1: [&[u8]; 5] = [
     b"POKEMON YELAPS",
 ];
 const GEN_2: [&[u8]; 3] = [b"POKEMON_GLD", b"POKEMON_SLV", b"PM_CRYSTAL"];
+/// The title IDs of the 3DS games, each the same the world over: X, Y,
+/// Omega Ruby and Alpha Sapphire, then Sun, Moon, Ultra Sun and Ultra
+/// Moon.
+const GEN_6: [u64; 4] = [
+    0x0004_0000_0005_5D00,
+    0x0004_0000_0005_5E00,
+    0x0004_0000_0011_C400,
+    0x0004_0000_0011_C500,
+];
+const GEN_7: [u64; 4] = [
+    0x0004_0000_0016_4800,
+    0x0004_0000_0017_5E00,
+    0x0004_0000_001B_5000,
+    0x0004_0000_001B_5100,
+];
 
 /// The generation of the Pokémon game in the ROM at `path`, if the
 /// randomizer can randomize it, judged by its header. Games in the hacks
 /// folder are not offered: the randomizer is made for the games as sold,
-/// and a hack may break when randomized.
+/// and a hack may break when randomized. A 3DS game is known by its title
+/// ID, whatever kind of file it is in, but one of Azahar's compressed
+/// kinds, which FVX cannot read.
 pub fn generation(path: &Path) -> Option<u8> {
     if romhack::is_hack(path) {
         return None;
+    }
+    if emu_3ds::is_game(path) {
+        return generation_of_title(emu_3ds::header::read(path).ok()?.title_id?);
     }
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     let mut header = Vec::with_capacity(0x150);
@@ -368,6 +440,17 @@ fn generation_of(extension: &str, header: &[u8]) -> Option<u8> {
         "nds" if starts(0x0C, &GEN_4) => Some(4),
         "nds" if starts(0x0C, &GEN_5) => Some(5),
         _ => None,
+    }
+}
+
+/// The generation of the 3DS Pokémon game whose title ID is `title`.
+fn generation_of_title(title: u64) -> Option<u8> {
+    if GEN_6.contains(&title) {
+        Some(6)
+    } else if GEN_7.contains(&title) {
+        Some(7)
+    } else {
+        None
     }
 }
 
@@ -506,6 +589,9 @@ pub struct Made {
 /// `Pokemon - Platinum Version (Random 123456).nds`, with its spoiler log
 /// beside it as `….nds.log`. The same game made before is used as it is.
 ///
+/// A 3DS game's run is the game under that name, with a console of its own
+/// beside it that holds what FVX changed (see the module's notes).
+///
 /// # Errors
 ///
 /// Says why if the randomizer cannot run or refuses the game, or a file
@@ -522,37 +608,77 @@ pub fn randomize(
     // next launch if the app quits meanwhile.
     let work =
         WorkFolder::new("randomize").map_err(|error| format!("Cannot randomize: {error}"))?;
-    randomize_in(randomizer, base, title, settings, seed, hacks, &work)
+    if !emu_3ds::is_game(base) {
+        return randomize_in(randomizer, base, title, settings, seed, hacks, &work);
+    }
+    let shared = emu_3ds::data_dir().ok_or_else(|| {
+        "Cannot randomize: there is no folder to keep the 3DS console in".to_owned()
+    })?;
+    // An installable title plays as the executable it holds, so that is
+    // what is randomized.
+    let game = crate::emulator::playable_3ds(base)
+        .map_err(|error| format!("Cannot randomize: {error:#}"))?;
+    // A name the system can hold, as a ROM's is made.
+    let name = run_name(title, seed, &game);
+    let image = hacks.join(persist::safe_file_name(&name).as_ref());
+    randomize_3ds_in(randomizer, &game, settings, seed, &image, &shared, &work)
 }
 
-/// Randomizes as [`randomize`] does, in the work folder `work`. The
-/// randomizer's Java is the folder's worker, so it is stopped if the app
-/// quits while it runs.
-fn randomize_in(
+/// The file name of the run of the game at `game`, which the library calls
+/// `title`, with `seed`: `Pokemon - Platinum Version (Random 123456).nds`,
+/// with the game's own extension.
+fn run_name(title: &str, seed: u32, game: &Path) -> String {
+    let extension = game
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    format!("{} (Random {seed}).{extension}", file_title(title))
+}
+
+/// FVX's command line, to randomize `game` with `settings` and `seed` into
+/// `out`, with its spoiler log. With `launcher`, the folder the launcher is
+/// in ([`write_launcher`]), it is run through that, for a 3DS game, and
+/// writes what it changed as a folder rather than a whole game.
+///
+/// # Errors
+///
+/// Says why if the two folders cannot be named to Java together.
+fn fvx(
     randomizer: &Randomizer,
-    base: &Path,
-    title: &str,
+    game: &Path,
+    out: &Path,
     settings: &str,
     seed: u32,
-    hacks: &Path,
-    work: &WorkFolder,
-) -> Result<Made, String> {
+    launcher: Option<&Path>,
+) -> Result<Command, String> {
     // On Windows it opens no console window.
     let mut java = emu_os::process::command(randomizer.java());
     java
         // What FVX's own launcher gives it, which the 3DS games need.
         .arg("-Xmx4608M")
         // No Dock icon, nor any window.
-        .arg("-Djava.awt.headless=true")
-        .arg("-jar")
-        .arg(randomizer.jar())
-        .arg("cli")
-        .arg("-i")
-        .arg(base)
+        .arg("-Djava.awt.headless=true");
+    match launcher {
+        Some(launcher) => {
+            let classes = std::env::join_paths([randomizer.jar(), launcher.to_owned()])
+                .map_err(|error| format!("Cannot run the randomizer: {error}"))?;
+            java.arg("-cp").arg(classes).arg(LAUNCHER);
+        }
+        None => {
+            java.arg("-jar").arg(randomizer.jar()).arg("cli");
+        }
+    }
+    java.arg("-i")
+        .arg(game)
         // FVX adds the extension it gives the game's generation.
         .arg("-o")
-        .arg(work.path().join("randomized"))
-        .args(["-S", settings, "-z", &seed.to_string(), "-l"])
+        .arg(out)
+        .args(["-S", settings, "-z", &seed.to_string(), "-l"]);
+    if launcher.is_some() {
+        // What it changed only, in a folder named for the game's title ID.
+        java.arg("-d");
+    }
+    java
         // It reads its name lists from its own `data` folder.
         .current_dir(&randomizer.folder)
         // Java reads options from these, which could change how it runs.
@@ -562,10 +688,32 @@ fn randomize_in(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = work
-        .spawn(&mut java)
+    Ok(java)
+}
+
+/// Runs FVX as `java` and waits for it. It is the work folder's worker, so
+/// it is stopped if the app quits while it runs.
+fn run(work: &WorkFolder, java: &mut Command) -> Result<Output, String> {
+    work.spawn(java)
         .and_then(|java| java.output())
-        .map_err(|error| format!("Cannot run the randomizer: {error}"))?;
+        .map_err(|error| format!("Cannot run the randomizer: {error}"))
+}
+
+/// Randomizes as [`randomize`] does, in the work folder `work`.
+fn randomize_in(
+    randomizer: &Randomizer,
+    base: &Path,
+    title: &str,
+    settings: &str,
+    seed: u32,
+    hacks: &Path,
+    work: &WorkFolder,
+) -> Result<Made, String> {
+    let out = work.path().join("randomized");
+    let output = run(
+        work,
+        &mut fvx(randomizer, base, &out, settings, seed, None)?,
+    )?;
     let rom = fs::read_dir(work.path())
         .map_err(|error| format!("Cannot randomize: {error}"))?
         .flatten()
@@ -581,11 +729,7 @@ fn randomize_in(
     };
     // FVX names Red and Blue `.gbc`, which the Game Boy Color would play;
     // the game keeps its own extension.
-    let extension = base
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    let name = format!("{} (Random {seed}).{extension}", file_title(title));
+    let name = run_name(title, seed, base);
     let failed = |error: io::Error| format!("Cannot keep the randomized game: {error}");
     let crc32 = archive::file_crc32(&rom).map_err(failed)?;
     let stored = archive::store(
@@ -600,6 +744,108 @@ fn randomize_in(
     written.push(".log");
     let log = fs::copy(written, &log).is_ok().then_some(log);
     Ok(Made { rom: stored, log })
+}
+
+/// Randomizes the 3DS game at `game` into the run at `image`, a name in
+/// the hacks folder, in the work folder `work`: FVX writes what it
+/// changed, which goes into a console of the run's own beside `image`,
+/// made as the one in `shared` is, and `image` becomes the game itself
+/// under that name. The same run made before is used as it is.
+fn randomize_3ds_in(
+    randomizer: &Randomizer,
+    game: &Path,
+    settings: &str,
+    seed: u32,
+    image: &Path,
+    shared: &Path,
+    work: &WorkFolder,
+) -> Result<Made, String> {
+    let console = emu_3ds::own_console(image);
+    if image.is_file() && emu_3ds::has_mod(&console) {
+        return Ok(Made {
+            rom: image.to_owned(),
+            log: log_of(image),
+        });
+    }
+    let launcher = randomizer.launcher();
+    write_launcher(&launcher).map_err(|error| format!("Cannot run the randomizer: {error}"))?;
+    let out = work.path().join("randomized");
+    let output = run(
+        work,
+        &mut fvx(randomizer, game, &out, settings, seed, Some(&launcher))?,
+    )?;
+    // The one folder FVX writes, named for the game's title ID.
+    let written = fs::read_dir(&out).ok().and_then(|folders| {
+        folders
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+    });
+    let written = match (output.status.success(), written) {
+        (true, Some(written)) => written,
+        (true, None) => return Err("The randomizer wrote no game".to_owned()),
+        (false, _) => return Err(failure(&output)),
+    };
+    keep_3ds_run(game, image, &console, shared, &written)
+        .map_err(|error| format!("Cannot keep the randomized game: {error}"))?;
+    let log = log_path(image);
+    let mut written = out.into_os_string();
+    written.push(".log");
+    let log = fs::copy(written, &log).is_ok().then_some(log);
+    Ok(Made {
+        rom: image.to_owned(),
+        log,
+    })
+}
+
+/// Makes the run of the 3DS game at `game`: the console in the folder
+/// `console`, as the one in `shared` is and with the mod `written`, then
+/// `image`, the game under the run's name. The console is made whole
+/// beside where it goes and renamed there, and one left there by a run
+/// that was not finished is replaced; one a game has saved on is not.
+fn keep_3ds_run(
+    game: &Path,
+    image: &Path,
+    console: &Path,
+    shared: &Path,
+    written: &Path,
+) -> io::Result<()> {
+    if emu_3ds::has_saves(console) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} has a save in it", console.display()),
+        ));
+    }
+    let part = console.with_extension("console.part");
+    match fs::remove_dir_all(&part) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let made = emu_3ds::new_console(shared, &part)
+        .and_then(|()| emu_3ds::add_mod(&part, written))
+        .and_then(|()| emu_os::install::place(&part, console))
+        .and_then(|()| link(game, image));
+    if made.is_err() {
+        fs::remove_dir_all(&part).ok();
+        fs::remove_dir_all(console).ok();
+    }
+    made
+}
+
+/// Makes `image` the game at `game` under another name: a second name for
+/// the same file where the disk gives it one, which takes no room, or a
+/// copy where it does not, as on another disk. A file already at `image`
+/// is left as it is: it may be that same file, which copying over would
+/// empty.
+fn link(game: &Path, image: &Path) -> io::Result<()> {
+    if image.exists() {
+        return Ok(());
+    }
+    match fs::hard_link(game, image) {
+        Ok(()) => Ok(()),
+        Err(_) if !image.exists() => fs::copy(game, image).map(drop),
+        Err(error) => Err(error),
+    }
 }
 
 /// Why FVX failed, in a sentence, from what it printed. It prints its
@@ -686,22 +932,43 @@ pub fn log_of(image: &Path) -> Option<PathBuf> {
 /// Whether the game at `base` has a battery save a run could go on from:
 /// one that holds something. A game never saved in has a save file all the
 /// same, blank as an erased cartridge's memory is, every byte `0xFF` (or
-/// zero), which starts a new game wherever it is copied.
+/// zero), which starts a new game wherever it is copied. A 3DS game has
+/// one if it has save data on its console's SD card.
 pub fn has_save(base: &Path) -> bool {
+    if emu_3ds::is_game(base) {
+        return emu_3ds::data_dir()
+            .is_some_and(|shared| !saves_3ds(base, &shared).files().is_empty());
+    }
     let save = fs::read(GameFiles::of(base).backup()).unwrap_or_default();
     save.iter().any(|&byte| byte != 0xFF && byte != 0)
+}
+
+/// The save data of the 3DS game at `base` on the console it plays on,
+/// which is the one in `shared` unless it has its own.
+fn saves_3ds(base: &Path, shared: &Path) -> emu_3ds::SaveData {
+    emu_3ds::SaveData::of(base, &emu_3ds::console_of(base, shared))
 }
 
 /// Gives the randomized game at `image` what the game at `base`, which it
 /// was made from, has of its own: its cheats and its bindings, and with
 /// `save`, its battery save, so the run goes on from where that game is.
 /// Each is a copy, and nothing `image` already has is replaced: the game
-/// it was made from keeps its files as they are.
+/// it was made from keeps its files as they are. A 3DS game's save is its
+/// save data on its console's SD card, copied to the run's console.
 ///
 /// # Errors
 ///
 /// Returns the error if a file is there but cannot be copied.
 pub fn carry_over(base: &Path, image: &Path, save: bool) -> io::Result<()> {
+    carry_over_from(base, image, save, emu_3ds::data_dir().as_deref())
+}
+
+/// Carries over as [`carry_over`] does, a 3DS game's save from the console
+/// in `shared`.
+fn carry_over_from(base: &Path, image: &Path, save: bool, shared: Option<&Path>) -> io::Result<()> {
+    if let Some(shared) = shared.filter(|_| save && emu_3ds::is_game(base)) {
+        saves_3ds(base, shared).copy_to(&emu_3ds::own_console(image))?;
+    }
     let (from, to) = (GameFiles::of(base), GameFiles::of(image));
     let mut files = vec![
         (from.cheats(), to.cheats()),
@@ -719,9 +986,10 @@ pub fn carry_over(base: &Path, image: &Path, save: bool) -> io::Result<()> {
 }
 
 /// Removes the randomized game at `image`, and its spoiler log, if it was
-/// never played: it has no battery save, state or checkpoint beside it.
-/// One that was played is kept, with its progress, where it is. Whether
-/// it was removed.
+/// never played: it has no battery save, state or checkpoint beside it,
+/// and for a 3DS game, no game has saved on its console, which is removed
+/// with it. One that was played is kept, with its progress, where it is.
+/// Whether it was removed.
 pub fn remove_unplayed(image: &Path) -> bool {
     romhack::hacks_dir().is_some_and(|hacks| remove_unplayed_in(&hacks, image))
 }
@@ -739,11 +1007,18 @@ fn remove_unplayed_in(hacks: &Path, image: &Path) -> bool {
     let mut progress = [files.backup(), files.set_aside()]
         .into_iter()
         .chain(states);
-    if progress.any(|file| file.exists()) {
+    // A 3DS game's console is beside it, so in the folder too.
+    let console = Some(emu_3ds::own_console(image))
+        .filter(|console| emu_3ds::is_game(image) && console.is_dir());
+    let saved = console.as_deref().is_some_and(emu_3ds::has_saves);
+    if saved || progress.any(|file| file.exists()) {
         return false;
     }
     if let Some(log) = log_of(image) {
         fs::remove_file(log).ok();
+    }
+    if let Some(console) = console {
+        fs::remove_dir_all(console).ok();
     }
     fs::remove_file(image).is_ok()
 }
@@ -816,6 +1091,39 @@ mod tests {
         assert_eq!(generation_of("gba", &header(0x0C, b"CPUE")), None);
         assert_eq!(generation_of("nds", b"short"), None);
         assert_eq!(generation_of("3ds", &header(0x0C, b"CPUE")), None);
+    }
+
+    /// The start of a 3DS executable (`.cxi`) whose title ID is `title`,
+    /// not encrypted.
+    fn ncch(title: u64) -> Vec<u8> {
+        let mut ncch = vec![0; 0x200];
+        ncch[0x100..0x104].copy_from_slice(b"NCCH");
+        ncch[0x118..0x120].copy_from_slice(&title.to_le_bytes());
+        ncch[0x18F] = 0x04;
+        ncch
+    }
+
+    #[test]
+    fn the_3ds_games_are_known_by_their_title_ids() {
+        assert_eq!(generation_of_title(0x0004_0000_0005_5D00), Some(6), "X");
+        assert_eq!(generation_of_title(0x0004_0000_0011_C400), Some(6), "OR");
+        assert_eq!(generation_of_title(0x0004_0000_0016_4800), Some(7), "Sun");
+        assert_eq!(generation_of_title(0x0004_0000_001B_5100), Some(7), "UM");
+        // Another game, and a Pokémon game's update, which is not the game.
+        assert_eq!(generation_of_title(0x0004_0000_0003_0800), None);
+        assert_eq!(generation_of_title(0x0004_000E_0011_C400), None);
+
+        let dir = temp_dir("generation-3ds");
+        let game = dir.join("Omega Ruby.cxi");
+        write(&game, &ncch(0x0004_0000_0011_C400));
+        assert_eq!(generation(&game), Some(6));
+        let other = dir.join("Other.cxi");
+        write(&other, &ncch(0x0004_0000_0003_0800));
+        assert_eq!(generation(&other), None);
+        let not_a_game = dir.join("Broken.3ds");
+        write(&not_a_game, b"not a 3DS game");
+        assert_eq!(generation(&not_a_game), None);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1231,6 +1539,183 @@ echo "Randomized successfully!"
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Writes what FVX would for a 3DS game: what it changed, in
+    /// `<-o>/<title ID>/`, and its log, `<-o>.log`. Records its arguments.
+    const WRITES_A_MOD: &str = r#"#!/bin/sh
+out=""; prev=""
+for arg in "$@"; do [ "$prev" = "-o" ] && out="$arg"; prev="$arg"; done
+mkdir -p "$out/000400000011C400/romfs/a/0"
+printf '%s\n' "$@" > "$out.args"
+printf 'CODE' > "$out/000400000011C400/code.bin"
+printf 'WILD' > "$out/000400000011C400/romfs/a/0/1"
+printf 'Random Seed: 123456' > "$out.log"
+echo "Randomized successfully!"
+"#;
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows: the stand-in for FVX's Java is a shell script; randomizes_for_real runs FVX itself"
+    )]
+    fn a_3ds_game_is_randomized_into_a_console_of_its_own() {
+        let dir = temp_dir("randomize-3ds");
+        let randomizer = fake_randomizer(&dir, WRITES_A_MOD);
+        let game = dir.join("Games/Omega Ruby.cxi");
+        write(&game, &ncch(0x0004_0000_0011_C400));
+        // The console every game shares, with this game's save on it.
+        let shared = dir.join("3DS");
+        let ids = "Azahar/sdmc/Nintendo 3DS/0000/1111";
+        let save = Path::new(ids).join("title/00040000/0011c400/data/00000001/main");
+        write(&shared.join(&save), b"save");
+        write(&shared.join("Azahar/nand/config"), b"settings");
+        let hacks = dir.join("Hacks");
+        let image = hacks.join("Omega Ruby (Random 123456).cxi");
+        let work = WorkFolder::new_in(&dir.join("temp"), "randomize").expect("work folder");
+        let settings = Preset::Classic.settings();
+
+        let made = randomize_3ds_in(
+            &randomizer,
+            &game,
+            settings,
+            123_456,
+            &image,
+            &shared,
+            &work,
+        )
+        .expect("randomized");
+        assert_eq!(made.rom, image);
+        // The game itself under the run's name, which takes no room.
+        assert_eq!(
+            fs::read(&image).expect("image"),
+            ncch(0x0004_0000_0011_C400)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let (game, image) = (fs::metadata(&game), fs::metadata(&image));
+            assert_eq!(game.expect("game").ino(), image.expect("image").ino());
+        }
+        // Its console: the shared one's settings, FVX's mod, no save.
+        let console = hacks.join("Omega Ruby (Random 123456).console");
+        assert_eq!(emu_3ds::console_of(&image, &shared), console);
+        let mods = console.join("Azahar/load/mods/000400000011C400");
+        assert_eq!(fs::read(mods.join("code.bin")).expect("code"), b"CODE");
+        assert_eq!(fs::read(mods.join("romfs/a/0/1")).expect("romfs"), b"WILD");
+        assert_eq!(
+            fs::read(console.join("Azahar/nand/config")).expect("nand"),
+            b"settings"
+        );
+        assert!(!emu_3ds::has_saves(&console));
+        assert!(
+            !hacks
+                .join("Omega Ruby (Random 123456).console.part")
+                .exists()
+        );
+        let log = hacks.join("Omega Ruby (Random 123456).cxi.log");
+        assert_eq!(made.log.as_ref(), Some(&log));
+        // FVX was run through the launcher, kept with its source, and told
+        // to write a folder.
+        let launcher = dir.join("launcher");
+        assert_eq!(
+            fs::read(launcher.join("Launch3ds.class")).expect("class"),
+            LAUNCHER_CLASS
+        );
+        assert!(LAUNCHER_CLASS.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]));
+        let source = fs::read_to_string(launcher.join("Launch3ds.java")).expect("source");
+        assert!(source.starts_with("// SPDX-License-Identifier: GPL-3.0-or-later"));
+        let args = fs::read_to_string(work.path().join("randomized.args")).expect("args");
+        let args: Vec<&str> = args.lines().collect();
+        let classes = std::env::join_paths([randomizer.jar(), launcher]).expect("paths");
+        assert_eq!(
+            args[..5],
+            [
+                "-Xmx4608M",
+                "-Djava.awt.headless=true",
+                "-cp",
+                classes.to_str().expect("utf-8"),
+                "Launch3ds"
+            ]
+        );
+        assert_eq!(args[5..7], ["-i", game.to_str().expect("utf-8")]);
+        assert_eq!(args.last(), Some(&"-d"));
+
+        // Made again, the same run is used as it is.
+        let again = randomize_3ds_in(
+            &randomizer,
+            &game,
+            settings,
+            123_456,
+            &image,
+            &shared,
+            &work,
+        );
+        assert_eq!(again, Ok(made));
+
+        // Never played, it goes with its console and log; the game stays.
+        assert!(has_no_save_3ds(&image, &shared));
+        assert!(remove_unplayed_in(&hacks, &image));
+        assert!(!image.exists() && !console.exists() && !log.exists());
+        assert_eq!(fs::read(&game).expect("game"), ncch(0x0004_0000_0011_C400));
+
+        // From the game's save: a copy on the run's console, which makes
+        // it one that was played, and kept.
+        randomize_3ds_in(
+            &randomizer,
+            &game,
+            settings,
+            123_456,
+            &image,
+            &shared,
+            &work,
+        )
+        .expect("randomized");
+        carry_over_from(&game, &image, true, Some(&shared)).expect("copied");
+        assert_eq!(fs::read(console.join(&save)).expect("save"), b"save");
+        assert!(!has_no_save_3ds(&image, &shared));
+        assert!(!remove_unplayed_in(&hacks, &image));
+        assert!(image.exists() && console.is_dir());
+        // A run is never made over a console with a save on it.
+        fs::remove_file(&image).expect("removed");
+        let refused = randomize_3ds_in(
+            &randomizer,
+            &game,
+            settings,
+            123_456,
+            &image,
+            &shared,
+            &work,
+        )
+        .expect_err("in the way");
+        assert!(
+            refused.starts_with("Cannot keep the randomized game: "),
+            "{refused}"
+        );
+        assert_eq!(fs::read(console.join(&save)).expect("save"), b"save");
+        assert_eq!(fs::read(shared.join(&save)).expect("own"), b"save");
+        drop(work);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Whether the 3DS game at `game` has no save data on its console.
+    fn has_no_save_3ds(game: &Path, shared: &Path) -> bool {
+        saves_3ds(game, shared).files().is_empty()
+    }
+
+    #[test]
+    fn a_game_given_another_name_is_never_copied_over_itself() {
+        let dir = temp_dir("link");
+        let (game, image) = (dir.join("game.3ds"), dir.join("run.3ds"));
+        write(&game, b"the game");
+        link(&game, &image).expect("linked");
+        assert_eq!(fs::read(&image).expect("image"), b"the game");
+        // Again, over what is the same file: left as it is.
+        link(&game, &image).expect("linked");
+        assert_eq!(fs::read(&game).expect("game"), b"the game");
+        fs::remove_file(&image).expect("removed");
+        assert_eq!(fs::read(&game).expect("game"), b"the game", "one name less");
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     #[cfg_attr(
         windows,
@@ -1404,8 +1889,10 @@ echo "Randomized successfully!"
 
     /// Downloads FVX for real (41 MB) into `DS_EMULATOR_RANDOMIZER_DATA`,
     /// or a temporary folder, and randomizes the ROM at
-    /// `DS_EMULATOR_RANDOMIZE_ROM` with each preset into a temporary hacks
-    /// folder, printing where each game went.
+    /// `DS_EMULATOR_RANDOMIZE_ROM` with each preset, each with a seed of
+    /// its own, into a temporary hacks folder, printing where each game
+    /// went. Each is then given the game's save, as Copy My Save does. Set
+    /// `DS_EMULATOR_HOME` for a 3DS game, whose console is in the home.
     #[test]
     #[ignore = "downloads from GitHub and needs a Pokémon ROM"]
     fn randomizes_for_real() {
@@ -1422,17 +1909,10 @@ echo "Randomized successfully!"
             rom.display()
         );
         let hacks = temp_dir("real-hacks");
-        for preset in Preset::ALL {
+        for (preset, seed) in Preset::ALL.into_iter().zip(482_913..) {
             let started = std::time::Instant::now();
-            let made = randomize(
-                &randomizer,
-                &rom,
-                "Test",
-                preset.settings(),
-                482_913,
-                &hacks,
-            )
-            .expect("randomized");
+            let made = randomize(&randomizer, &rom, "Test", preset.settings(), seed, &hacks)
+                .expect("randomized");
             eprintln!(
                 "{}: {} in {:.1?}",
                 preset.label(),
@@ -1440,7 +1920,8 @@ echo "Randomized successfully!"
                 started.elapsed()
             );
             let log = fs::read_to_string(made.log.expect("a log")).expect("log");
-            assert!(log.contains("482913"), "the log names the seed");
+            assert!(log.contains(&seed.to_string()), "the log names the seed");
+            carry_over(&rom, &made.rom, true).expect("given the game's save");
         }
     }
 }

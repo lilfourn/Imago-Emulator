@@ -152,7 +152,8 @@ impl Candidate {
             1 => "GB",
             2 => "GBC",
             3 => "GBA",
-            _ => "DS",
+            4 | 5 => "DS",
+            _ => "3DS",
         };
         let detail = format!("{system} · Gen {}", self.generation);
         match self.seed {
@@ -1096,6 +1097,8 @@ mod tests {
         assert_eq!(game(2).detail(), "GBC · Gen 2");
         assert_eq!(game(3).detail(), "GBA · Gen 3");
         assert_eq!(game(5).detail(), "DS · Gen 5");
+        assert_eq!(game(6).detail(), "3DS · Gen 6");
+        assert_eq!(game(7).detail(), "3DS · Gen 7");
         let randomized = Candidate {
             seed: Some(336_933),
             ..game(4)

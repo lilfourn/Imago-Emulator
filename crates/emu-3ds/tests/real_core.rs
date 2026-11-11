@@ -106,7 +106,7 @@ fn play(home: &Path) -> Result<(), String> {
     let helper = std::env::current_exe().map_err(|error| error.to_string())?;
     let started = Instant::now();
     let mut core =
-        emu_3ds::ThreeDs::open(&game, &data, &helper).map_err(|error| error.to_string())?;
+        emu_3ds::ThreeDs::open(&game, &data, &data, &helper).map_err(|error| error.to_string())?;
     println!("started the helper in {:.1?}", started.elapsed());
 
     let started = Instant::now();

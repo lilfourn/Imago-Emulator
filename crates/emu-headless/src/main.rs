@@ -19,7 +19,9 @@
 //! started again. The core and the console's files are kept in
 //! `--work-dir`, by default the app's own
 //! (`~/Library/Application Support/ds-emulator/3DS`), and the core is
-//! downloaded there the first time. Should the helper stop, the run ends
+//! downloaded there the first time. A game with a console of its own
+//! beside it (`Game.console`, as a randomized run has) plays on that one,
+//! with its own saves and its mod. Should the helper stop, the run ends
 //! there with exit status 1, saying why. An installable title (`.cia`)
 //! plays as the executable it holds, written out the first time into
 //! `Games` in `--work-dir`, by default in `~/Library/Caches/emu-headless`;
@@ -317,7 +319,8 @@ fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
                 .context("there is no folder to keep the 3DS core in; pass --work-dir")?,
         };
         let helper = std::env::current_exe().context("cannot find emu-headless to start again")?;
-        let core = emu_3ds::ThreeDs::open(&playable_3ds(args)?, &data, &helper)?;
+        let console = emu_3ds::console_of(&args.rom, &data);
+        let core = emu_3ds::ThreeDs::open(&playable_3ds(args)?, &data, &console, &helper)?;
         return Ok((system, Box::new(core)));
     }
     let rom = fs::read(&args.rom).with_context(|| format!("reading {}", args.rom.display()))?;

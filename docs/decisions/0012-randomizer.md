@@ -144,3 +144,49 @@ made once, by FVX, into the hacks folder. What changed is whose it is:
 
 A library file with a run in it is not read by a build from before this:
 it says so and leaves the file alone.
+
+## Update, 2026-11-11: the 3DS games
+
+Decision 7 left out X, Y, Omega Ruby, Alpha Sapphire, Sun, Moon, Ultra Sun
+and Ultra Moon: Azahar keeps a game's save by its title ID, so a
+randomized copy would share the save of the game it was made from. They
+are offered now, each known by its title ID.
+
+1. **A 3DS run is a console of its own, not a ROM.** Azahar's core keeps
+   everything in the one folder it is given: the NAND, the SD card with
+   the saves, and the mods it loads over a game
+   (`Azahar/load/mods/<title ID>/`). The app gave every game the same
+   folder. A game with a folder beside it named as it is, with `console`
+   for its extension, now plays on that one instead
+   (`emu_3ds::own_console`). The run's console holds what FVX changed and
+   the run's save; the NAND, system files and compiled shaders are copied
+   from the shared console when it is made, so the run starts as the game
+   does and its first minutes do not stall on shaders.
+2. **FVX writes what it changed, not a game.** With `-d` it writes the
+   game's code and the files it changed as a folder, about 30 MB in five
+   seconds, where a whole game is 2 GB. That folder is the mod.
+3. **The run's image is the game under another name**: a hard link in the
+   hacks folder, or a copy where the game is on another disk. The library
+   and the emulator know a run by its image's path, so nothing else
+   changes: the run's states and checkpoint sit beside the image, the
+   switch opens it, and its console is found beside it. An installable
+   title's run is of the executable it holds. The image is never written
+   to, and never copied over: it may be the game itself.
+4. **Copy My Save copies the game's save data and extdata** from its
+   console's SD card to the run's. A run is unplayed, and removed when a
+   new seed takes its place, only while nothing has saved on its console.
+5. **A launcher, under the GPL.** FVX's command line refuses 3DS games:
+   only its window tells its ROM opener that Java has the memory they
+   need, and the flag is private. `assets/randomizer/Launch3ds.java` sets
+   it by reflection and runs the command line. It links to FVX, so it is
+   GPL-3.0-or-later, the one file in this repository that is. The owner
+   chose this over asking FVX to change. FVX's Java has no compiler, so
+   the app carries the class compiled
+   (`scripts/randomizer/build-launcher.sh`), and writes it and its source
+   into `Randomizer/launcher/`, where FVX's Java runs it as a program of
+   its own. Nothing of the app is linked to it. FVX 1.6.3 has the same
+   gate.
+
+Not done: a game update (FVX can take one with `-u`), which the core
+cannot install either. One of Azahar's compressed games is not offered,
+as FVX cannot read it.
