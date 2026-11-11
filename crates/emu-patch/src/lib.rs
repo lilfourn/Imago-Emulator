@@ -12,14 +12,18 @@
 //! | UPS | `UPS1` | CRC-32 of source, target and patch | byuu's UPS |
 //! | BPS | `BPS1` | CRC-32 of source, target and patch | `bps_spec.md` of beat and Flips |
 //! | xdelta | `D6 C3 C4 00` | Adler-32 of each window | RFC 3284, with xdelta3's additions |
+//! | Archipelago | `PK` (a zip) | MD5 of source | `worlds/Files.py` of Archipelago 0.6 |
 //!
 //! UPS and BPS name their source by checksum ([`source_crc32`]), so a
 //! frontend can find it among the user's games, and both check the
 //! result. An xdelta patch checks its result only. An IPS patch checks
-//! nothing: applied to the wrong ROM, it makes a broken game.
+//! nothing: applied to the wrong ROM, it makes a broken game. An
+//! Archipelago patch, a randomized game's, names its source by MD5
+//! ([`source_md5`]) and checks that, not its result.
 //!
 //! Knows formats, not files: patches, sources and targets are bytes.
 
+mod archipelago;
 mod beat;
 mod ips;
 mod reader;
@@ -40,6 +44,10 @@ pub enum Format {
     /// VCDIFF, as xdelta3 writes it; usual for DS hacks, whose ROMs are
     /// too big for IPS.
     Vcdiff,
+    /// An Archipelago patch (`.apemerald`, `.apred`): a zip of a bsdiff
+    /// patch and edits made after it, for a game whose items Archipelago
+    /// moved about.
+    Archipelago,
 }
 
 impl Format {
@@ -54,6 +62,8 @@ impl Format {
             Some(Self::Bps)
         } else if patch.starts_with(&vcdiff::MAGIC) {
             Some(Self::Vcdiff)
+        } else if patch.starts_with(&archipelago::MAGIC) {
+            Some(Self::Archipelago)
         } else {
             None
         }
@@ -67,6 +77,7 @@ impl Format {
             Self::Ups => "UPS",
             Self::Bps => "BPS",
             Self::Vcdiff => "xdelta",
+            Self::Archipelago => "Archipelago",
         }
     }
 }
@@ -75,7 +86,7 @@ impl Format {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PatchError {
     /// The bytes are not a patch in any of the formats.
-    #[error("it is not an IPS, UPS, BPS or xdelta patch")]
+    #[error("it is not an IPS, UPS, BPS, xdelta or Archipelago patch")]
     UnknownFormat,
     /// The patch is cut short, fails its own checksum, or says something
     /// impossible.
@@ -88,6 +99,14 @@ pub enum PatchError {
         expected: u32,
         /// The CRC-32 of the ROM it was given.
         actual: u32,
+    },
+    /// The patch names another ROM as its source, by MD5.
+    #[error("the patch is for a different ROM: one with MD5 {expected}, not {actual}")]
+    WrongRom {
+        /// The MD5 of the ROM the patch was made from, in lowercase hex.
+        expected: String,
+        /// The MD5 of the ROM it was given.
+        actual: String,
     },
     /// The ROM given is the patch's target: the hacked game already.
     #[error("the game is already patched")]
@@ -120,6 +139,7 @@ pub fn apply(patch: &[u8], source: &[u8], limit: usize) -> Result<Vec<u8>, Patch
         Format::Ups => beat::apply_ups(patch, source, limit),
         Format::Bps => beat::apply_bps(patch, source, limit),
         Format::Vcdiff => vcdiff::apply(patch, source, limit),
+        Format::Archipelago => archipelago::apply(patch, source, limit),
     }
 }
 
@@ -129,6 +149,33 @@ pub fn apply(patch: &[u8], source: &[u8], limit: usize) -> Result<Vec<u8>, Patch
 pub fn source_crc32(patch: &[u8]) -> Option<u32> {
     match Format::of(patch)? {
         Format::Ups | Format::Bps => beat::source_crc32(patch),
-        Format::Ips | Format::Vcdiff => None,
+        Format::Ips | Format::Vcdiff | Format::Archipelago => None,
     }
+}
+
+/// The MD5 of the ROM `patch` was made from, in lowercase hex, for the
+/// format that records it: Archipelago's.
+#[must_use]
+pub fn source_md5(patch: &[u8]) -> Option<String> {
+    match Format::of(patch)? {
+        Format::Archipelago => archipelago::source_md5(patch),
+        _ => None,
+    }
+}
+
+/// The extension of the game `patch` makes, as `gba`, for the format that
+/// says: Archipelago's. The others make a game of their source's kind.
+#[must_use]
+pub fn target_extension(patch: &[u8]) -> Option<String> {
+    match Format::of(patch)? {
+        Format::Archipelago => archipelago::target_extension(patch),
+        _ => None,
+    }
+}
+
+/// The MD5 of `bytes`, in lowercase hex, to find a patch's source by
+/// ([`source_md5`]).
+#[must_use]
+pub fn md5(bytes: &[u8]) -> String {
+    archipelago::md5_hex(bytes)
 }

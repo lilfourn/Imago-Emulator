@@ -7,10 +7,19 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Pure Rust (MIT or Apache-2.0), reading only: an Archipelago patch's
+# bsdiff holds three bzip2 streams.
+bzip2-rs = "0.1"
 crc32fast.workspace = true
 # Pure Rust (MIT): xdelta3 compresses parts of its patches as .xz streams.
 lzma-rs = "0.3"
+# An Archipelago patch names the ROM it is for by its MD5.
+md-5 = "0.10"
+# Its manifest.
+serde_json = "1"
 thiserror.workspace = true
+# An Archipelago patch is a zip; as emu-app reads zips.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [lints]
 workspace = true

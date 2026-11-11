@@ -70,3 +70,42 @@ patch states.
 - Patches are tested against ones made by Floating IPS and xdelta3 from
   made-up ROMs (`scripts/make-patch-fixtures.sh`). A 128 MiB DS-sized
   patch applies in well under a second.
+
+## Update, 2026-11-11: Archipelago patches
+
+The owner wants every kind of Pokémon randomizer playable. FVX shuffles
+Pokémon; [Archipelago](https://archipelago.gg) shuffles where items and
+key items are, and hands each player a patch for their own ROM. That is a
+patch like any other here, so it is read where the others are.
+
+1. **`emu-patch` reads the container**, as `worlds/Files.py` of
+   Archipelago 0.6.8 writes it (format version 7): a zip with
+   `archipelago.json` and the files its `procedure` names. Two steps are
+   read, all that Pokémon Emerald's and Red and Blue's patches use:
+   `apply_bsdiff4`, a bsdiff 4.0 patch, and `apply_tokens`, small edits
+   made after it. A manifest with no procedure is one `delta.bsdiff4`. A
+   step of a game's own, a newer format, or a "custom" procedure is
+   refused by name.
+2. **bzip2 is unpacked by `bzip2-rs`** (MIT or Apache-2.0, pure Rust,
+   reading only): a bsdiff patch is three bzip2 streams. libbzip2's own
+   licence is not on the list. Each stream is held to the size of the game
+   it makes before it is unpacked further. `md-5` was in the lock file
+   already; `zip` and `serde_json` are the ones the app uses.
+3. **The game is named by MD5**, which the library does not keep. The app
+   reads the library's games of the kind the patch makes (`.gba` for
+   Emerald) until one matches, and otherwise asks, as for an IPS patch. A
+   ROM that is not the one named is refused with both checksums: bsdiff
+   checks nothing, and would make a broken game.
+4. **It becomes a game of its own**, as a hack does, not the game's
+   randomized run: its seed and settings are Archipelago's, made on its
+   site, and a run's switch would hide that it needs a patch from there.
+5. **No client.** The patched ROM holds what its own player finds, so a
+   single-player seed plays through. Items sent between players go
+   through Archipelago's server, which the app does not speak to.
+
+Checked against Archipelago's own code, not a real seed: the fixtures are
+written by its `Files.py` and applied again by it
+(`scripts/make-archipelago-fixtures.py`), and the tests hold this crate
+to the same bytes. No patch from archipelago.gg has been applied, and no
+game made from one played: the owner's library has no Emerald, Red or
+Blue to make one for.

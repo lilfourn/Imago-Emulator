@@ -196,7 +196,9 @@ What else there is, for later:
   patches (`.apemerald`, `.apred`, and community worlds for Crystal,
   FireRed, Platinum and HeartGold). A single-player seed plays in any
   emulator without its client. The patch is a zip of a bsdiff and a list
-  of byte edits, which `emu-patch` does not read yet.
+  of byte edits, which `emu-patch` reads since 2026-11-11 (decision
+  0009's update), checked against Archipelago's own code but not yet on
+  a patch from its site.
 - **Hacks**: FVX runs on a hack that keeps its game's code, without
   saying so, and may break it. Drayano's hacks and the CFRU ones (Radical
   Red, Unbound) are known to break; those two have a randomizer of their
