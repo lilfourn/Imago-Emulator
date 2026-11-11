@@ -230,10 +230,10 @@ impl LibraryView {
         let detail = match pictures.played {
             Some(played) => format!(
                 "{} · Played {}",
-                platform_name(game.platform),
+                system_line(game),
                 ago(played, SystemTime::now())
             ),
-            None => platform_name(game.platform).to_owned(),
+            None => system_line(game),
         };
         let path = game.path.clone();
         let resume = div()
@@ -659,11 +659,7 @@ impl LibraryView {
                                 .text_color(rgb(DIM))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
-                                .child(line(
-                                    platform_name(game.platform),
-                                    11.0,
-                                    gpui::FontWeight::NORMAL,
-                                )),
+                                .child(line(&system_line(game), 11.0, gpui::FontWeight::NORMAL)),
                         ),
                 ),
             )
@@ -719,8 +715,10 @@ impl LibraryView {
 
     /// The menu of `game`, whose files say `facts` once read: its picture,
     /// title and system; when and how long it has been played, its saves
-    /// and its size; then Play, Show in Finder, Randomize… for a Pokémon
-    /// game the randomizer knows, and Remove from Library.
+    /// and its size; then Play, Show in Finder and Remove from Library. A
+    /// Pokémon game the randomizer knows has Randomize… too, or once it
+    /// has a randomized run, Randomized, which switches the run on and
+    /// off, and New Seed….
     fn game_menu(
         &self,
         game: &Game,
@@ -734,8 +732,8 @@ impl LibraryView {
 
         let words = inner - THUMBNAIL - 10.0;
         let system = match &game.serial {
-            Some(serial) => format!("{} · {serial}", platform_name(game.platform)),
-            None => platform_name(game.platform).to_owned(),
+            Some(serial) => format!("{} · {serial}", system_line(game)),
+            None => system_line(game),
         };
         let header = div()
             .flex()
@@ -877,20 +875,46 @@ impl LibraryView {
             }))
         })
         .children(probe::part("menu.action:reveal"));
-        let randomize = randomizable.then(|| {
+        let run = game.randomized.as_ref();
+        // The switch: which of the two the game plays, said as it is now.
+        let switch = run.map(|run| {
+            let (path, on) = (game.path.clone(), !run.on);
+            let now = if run.on { "On" } else { "Off" };
             menu_action(
-                "menu-randomize",
+                "menu-randomized",
                 icons::SHUFFLE,
-                "Randomize…",
-                None,
+                "Randomized",
+                Some(now.to_owned()),
                 TEXT,
                 true,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.close_menu(cx);
-                cx.emit(LibraryEvent::Randomize(randomize_path.clone()));
+                let at = this.menu.as_ref().map(|menu| menu.at);
+                this.switch_randomized(&path, on, cx);
+                // Its saves and states are the other file's now.
+                if let Some(at) = at {
+                    this.open_menu(path.clone(), at, cx);
+                }
             }))
-            .children(probe::part("menu.action:randomize"))
+            .children(probe::part("menu.action:randomized"))
+        });
+        let randomize = (randomizable || run.is_some()).then(|| {
+            let label = if run.is_some() {
+                "New Seed…"
+            } else {
+                "Randomize…"
+            };
+            let icon = if run.is_some() {
+                icons::REFRESH
+            } else {
+                icons::SHUFFLE
+            };
+            menu_action("menu-randomize", icon, label, None, TEXT, true)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.close_menu(cx);
+                    cx.emit(LibraryEvent::Randomize(randomize_path.clone()));
+                }))
+                .children(probe::part("menu.action:randomize"))
         });
         let remove = menu_action(
             "menu-remove",
@@ -929,6 +953,7 @@ impl LibraryView {
             .child(rule())
             .child(play)
             .child(reveal)
+            .children(switch)
             .children(randomize)
             .child(rule())
             .child(remove)
@@ -1378,6 +1403,16 @@ fn menu_action(
         .child(icons::icon(icon, icons::SIZE, colour))
         .child(div().flex_1().child(label))
         .children(keys.map(|keys| div().text_size(px(12.0)).text_color(rgb(DIM)).child(keys)))
+}
+
+/// `game`'s system, and that it is randomized while its randomized run
+/// is what it plays: `Nintendo DS · Randomized`.
+fn system_line(game: &Game) -> String {
+    let system = platform_name(game.platform);
+    match &game.randomized {
+        Some(run) if run.on => format!("{system} · Randomized"),
+        _ => system.to_owned(),
+    }
 }
 
 /// `game`'s picture, `side` square, atop its menu: its box art, or the

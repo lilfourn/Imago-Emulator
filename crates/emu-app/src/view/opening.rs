@@ -234,6 +234,13 @@ impl EmulatorView {
             }
             None => {
                 self.show_warning(why, cx);
+                // A game switched to its randomized run, or back, that
+                // could not load goes on playing what still runs.
+                if let Some(session) = self.game.session() {
+                    let playing = session.rom_paths.clone();
+                    self.library
+                        .update(cx, |library, cx| library.played(&playing, cx));
+                }
                 if self.game.session().is_none() {
                     // Not the name of a game that stopped for this one.
                     window.set_window_title("Imago Emulator");
@@ -319,8 +326,10 @@ impl EmulatorView {
         let (events, receiver) = async_channel::unbounded();
         let rom_paths = loaded.rom_paths().to_vec();
         let played = rom_paths.clone();
-        self.library
-            .update(cx, |library, cx| library.add(played, cx));
+        self.library.update(cx, |library, cx| {
+            library.played(&played, cx);
+            library.add(played, cx);
+        });
         let player_rom_paths = loaded.player_rom_paths().to_vec();
         let files = loaded.files().to_vec();
         let states = loaded.states();

@@ -42,7 +42,7 @@ use crate::debugger_window::DebuggerWindow;
 use crate::emulator::{self, CHECKPOINT, Command, Emulator, Event, Opened, OwnSaves};
 use crate::filter::Filter;
 use crate::fonts;
-use crate::game_menu::{CheatRow, GameMenu, MenuEvent};
+use crate::game_menu::{CheatRow, GameMenu, MenuEvent, RandomizerRow};
 use crate::gamepad::{self, PadEvent};
 use crate::gpu_upscale::{Bgra, Gpu, GpuDevice, GpuError, Method, Request};
 use crate::guide::{self, GuideEvent, GuideGame, GuidePanel};
@@ -58,6 +58,7 @@ use crate::persist::{self, GameFiles, GameLock, StateFiles, file_name};
 use crate::picture::{self, Look, Picture, Resolution3d};
 use crate::probe;
 use crate::randomize_window::{self, RandomizeWindow};
+use crate::randomizer;
 use crate::romhack::{self, MakeError};
 use crate::settings::{self, Settings, WindowPlace};
 use crate::settings_window::SettingsWindow;
@@ -1379,12 +1380,121 @@ impl EmulatorView {
         self.release_all();
         self.send_debug(debugger::Command::Pause);
         let cheats = self.menu_cheats();
-        let menu = cx.new(|_| GameMenu::new(title, cheats, controls));
+        // What the library knows of its randomizer shows at once; whether
+        // the randomizer knows the game, and its log, once read.
+        let game = self.library.read(cx).game_of(&rom);
+        let randomizer = randomizer_row(game.as_ref(), false, false);
+        let menu = cx.new(|_| GameMenu::new(title, cheats, controls, randomizer));
         let subscription = cx.subscribe_in(&menu, window, Self::menu_event);
         self.menu = Some((menu, subscription));
+        self.read_menu_randomizer(cx);
         // The menu says progress is saved; make it so.
         self.save_checkpoint();
         cx.notify();
+    }
+
+    /// The game the open menu is for: the active player's.
+    fn menu_rom(&self) -> Option<PathBuf> {
+        let session = self.game.session()?;
+        self.menu.as_ref()?;
+        let player = self.input.player().min(session.player_rom_paths.len() - 1);
+        Some(session.player_rom_paths[player].clone())
+    }
+
+    /// Reads, off the UI thread, what the open game menu is to say of its
+    /// game's randomizer, then shows it: whether the randomizer knows the
+    /// game, by its header, and whether its randomized run has a spoiler
+    /// log.
+    fn read_menu_randomizer(&mut self, cx: &mut Context<Self>) {
+        let Some(rom) = self.menu_rom() else {
+            return;
+        };
+        let game = self.library.read(cx).game_of(&rom);
+        let base = game
+            .as_ref()
+            .map_or_else(|| rom.clone(), |game| game.path.clone());
+        let run = game.and_then(|game| game.randomized);
+        let read = cx.background_executor().spawn(async move {
+            let known =
+                randomizer::UNSUPPORTED.is_none() && randomizer::generation(&base).is_some();
+            let log = run.is_some_and(|run| randomizer::log_of(&run.image).is_some());
+            (known, log)
+        });
+        cx.spawn(async move |this, cx| {
+            let (known, log) = read.await;
+            this.update(cx, |this, cx| {
+                // Still the menu of that game.
+                if this.menu_rom().as_ref() != Some(&rom) {
+                    return;
+                }
+                let game = this.library.read(cx).game_of(&rom);
+                let row = randomizer_row(game.as_ref(), known, log);
+                if let Some((menu, _)) = &this.menu {
+                    menu.update(cx, |menu, cx| menu.set_randomizer(row, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Switches the menu's game to its randomized run, or back from it,
+    /// and plays that in its place: each picks up where it was left, as
+    /// each has its own saves. The session's other games stay as they
+    /// are. A game with no run yet is set one up.
+    fn switch_randomizer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rom) = self.menu_rom() else {
+            return;
+        };
+        let game = self.library.read(cx).game_of(&rom);
+        let Some((base, run)) = game.and_then(|game| Some((game.path, game.randomized?))) else {
+            self.set_up_randomizer(window, cx);
+            return;
+        };
+        let plays = self.library.update(cx, |library, cx| {
+            library.switch_randomized(&base, !run.on, cx)
+        });
+        let (Some(plays), Some(session)) = (plays, self.game.session()) else {
+            return;
+        };
+        if plays == rom {
+            return;
+        }
+        let roms = session.rom_paths.iter();
+        let roms = roms.map(|path| {
+            if *path == rom {
+                plays.clone()
+            } else {
+                path.clone()
+            }
+        });
+        self.open(roms.collect(), window, cx);
+    }
+
+    /// Opens the randomize window with the menu's game chosen, to make its
+    /// randomized run, or a new one.
+    fn set_up_randomizer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rom) = self.menu_rom() else {
+            return;
+        };
+        let game = self.library.read(cx).game_of(&rom);
+        let base = game.map_or(rom, |game| game.path);
+        self.show_randomizer(Some(base), window, cx);
+    }
+
+    /// Opens the spoiler log of the menu's game's randomized run in the
+    /// text editor.
+    fn open_spoiler_log(&mut self, cx: &mut Context<Self>) {
+        let game = self
+            .menu_rom()
+            .and_then(|rom| self.library.read(cx).game_of(&rom));
+        let Some(run) = game.and_then(|game| game.randomized) else {
+            return;
+        };
+        if let Err(error) = emu_os::process::open_in_text_editor(&randomizer::log_path(&run.image))
+        {
+            self.show_notice(format!("Cannot open the spoiler log: {error}"), cx);
+        }
     }
 
     /// Closes the game menu, if open, and plays on.
@@ -1419,6 +1529,9 @@ impl EmulatorView {
             MenuEvent::EditCheats => self.edit_cheats(&EditCheats, window, cx),
             MenuEvent::StartOver => self.start_over(window, cx),
             MenuEvent::ExitToLibrary => self.close_game(window, cx),
+            MenuEvent::SwitchRandomizer => self.switch_randomizer(window, cx),
+            MenuEvent::SetUpRandomizer => self.set_up_randomizer(window, cx),
+            MenuEvent::OpenSpoilerLog => self.open_spoiler_log(cx),
         }
     }
 
@@ -1501,7 +1614,12 @@ impl EmulatorView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            LibraryEvent::Play(path) => self.open(vec![path.clone()], window, cx),
+            // A game with its randomized run on plays the run.
+            LibraryEvent::Play(path) => {
+                let plays = self.library.read(cx).play_path_of(path);
+                self.open(vec![plays], window, cx);
+            }
+            LibraryEvent::RandomizedChanged(_) => self.read_menu_randomizer(cx),
             LibraryEvent::AddGames => self.add_to_library(&AddToLibrary, window, cx),
             LibraryEvent::OpenSettings => self.show_settings(cx),
             LibraryEvent::Randomize(path) => self.show_randomizer(Some(path.clone()), window, cx),
@@ -3130,8 +3248,31 @@ fn guide_stage(
     (((viewport.0 - width).max(1.0), viewport.1), Some(width))
 }
 
+/// What the game menu says of the randomizer for `game`, the library's
+/// record of the game it is for: nothing unless the game has a randomized
+/// run or the randomizer knows it (`known`). `log` is whether the run has
+/// a spoiler log.
+fn randomizer_row(game: Option<&library::Game>, known: bool, log: bool) -> Option<RandomizerRow> {
+    let run = game.and_then(|game| game.randomized.as_ref());
+    (known || run.is_some()).then(|| RandomizerRow {
+        on: run.is_some_and(|run| run.on),
+        run: run.map(|run| match run.settings.as_deref() {
+            Some(settings) => {
+                format!(
+                    "{} · Seed {}",
+                    randomizer::changes_label(settings),
+                    run.seed
+                )
+            }
+            None => format!("Seed {}", run.seed),
+        }),
+        log: log && run.is_some(),
+    })
+}
+
 /// What Guide is told about the game at `rom`, for `system`, from the
-/// library's record of it if it has one.
+/// library's record of it, or of the game whose randomized run it is, if
+/// it has one.
 fn guide_info(rom: &Path, system: System, game: Option<library::Game>) -> GuideGame {
     use crate::rom_info::Platform as Shelf;
     use emu_guide::game::{GameContext, Kind, Platform};
@@ -3154,8 +3295,20 @@ fn guide_info(rom: &Path, system: System, game: Option<library::Game>) -> GuideG
         |game| game.title.clone(),
     );
     let release = game.as_ref().and_then(|game| game.name.clone());
+    // The game's randomized run, which the library keeps with the game it
+    // was made from: that game is what the wikis describe.
+    let run_of = game.as_ref().filter(|game| {
+        let run = game.randomized.as_ref();
+        run.is_some_and(|run| run.image == rom)
+    });
     let kind = if platform == Platform::RpgMaker {
         Kind::FanGame
+    } else if let Some(game) = run_of {
+        let release = release.as_deref();
+        let listed = release.map(|name| name.split(" (").next().unwrap_or(name).trim());
+        Kind::Randomized {
+            base: listed.unwrap_or(&game.title).to_owned(),
+        }
     } else if let Some(at) = stem.find(" (Random ") {
         Kind::Randomized {
             base: stem[..at].to_owned(),
@@ -3304,8 +3457,9 @@ mod tests {
             name: Some("Pokemon - Platinum Version (USA) (Rev 1)".to_owned()),
             looked_up: true,
             play_time: Duration::from_secs(60),
+            randomized: None,
         };
-        let info = guide_info(&retail.path.clone(), System::Nds, Some(retail));
+        let info = guide_info(&retail.path.clone(), System::Nds, Some(retail.clone()));
         assert_eq!(info.context.kind, Kind::Retail);
         assert_eq!(info.context.platform, Platform::Ds);
         assert_eq!(info.context.short_title(), "Platinum");
@@ -3315,6 +3469,51 @@ mod tests {
             None,
         );
         assert_eq!(info.key, unread.key);
+
+        // Its randomized run is the game the wikis describe, randomized;
+        // and the game itself is still the game while the run is on.
+        let image = PathBuf::from("/hacks/Pokemon - Platinum Version (Random 336933).nds");
+        let with_run = library::Game {
+            randomized: Some(library::Randomized {
+                image: image.clone(),
+                seed: 336_933,
+                settings: None,
+                on: true,
+            }),
+            ..retail
+        };
+        let run = guide_info(&image, System::Nds, Some(with_run.clone()));
+        assert_eq!(
+            run.context.kind,
+            Kind::Randomized {
+                base: "Pokemon - Platinum Version".to_owned()
+            }
+        );
+        assert_eq!(run.context.title, "Pokemon: Platinum Version");
+        assert_eq!(run.context.lookup_name(), "Pokemon - Platinum Version");
+        assert_ne!(run.key, info.key, "each has its own chats");
+        let own = guide_info(&with_run.path.clone(), System::Nds, Some(with_run.clone()));
+        assert_eq!(own.context.kind, Kind::Retail);
+
+        // What the game menu says of the randomizer.
+        assert_eq!(randomizer_row(None, false, false), None);
+        assert_eq!(
+            randomizer_row(None, true, false),
+            Some(RandomizerRow {
+                on: false,
+                run: None,
+                log: false
+            }),
+            "a game the randomizer knows, with no run yet"
+        );
+        assert_eq!(
+            randomizer_row(Some(&with_run), false, true),
+            Some(RandomizerRow {
+                on: true,
+                run: Some("Seed 336933".to_owned()),
+                log: true
+            })
+        );
 
         let random = Path::new("/games/Pokemon Emerald (Random 42).gba");
         let info = guide_info(random, System::Gba, None);

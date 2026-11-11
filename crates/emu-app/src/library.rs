@@ -11,7 +11,17 @@
 //! name = "Legend of Zelda, The - The Minish Cap (USA)"  # once looked up
 //! looked_up = true           # the game database has been asked
 //! play_time = 4520           # seconds played, once it has been
+//!
+//! [game.randomized]          # a Pokémon game with a randomized run
+//! image = "/Users/me/Library/Application Support/ds-emulator/Hacks/Emerald (Random 123456).gba"
+//! seed = 123456
+//! settings = "428AQgEB…"     # the randomizer's settings, once known
+//! on = true                  # the tile plays the randomized run
 //! ```
+//!
+//! A randomized run ([`Randomized`]) is not a game of its own: it belongs
+//! to the game it was made from, which plays it while its switch is on,
+//! and it keeps its own saves beside its image.
 //!
 //! A path is kept as text, so a game whose path is not valid Unicode (a
 //! file from an old archive, on Linux or Windows) cannot be written. It
@@ -20,7 +30,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +45,23 @@ use crate::rom_info::{Platform, RomInfo};
 /// game's saves sit next to the path the user gave.
 pub fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// A game's randomized run: a copy of its ROM the randomizer made (see
+/// `randomizer`), which the game plays in its own place while the run is
+/// on. The copy has its own battery save, states and checkpoint beside
+/// it, so the game as it was keeps its progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Randomized {
+    /// The randomized ROM, in the hacks folder.
+    pub image: PathBuf,
+    /// The seed it was made with, which tells runs apart.
+    pub seed: u32,
+    /// The randomizer's settings string it was made with. None for a run
+    /// made before runs were kept with their games.
+    pub settings: Option<String>,
+    /// Whether the game plays this run rather than itself.
+    pub on: bool,
 }
 
 /// One game in the library.
@@ -61,9 +88,29 @@ pub struct Game {
     /// How long it has been played, counted since play time was first
     /// kept (see [`PlayClock`]).
     pub play_time: Duration,
+    /// Its randomized run, if one has been made.
+    pub randomized: Option<Randomized>,
 }
 
 impl Game {
+    /// The file that plays when the game is chosen: its randomized run's
+    /// while that is on, or else its own.
+    pub fn play_path(&self) -> &Path {
+        match &self.randomized {
+            Some(run) if run.on => &run.image,
+            _ => &self.path,
+        }
+    }
+
+    /// Whether `path` is the game's own file, or its randomized run's.
+    fn is_at(&self, path: &Path) -> bool {
+        self.path == path
+            || self
+                .randomized
+                .as_ref()
+                .is_some_and(|run| run.image == path)
+    }
+
     /// The game in the ROM at `path`, which says `info`, before it is
     /// looked up.
     pub fn new(path: &Path, info: &RomInfo) -> Self {
@@ -86,6 +133,7 @@ impl Game {
             name: None,
             looked_up: false,
             play_time: Duration::ZERO,
+            randomized: None,
         }
     }
 
@@ -119,6 +167,7 @@ impl Game {
             name: None,
             looked_up: true,
             play_time: Duration::ZERO,
+            randomized: None,
         }
     }
 
@@ -142,8 +191,8 @@ pub struct Library {
 
 impl Library {
     /// Adds `game`, or replaces the game at the same path. A replaced game
-    /// keeps what the database said of it while the ROM is unchanged, and
-    /// how long it has been played.
+    /// keeps what the database said of it while the ROM is unchanged, how
+    /// long it has been played, and its randomized run.
     pub fn add(&mut self, mut game: Game) {
         match self.games.iter_mut().find(|known| known.path == game.path) {
             Some(known) => {
@@ -153,15 +202,119 @@ impl Library {
                     game.looked_up = true;
                 }
                 game.play_time = game.play_time.max(known.play_time);
+                if game.randomized.is_none() {
+                    game.randomized = known.randomized.take();
+                }
                 *known = game;
             }
             None => self.games.push(game),
         }
     }
 
-    /// Whether the game at `path` is in the library.
+    /// Whether the library has the game at `path`: as a game, or as a
+    /// game's randomized run, which is never a game of its own.
     pub fn contains(&self, path: &Path) -> bool {
-        self.games.iter().any(|game| game.path == path)
+        self.game_at(path).is_some()
+    }
+
+    /// The game at `path`, or the game whose randomized run is there.
+    pub fn game_at(&self, path: &Path) -> Option<&Game> {
+        let own = self.games.iter().find(|game| game.path == path);
+        own.or_else(|| self.games.iter().find(|game| game.is_at(path)))
+    }
+
+    /// Gives the game at `base` the randomized run `run`. Returns the run
+    /// it had before, if it had one; `Err` with the run if the library has
+    /// no such game.
+    pub fn set_randomized(
+        &mut self,
+        base: &Path,
+        run: Randomized,
+    ) -> Result<Option<Randomized>, Randomized> {
+        match self.games.iter_mut().find(|game| game.path == base) {
+            Some(game) => Ok(game.randomized.replace(run)),
+            None => Err(run),
+        }
+    }
+
+    /// Switches the randomized run of the game at `base` on or off.
+    /// Returns the file the game plays from now on, or `None` if the
+    /// library has no such game or it has no run.
+    pub fn switch_randomized(&mut self, base: &Path, on: bool) -> Option<PathBuf> {
+        let game = self.games.iter_mut().find(|game| game.path == base)?;
+        game.randomized.as_mut()?.on = on;
+        Some(game.play_path().to_owned())
+    }
+
+    /// The file at `path` is being played. If it is one of the two a game
+    /// with a randomized run has, its own or the run's, the run is
+    /// switched to match, so the game goes on playing whichever was played
+    /// last. Whether that changed anything.
+    pub fn played(&mut self, path: &Path) -> bool {
+        let Some(game) = self.games.iter_mut().find(|game| game.is_at(path)) else {
+            return false;
+        };
+        let Some(run) = &mut game.randomized else {
+            return false;
+        };
+        let on = run.image == path;
+        let changed = run.on != on;
+        run.on = on;
+        changed
+    }
+
+    /// Folds the randomized games that were listed as games of their own,
+    /// as they were before runs were kept with their games, into the games
+    /// they were made from: each game in the folder `hacks` named
+    /// `Title (Random 123456)` becomes the run of the one other game for
+    /// its system with its game code, or failing a code, its title. The
+    /// time it was played is added to that game's. The run is on if it was
+    /// played after the game it was made from; `played` says when the game
+    /// at a path last was. Returns how many were folded.
+    pub fn fold_randomized(
+        &mut self,
+        hacks: &Path,
+        played: impl Fn(&Path) -> Option<SystemTime>,
+    ) -> usize {
+        let mut folded = 0;
+        let mut at = 0;
+        while at < self.games.len() {
+            let copy = &self.games[at];
+            let run = copy
+                .path
+                .starts_with(hacks)
+                .then(|| random_name(&copy.path));
+            let Some((made_from, seed)) = run.flatten() else {
+                at += 1;
+                continue;
+            };
+            let mut bases = self.games.iter().enumerate().filter(|(_, base)| {
+                !base.path.starts_with(hacks)
+                    && base.randomized.is_none()
+                    && base.platform == copy.platform
+                    && match (&base.serial, &copy.serial) {
+                        (Some(base), Some(copy)) => base == copy,
+                        _ => file_title(&base.title) == made_from,
+                    }
+            });
+            // Two games it could be from, and it stays a game of its own.
+            let (Some((base, _)), None) = (bases.next(), bases.next()) else {
+                at += 1;
+                continue;
+            };
+            let copy = self.games.remove(at);
+            let base = &mut self.games[base - usize::from(base > at)];
+            let last = played(&copy.path);
+            base.randomized = Some(Randomized {
+                on: last.is_some() && last >= played(&base.path),
+                image: copy.path,
+                seed,
+                settings: None,
+            });
+            base.play_time += copy.play_time;
+            folded += 1;
+        }
+        folded
     }
 
     /// Takes the game at `path` out of the library: what it was and where,
@@ -179,10 +332,10 @@ impl Library {
         }
     }
 
-    /// Adds `time` to how long the game at `path` has been played. Whether
-    /// the library has it.
+    /// Adds `time` to how long the game at `path` has been played, which
+    /// may be its randomized run. Whether the library has it.
     pub fn add_play_time(&mut self, path: &Path, time: Duration) -> bool {
-        let Some(game) = self.games.iter_mut().find(|game| game.path == path) else {
+        let Some(game) = self.games.iter_mut().find(|game| game.is_at(path)) else {
             return false;
         };
         game.play_time += time;
@@ -227,6 +380,12 @@ impl Library {
                     name: entry.name,
                     looked_up: entry.looked_up,
                     play_time: Duration::from_secs(entry.play_time),
+                    randomized: entry.randomized.map(|run| Randomized {
+                        image: run.image,
+                        seed: run.seed,
+                        settings: run.settings,
+                        on: run.on,
+                    }),
                 })
             })
             .collect::<Result<_, LibraryError>>()?;
@@ -236,9 +395,7 @@ impl Library {
     /// The games the library file cannot hold, which are left out of it:
     /// those whose paths are not valid Unicode, as TOML text must be.
     pub fn left_out(&self) -> impl Iterator<Item = &Game> {
-        self.games
-            .iter()
-            .filter(|game| game.path.to_str().is_none())
+        self.games.iter().filter(|game| !writable(game))
     }
 
     /// The library as the TOML [`Library::from_toml`] reads, without the
@@ -253,7 +410,7 @@ impl Library {
             game: self
                 .games
                 .iter()
-                .filter(|game| game.path.to_str().is_some())
+                .filter(|game| writable(game))
                 .map(|game| GameEntry {
                     path: game.path.clone(),
                     platform: game.platform.tag().to_owned(),
@@ -263,6 +420,12 @@ impl Library {
                     name: game.name.clone(),
                     looked_up: game.looked_up,
                     play_time: game.play_time.as_secs(),
+                    randomized: game.randomized.as_ref().map(|run| RandomizedEntry {
+                        image: run.image.clone(),
+                        seed: run.seed,
+                        settings: run.settings.clone(),
+                        on: run.on,
+                    }),
                 })
                 .collect(),
         };
@@ -365,6 +528,48 @@ struct GameEntry {
     /// Seconds played.
     #[serde(default, skip_serializing_if = "is_zero")]
     play_time: u64,
+    /// Last, as TOML writes a table after a game's plain values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    randomized: Option<RandomizedEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RandomizedEntry {
+    image: PathBuf,
+    seed: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settings: Option<String>,
+    #[serde(default)]
+    on: bool,
+}
+
+/// Whether the library file can hold `game`: its path, and its randomized
+/// run's, are kept as text.
+fn writable(game: &Game) -> bool {
+    let run = game.randomized.as_ref();
+    game.path.to_str().is_some() && run.is_none_or(|run| run.image.to_str().is_some())
+}
+
+/// `title` as a file name: without the colons and slashes macOS's Finder
+/// and its file system disagree on. `Pokemon: Platinum Version` becomes
+/// `Pokemon - Platinum Version`.
+pub fn file_title(title: &str) -> String {
+    let title = title.replace(": ", " - ").replace([':', '/'], "-");
+    let title = title.trim();
+    if title.is_empty() {
+        "Pokémon".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
+/// The name of the randomized game at `path`: `Title (Random 123456).nds`
+/// names the game it was made from, as a file name, and its seed.
+pub fn random_name(path: &Path) -> Option<(String, u32)> {
+    let stem = path.file_stem()?.to_str()?;
+    let (made_from, seed) = stem.strip_suffix(')')?.rsplit_once(" (Random ")?;
+    Some((made_from.to_owned(), seed.parse().ok()?))
 }
 
 /// Whether no time was played: serde passes it by reference.
@@ -401,10 +606,11 @@ impl PlayClock {
     }
 }
 
-/// `game`'s own files, next to its ROM or folder, named as a session that
-/// plays it names them ([`emulator::files_of_listed`]).
+/// The files of what `game` plays, its randomized run while that is on
+/// ([`Game::play_path`]): next to that ROM or folder, named as a session
+/// that plays it names them ([`emulator::files_of_listed`]).
 pub fn files_of(game: &Game) -> persist::GameFiles {
-    emulator::files_of_listed(&game.path, game.platform == Platform::RpgMaker)
+    emulator::files_of_listed(game.play_path(), game.platform == Platform::RpgMaker)
 }
 
 /// Where `game` was left off: the save state of its checkpoint, which it
@@ -701,6 +907,195 @@ mod tests {
         // Added again, as by the store, it keeps its time.
         library.add(Game::new(path, &info(Platform::Gb, 7)));
         assert_eq!(library.games[0].play_time, Duration::from_millis(90_400));
+    }
+
+    /// A randomized run of a game, in the folder `hacks`.
+    fn run(hacks: &str, seed: u32) -> Randomized {
+        Randomized {
+            image: Path::new(hacks).join(format!("Platinum (Random {seed}).nds")),
+            seed,
+            settings: Some("428AQgEB".to_owned()),
+            on: true,
+        }
+    }
+
+    #[test]
+    fn a_game_plays_its_randomized_run_while_that_is_on() {
+        let path = Path::new("/roms/Platinum.nds");
+        let mut library = Library::default();
+        library.add(Game::new(path, &info(Platform::Nds, 1)));
+        assert_eq!(library.games[0].play_path(), path);
+        assert_eq!(library.switch_randomized(path, true), None, "no run yet");
+        assert_eq!(
+            library.set_randomized(Path::new("/roms/Gone.nds"), run("/hacks", 1)),
+            Err(run("/hacks", 1)),
+            "no such game"
+        );
+
+        let first = run("/hacks", 336_933);
+        assert_eq!(library.set_randomized(path, first.clone()), Ok(None));
+        assert_eq!(library.games[0].play_path(), first.image);
+        assert_eq!(
+            checkpoint_path(&library.games[0]),
+            first.image.with_extension("ss0")
+        );
+        // The run is the game's, not a game of its own.
+        assert!(library.contains(&first.image) && library.contains(path));
+        assert_eq!(
+            library.game_at(&first.image).map(|game| &*game.path),
+            Some(path)
+        );
+        assert_eq!(library.games.len(), 1);
+        assert!(library.add_play_time(&first.image, Duration::from_secs(30)));
+        assert_eq!(library.games[0].play_time, Duration::from_secs(30));
+
+        // Off, the game plays itself, and on again, the run.
+        assert_eq!(
+            library.switch_randomized(path, false).as_deref(),
+            Some(path)
+        );
+        assert_eq!(
+            checkpoint_path(&library.games[0]),
+            Path::new("/roms/Platinum.ss0")
+        );
+        assert_eq!(
+            library.switch_randomized(path, true),
+            Some(first.image.clone())
+        );
+        // Whichever of the two is played is what the game goes on playing.
+        assert!(library.played(path));
+        assert_eq!(library.games[0].play_path(), path);
+        assert!(!library.played(path), "already so");
+        assert!(library.played(&first.image));
+        assert_eq!(library.games[0].play_path(), first.image);
+        assert!(!library.played(Path::new("/roms/Other.nds")));
+
+        // A new run takes the old one's place, and a game added again,
+        // as it is when played, keeps its run.
+        let second = run("/hacks", 2);
+        assert_eq!(
+            library.set_randomized(path, second.clone()),
+            Ok(Some(first))
+        );
+        library.add(Game::new(path, &info(Platform::Nds, 1)));
+        assert_eq!(library.games[0].randomized, Some(second.clone()));
+
+        // It is kept in the file, and read back.
+        let text = library.to_toml().expect("writes");
+        assert!(text.contains("[game.randomized]"), "{text}");
+        assert!(text.contains("seed = 2"), "{text}");
+        assert_eq!(Library::from_toml(&text), Ok(library.clone()));
+        // A run made before settings were kept has none.
+        library.games[0].randomized = Some(Randomized {
+            settings: None,
+            on: false,
+            ..second
+        });
+        let text = library.to_toml().expect("writes");
+        assert!(!text.contains("settings"), "{text}");
+        assert_eq!(Library::from_toml(&text), Ok(library));
+    }
+
+    #[test]
+    fn randomized_games_listed_on_their_own_become_their_games_runs() {
+        let hacks = Path::new("/data/Hacks");
+        let ds = |name: &str, serial: &str| {
+            let mut info = info(Platform::Nds, 1);
+            info.serial = Some(serial.to_owned());
+            Game::new(&Path::new("/roms").join(name), &info)
+        };
+        let copy = |name: &str, serial: Option<&str>, platform| {
+            let mut info = info(platform, 2);
+            info.serial = serial.map(str::to_owned);
+            let mut game = Game::new(&hacks.join(name), &info);
+            game.made_from_patch();
+            game.play_time = Duration::from_secs(100);
+            game
+        };
+        let mut library = Library::default();
+        library.add(ds("White.nds", "IRAO"));
+        library.add(copy(
+            "Pokemon - Platinum Version (Random 336933).nds",
+            Some("CPUE"),
+            Platform::Nds,
+        ));
+        let mut platinum = ds("Platinum.nds", "CPUE");
+        platinum.play_time = Duration::from_secs(50);
+        library.add(platinum);
+        // A hack that is no randomized game, one whose game is not in
+        // the library, and one for a game the library has twice.
+        library.add(copy("Renegade Platinum.nds", Some("CPUE"), Platform::Nds));
+        library.add(copy(
+            "Pokemon Emerald (Random 42).gba",
+            Some("BPEE"),
+            Platform::Gba,
+        ));
+        library.add(ds("SoulSilver.nds", "IPGE"));
+        library.add(ds("SoulSilver Again.nds", "IPGE"));
+        library.add(copy(
+            "SoulSilver (Random 7).nds",
+            Some("IPGE"),
+            Platform::Nds,
+        ));
+        // A Game Boy game has no code: its title says which it is from.
+        let mut red = Game::new(Path::new("/roms/Red.gb"), &info(Platform::Gb, 3));
+        red.title = "Pokemon: Red Version".to_owned();
+        library.add(red);
+        library.add(copy(
+            "Pokemon - Red Version (Random 9).gb",
+            None,
+            Platform::Gb,
+        ));
+
+        // The randomized Platinum was played last; Red's copy never was.
+        let played = |path: &Path| {
+            let secs = match path.file_name()?.to_str()? {
+                "Platinum.nds" => 10,
+                "Pokemon - Platinum Version (Random 336933).nds" => 20,
+                "Red.gb" => 5,
+                _ => return None,
+            };
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        };
+        assert_eq!(library.fold_randomized(hacks, played), 2);
+        let titles: Vec<&str> = library.games.iter().map(|game| &*game.title).collect();
+        assert_eq!(
+            titles,
+            [
+                "White",
+                "Platinum",
+                "Renegade Platinum",
+                "Pokemon Emerald (Random 42)",
+                "SoulSilver",
+                "SoulSilver Again",
+                "SoulSilver (Random 7)",
+                "Pokemon: Red Version",
+            ]
+        );
+        let platinum = &library.games[1];
+        assert_eq!(
+            platinum.randomized,
+            Some(Randomized {
+                image: hacks.join("Pokemon - Platinum Version (Random 336933).nds"),
+                seed: 336_933,
+                settings: None,
+                on: true,
+            })
+        );
+        assert_eq!(platinum.play_time, Duration::from_secs(150));
+        let red = library.games[7].randomized.as_ref().expect("folded");
+        assert_eq!((red.seed, red.on), (9, false), "its game was played last");
+        // Nothing more to fold.
+        assert_eq!(library.fold_randomized(hacks, played), 0);
+
+        assert_eq!(
+            random_name(Path::new(
+                "/h/Pokemon - Platinum Version (Random 336933).nds"
+            )),
+            Some(("Pokemon - Platinum Version".to_owned(), 336_933))
+        );
+        assert_eq!(random_name(Path::new("/h/Renegade Platinum.nds")), None);
+        assert_eq!(random_name(Path::new("/h/Game (Random abc).nds")), None);
     }
 
     #[test]

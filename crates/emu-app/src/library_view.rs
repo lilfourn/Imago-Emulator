@@ -44,10 +44,11 @@ use crate::app_icon;
 use crate::archive;
 use crate::boxart;
 use crate::chrome;
+use crate::emulator;
 use crate::icons;
 use crate::keys;
 use crate::leftovers;
-use crate::library::{self, Game, Library};
+use crate::library::{self, Game, Library, Randomized};
 use crate::persist;
 use crate::probe;
 use crate::randomizer;
@@ -86,6 +87,9 @@ pub enum LibraryEvent {
     OpenSettings,
     /// Open the randomize window with the game at this path chosen.
     Randomize(PathBuf),
+    /// The randomized run of the game at this path was made, switched or
+    /// replaced.
+    RandomizedChanged(PathBuf),
     /// Tell the user something went wrong.
     Notice(String),
 }
@@ -278,7 +282,19 @@ impl LibraryView {
     /// A view of `library`, saved to `path`, which starts finding box art
     /// for games that have none, and removes what adding games left behind
     /// when an app quit or crashed during it.
-    pub fn new(library: Library, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+    pub fn new(mut library: Library, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+        // As the file has them, the randomized games about to be folded
+        // into the games they were made from among them: saving takes in
+        // only the games this copy of the app has never known.
+        let on_disk = library.paths();
+        let folded = romhack::hacks_dir().map_or(0, |hacks| {
+            library.fold_randomized(&hacks, |game| {
+                let checkpoint = emulator::files_of(game).state(emulator::CHECKPOINT, false);
+                fs::metadata(checkpoint)
+                    .and_then(|file| file.modified())
+                    .ok()
+            })
+        });
         let folders: Vec<PathBuf> = [archive::games_dir(), romhack::hacks_dir()]
             .into_iter()
             .flatten()
@@ -295,7 +311,7 @@ impl LibraryView {
             })
             .detach();
         let mut view = Self {
-            on_disk: library.paths(),
+            on_disk,
             told_left_out: HashSet::new(),
             library,
             path,
@@ -337,6 +353,9 @@ impl LibraryView {
             .iter()
             .map(|game| (game.path.clone(), cached_pictures(cache.as_deref(), game)))
             .collect();
+        if folded > 0 {
+            view.save(cx);
+        }
         view.refresh(cx);
         view
     }
@@ -505,19 +524,72 @@ impl LibraryView {
         games.map(|game| (game.crc32, game.path.clone())).collect()
     }
 
-    /// The library's record of the game at `path`, if it has it.
+    /// The library's record of the game at `path`, or of the game whose
+    /// randomized run is there, if it has it.
     pub fn game_of(&self, path: &Path) -> Option<library::Game> {
-        self.library
-            .games
-            .iter()
-            .find(|game| game.path == path)
-            .cloned()
+        self.library.game_at(path).cloned()
     }
 
-    /// The title the library shows for the game at `path`, if it has it.
+    /// The title the library shows for the game at `path`, or for the
+    /// game whose randomized run is there, if it has it.
     pub fn title_of(&self, path: &Path) -> Option<String> {
-        let game = self.library.games.iter().find(|game| game.path == path)?;
-        Some(game.title.clone())
+        Some(self.library.game_at(path)?.title.clone())
+    }
+
+    /// The file that plays when the game at `path` is chosen: its
+    /// randomized run's while that is on, or else `path` itself.
+    pub fn play_path_of(&self, path: &Path) -> PathBuf {
+        let game = self.library.games.iter().find(|game| game.path == path);
+        game.map_or(path, |game| game.play_path()).to_owned()
+    }
+
+    /// Gives the game at `base` the randomized run `run`, which it plays
+    /// from now on while the run is on. Returns the run it had before, if
+    /// it had one; `Err` if the library has no such game.
+    pub fn set_randomized(
+        &mut self,
+        base: &Path,
+        run: Randomized,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<Randomized>, ()> {
+        let before = self.library.set_randomized(base, run).map_err(|_| ())?;
+        self.randomized_changed(base, cx);
+        Ok(before)
+    }
+
+    /// Switches the randomized run of the game at `base` on or off.
+    /// Returns the file the game plays from now on, or `None` if it has no
+    /// run.
+    pub fn switch_randomized(
+        &mut self,
+        base: &Path,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<PathBuf> {
+        let plays = self.library.switch_randomized(base, on)?;
+        self.randomized_changed(base, cx);
+        Some(plays)
+    }
+
+    /// The files at `paths` are being played: a game with a randomized
+    /// run goes on playing whichever of its two was played last.
+    pub fn played(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        for path in paths {
+            if self.library.played(path)
+                && let Some(base) = self.library.game_at(path).map(|game| game.path.clone())
+            {
+                self.randomized_changed(&base, cx);
+            }
+        }
+    }
+
+    /// The game at `base` plays another file now: its pictures and when it
+    /// was played are that file's.
+    fn randomized_changed(&mut self, base: &Path, cx: &mut Context<Self>) {
+        self.save(cx);
+        self.refresh(cx);
+        cx.emit(LibraryEvent::RandomizedChanged(base.to_owned()));
+        cx.notify();
     }
 
     /// Shows the store in the library's place, opening it the first time.

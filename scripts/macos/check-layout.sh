@@ -95,6 +95,32 @@ app_icon = "night"
 EOF
 }
 
+# A game the randomizer knows, to run: the test ROM with Emerald's game
+# code in its header, and in the library with a randomized run, a copy of
+# itself with a spoiler log beside it. No Nintendo data.
+seed_randomized() {
+  local games=/tmp/ds-emulator-layout-games
+  cp $game $games/7.gba
+  printf BPEE | dd of=$games/7.gba bs=1 seek=172 conv=notrunc 2>/dev/null
+  cp $games/7.gba "$games/Emerald (Random 123456).gba"
+  : >"$games/Emerald (Random 123456).gba.log"
+  cat >>"$config/library.toml" <<EOF
+[[game]]
+path = "$games/7.gba"
+platform = "gba"
+crc32 = "00000007"
+serial = "BPEE"
+title = "Pokémon Emerald Version"
+looked_up = true
+
+[game.randomized]
+image = "$games/Emerald (Random 123456).gba"
+seed = 123456
+on = false
+
+EOF
+}
+
 # The store's catalogs, as if fetched just now so they are not fetched
 # again: made-up games whose screenshots can't be had, so each shows its
 # system's plate and nothing is downloaded.
@@ -124,9 +150,10 @@ seed_store() {
 # window, opened with its shortcut as a menu item can't be pressed behind
 # other windows, and supporter is that window with a supporter's key in; store
 # and page are the store and a game's page in it; randomize is the randomize
-# window, listing the library's Pokémon games.
+# window, listing the library's Pokémon games; randomizer is the Randomizer
+# page of the menu of a game the randomizer knows.
 failed=0
-for state in ${=STATES:-empty library search context settings supporter game menu cheats restart store page randomize}; do
+for state in ${=STATES:-empty library search context settings supporter game menu cheats restart randomizer store page randomize}; do
   # The main window is the only one; its title names the game.
   rom=() steps=() window=main title=''
   case $state in
@@ -143,6 +170,9 @@ for state in ${=STATES:-empty library search context settings supporter game men
     menu) seed library; rom=($game); steps=(key escape) ;;
     cheats) seed library; rom=($game); steps=(key escape key right key return) ;;
     restart) seed library; rom=($game); steps=(key escape key right key right key return) ;;
+    randomizer)
+      seed library; seed_randomized; rom=(/tmp/ds-emulator-layout-games/7.gba)
+      steps=(key escape key right key right key return) ;;
     store) seed library; seed_store; steps=(key cmd-shift-g) ;;
     page) seed library; seed_store; steps=(key cmd-shift-g key return) ;;
     randomize) seed library; seed_pokemon; steps=(key cmd-alt-r); window=randomize title=Randomize ;;
