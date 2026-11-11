@@ -10,12 +10,15 @@
 //! The choices themselves are settings ([`Settings::accent`] and
 //! [`Settings::app_icon`]), and [`look`] says what shows: the choices
 //! while a key is in, the app's own look otherwise.
+//!
+//! A key has a [`Tier`]. Every tier gets every accent and the first five
+//! icons; the higher two each add an icon of their own ([`AppIcon::tier`]).
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use emu_supporter::{KeyError, Supporter};
+use emu_supporter::{KeyError, Supporter, Tier};
 use gpui::{App, Global};
 
 use crate::settings::Settings;
@@ -39,17 +42,41 @@ pub enum AppIcon {
     Chalk,
     /// Whites and blues on Imago's blue.
     Blueprint,
+    /// Whites on the icon's coral: a Patron's.
+    Ember,
+    /// Golds on a dark body: a Founder's.
+    Founder,
 }
 
 impl AppIcon {
     /// Every icon, in the order Settings offers them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Classic,
         Self::Night,
         Self::Ink,
         Self::Chalk,
         Self::Blueprint,
+        Self::Ember,
+        Self::Founder,
     ];
+
+    /// The tier a supporter needs for it: any, but for the two icons
+    /// that are a higher tier's own.
+    pub fn tier(self) -> Tier {
+        match self {
+            Self::Ember => Tier::Patron,
+            Self::Founder => Tier::Founder,
+            _ => Tier::Supporter,
+        }
+    }
+
+    /// The icons a supporter of `tier` chooses between, in order.
+    pub fn offered(tier: Tier) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|icon| icon.tier() <= tier)
+            .collect()
+    }
 
     /// What Settings calls it.
     pub fn label(self) -> &'static str {
@@ -59,6 +86,8 @@ impl AppIcon {
             Self::Ink => "Ink",
             Self::Chalk => "Chalk",
             Self::Blueprint => "Blueprint",
+            Self::Ember => "Ember",
+            Self::Founder => "Founder",
         }
     }
 
@@ -70,6 +99,8 @@ impl AppIcon {
             Self::Ink => "ink",
             Self::Chalk => "chalk",
             Self::Blueprint => "blueprint",
+            Self::Ember => "ember",
+            Self::Founder => "founder",
         }
     }
 
@@ -86,6 +117,8 @@ impl AppIcon {
             Self::Ink => include_bytes!("../../../assets/app-icons/ink.png"),
             Self::Chalk => include_bytes!("../../../assets/app-icons/chalk.png"),
             Self::Blueprint => include_bytes!("../../../assets/app-icons/blueprint.png"),
+            Self::Ember => include_bytes!("../../../assets/app-icons/ember.png"),
+            Self::Founder => include_bytes!("../../../assets/app-icons/founder.png"),
         }
     }
 }
@@ -95,12 +128,13 @@ impl AppIcon {
 pub const CHOOSES_ICON: bool = cfg!(target_os = "macos");
 
 /// The accent and the Dock icon to show for `settings`: what they choose
-/// for a `supporter`, and the app's own otherwise, whatever the file says.
-pub fn look(settings: &Settings, supporter: bool) -> (Accent, AppIcon) {
-    if supporter {
-        (settings.accent, settings.app_icon)
-    } else {
-        (Accent::default(), AppIcon::default())
+/// for a supporter of `tier`, and the app's own without a key, whatever
+/// the file says. An icon that is a higher tier's shows as the app's own.
+pub fn look(settings: &Settings, tier: Option<Tier>) -> (Accent, AppIcon) {
+    match tier {
+        Some(tier) if settings.app_icon.tier() <= tier => (settings.accent, settings.app_icon),
+        Some(_) => (settings.accent, AppIcon::default()),
+        None => (Accent::default(), AppIcon::default()),
     }
 }
 
@@ -129,6 +163,11 @@ pub fn load(cx: &mut App) {
 /// The supporter whose key the app holds.
 pub fn current(cx: &App) -> Option<&Supporter> {
     cx.try_global::<Shared>()?.0.as_ref()
+}
+
+/// The tier of the key the app holds, if it holds one.
+pub fn tier(cx: &App) -> Option<Tier> {
+    current(cx).map(|supporter| supporter.tier)
 }
 
 /// Why a key was not taken.
@@ -231,11 +270,14 @@ mod tests {
         let dir = temp_dir("supporter-keep");
         let path = dir.join("ds-emulator").join("supporter.key");
         assert_eq!(kept(&path, &trusted()), None, "no file yet");
-        let key = emu_supporter::issue(&SEED, 5, 20_768, "Ada").expect("issued");
+        let key = emu_supporter::issue(&SEED, Tier::Patron, 5, 20_768, "Ada").expect("issued");
         // Pasted as an email wrapped it.
         let pasted = format!(" {}\n{} \n", &key[..30], &key[30..]);
         let supporter = keep(&path, &pasted, &trusted()).expect("kept");
-        assert_eq!(supporter.name, "Ada");
+        assert_eq!(
+            (supporter.name.as_str(), supporter.tier),
+            ("Ada", Tier::Patron)
+        );
         assert_eq!(
             fs::read_to_string(&path).expect("file"),
             format!("{key}\n"),
@@ -244,7 +286,8 @@ mod tests {
         assert_eq!(kept(&path, &trusted()), Some(supporter.clone()));
 
         // What is not a key leaves the one kept.
-        let forged = emu_supporter::issue(&[4; 32], 5, 20_768, "Eve").expect("issued");
+        let forged =
+            emu_supporter::issue(&[4; 32], Tier::Founder, 5, 20_768, "Eve").expect("issued");
         for bad in ["", "hello", &key[..40], &forged] {
             assert!(
                 matches!(keep(&path, bad, &trusted()), Err(EnterError::Key(_))),
@@ -268,7 +311,7 @@ mod tests {
         fs::create_dir_all(&dir).expect("folder");
         // A file where the key's folder would go.
         fs::write(dir.join("ds-emulator"), "").expect("file");
-        let key = emu_supporter::issue(&SEED, 5, 20_768, "").expect("issued");
+        let key = emu_supporter::issue(&SEED, Tier::Supporter, 5, 20_768, "").expect("issued");
         let path = dir.join("ds-emulator").join("supporter.key");
         assert!(matches!(
             keep(&path, &key, &trusted()),
@@ -284,13 +327,47 @@ mod tests {
             app_icon: AppIcon::Night,
             ..Settings::default()
         };
-        assert_eq!(look(&chosen, true), (Accent::Violet, AppIcon::Night));
+        for tier in Tier::ALL {
+            assert_eq!(look(&chosen, Some(tier)), (Accent::Violet, AppIcon::Night));
+        }
         // The file may say anything: without a key it shows nothing.
-        assert_eq!(look(&chosen, false), (Accent::Blue, AppIcon::Classic));
+        assert_eq!(look(&chosen, None), (Accent::Blue, AppIcon::Classic));
         assert_eq!(
-            look(&Settings::default(), true),
+            look(&Settings::default(), Some(Tier::Founder)),
             (Accent::Blue, AppIcon::Classic)
         );
+    }
+
+    #[test]
+    fn a_higher_tiers_icon_shows_only_for_that_tier_and_above() {
+        let founders = Settings {
+            accent: Accent::Teal,
+            app_icon: AppIcon::Founder,
+            ..Settings::default()
+        };
+        // The accent is every supporter's; the icon is not.
+        assert_eq!(
+            look(&founders, Some(Tier::Supporter)),
+            (Accent::Teal, AppIcon::Classic)
+        );
+        assert_eq!(
+            look(&founders, Some(Tier::Patron)),
+            (Accent::Teal, AppIcon::Classic)
+        );
+        assert_eq!(
+            look(&founders, Some(Tier::Founder)),
+            (Accent::Teal, AppIcon::Founder)
+        );
+        // Each tier is offered what the one before is, and its own after.
+        let supporter = AppIcon::offered(Tier::Supporter);
+        let patron = AppIcon::offered(Tier::Patron);
+        let founder = AppIcon::offered(Tier::Founder);
+        assert_eq!(supporter.len(), 5);
+        assert_eq!(patron[..5], supporter[..]);
+        assert_eq!(patron[5..], [AppIcon::Ember]);
+        assert_eq!(founder[..6], patron[..]);
+        assert_eq!(founder[6..], [AppIcon::Founder]);
+        assert_eq!(founder, AppIcon::ALL);
     }
 
     #[test]

@@ -433,7 +433,7 @@ impl EmulatorView {
             Some(Ok(settings)) => {
                 view.settings = settings;
                 // Before the first frame is drawn in it.
-                let supporter = supporter::current(cx).is_some();
+                let supporter = supporter::tier(cx);
                 theme::set_accent(supporter::look(&settings, supporter).0);
                 view.input
                     .latch(settings.fast_forward_on, settings.slow_motion_on);
@@ -1925,7 +1925,7 @@ impl EmulatorView {
     /// holds a supporter's key, and its own otherwise, in every window:
     /// after either is chosen, and after a key is put in or taken out.
     pub fn apply_look(&self, cx: &mut App) {
-        let supporter = supporter::current(cx).is_some();
+        let supporter = supporter::tier(cx);
         let (accent, icon) = supporter::look(&self.settings, supporter);
         theme::set_accent(accent);
         crate::window_chrome::set_dock_icon(icon.png());

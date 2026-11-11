@@ -17,7 +17,7 @@
 //! it is thanked with. Nothing else in the app asks for support.
 
 use emu_guide::chat::Effort;
-use emu_supporter::KeyError;
+use emu_supporter::{KeyError, Tier};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ScrollHandle,
     SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
@@ -215,12 +215,22 @@ fn support_buttons(supporter: bool) -> Vec<Support> {
 
 /// The line under the supporter's row, and whether it tells of a problem:
 /// why the key last pasted was not taken, or thanks to the supporter by
-/// the `name` in their key (which may be empty), or what supporting is.
-fn support_caption(supporter: Option<&str>, problem: Option<&str>) -> (String, bool) {
+/// the name in their key (which may be empty) and its tier, or what
+/// supporting is.
+fn support_caption(supporter: Option<(&str, Tier)>, problem: Option<&str>) -> (String, bool) {
+    // The first tier is what a supporter is; the others are named.
+    let named = |tier: Tier| match tier {
+        Tier::Supporter => String::new(),
+        Tier::Patron => " You\u{2019}re a Patron.".to_owned(),
+        Tier::Founder => " You\u{2019}re a Founder.".to_owned(),
+    };
     match (problem, supporter) {
         (Some(problem), _) => (problem.to_owned(), true),
-        (None, Some("")) => ("Thank you for supporting Imago Emulator.".to_owned(), false),
-        (None, Some(name)) => (format!("Thank you, {name}."), false),
+        (None, Some(("", tier))) => (
+            format!("Thank you for supporting Imago Emulator.{}", named(tier)),
+            false,
+        ),
+        (None, Some((name, tier))) => (format!("Thank you, {name}.{}", named(tier)), false),
         (None, None) if supporter::CHOOSES_ICON => (
             "Imago Emulator is free. Supporters get accent colours and Dock icons as thanks."
                 .to_owned(),
@@ -424,9 +434,10 @@ fn rows(settings: &Settings) -> Vec<Row> {
     ]
 }
 
-/// The rows a supporter gets, after the supporter's row, for `settings`:
-/// the accent, and the Dock icon where there is a Dock.
-fn look_rows(settings: &Settings) -> Vec<Row> {
+/// The rows a supporter of `tier` gets, after the supporter's row, for
+/// `settings`: the accent, and where there is a Dock, the icons the tier
+/// is offered.
+fn look_rows(settings: &Settings, tier: Tier) -> Vec<Row> {
     let mut rows = vec![Row::new(
         "Accent",
         Accent::ALL
@@ -439,7 +450,7 @@ fn look_rows(settings: &Settings) -> Vec<Row> {
     if supporter::CHOOSES_ICON {
         rows.push(Row::new(
             "App Icon",
-            AppIcon::ALL
+            AppIcon::offered(tier)
                 .into_iter()
                 .map(|icon| (icon.label().into(), icon))
                 .collect(),
@@ -462,11 +473,7 @@ fn window_height(display: Option<f32>, look_rows: usize) -> f32 {
 
 /// How many of a supporter's rows the window shows: none without a key.
 fn shown_look_rows(cx: &App) -> usize {
-    if supporter::current(cx).is_some() {
-        look_rows(&Settings::default()).len()
-    } else {
-        0
-    }
+    supporter::tier(cx).map_or(0, |tier| look_rows(&Settings::default(), tier).len())
 }
 
 impl SettingsWindow {
@@ -571,7 +578,7 @@ impl SettingsWindow {
         }));
         let supporter = supporter::current(cx);
         let (caption, problem) = support_caption(
-            supporter.map(|supporter| supporter.name.as_str()),
+            supporter.map(|supporter| (supporter.name.as_str(), supporter.tier)),
             self.key_problem.as_deref(),
         );
         entries.push(Entry::Buttons(Buttons {
@@ -584,8 +591,9 @@ impl SettingsWindow {
             caption,
             problem,
         }));
-        if supporter.is_some() {
-            entries.extend(look_rows(&self.settings).into_iter().map(Entry::Choices));
+        if let Some(supporter) = supporter {
+            let rows = look_rows(&self.settings, supporter.tier);
+            entries.extend(rows.into_iter().map(Entry::Choices));
         }
         entries
     }
@@ -1129,15 +1137,24 @@ mod tests {
         assert_eq!(words.contains("Dock icons"), supporter::CHOOSES_ICON);
         assert!(!problem);
         assert_eq!(
-            support_caption(Some("Ada"), None),
+            support_caption(Some(("Ada", Tier::Supporter)), None),
             ("Thank you, Ada.".to_owned(), false)
         );
         assert_eq!(
-            support_caption(Some(""), None),
+            support_caption(Some(("", Tier::Supporter)), None),
             ("Thank you for supporting Imago Emulator.".to_owned(), false)
         );
+        // The higher tiers are named.
+        assert_eq!(
+            support_caption(Some(("Ada", Tier::Patron)), None).0,
+            "Thank you, Ada. You\u{2019}re a Patron."
+        );
+        assert_eq!(
+            support_caption(Some(("", Tier::Founder)), None).0,
+            "Thank you for supporting Imago Emulator. You\u{2019}re a Founder."
+        );
         // A key refused says so, whether or not another is in.
-        for supporter in [None, Some("Ada")] {
+        for supporter in [None, Some(("Ada", Tier::Patron))] {
             assert_eq!(
                 support_caption(supporter, Some("That key is no longer valid.")),
                 ("That key is no longer valid.".to_owned(), true)
@@ -1162,7 +1179,7 @@ mod tests {
     #[test]
     fn a_supporters_rows_mark_and_store_the_look() {
         let mut settings = Settings::default();
-        let rows = look_rows(&settings);
+        let rows = look_rows(&settings, Tier::Supporter);
         let names: Vec<_> = rows.iter().map(|row| row.name).collect();
         if supporter::CHOOSES_ICON {
             assert_eq!(names, ["Accent", "App Icon"]);
@@ -1179,6 +1196,16 @@ mod tests {
             assert_eq!(icon.chosen, Some(0), "the app's own by default");
             (icon.choose)(&mut settings, 1);
             assert_eq!(settings.app_icon, AppIcon::Night);
+            // Each tier's row ends with the icon that is its own.
+            assert_eq!(icon.labels.len(), 5);
+            let patron = look_rows(&settings, Tier::Patron).remove(1);
+            assert_eq!(patron.labels.last().map(AsRef::as_ref), Some("Ember"));
+            let founder = look_rows(&settings, Tier::Founder).remove(1);
+            assert_eq!(founder.labels.len(), 7);
+            (founder.choose)(&mut settings, 6);
+            assert_eq!(settings.app_icon, AppIcon::Founder);
+            // A Founder's icon is none of a Supporter's choices.
+            assert_eq!(look_rows(&settings, Tier::Supporter).remove(1).chosen, None);
         }
         // None of them is among the settings everyone has.
         for row in super::rows(&settings) {

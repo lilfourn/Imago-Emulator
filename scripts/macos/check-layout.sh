@@ -80,12 +80,13 @@ seed_pokemon() {
   done
 }
 
-# A supporter's key and the look chosen with it, so Settings shows a
-# supporter's rows. The key is issued here with the owner's signing key,
+# A Founder's key and the look chosen with it, so Settings shows a
+# supporter's rows, with every icon there is in the longest of them. The
+# key is issued here with the owner's signing key,
 # which only the owner's Mac has; without it the state is skipped.
 seed_supporter() {
   local key
-  key=$($bin/supporter-key issue --name "Layout Check" 2>/dev/null) || return 1
+  key=$($bin/supporter-key issue --tier founder --name "Layout Check" 2>/dev/null) || return 1
   print -r -- $key >"$config/supporter.key"
   cat >>"$config/settings.toml" <<EOF
 
