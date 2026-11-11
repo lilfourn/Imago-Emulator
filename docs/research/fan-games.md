@@ -150,6 +150,49 @@ way:
   core opens, but Azahar keeps saves by title ID in one SD card, so a
   randomized copy would share the clean game's save.
 
+#### Randomizers surveyed, 2026-11-11
+
+Asked whether randomizing could be a switch on a running game:
+
+- **Nothing maintained randomizes an untouched ROM as it runs.** The
+  closest are [GBAXG](https://kittypboxx.github.io/GBAXG/), which rewrites
+  memory in its own browser emulator from hard-coded addresses (2023), and
+  a Red/Blue proof of concept through an edited save
+  ([RAMdomizer](https://github.com/NPO-197/PokemonRedBlue-RAMdomizer),
+  2021). Every randomizer in use writes a ROM or a patch first.
+- **No emulator has one built in.** mGBA and RetroArch soft-patch a
+  `game.bps` beside the ROM and keep the ROM's save name, so the patched
+  and plain game share a save. The IronMON trackers call UPR's command
+  line from BizHawk and load numbered ROMs.
+- So the app keeps making a ROM, and makes it the game's run, with a
+  switch ([decision 0012](../decisions/0012-randomizer.md)).
+
+What else there is, for later:
+
+- **The 3DS games.** FVX 1.6.2's command line refuses them
+  (`EXTRA_MEMORY_NOT_AVAILABLE`): only its window calls
+  `RomOpener.setExtraMemoryAvailable(true)`. With that flag set by a
+  ten-line launcher class, `-d` wrote Omega Ruby's randomized files as a
+  31 MB folder, `<title ID>/romfs` and `code.bin`, in 4 s: the layout
+  Azahar loads from `load/mods/<title ID>/`. Azahar's libretro core keeps
+  its files under the save folder it is given, so a folder per run would
+  keep the saves apart (read in its source, not run).
+- **Key items and progression**: [Archipelago](https://archipelago.gg)
+  patches (`.apemerald`, `.apred`, and community worlds for Crystal,
+  FireRed, Platinum and HeartGold). A single-player seed plays in any
+  emulator without its client. The patch is a zip of a bsdiff and a list
+  of byte edits, which `emu-patch` does not read yet.
+- **Hacks**: FVX runs on a hack that keeps its game's code, without
+  saying so, and may break it. Drayano's hacks and the CFRU ones (Radical
+  Red, Unbound) are known to break; those two have a randomizer of their
+  own at New Game.
+- **RPG Maker games**: Essentials v20 and later raise
+  `:on_wild_pokemon_created` and `:on_trainer_load`, v19
+  `Events.onWildPokemonCreate` and `onTrainerPartyLoad`, which a script
+  loaded with the game could shuffle from.
+- **FVX 1.6.3** (7 November 2026) fixes random move names failing, alt
+  formes' types and abilities, and a Gen 1 crash.
+
 What follows is the research that led to it.
 
 

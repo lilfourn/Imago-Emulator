@@ -1,7 +1,13 @@
 //! Randomized Pokémon games, made by the Universal Pokémon Randomizer FVX
 //! from the player's own copy of a game: wild Pokémon, trainers, starters
-//! and more shuffled, as a new game in the hacks folder (see `romhack`),
+//! and more shuffled, as a new ROM in the hacks folder (see `romhack`),
 //! with its spoiler log beside it.
+//!
+//! What is made is not a game of its own in the library. It is the
+//! randomized run of the game it was made from (`library::Randomized`),
+//! which plays it while the run is switched on. It has its own battery
+//! save, states and checkpoint beside it, so the game as it was keeps its
+//! progress, and switching goes from one to the other and back.
 //!
 //! FVX is GPL-3.0 Java, so it is not built into the app. A pinned release
 //! for this system (macOS, Linux or Windows), which carries its own Java,
@@ -33,7 +39,10 @@ use zip::ZipArchive;
 
 use crate::archive;
 use crate::leftovers::WorkFolder;
+use crate::library::{file_title, random_name};
+use crate::persist::GameFiles;
 use crate::romhack;
+use crate::slots::LAST_FILE_SLOT;
 
 /// The FVX release the app runs.
 pub const VERSION: &str = "1.6.2";
@@ -586,9 +595,7 @@ fn randomize_in(
         File::open(&rom).map_err(failed)?,
     )
     .map_err(failed)?;
-    let mut log = stored.clone().into_os_string();
-    log.push(".log");
-    let log = PathBuf::from(log);
+    let log = log_path(&stored);
     let mut written = rom.into_os_string();
     written.push(".log");
     let log = fs::copy(written, &log).is_ok().then_some(log);
@@ -652,17 +659,93 @@ fn exception(printed: &str) -> Option<String> {
     })
 }
 
-/// `title` as a file name: without the colons and slashes macOS's Finder
-/// and its file system disagree on. `Pokemon: Platinum Version` becomes
-/// `Pokemon - Platinum Version`.
-fn file_title(title: &str) -> String {
-    let title = title.replace(": ", " - ").replace([':', '/'], "-");
-    let title = title.trim();
-    if title.is_empty() {
-        "Pokémon".to_owned()
-    } else {
-        title.to_owned()
+/// What the settings string `settings` changes, in a word or two: the
+/// name of the preset it is, or that the settings are the player's own.
+pub fn changes_label(settings: &str) -> &'static str {
+    let presets = Preset::ALL.into_iter();
+    let preset = presets
+        .into_iter()
+        .find(|preset| preset.settings() == settings);
+    preset.map_or("Custom settings", Preset::label)
+}
+
+/// Where the spoiler log of the randomized game at `image` is kept:
+/// beside it, as `….nds.log`.
+pub fn log_path(image: &Path) -> PathBuf {
+    let mut log = image.as_os_str().to_owned();
+    log.push(".log");
+    PathBuf::from(log)
+}
+
+/// The spoiler log kept beside the randomized game at `image`, if it is
+/// there.
+pub fn log_of(image: &Path) -> Option<PathBuf> {
+    Some(log_path(image)).filter(|log| log.is_file())
+}
+
+/// Whether the game at `base` has a battery save a run could go on from:
+/// one that holds something. A game never saved in has a save file all the
+/// same, blank as an erased cartridge's memory is, every byte `0xFF` (or
+/// zero), which starts a new game wherever it is copied.
+pub fn has_save(base: &Path) -> bool {
+    let save = fs::read(GameFiles::of(base).backup()).unwrap_or_default();
+    save.iter().any(|&byte| byte != 0xFF && byte != 0)
+}
+
+/// Gives the randomized game at `image` what the game at `base`, which it
+/// was made from, has of its own: its cheats and its bindings, and with
+/// `save`, its battery save, so the run goes on from where that game is.
+/// Each is a copy, and nothing `image` already has is replaced: the game
+/// it was made from keeps its files as they are.
+///
+/// # Errors
+///
+/// Returns the error if a file is there but cannot be copied.
+pub fn carry_over(base: &Path, image: &Path, save: bool) -> io::Result<()> {
+    let (from, to) = (GameFiles::of(base), GameFiles::of(image));
+    let mut files = vec![
+        (from.cheats(), to.cheats()),
+        (from.bindings(), to.bindings()),
+    ];
+    if save {
+        files.push((from.backup(), to.backup()));
     }
+    for (from, to) in files {
+        if from.is_file() && !to.exists() {
+            fs::copy(from, to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes the randomized game at `image`, and its spoiler log, if it was
+/// never played: it has no battery save, state or checkpoint beside it.
+/// One that was played is kept, with its progress, where it is. Whether
+/// it was removed.
+pub fn remove_unplayed(image: &Path) -> bool {
+    romhack::hacks_dir().is_some_and(|hacks| remove_unplayed_in(&hacks, image))
+}
+
+/// Removes an unplayed randomized game as [`remove_unplayed`] does, if it
+/// is in the folder `hacks` and named as the randomizer names its games:
+/// nothing else is ever removed.
+fn remove_unplayed_in(hacks: &Path, image: &Path) -> bool {
+    if !image.starts_with(hacks) || random_name(image).is_none() {
+        return false;
+    }
+    let files = GameFiles::of(image);
+    let states =
+        (0..=LAST_FILE_SLOT).flat_map(|slot| [files.state(slot, false), files.state(slot, true)]);
+    let mut progress = [files.backup(), files.set_aside()]
+        .into_iter()
+        .chain(states);
+    if progress.any(|file| file.exists()) {
+        return false;
+    }
+    if let Some(log) = log_of(image) {
+        fs::remove_file(log).ok();
+    }
+    fs::remove_file(image).is_ok()
 }
 
 #[cfg(test)]
@@ -733,6 +816,79 @@ mod tests {
         assert_eq!(generation_of("gba", &header(0x0C, b"CPUE")), None);
         assert_eq!(generation_of("nds", b"short"), None);
         assert_eq!(generation_of("3ds", &header(0x0C, b"CPUE")), None);
+    }
+
+    #[test]
+    fn a_run_is_given_its_games_files_and_removed_only_if_never_played() {
+        let dir = temp_dir("carry");
+        let hacks = dir.join("Hacks");
+        let base = dir.join("Platinum.nds");
+        let image = hacks.join("Platinum (Random 123456).nds");
+        write(&base, b"rom");
+        write(&image, b"randomized");
+        write(&log_path(&image), b"log");
+        write(&dir.join("Platinum.sav"), b"save");
+        write(&dir.join("Platinum.cht"), b"cheats");
+        assert_eq!(
+            log_of(&image),
+            Some(hacks.join("Platinum (Random 123456).nds.log"))
+        );
+
+        assert!(has_save(&base));
+        // A new game: the cheats come along, the save does not.
+        carry_over(&base, &image, false).expect("copied");
+        let cheats = hacks.join("Platinum (Random 123456).cht");
+        let save = hacks.join("Platinum (Random 123456).sav");
+        assert_eq!(fs::read(&cheats).expect("cheats"), b"cheats");
+        assert!(!save.exists());
+        assert!(
+            !hacks
+                .join("Platinum (Random 123456).bindings.toml")
+                .exists()
+        );
+
+        // Never played, so it is removed, with its log; but only a
+        // randomized game in the hacks folder ever is.
+        assert!(!remove_unplayed_in(&hacks, &base), "not in the folder");
+        let hack = hacks.join("Renegade Platinum.nds");
+        write(&hack, b"hack");
+        assert!(!remove_unplayed_in(&hacks, &hack), "not a randomized game");
+        assert!(hack.exists() && base.exists());
+        assert!(remove_unplayed_in(&hacks, &image));
+        assert!(!image.exists() && log_of(&image).is_none());
+
+        // From the game's save: a copy, which is never replaced.
+        write(&image, b"randomized");
+        carry_over(&base, &image, true).expect("copied");
+        assert_eq!(fs::read(&save).expect("save"), b"save");
+        write(&save, b"played on");
+        write(&dir.join("Platinum.sav"), b"saved since");
+        carry_over(&base, &image, true).expect("copied");
+        assert_eq!(fs::read(&save).expect("save"), b"played on");
+        assert_eq!(
+            fs::read(dir.join("Platinum.sav")).expect("own"),
+            b"saved since"
+        );
+        // A game never saved in has a blank save, or none: nothing to go
+        // on from.
+        write(&dir.join("Platinum.sav"), &[0xFF; 64]);
+        assert!(!has_save(&base));
+        fs::remove_file(dir.join("Platinum.sav")).expect("removed");
+        assert!(!has_save(&base));
+        // With a save, or only a checkpoint, it has been played.
+        assert!(!remove_unplayed_in(&hacks, &image));
+        fs::remove_file(&save).expect("removed");
+        write(&hacks.join("Platinum (Random 123456).ss0"), b"state");
+        assert!(!remove_unplayed_in(&hacks, &image));
+        assert!(image.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn settings_are_named_by_the_preset_they_are() {
+        assert_eq!(changes_label(Preset::Wild.settings()), "Wild Pokémon");
+        assert_eq!(changes_label(Preset::Everything.settings()), "Everything");
+        assert_eq!(changes_label("428AAAA"), "Custom settings");
     }
 
     #[test]

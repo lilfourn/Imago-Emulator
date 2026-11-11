@@ -1,12 +1,15 @@
-//! The randomize window, from File > Randomize Game…: which of the
-//! library's Pokémon games to randomize and how, then a new game made from
-//! it with the Universal Pokémon Randomizer FVX (see `randomizer`), added
-//! to the library beside its spoiler log, ready to play.
+//! The randomize window, from File > Randomize Game…, a game's menu in
+//! the library or the Randomizer page of a running game's menu: which of
+//! the library's Pokémon games to randomize and how, then its randomized
+//! run made with the Universal Pokémon Randomizer FVX (see `randomizer`),
+//! which the game plays from then on while the run is switched on. The run
+//! starts a new game, or goes on from a copy of the game's own save.
 //!
 //! Keyboard first: up and down (or W and S) choose the game, left and
-//! right (or A and D) what changes, ⌘V pastes a settings string from the
-//! randomizer's own window or a guide, Return randomizes, then plays what
-//! was made, and Escape or ⌘W closes the window.
+//! right (or A and D) what changes, Tab whether it starts from the game's
+//! save, ⌘V pastes a settings string from the randomizer's own window or a
+//! guide, Return randomizes, then plays what was made, and Escape or ⌘W
+//! closes the window.
 //!
 //! One game is made at a time. A run goes on if the window is closed, and
 //! the main window says how it went.
@@ -24,6 +27,7 @@ use gpui::{
 use crate::app::{CloseGame, TOP_BAR, shortcut, top_bar};
 use crate::chrome::{self, Tone};
 use crate::icons;
+use crate::library::Randomized;
 use crate::library_view::{LibraryEvent, LibraryView};
 use crate::probe;
 use crate::randomizer::{self, Made, Preset};
@@ -37,7 +41,7 @@ use crate::view::EmulatorView;
 
 /// The window's size, in logical pixels.
 const WIDTH: f32 = 520.0;
-const HEIGHT: f32 = 500.0;
+const HEIGHT: f32 = 560.0;
 /// Size of the window's words.
 const TEXT_SIZE: f32 = 14.0;
 /// Height of a game's row in the list, and how many rows show before it
@@ -75,13 +79,10 @@ impl Drop for Running {
     }
 }
 
-/// What the window, or the main window once it is closed, says of a game
-/// just made.
-fn made_text(made: &Made) -> String {
-    format!(
-        "Made {}. It is in your library.",
-        made.rom.file_stem().unwrap_or_default().to_string_lossy()
-    )
+/// What the window, or the main window once it is closed, says of the
+/// run just made for the game called `title`.
+fn made_text(title: &str, seed: u32) -> String {
+    format!("{title} is randomized, seed {seed}. Switch it off in its menu.")
 }
 
 /// A game in the library the randomizer can randomize.
@@ -90,32 +91,45 @@ pub struct Candidate {
     path: PathBuf,
     title: String,
     generation: u8,
+    /// The seed of its randomized run, if it has one.
+    seed: Option<u32>,
+    /// Whether it has a battery save of its own that holds something, for
+    /// a run to go on from.
+    saved: bool,
 }
 
-/// The library's games, each by its path and title, for [`candidates`].
-pub fn library_games(library: &LibraryView) -> Vec<(PathBuf, String)> {
+/// A game the library has, for [`candidates`]: its path, its title and
+/// the seed of its randomized run, if it has one.
+pub type LibraryGame = (PathBuf, String, Option<u32>);
+
+/// The library's games, for [`candidates`].
+pub fn library_games(library: &LibraryView) -> Vec<LibraryGame> {
     library
         .checksums()
         .into_iter()
-        .map(|(_, path)| {
-            let title = library.title_of(&path).unwrap_or_default();
-            (path, title)
+        .filter_map(|(_, path)| {
+            let game = library.game_of(&path)?;
+            let seed = game.randomized.map(|run| run.seed);
+            Some((path, game.title, seed))
         })
         .collect()
 }
 
 /// Which of `games` the randomizer can randomize, by generation and then
-/// title. Each one's header says, so this blocks; run it off the UI
-/// thread.
-pub fn candidates(games: Vec<(PathBuf, String)>) -> Vec<Candidate> {
+/// title. Each one's header says, and its folder whether it has a save, so
+/// this blocks; run it off the UI thread.
+pub fn candidates(games: Vec<LibraryGame>) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = games
         .into_iter()
-        .filter_map(|(path, title)| {
+        .filter_map(|(path, title, seed)| {
             let generation = randomizer::generation(&path)?;
+            let saved = randomizer::has_save(&path);
             Some(Candidate {
                 path,
                 title,
                 generation,
+                seed,
+                saved,
             })
         })
         .collect();
@@ -131,7 +145,8 @@ fn index_of(candidates: &[Candidate], path: Option<&PathBuf>) -> usize {
 }
 
 impl Candidate {
-    /// Its system and generation, as its row says them: `DS · Gen 4`.
+    /// Its system and generation, as its row says them, and the seed of
+    /// its randomized run if it has one: `DS · Gen 4 · Seed 336933`.
     fn detail(&self) -> String {
         let system = match self.generation {
             1 => "GB",
@@ -139,7 +154,11 @@ impl Candidate {
             3 => "GBA",
             _ => "DS",
         };
-        format!("{system} · Gen {}", self.generation)
+        let detail = format!("{system} · Gen {}", self.generation);
+        match self.seed {
+            Some(seed) => format!("{detail} · Seed {seed}"),
+            None => detail,
+        }
     }
 }
 
@@ -163,8 +182,8 @@ enum State {
     /// Downloading the randomizer, the first time.
     Downloading,
     Randomizing,
-    /// Made this game, which the library now has.
-    Made(Made),
+    /// Made this run, which its game plays now, as this says.
+    Made(Made, String),
 }
 
 /// The randomize window's root view.
@@ -179,6 +198,9 @@ pub struct RandomizeWindow {
     changes: Changes,
     /// The last settings pasted, kept while a preset is chosen.
     pasted: Option<String>,
+    /// Whether the run goes on from a copy of the game's own save, for a
+    /// game that has one, rather than starting a new game.
+    with_save: bool,
     state: State,
     focus: FocusHandle,
     scroll: ScrollHandle,
@@ -238,6 +260,7 @@ impl RandomizeWindow {
             chosen,
             changes: Changes::Preset(Preset::Classic),
             pasted: None,
+            with_save: false,
             state: State::Choosing {
                 problem: unsupported(),
             },
@@ -305,6 +328,22 @@ impl RandomizeWindow {
         cx.notify();
     }
 
+    /// Chooses whether the run goes on from the game's own save.
+    fn choose_start(&mut self, with_save: bool, cx: &mut Context<Self>) {
+        if self.busy() {
+            return;
+        }
+        self.with_save = with_save;
+        self.state = State::Choosing { problem: None };
+        cx.notify();
+    }
+
+    /// Whether the chosen game has a save for its run to go on from.
+    fn chosen_saved(&self) -> bool {
+        let chosen = self.candidates.get(self.chosen);
+        chosen.is_some_and(|game| game.saved)
+    }
+
     /// The choices of what changes: the presets, then the pasted
     /// settings once there are some.
     fn change_choices(&self) -> Vec<Changes> {
@@ -339,8 +378,9 @@ impl RandomizeWindow {
     }
 
     /// Randomizes the chosen game: downloads the randomizer first if need
-    /// be, then makes the game and adds it to the library. The work goes
-    /// on if the window is closed.
+    /// be, then makes its randomized run, which the game plays from then
+    /// on. A run it had before is left as it is if it was played, and
+    /// removed if it never was. The work goes on if the window is closed.
     fn randomize(&mut self, cx: &mut Context<Self>) {
         if self.busy() {
             return;
@@ -375,6 +415,7 @@ impl RandomizeWindow {
             Changes::Pasted(settings) => settings.clone(),
         };
         let seed = randomizer::new_seed();
+        let with_save = self.with_save && game.saved;
         self.state = if randomizer::installed(&data).is_some() {
             State::Randomizing
         } else {
@@ -393,32 +434,69 @@ impl RandomizeWindow {
                     cx.notify();
                 })
                 .ok();
+                let (base, title, settings) =
+                    (game.path.clone(), game.title.clone(), settings.clone());
                 background
                     .spawn(async move {
-                        randomizer::randomize(
+                        let made = randomizer::randomize(
                             &randomizer,
-                            &game.path,
-                            &game.title,
+                            &base,
+                            &title,
                             &settings,
                             seed,
                             &hacks,
-                        )
+                        )?;
+                        // Its cheats and bindings, and its save if asked.
+                        randomizer::carry_over(&base, &made.rom, with_save).map_err(|error| {
+                            format!(
+                                "Cannot copy the game's own files to its randomized run: {error}"
+                            )
+                        })?;
+                        Ok::<Made, String>(made)
                     })
                     .await
             }
             .await;
             if let Ok(made) = &made {
-                library
-                    .update(cx, |library, cx| library.add(vec![made.rom.clone()], cx))
-                    .ok();
+                let run = Randomized {
+                    image: made.rom.clone(),
+                    seed,
+                    settings: Some(settings),
+                    on: true,
+                };
+                let before = library
+                    .update(cx, |library, cx| {
+                        let before = library.set_randomized(&game.path, run, cx);
+                        // Taken out of the library meanwhile: a game of
+                        // its own, as a hack is.
+                        if before.is_err() {
+                            library.add(vec![made.rom.clone()], cx);
+                        }
+                        before.ok().flatten()
+                    })
+                    .ok()
+                    .flatten();
+                // The run it had: gone if it was never played.
+                if let Some(before) = before.filter(|before| before.image != made.rom) {
+                    background
+                        .spawn(async move { randomizer::remove_unplayed(&before.image) })
+                        .detach();
+                }
             }
             let said = match &made {
-                Ok(made) => made_text(made),
+                Ok(_) => made_text(&game.title, seed),
                 Err(problem) => problem.clone(),
             };
             let shown = this.update(cx, |this, cx| {
                 this.state = match made {
-                    Ok(made) => State::Made(made),
+                    Ok(made) => {
+                        // Its row says the seed it has now.
+                        let made_for = |candidate: &&mut Candidate| candidate.path == game.path;
+                        if let Some(candidate) = this.candidates.iter_mut().find(made_for) {
+                            candidate.seed = Some(seed);
+                        }
+                        State::Made(made, made_text(&game.title, seed))
+                    }
                     Err(problem) => State::Choosing {
                         problem: Some(problem),
                     },
@@ -439,7 +517,7 @@ impl RandomizeWindow {
 
     /// Plays the game just made in the main window, and closes this one.
     fn play(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (State::Made(made), Some(main)) = (&self.state, self.main.upgrade()) else {
+        let (State::Made(made, _), Some(main)) = (&self.state, self.main.upgrade()) else {
             return;
         };
         let rom = made.rom.clone();
@@ -454,7 +532,7 @@ impl RandomizeWindow {
 
     /// Opens the spoiler log of the game just made in the text editor.
     fn open_log(&self) {
-        if let State::Made(Made { log: Some(log), .. }) = &self.state {
+        if let State::Made(Made { log: Some(log), .. }, _) = &self.state {
             emu_os::process::open_in_text_editor(log).ok();
         }
     }
@@ -474,7 +552,8 @@ impl RandomizeWindow {
             // Return held through a quick run would play what it made.
             "enter" if event.is_held => {}
             "escape" => window.remove_window(),
-            "enter" if matches!(self.state, State::Made(_)) => self.play(window, cx),
+            "enter" if matches!(self.state, State::Made(..)) => self.play(window, cx),
+            "tab" if self.chosen_saved() => self.choose_start(!self.with_save, cx),
             "enter" => self.randomize(cx),
             "up" | "w" => self.choose_game(self.chosen.saturating_sub(1), cx),
             "down" | "s" => self.choose_game(self.chosen + 1, cx),
@@ -600,6 +679,29 @@ impl RandomizeWindow {
             .into_any_element()
     }
 
+    /// Whether the run starts a new game or goes on from the chosen
+    /// game's own save. A game with no save can only start a new one: the
+    /// other choice is dimmed.
+    fn start(&self, cx: &mut Context<Self>) -> AnyElement {
+        let saved = self.chosen_saved();
+        let choices = [("New Game", false), ("Copy My Save", true)]
+            .into_iter()
+            .enumerate()
+            .map(|(at, (label, with_save))| {
+                let chosen = with_save == (self.with_save && saved);
+                let choice = ui::choice(("start", at), label, chosen);
+                if with_save && !saved {
+                    return choice.opacity(0.4).cursor_default();
+                }
+                choice.on_click(cx.listener(move |this, _, _, cx| this.choose_start(with_save, cx)))
+            })
+            .collect();
+        div()
+            .flex()
+            .child(ui::track("start", choices))
+            .into_any_element()
+    }
+
     /// What is happening, or went wrong, at the foot of the window.
     fn status(&self) -> AnyElement {
         let (text, colour, pulsing): (SharedString, u32, bool) = match &self.state {
@@ -607,11 +709,18 @@ impl RandomizeWindow {
             State::Choosing {
                 problem: Some(problem),
             } => (problem.clone().into(), TEXT, false),
-            State::Choosing { problem: None } => (
-                "Trade evolutions happen by level instead. Your game is left as it is.".into(),
-                DIM,
-                false,
-            ),
+            State::Choosing { problem: None } => {
+                let chosen = self.candidates.get(self.chosen);
+                let text = match chosen.and_then(|game| game.seed) {
+                    Some(seed) => {
+                        format!("Takes the place of seed {seed}, which is kept if it was played.")
+                    }
+                    None => {
+                        "Your game keeps its own save. Trade evolutions happen by level.".to_owned()
+                    }
+                };
+                (text.into(), DIM, false)
+            }
             State::Downloading => (
                 format!(
                     "Downloading the randomizer, FVX {} ({} MB)…",
@@ -623,7 +732,7 @@ impl RandomizeWindow {
                 true,
             ),
             State::Randomizing => ("Randomizing…".into(), DIM, true),
-            State::Made(made) => (made_text(made).into(), TEXT, false),
+            State::Made(_, said) => (said.clone().into(), TEXT, false),
         };
         let words = div()
             .id("status")
@@ -656,7 +765,7 @@ impl RandomizeWindow {
     /// Play.
     fn buttons(&self, cx: &mut Context<Self>) -> AnyElement {
         let made = match &self.state {
-            State::Made(made) => Some(made),
+            State::Made(made, _) => Some(made),
             _ => None,
         };
         let ready = !self.busy() && !self.candidates.is_empty();
@@ -706,7 +815,13 @@ impl RandomizeWindow {
                 .on_click(cx.listener(|this, _, window, cx| this.play(window, cx)));
             return buttons.children(log).child(play).into_any_element();
         }
-        let randomize = primary("randomize", "Randomize", None)
+        let chosen = self.candidates.get(self.chosen);
+        let label = if chosen.is_some_and(|game| game.seed.is_some()) {
+            "New Seed"
+        } else {
+            "Randomize"
+        };
+        let randomize = primary("randomize", label, None)
             .when(ready, |button| {
                 button
                     .cursor_pointer()
@@ -804,8 +919,9 @@ fn unsupported() -> Option<String> {
 }
 
 /// The keys the window takes, once a game is `made` or before: ↩ and ⌘V
-/// on macOS, Enter and Ctrl+V elsewhere.
-fn hint(made: bool) -> String {
+/// on macOS, Enter and Ctrl+V elsewhere. Tab is among them for a game
+/// with a save of its own (`saved`).
+fn hint(made: bool, saved: bool) -> String {
     let enter = if cfg!(target_os = "macos") {
         "↩".to_owned()
     } else {
@@ -815,7 +931,8 @@ fn hint(made: bool) -> String {
         format!("{enter} play · choose again to make another")
     } else {
         let paste = crate::keys::shortcut(shortcut::PASTE);
-        format!("↑↓ game · ←→ what changes · {paste} paste settings · {enter} randomize")
+        let start = if saved { " · ⇥ start" } else { "" };
+        format!("↑↓ game · ←→ what changes{start} · {paste} paste settings · {enter} randomize")
     }
 }
 
@@ -847,11 +964,14 @@ impl gpui::Render for RandomizeWindow {
                 .child(div().h(px(12.0)))
                 .child(heading("What Changes"))
                 .child(self.changes(cx))
+                .child(div().h(px(12.0)))
+                .child(heading("Start"))
+                .child(self.start(cx))
                 .into_any_element()
         } else {
             self.no_games()
         };
-        let hint = hint(matches!(self.state, State::Made(_)));
+        let hint = hint(matches!(self.state, State::Made(..)), self.chosen_saved());
         let header = div()
             .h(px(TOP_BAR))
             .flex()
@@ -905,12 +1025,19 @@ mod tests {
             ("Enter", "Ctrl+V")
         };
         assert_eq!(
-            hint(true),
+            hint(true, true),
             format!("{enter} play · choose again to make another")
         );
         assert_eq!(
-            hint(false),
+            hint(false, false),
             format!("↑↓ game · ←→ what changes · {paste} paste settings · {enter} randomize")
+        );
+        // A game with a save of its own can start its run from it.
+        assert_eq!(
+            hint(false, true),
+            format!(
+                "↑↓ game · ←→ what changes · ⇥ start · {paste} paste settings · {enter} randomize"
+            )
         );
     }
 
@@ -929,14 +1056,25 @@ mod tests {
         let emerald = rom("Emerald.gba", 0xAC, b"BPEE");
         let crystal = rom("Crystal.gbc", 0x134, b"PM_CRYSTAL");
         let golden_sun = rom("Golden Sun.gba", 0xAC, b"AGSE");
+        // Emerald has a save beside it, and Platinum a randomized run.
+        std::fs::write(dir.join("Emerald.sav"), [7; 8]).expect("save");
+        // Crystal's is blank: it was never saved in.
+        std::fs::write(dir.join("Crystal.sav"), [0xFF; 8]).expect("save");
         let games = vec![
-            (platinum.clone(), "Platinum".to_owned()),
-            (golden_sun, "Golden Sun".to_owned()),
-            (dir.join("Gone.nds"), "Gone".to_owned()),
-            (emerald.clone(), "Emerald".to_owned()),
-            (crystal.clone(), "Crystal".to_owned()),
+            (platinum.clone(), "Platinum".to_owned(), Some(336_933)),
+            (golden_sun, "Golden Sun".to_owned(), None),
+            (dir.join("Gone.nds"), "Gone".to_owned(), None),
+            (emerald.clone(), "Emerald".to_owned(), None),
+            (crystal.clone(), "Crystal".to_owned(), None),
         ];
         let offered = candidates(games);
+        let saved: Vec<bool> = offered.iter().map(|game| game.saved).collect();
+        assert_eq!(
+            saved,
+            [false, true, false],
+            "which has a save to go on from"
+        );
+        assert_eq!(offered[2].seed, Some(336_933));
         let paths: Vec<&PathBuf> = offered.iter().map(|game| &game.path).collect();
         assert_eq!(paths, [&crystal, &emerald, &platinum], "by generation");
         assert_eq!(index_of(&offered, Some(&platinum)), 2);
@@ -951,10 +1089,21 @@ mod tests {
             path: PathBuf::from("game"),
             title: "Pokémon".to_owned(),
             generation,
+            seed: None,
+            saved: false,
         };
         assert_eq!(game(1).detail(), "GB · Gen 1");
         assert_eq!(game(2).detail(), "GBC · Gen 2");
         assert_eq!(game(3).detail(), "GBA · Gen 3");
         assert_eq!(game(5).detail(), "DS · Gen 5");
+        let randomized = Candidate {
+            seed: Some(336_933),
+            ..game(4)
+        };
+        assert_eq!(randomized.detail(), "DS · Gen 4 · Seed 336933");
+        assert_eq!(
+            made_text("Pokemon: Platinum Version", 336_933),
+            "Pokemon: Platinum Version is randomized, seed 336933. Switch it off in its menu."
+        );
     }
 }

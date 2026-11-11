@@ -102,3 +102,45 @@ Facts that shaped the choice:
 FVX's download is `emu_os::install` over `emu_os::fetch`, shared with the
 3DS core's and the RPG Maker player's (see decision 0011's update of the
 same day).
+
+## Update, 2026-11-11: a switch on the game, not a second game
+
+Decision 3 made the randomized game a game of its own in the library, as
+a hack is. The owner asked for a switch on the game instead. No
+randomizer changes a game while it runs, and none that is maintained
+works on an untouched ROM: every one in use rewrites the ROM first
+([research](../research/fan-games.md#randomizers-surveyed-2026-11-11)).
+So the randomized ROM is still
+made once, by FVX, into the hacks folder. What changed is whose it is:
+
+1. **The run belongs to its game.** The library keeps it in the game's
+   entry (`[game.randomized]`: the image, the seed, the settings and
+   whether it is on), and lists no game for it. The tile plays the run
+   while it is on. Its title, box art and play time are the game's.
+2. **Each of the two keeps its own files**, as before: the run's battery
+   save, states and checkpoint sit beside its image. So switching goes
+   from where one was left to where the other was, and nothing is lost
+   either way. A save state made in one never loads in the other, as its
+   header names the ROM.
+3. **The switch is where the game is.** A game the randomizer knows has a
+   Randomizer tile in its game menu, whose page has the switch, New Seed…
+   and Spoiler Log; the library's menu for the game has the same switch.
+   The randomize window makes the run. Whichever of the two is played, by
+   any way of opening it, is what the tile plays from then on.
+4. **A run starts a new game, or from a copy of the game's save.** FVX
+   changes only the game's data, and renumbers no species, move or item,
+   so a save loads in either. The save is copied, never shared: the game
+   it came from keeps its own. Pokémon already caught keep their species
+   and take the randomized game's stats, types and moves. The game's
+   cheats and bindings are copied to a new run too.
+5. **A new seed takes the run's place.** The run before stays in the hacks
+   folder, with its progress, if it has a save or a state; one never
+   played is removed with its log, so trying seeds does not fill the disk.
+6. **Randomized games made before this** were listed on their own. On
+   first launch each becomes the run of the one game for its system with
+   its game code (or, for a Game Boy game, its title), and is on if it was
+   played after that game. One that could be from two games, or whose game
+   is not in the library, stays a game of its own.
+
+A library file with a run in it is not read by a build from before this:
+it says so and leaves the file alone.

@@ -97,6 +97,11 @@ impl GameFiles {
         self.named("sav")
     }
 
+    /// The battery save Start Over first sets aside ([`set_aside`]).
+    pub fn set_aside(&self) -> PathBuf {
+        self.named("sav.bak")
+    }
+
     /// The cheat list.
     pub fn cheats(&self) -> PathBuf {
         self.named("cht")
@@ -132,7 +137,7 @@ impl GameFiles {
             (0..=LAST_FILE_SLOT).flat_map(|slot| [self.state(slot, false), self.state(slot, true)]);
         [
             self.backup(),
-            self.named("sav.bak"),
+            self.set_aside(),
             self.cheats(),
             self.bindings(),
         ]

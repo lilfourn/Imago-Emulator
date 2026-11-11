@@ -54,8 +54,9 @@ own dumps. The app has:
   3DS games, demos, music carts and tools, each added to the library in
   one click;
 - ROM hacks, from IPS, UPS, BPS and xdelta patches;
-- a randomizer, which makes new versions of the games it supports from
-  your own copies;
+- a randomizer you switch on for a Pokémon game: the same game with its
+  wild Pokémon, trainers and more shuffled, beside your own, each with its
+  own save;
 - cheats;
 - Lua scripts that read and write memory, press buttons and draw over the
   screens;
@@ -577,9 +578,20 @@ not read ([decision 0009](docs/decisions/0009-rom-hack-patches.md)).
 
 ## Randomizer
 
-File > Randomize Game… (⌘⌥R), or Randomize… in a Pokémon game's
-menu in the library, makes a randomized copy of the game: the same game with new
-wild Pokémon, trainers, starters and more. It runs the [Universal Pokémon Randomizer
+A Pokémon game can be played randomized: the same game with new wild
+Pokémon, trainers, starters and more. It stays one game in the library,
+with a switch between the game as it is and its randomized run. Each has
+its own save, states and place where you left off, so switching loses
+nothing.
+
+Set it up from the Randomizer tile in a running game's menu (Escape), from
+Randomize… in the game's menu in the library, or with File > Randomize
+Game… (⌘⌥R). After that, the Randomized switch in either menu goes from
+one to the other, and the library says which one the game plays. New Seed…
+makes another run in its place; the run before is kept in the hacks folder
+if it was played, and removed if it never was.
+
+It runs the [Universal Pokémon Randomizer
 FVX](https://github.com/upr-fvx/universal-pokemon-randomizer-fvx), the
 successor of the Universal Pokémon Randomizer ZX. The first time, the app
 downloads FVX 1.6.2 with its own Java (41 MB, checked against a pinned
@@ -596,13 +608,19 @@ SoulSilver, Black, White, Black 2 and White 2. Choose what changes:
 | Everything | Classic, and every Pokémon's types, abilities and moves, the TMs, the tutors and the items lying around |
 | Pasted | Settings from the randomizer's own window or a guide: copy the settings string, then press ⌘V in the window. ZX and FVX strings both work |
 
-Each also turns evolutions by trade into evolutions by level. The game
-goes into the hacks folder as `Pokemon - Platinum Version (Random
-482913).nds`, with its own saves and its own place in the library, and its
-spoiler log beside it (Spoiler Log in the window opens it). Your copy is
-left as it is. The six digits are the seed: the same seed and settings in
-FVX make the same game. One game is made at a time; closing the window
-doesn't stop it, and the main window says when it is done. The 3DS games
+Each also turns evolutions by trade into evolutions by level. A game with
+a save of its own can start its run as a new game, or from a copy of that
+save (Copy My Save): you keep your team and progress, and what you meet
+from then on is randomized. Pokémon you already have keep their species,
+but take the randomized game's stats, types and moves where those changed.
+The game's cheats and bindings are copied to the run either way.
+
+The randomized ROM goes into the hacks folder as `Pokemon - Platinum
+Version (Random 482913).nds`, with its saves and its spoiler log beside it
+(Spoiler Log opens it). Your copy and its save are left as they are. The
+six digits are the seed: the same seed and settings in FVX make the same
+game. One game is made at a time; closing the window doesn't stop it, and
+the main window says when it is done. The 3DS games
 are not offered yet, because a randomized copy would share its save with
 the game it came from ([decision 0012](docs/decisions/0012-randomizer.md)).
 

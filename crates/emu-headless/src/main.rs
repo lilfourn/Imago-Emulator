@@ -4,8 +4,12 @@
 //! ```text
 //! emu-headless [--system gb|gba|nds|3ds] [--frames N] [--start-time SECS] [--dump DIR]
 //!              [--wav FILE] [--script FILE.lua] [--work-dir DIR] [--state FILE]
-//!              [--scale N] [--time] [--digest] ROM
+//!              [--backup FILE] [--scale N] [--time] [--digest] ROM
 //! ```
+//!
+//! `--backup FILE` starts the game with a battery save, such as the
+//! `game.sav` beside a ROM, in its cartridge. It is only read: what the
+//! game saves during the run is not written back.
 //!
 //! An RPG Maker game's folder plays in place of a ROM, in a hidden player
 //! of its own kept in `--work-dir` (by default
@@ -60,7 +64,8 @@ use emu_script::{Output, Script, StateRequest};
 
 const USAGE: &str = "usage: emu-headless [--system gb|gba|nds|3ds] [--frames N] \
                      [--start-time SECS] [--dump DIR] [--wav FILE] [--script FILE.lua] \
-                     [--work-dir DIR] [--state FILE] [--scale N] [--time] [--digest] ROM";
+                     [--work-dir DIR] [--state FILE] [--backup FILE] [--scale N] [--time] \
+                     [--digest] ROM";
 
 struct Args {
     rom: PathBuf,
@@ -72,6 +77,7 @@ struct Args {
     script: Option<PathBuf>,
     work_dir: Option<PathBuf>,
     state: Option<PathBuf>,
+    backup: Option<PathBuf>,
     scale: Option<u32>,
     time: bool,
     digest: bool,
@@ -108,6 +114,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     let mut script = None;
     let mut work_dir = None;
     let mut state = None;
+    let mut backup = None;
     let mut scale = None;
     let mut time = false;
     let mut digest = false;
@@ -124,6 +131,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
             "--script" => script = Some(PathBuf::from(value("--script")?)),
             "--work-dir" => work_dir = Some(PathBuf::from(value("--work-dir")?)),
             "--state" => state = Some(PathBuf::from(value("--state")?)),
+            "--backup" => backup = Some(PathBuf::from(value("--backup")?)),
             "--scale" => scale = Some(value("--scale")?.parse().context("--scale")?),
             "--time" => time = true,
             "--digest" => digest = true,
@@ -143,6 +151,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
         script,
         work_dir,
         state,
+        backup,
         scale,
         time,
         digest,
@@ -312,7 +321,12 @@ fn open(args: &Args) -> anyhow::Result<(System, Box<dyn Core>)> {
         return Ok((system, Box::new(core)));
     }
     let rom = fs::read(&args.rom).with_context(|| format!("reading {}", args.rom.display()))?;
+    let backup = match &args.backup {
+        Some(path) => Some(fs::read(path).with_context(|| format!("reading {}", path.display()))?),
+        None => None,
+    };
     let media = Media {
+        backup: backup.as_deref(),
         start_time: args.start_time,
         ..Media::new(&rom)
     };
