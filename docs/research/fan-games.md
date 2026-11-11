@@ -180,6 +180,16 @@ Asked whether randomizing could be a switch on a running game:
   Flying without; with the mod's `code.bin` blanked the game did not
   start.
 
+- **PC fan games** (built the same day, decision 0012's third update):
+  a script of the app's swaps species as the game makes Pokémon. Checked
+  in a copy of Pokémon This Gym of Mine (Essentials v18.1, 912 species)
+  by calling the game's own functions with the script loaded: wild
+  Bulbasaur became Rowlet and Mewtwo Lugia, each within a few points of
+  the same base stat total; a trainer's six became six others at the same
+  levels with their own moves; a Pikachu given by name was swapped and
+  one the game made was not; the same seed gave the same swaps and
+  another seed others; with trainers and gifts off those were unchanged.
+
 What else there is, for later:
 
 - **Key items and progression**: [Archipelago](https://archipelago.gg)

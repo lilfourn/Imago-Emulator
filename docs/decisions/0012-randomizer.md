@@ -190,3 +190,46 @@ are offered now, each known by its title ID.
 Not done: a game update (FVX can take one with `-u`), which the core
 cannot install either. One of Azahar's compressed games is not offered,
 as FVX cannot read it.
+
+## Update, 2026-11-11: PC fan games
+
+The owner wants every Pokémon game randomizable, the PC fan games among
+them. Those are Ruby scripts on RPG Maker (decision 0008), not ROMs: FVX
+knows none, and each game's data is its own.
+
+1. **The game is randomized as it runs, by a script of the app's.**
+   `emu-app/src/randomizer/essentials.rb` is loaded into the run's hidden
+   player after the game's own preload scripts. As the game's `Main`
+   starts it wraps the functions Essentials makes Pokémon with: wild
+   Pokémon (`pbGenerateWildPokemon`), trainers' teams
+   (`Events.onTrainerPartyLoad`, which a battle triggers), and gifts,
+   trades and eggs (`pbAddPokemon` and its like, when the game names a
+   species rather than hands over a Pokémon). Nothing in the game's
+   folder is changed.
+2. **Each species becomes another of about the same strength.** The
+   species are ordered by base stat total, cut into tiers of 16 and
+   shuffled within each, by Ruby's own `Random` seeded with the run's
+   seed. The swap is one to one and the same every time, so a place has
+   the same wild Pokémon each visit, as FVX's runs do.
+3. **Two presets.** Wild Pokémon, and Classic, which adds trainers and
+   gifts. "Everything" would rewrite each species' types, abilities and
+   moves, which these games keep in compiled data: not done. The run's
+   settings in the library are `essentials:wild` or `essentials:classic`.
+4. **A run is a folder, not a copy of the game** (`emu_mkxp::Run`):
+   `run.json` names the game's folder, the scripts to load and the name
+   the saves are kept under. `emu_mkxp::game_folder` takes it for a
+   game, so the library, the switch, the states and the checkpoint work
+   by its path as they do for a ROM's run. It has a hidden player of its
+   own and mkxp-z keeps its saves under `<the game's name> (Random
+   <seed>)`, beside the game's.
+5. **The hooks ride on `Main`'s first line.** mkxp-z counts the game's
+   scripts before preload scripts run, so a script added to the list
+   pushes `Main` off the end and the game never starts. A fault in the
+   hooks is caught: the game then plays unchanged and the log says why.
+6. **The spoiler log is written by the script**, the first time the run
+   is played: only the running game knows its species.
+7. **Essentials v18 only**, which is what Pokémon This Gym of Mine is and
+   what could be run. v19 keeps species in `GameData` and v20 replaced
+   `Events`; in such a game the script finds nothing it knows, changes
+   nothing and says so in the log. A game is offered if its folder shows
+   Essentials' data (`PBS/`, `Data/species.dat` or `Data/dexdata.dat`).

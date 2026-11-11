@@ -30,7 +30,8 @@ use crate::icons;
 use crate::library::Randomized;
 use crate::library_view::{LibraryEvent, LibraryView};
 use crate::probe;
-use crate::randomizer::{self, Made, Preset};
+use crate::randomizer::essentials::Shuffle;
+use crate::randomizer::{self, Kind, Made, Preset};
 use crate::romhack;
 use crate::theme::{
     BACKGROUND, CHOSEN, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT, accent,
@@ -90,7 +91,8 @@ fn made_text(title: &str, seed: u32) -> String {
 pub struct Candidate {
     path: PathBuf,
     title: String,
-    generation: u8,
+    /// How it is randomized: a ROM of some generation, or a fan game.
+    kind: Kind,
     /// The seed of its randomized run, if it has one.
     seed: Option<u32>,
     /// Whether it has a battery save of its own that holds something, for
@@ -115,25 +117,29 @@ pub fn library_games(library: &LibraryView) -> Vec<LibraryGame> {
         .collect()
 }
 
-/// Which of `games` the randomizer can randomize, by generation and then
-/// title. Each one's header says, and its folder whether it has a save, so
-/// this blocks; run it off the UI thread.
+/// Which of `games` the randomizer can randomize, by generation, with the
+/// fan games after, and then title. Each one's header says, and its folder
+/// whether it has a save, so this blocks; run it off the UI thread.
 pub fn candidates(games: Vec<LibraryGame>) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = games
         .into_iter()
         .filter_map(|(path, title, seed)| {
-            let generation = randomizer::generation(&path)?;
+            let kind = randomizer::kind(&path)?;
             let saved = randomizer::has_save(&path);
             Some(Candidate {
                 path,
                 title,
-                generation,
+                kind,
                 seed,
                 saved,
             })
         })
         .collect();
-    candidates.sort_by_cached_key(|game| (game.generation, game.title.to_lowercase()));
+    let order = |kind: Kind| match kind {
+        Kind::Generation(generation) => generation,
+        Kind::Essentials => u8::MAX,
+    };
+    candidates.sort_by_cached_key(|game| (order(game.kind), game.title.to_lowercase()));
     candidates
 }
 
@@ -148,14 +154,19 @@ impl Candidate {
     /// Its system and generation, as its row says them, and the seed of
     /// its randomized run if it has one: `DS · Gen 4 · Seed 336933`.
     fn detail(&self) -> String {
-        let system = match self.generation {
-            1 => "GB",
-            2 => "GBC",
-            3 => "GBA",
-            4 | 5 => "DS",
-            _ => "3DS",
+        let detail = match self.kind {
+            Kind::Generation(generation) => {
+                let system = match generation {
+                    1 => "GB",
+                    2 => "GBC",
+                    3 => "GBA",
+                    4 | 5 => "DS",
+                    _ => "3DS",
+                };
+                format!("{system} · Gen {generation}")
+            }
+            Kind::Essentials => "PC · Fan game".to_owned(),
         };
-        let detail = format!("{system} · Gen {}", self.generation);
         match self.seed {
             Some(seed) => format!("{detail} · Seed {seed}"),
             None => detail,
@@ -290,6 +301,7 @@ impl RandomizeWindow {
             this.update(cx, |this, cx| {
                 this.chosen = index_of(&candidates, wanted.as_ref());
                 this.candidates = candidates;
+                this.keep_to_choices();
                 this.scroll.scroll_to_item(this.chosen);
                 this.state = State::Choosing {
                     problem: unsupported(),
@@ -315,8 +327,17 @@ impl RandomizeWindow {
         }
         self.chosen = index;
         self.scroll.scroll_to_item(index);
+        self.keep_to_choices();
         self.state = State::Choosing { problem: None };
         cx.notify();
+    }
+
+    /// Chooses Classic if what changes was chosen for another game and the
+    /// chosen one has no such choice, as a fan game has no "Everything".
+    fn keep_to_choices(&mut self) {
+        if !self.change_choices().contains(&self.changes) {
+            self.changes = Changes::Preset(Preset::Classic);
+        }
     }
 
     /// Chooses what changes, and leaves what was made behind.
@@ -345,9 +366,27 @@ impl RandomizeWindow {
         chosen.is_some_and(|game| game.saved)
     }
 
+    /// The fan game's shuffle the chosen changes are, if the chosen game
+    /// is a fan game: its run is made by the app's own script, which has
+    /// two of the presets.
+    fn shuffle(&self) -> Option<Shuffle> {
+        let chosen = self.candidates.get(self.chosen)?;
+        let shuffle = match self.changes {
+            Changes::Preset(Preset::Wild) => Shuffle::Wild,
+            _ => Shuffle::Classic,
+        };
+        (chosen.kind == Kind::Essentials).then_some(shuffle)
+    }
+
     /// The choices of what changes: the presets, then the pasted
-    /// settings once there are some.
+    /// settings once there are some. A fan game has the presets its
+    /// script can do, and takes no settings.
     fn change_choices(&self) -> Vec<Changes> {
+        if self.shuffle().is_some() {
+            return [Shuffle::Wild, Shuffle::Classic]
+                .map(|shuffle| Changes::Preset(shuffle.into()))
+                .to_vec();
+        }
         let presets = Preset::ALL.into_iter().map(Changes::Preset);
         presets
             .chain(self.pasted.clone().map(Changes::Pasted))
@@ -358,6 +397,13 @@ impl RandomizeWindow {
     /// chooses it; or says why it is not one.
     fn paste(&mut self, cx: &mut Context<Self>) {
         if self.busy() {
+            return;
+        }
+        if self.shuffle().is_some() {
+            self.state = State::Choosing {
+                problem: Some("A fan game takes no settings string".to_owned()),
+            };
+            cx.notify();
             return;
         }
         let text = cx
@@ -386,8 +432,10 @@ impl RandomizeWindow {
         if self.busy() {
             return;
         }
+        // A fan game's run is made by the app's own script, not FVX.
+        let shuffle = self.shuffle();
         // Said at once, not after a moment of "Downloading…".
-        if let Some(why) = randomizer::UNSUPPORTED {
+        if let Some(why) = randomizer::UNSUPPORTED.filter(|_| shuffle.is_none()) {
             self.state = State::Choosing {
                 problem: Some(why.to_owned()),
             };
@@ -411,13 +459,14 @@ impl RandomizeWindow {
             cx.notify();
             return;
         };
-        let settings = match &self.changes {
-            Changes::Preset(preset) => preset.settings().to_owned(),
-            Changes::Pasted(settings) => settings.clone(),
+        let settings = match (shuffle, &self.changes) {
+            (Some(shuffle), _) => shuffle.settings().to_owned(),
+            (None, Changes::Preset(preset)) => preset.settings().to_owned(),
+            (None, Changes::Pasted(settings)) => settings.clone(),
         };
         let seed = randomizer::new_seed();
         let with_save = self.with_save && game.saved;
-        self.state = if randomizer::installed(&data).is_some() {
+        self.state = if shuffle.is_some() || randomizer::installed(&data).is_some() {
             State::Randomizing
         } else {
             State::Downloading
@@ -427,9 +476,14 @@ impl RandomizeWindow {
         let background = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let made = async {
-                let randomizer = background
-                    .spawn(async move { randomizer::ensure(&data) })
-                    .await?;
+                let randomizer = match shuffle {
+                    Some(_) => None,
+                    None => Some(
+                        background
+                            .spawn(async move { randomizer::ensure(&data) })
+                            .await?,
+                    ),
+                };
                 this.update(cx, |this, cx| {
                     this.state = State::Randomizing;
                     cx.notify();
@@ -439,14 +493,22 @@ impl RandomizeWindow {
                     (game.path.clone(), game.title.clone(), settings.clone());
                 background
                     .spawn(async move {
-                        let made = randomizer::randomize(
-                            &randomizer,
-                            &base,
-                            &title,
-                            &settings,
-                            seed,
-                            &hacks,
-                        )?;
+                        let made = match (shuffle, randomizer) {
+                            (Some(shuffle), _) => {
+                                randomizer::essentials::make(&base, &title, shuffle, seed, &hacks)?
+                            }
+                            (None, Some(randomizer)) => randomizer::randomize(
+                                &randomizer,
+                                &base,
+                                &title,
+                                &settings,
+                                seed,
+                                &hacks,
+                            )?,
+                            (None, None) => {
+                                return Err("The randomizer is not installed".to_owned());
+                            }
+                        };
                         // Its cheats and bindings, and its save if asked.
                         randomizer::carry_over(&base, &made.rom, with_save).map_err(|error| {
                             format!(
@@ -716,6 +778,9 @@ impl RandomizeWindow {
                     Some(seed) => {
                         format!("Takes the place of seed {seed}, which is kept if it was played.")
                     }
+                    None if self.shuffle().is_some() => {
+                        "Your game keeps its own save, and its files are not changed.".to_owned()
+                    }
                     None => {
                         "Your game keeps its own save. Trade evolutions happen by level.".to_owned()
                     }
@@ -921,8 +986,9 @@ fn unsupported() -> Option<String> {
 
 /// The keys the window takes, once a game is `made` or before: ↩ and ⌘V
 /// on macOS, Enter and Ctrl+V elsewhere. Tab is among them for a game
-/// with a save of its own (`saved`).
-fn hint(made: bool, saved: bool) -> String {
+/// with a save of its own (`saved`), and pasting for one that takes a
+/// settings string (`pastes`), as a fan game does not.
+fn hint(made: bool, saved: bool, pastes: bool) -> String {
     let enter = if cfg!(target_os = "macos") {
         "↩".to_owned()
     } else {
@@ -931,9 +997,16 @@ fn hint(made: bool, saved: bool) -> String {
     if made {
         format!("{enter} play · choose again to make another")
     } else {
-        let paste = crate::keys::shortcut(shortcut::PASTE);
         let start = if saved { " · ⇥ start" } else { "" };
-        format!("↑↓ game · ←→ what changes{start} · {paste} paste settings · {enter} randomize")
+        let paste = if pastes {
+            format!(
+                " · {} paste settings",
+                crate::keys::shortcut(shortcut::PASTE)
+            )
+        } else {
+            String::new()
+        };
+        format!("↑↓ game · ←→ what changes{start}{paste} · {enter} randomize")
     }
 }
 
@@ -972,7 +1045,11 @@ impl gpui::Render for RandomizeWindow {
         } else {
             self.no_games()
         };
-        let hint = hint(matches!(self.state, State::Made(..)), self.chosen_saved());
+        let hint = hint(
+            matches!(self.state, State::Made(..)),
+            self.chosen_saved(),
+            self.shuffle().is_none(),
+        );
         let header = div()
             .h(px(TOP_BAR))
             .flex()
@@ -1026,19 +1103,24 @@ mod tests {
             ("Enter", "Ctrl+V")
         };
         assert_eq!(
-            hint(true, true),
+            hint(true, true, true),
             format!("{enter} play · choose again to make another")
         );
         assert_eq!(
-            hint(false, false),
+            hint(false, false, true),
             format!("↑↓ game · ←→ what changes · {paste} paste settings · {enter} randomize")
         );
         // A game with a save of its own can start its run from it.
         assert_eq!(
-            hint(false, true),
+            hint(false, true, true),
             format!(
                 "↑↓ game · ←→ what changes · ⇥ start · {paste} paste settings · {enter} randomize"
             )
+        );
+        // A fan game takes no settings string.
+        assert_eq!(
+            hint(false, true, false),
+            format!("↑↓ game · ←→ what changes · ⇥ start · {enter} randomize")
         );
     }
 
@@ -1089,7 +1171,7 @@ mod tests {
         let game = |generation| Candidate {
             path: PathBuf::from("game"),
             title: "Pokémon".to_owned(),
-            generation,
+            kind: Kind::Generation(generation),
             seed: None,
             saved: false,
         };
@@ -1099,6 +1181,11 @@ mod tests {
         assert_eq!(game(5).detail(), "DS · Gen 5");
         assert_eq!(game(6).detail(), "3DS · Gen 6");
         assert_eq!(game(7).detail(), "3DS · Gen 7");
+        let fan_game = Candidate {
+            kind: Kind::Essentials,
+            ..game(0)
+        };
+        assert_eq!(fan_game.detail(), "PC · Fan game");
         let randomized = Candidate {
             seed: Some(336_933),
             ..game(4)
