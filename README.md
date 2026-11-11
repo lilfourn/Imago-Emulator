@@ -768,7 +768,9 @@ unmaintained crate the workspace depends on directly.
 Settings has a Supporter section (Imago Emulator > Support Imago
 Emulator… opens it). Copy the key from its email and press Paste Key, or
 ⌘V anywhere in Settings. Accent then offers five colours for the buttons
-and the caret, and App Icon five icons for the Dock while the app runs.
+and the caret, and App Icon five icons for the Dock while the app runs. A
+key is a Supporter's, a Patron's or a Founder's: the same looks, and one
+more icon each for a Patron (Ember) and a Founder (Founder).
 Remove Key puts the app's own look back. The key is checked on your Mac
 and never sent anywhere; it is kept in
 `~/Library/Application Support/ds-emulator/supporter.key`
@@ -778,6 +780,7 @@ Keys are made with `supporter-key`, by whoever holds the signing key:
 
 ```sh
 cargo run -p emu-supporter --bin supporter-key -- issue --name "Ada Lovelace"
+cargo run -p emu-supporter --bin supporter-key -- issue --tier founder --name "Ada Lovelace"
 cargo run -p emu-supporter --bin supporter-key -- issue --count 100   # no names, one a line
 cargo run -p emu-supporter --bin supporter-key -- check IMAGO-…
 ```

@@ -33,7 +33,11 @@ nothing is paywalled; this decision says what that rule protects.
    speed, saves, states, the store, the randomizer, Guide, upscaling and
    every fix reach everyone at once. No early builds, no paid build.
 2. **Supporters get looks, as thanks**: an accent colour (five) and, on
-   macOS, a Dock icon (five). Nothing else is unlocked by a key, and
+   macOS, a Dock icon (five). A key has a tier, Supporter, Patron or
+   Founder: the same looks, and one more Dock icon each for a Patron and
+   a Founder, so that giving more is thanked without the app being any
+   more of an app. Founder is sold only while the app is new. Nothing
+   else is unlocked by a key, and
    nothing may be added to that list that a game needs, that any game
    company's games are named by, or that people already have. A dark
    theme, if the app gets one, is for everyone.
@@ -43,7 +47,9 @@ nothing is paywalled; this decision says what that rule protects.
 4. **A key is checked on the computer, never by a server**
    (`emu-supporter`). It is an Ed25519 signature over the key's number,
    its date and the supporter's name, checked against public keys built
-   into the app. The app makes no request about it, holds no account, and
+   into the app, with the tier signed too. A tier from a later build
+   counts as the highest this one knows. The app makes no request about
+   it, holds no account, and
    a key works offline for as long as the app does. Whoever sells keys
    only has to sign them, so the seller can be changed without changing
    the app.
@@ -53,9 +59,9 @@ nothing is paywalled; this decision says what that rule protects.
 6. **Keys are taken back by number** (`REVOKED`), in the next build. That
    is slow on purpose: it is for a refund or a key posted in public, not
    for policing.
-7. **The price is the owner's**; the advice is one payment, of the
-   buyer's choosing from $10, through a merchant of record that handles
-   tax. No subscription for looks.
+7. **The prices are the owner's**, and none is in the app; the advice is
+   one payment of $10, $25 or $50 for the three tiers, through a merchant
+   of record that handles tax. No subscription for looks.
 
 ## Consequences
 

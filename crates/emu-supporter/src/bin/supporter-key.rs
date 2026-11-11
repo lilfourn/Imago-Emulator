@@ -3,8 +3,10 @@
 //! ```text
 //! supporter-key keygen                    make the signing key, once
 //! supporter-key public                    the signing key's public half
-//! supporter-key issue [--name NAME] [--count N]
-//!                                         print new keys, one a line
+//! supporter-key issue [--tier TIER] [--name NAME] [--count N]
+//!                                         print new keys, one a line;
+//!                                         TIER is supporter (the default),
+//!                                         patron or founder
 //! supporter-key check KEY                 what a key says, as the app reads it
 //! ```
 //!
@@ -22,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use emu_supporter::Tier;
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -37,6 +40,7 @@ fn main() -> ExitCode {
 fn run(arguments: &[String]) -> Result<(), String> {
     let mut command = None;
     let mut name = String::new();
+    let mut tier = Tier::Supporter;
     let mut count = 1_u32;
     let mut signing_key = None;
     let mut key = None;
@@ -49,6 +53,12 @@ fn run(arguments: &[String]) -> Result<(), String> {
         };
         match argument.as_str() {
             "--name" => name = value("a name")?,
+            "--tier" => {
+                let given = value("a tier")?;
+                tier = Tier::from_name(&given).ok_or_else(|| {
+                    format!("unknown tier {given:?}; use supporter, patron or founder")
+                })?;
+            }
             "--count" => {
                 count = value("a number")?
                     .parse()
@@ -93,8 +103,9 @@ fn run(arguments: &[String]) -> Result<(), String> {
             }
             let mut out = io::stdout().lock();
             for _ in 0..count {
-                let key = emu_supporter::issue(&seed, emu_supporter::new_id(), today(), &name)
-                    .map_err(|error| error.to_string())?;
+                let key =
+                    emu_supporter::issue(&seed, tier, emu_supporter::new_id(), today(), &name)
+                        .map_err(|error| error.to_string())?;
                 writeln!(out, "{key}").map_err(|error| error.to_string())?;
             }
         }
@@ -108,13 +119,15 @@ fn run(arguments: &[String]) -> Result<(), String> {
                 &supporter.name
             };
             println!(
-                "Good: key {:016x}, issued {year}-{month:02}-{day:02}, {name}",
+                "Good: {} key {:016x}, issued {year}-{month:02}-{day:02}, {name}",
+                supporter.tier.label(),
                 supporter.id
             );
         }
         _ => {
             println!(
-                "supporter-key keygen | public | issue [--name NAME] [--count N] | check KEY\n\
+                "supporter-key keygen | public | issue [--tier TIER] [--name NAME] [--count N] | check KEY\n\
+                 \x20 --tier TIER          supporter (the default), patron or founder\n\
                  \x20 --signing-key FILE   instead of ~/.config/imago-emulator/supporter-signing.key"
             );
         }

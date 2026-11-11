@@ -46,7 +46,8 @@
 //!
 //! [look]                  # a supporter's choices; left out while both are the app's own
 //! accent = "violet"       # "blue", "teal", "green", "gold" or "violet"
-//! app_icon = "night"      # in the Dock: "classic", "night", "ink", "chalk" or "blueprint"
+//! app_icon = "night"      # in the Dock: "classic", "night", "ink", "chalk", "blueprint",
+//!                         # a Patron's "ember" or a Founder's "founder"
 //! ```
 //!
 //! Settings missing from the file keep their defaults. Files saved before
@@ -689,8 +690,10 @@ pub enum SettingsError {
     /// The accent is not one of the five names.
     #[error("unknown accent {0:?} in settings; use blue, teal, green, gold or violet")]
     UnknownAccent(String),
-    /// The app icon is not one of the five names.
-    #[error("unknown app icon {0:?} in settings; use classic, night, ink, chalk or blueprint")]
+    /// The app icon is not one of the seven names.
+    #[error(
+        "unknown app icon {0:?} in settings; use classic, night, ink, chalk, blueprint, ember or founder"
+    )]
     UnknownAppIcon(String),
     /// Guide's Thinking is not "off", "low", "medium" or "high".
     #[error("unknown Guide thinking {0:?} in settings; use off, low, medium or high")]

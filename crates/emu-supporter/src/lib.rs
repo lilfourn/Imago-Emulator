@@ -15,6 +15,7 @@
 //! | Bytes | What |
 //! |---|---|
 //! | 1 | The format's version, [`VERSION`] |
+//! | 1 | The supporter's [`Tier`] |
 //! | 8 | The key's number, big-endian: what [`REVOKED`] names |
 //! | 4 | The day it was issued, in days since 1970-01-01, big-endian |
 //! | 0 to [`MAX_NAME`] | The supporter's name, UTF-8; may be empty |
@@ -40,8 +41,72 @@ pub const MAX_NAME: usize = 64;
 /// key is never one for anything else the signing key may come to sign.
 pub const CONTEXT: &[u8] = b"imago-emulator supporter key\0";
 
-/// The bytes before the name: the version, the number and the day.
-const HEADER: usize = 1 + 8 + 4;
+/// The bytes before the name: the version, the tier, the number and the
+/// day.
+const HEADER: usize = 1 + 1 + 8 + 4;
+
+/// How much a supporter gave, by the name of what they bought. Every tier
+/// has everything the one before it has; what each adds is a look
+/// (`emu-app`'s `supporter` module), never anything a game needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Tier {
+    /// The first tier.
+    #[default]
+    Supporter,
+    /// The second.
+    Patron,
+    /// The third, sold only while the app is new.
+    Founder,
+}
+
+impl Tier {
+    /// Every tier, from the first.
+    pub const ALL: [Self; 3] = [Self::Supporter, Self::Patron, Self::Founder];
+
+    /// The tier's byte in a key.
+    fn byte(self) -> u8 {
+        match self {
+            Self::Supporter => 1,
+            Self::Patron => 2,
+            Self::Founder => 3,
+        }
+    }
+
+    /// The tier a key's `byte` stands for. A tier above those this build
+    /// knows, from a later one, counts as the highest it does know: its
+    /// holder gave at least that much. No tier is byte 0.
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => None,
+            1 => Some(Self::Supporter),
+            2 => Some(Self::Patron),
+            _ => Some(Self::Founder),
+        }
+    }
+
+    /// What the app calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Supporter => "Supporter",
+            Self::Patron => "Patron",
+            Self::Founder => "Founder",
+        }
+    }
+
+    /// What `supporter-key --tier` calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Supporter => "supporter",
+            Self::Patron => "patron",
+            Self::Founder => "founder",
+        }
+    }
+
+    /// The tier `supporter-key --tier` calls `name`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tier| tier.name() == name)
+    }
+}
 
 /// The public halves of the signing keys the app trusts. A key signed by
 /// any of them is good, so a signing key can be replaced without ending
@@ -61,6 +126,8 @@ pub const REVOKED: [u64; 0] = [];
 /// What a good key says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Supporter {
+    /// What they bought.
+    pub tier: Tier,
     /// The key's number.
     pub id: u64,
     /// The day it was issued, in days since 1970-01-01.
@@ -133,11 +200,13 @@ pub fn read_with(trusted: &[[u8; 32]], text: &str) -> Result<Supporter, KeyError
     if payload[0] != VERSION {
         return Err(KeyError::Newer);
     }
+    let tier = Tier::from_byte(payload[1]).ok_or(KeyError::Newer)?;
     let number = |range: std::ops::Range<usize>| payload.get(range).ok_or(KeyError::Damaged);
-    let id = u64::from_be_bytes(number(1..9)?.try_into().map_err(|_| KeyError::Damaged)?);
-    let issued = u32::from_be_bytes(number(9..13)?.try_into().map_err(|_| KeyError::Damaged)?);
+    let id = u64::from_be_bytes(number(2..10)?.try_into().map_err(|_| KeyError::Damaged)?);
+    let issued = u32::from_be_bytes(number(10..14)?.try_into().map_err(|_| KeyError::Damaged)?);
     let name = std::str::from_utf8(&payload[HEADER..]).map_err(|_| KeyError::Damaged)?;
     Ok(Supporter {
+        tier,
         id,
         issued,
         name: name.to_owned(),
@@ -155,13 +224,19 @@ pub enum IssueError {
     NameNotPlain,
 }
 
-/// A key numbered `id`, issued on day `issued` to `name` (which may be
-/// empty), signed with the signing key whose seed is `seed`.
+/// A `tier` key numbered `id`, issued on day `issued` to `name` (which
+/// may be empty), signed with the signing key whose seed is `seed`.
 ///
 /// # Errors
 ///
 /// Returns [`IssueError`] if the name does not fit a key.
-pub fn issue(seed: &[u8; 32], id: u64, issued: u32, name: &str) -> Result<String, IssueError> {
+pub fn issue(
+    seed: &[u8; 32],
+    tier: Tier,
+    id: u64,
+    issued: u32,
+    name: &str,
+) -> Result<String, IssueError> {
     let name = name.trim();
     if name.len() > MAX_NAME {
         return Err(IssueError::NameTooLong);
@@ -169,7 +244,7 @@ pub fn issue(seed: &[u8; 32], id: u64, issued: u32, name: &str) -> Result<String
     if name.chars().any(char::is_control) {
         return Err(IssueError::NameNotPlain);
     }
-    let mut bytes = vec![VERSION];
+    let mut bytes = vec![VERSION, tier.byte()];
     bytes.extend(id.to_be_bytes());
     bytes.extend(issued.to_be_bytes());
     bytes.extend(name.as_bytes());
@@ -231,11 +306,19 @@ mod tests {
 
     #[test]
     fn a_key_says_who_it_was_issued_to_and_when() {
-        let key = issue(&SEED, 0x0123_4567_89AB_CDEF, 20_768, "Ada Lovelace").expect("issued");
+        let key = issue(
+            &SEED,
+            Tier::Patron,
+            0x0123_4567_89AB_CDEF,
+            20_768,
+            "Ada Lovelace",
+        )
+        .expect("issued");
         assert!(key.starts_with(PREFIX), "{key}");
         assert_eq!(
             read_with(&trusted(), &key),
             Ok(Supporter {
+                tier: Tier::Patron,
                 id: 0x0123_4567_89AB_CDEF,
                 issued: 20_768,
                 name: "Ada Lovelace".to_owned(),
@@ -243,36 +326,42 @@ mod tests {
         );
         // The same key again is the same text.
         assert_eq!(
-            issue(&SEED, 0x0123_4567_89AB_CDEF, 20_768, "Ada Lovelace"),
+            issue(
+                &SEED,
+                Tier::Patron,
+                0x0123_4567_89AB_CDEF,
+                20_768,
+                "Ada Lovelace"
+            ),
             Ok(key)
         );
     }
 
     #[test]
     fn a_key_needs_no_name_and_holds_one_in_any_script() {
-        let plain = issue(&SEED, 1, 2, "").expect("issued");
+        let plain = issue(&SEED, Tier::Supporter, 1, 2, "").expect("issued");
         assert_eq!(read_with(&trusted(), &plain).expect("read").name, "");
-        // The shortest key there is: 13 bytes and a signature.
-        assert_eq!(plain.len(), PREFIX.len() + (77_usize * 4).div_ceil(3));
-        let named = issue(&SEED, 1, 2, "  ポケット 🎮 ").expect("issued");
+        // The shortest key there is: 14 bytes and a signature.
+        assert_eq!(plain.len(), PREFIX.len() + (78_usize * 4).div_ceil(3));
+        let named = issue(&SEED, Tier::Supporter, 1, 2, "  ポケット 🎮 ").expect("issued");
         assert_eq!(
             read_with(&trusted(), &named).expect("read").name,
             "ポケット 🎮"
         );
         assert_eq!(
-            issue(&SEED, 1, 2, &"é".repeat(33)),
+            issue(&SEED, Tier::Supporter, 1, 2, &"é".repeat(33)),
             Err(IssueError::NameTooLong)
         );
-        assert!(issue(&SEED, 1, 2, &"é".repeat(32)).is_ok());
+        assert!(issue(&SEED, Tier::Supporter, 1, 2, &"é".repeat(32)).is_ok());
         assert_eq!(
-            issue(&SEED, 1, 2, "two\nlines"),
+            issue(&SEED, Tier::Supporter, 1, 2, "two\nlines"),
             Err(IssueError::NameNotPlain)
         );
     }
 
     #[test]
     fn a_key_reads_however_an_email_wrapped_it() {
-        let key = issue(&SEED, 9, 9, "Wrapped").expect("issued");
+        let key = issue(&SEED, Tier::Supporter, 9, 9, "Wrapped").expect("issued");
         let (start, end) = key.split_at(40);
         let wrapped = format!("  {start}\r\n  {end} \n");
         assert_eq!(
@@ -283,7 +372,7 @@ mod tests {
 
     #[test]
     fn a_key_changed_anywhere_is_refused() {
-        let key = issue(&SEED, 42, 20_000, "Mallory").expect("issued");
+        let key = issue(&SEED, Tier::Supporter, 42, 20_000, "Mallory").expect("issued");
         let body = &key[PREFIX.len()..];
         let bytes = URL_SAFE_NO_PAD.decode(body).expect("base64");
         // Every byte, the name's and the signature's alike.
@@ -306,7 +395,7 @@ mod tests {
 
     #[test]
     fn a_key_signed_by_someone_else_is_refused() {
-        let key = issue(&[8; 32], 42, 20_000, "Mallory").expect("issued");
+        let key = issue(&[8; 32], Tier::Supporter, 42, 20_000, "Mallory").expect("issued");
         assert_eq!(read_with(&trusted(), &key), Err(KeyError::Forged));
         // Either of two trusted signing keys will do.
         let both = [public_key(&SEED), public_key(&[8; 32])];
@@ -325,14 +414,14 @@ mod tests {
                 "{text:?}"
             );
         }
-        let key = issue(&SEED, 1, 2, "Cut").expect("issued");
+        let key = issue(&SEED, Tier::Supporter, 1, 2, "Cut").expect("issued");
         for text in [
             "IMAGO-",
             "IMAGO-!!!",
             "IMAGO-AAAA",
             &key[..key.len() - 30],
-            // Longer than any key: 13 bytes, a 65-byte name and a signature.
-            &format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode([1; 142])),
+            // Longer than any key: 14 bytes, a 65-byte name and a signature.
+            &format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode([1; 143])),
         ] {
             assert_eq!(
                 read_with(&trusted(), text),
@@ -344,7 +433,7 @@ mod tests {
 
     #[test]
     fn a_signed_key_in_a_format_from_the_future_asks_for_a_newer_app() {
-        let mut bytes = vec![VERSION + 1];
+        let mut bytes = vec![VERSION + 1, 1];
         bytes.extend([0; 12]);
         let message = [CONTEXT, &bytes].concat();
         let signature = KeyPair::from_seed(Seed::new(SEED)).sk.sign(message, None);
@@ -356,7 +445,7 @@ mod tests {
     #[test]
     fn a_signature_for_something_else_is_not_a_key() {
         // The key's bytes signed without the context before them.
-        let mut bytes = vec![VERSION];
+        let mut bytes = vec![VERSION, 1];
         bytes.extend([0; 12]);
         let signature = KeyPair::from_seed(Seed::new(SEED)).sk.sign(&bytes, None);
         bytes.extend(signature.as_ref());
@@ -371,8 +460,50 @@ mod tests {
             assert!(PublicKey::from_slice(&key).is_ok());
             assert_ne!(key, public_key(&SEED));
         }
-        let key = issue(&SEED, 1, 2, "Test").expect("issued");
+        let key = issue(&SEED, Tier::Supporter, 1, 2, "Test").expect("issued");
         assert_eq!(read(&key), Err(KeyError::Forged));
+    }
+
+    /// A key's text with its tier byte set to `byte`, signed by [`SEED`].
+    fn key_with_tier_byte(byte: u8) -> String {
+        let mut bytes = vec![VERSION, byte];
+        bytes.extend([0; 12]);
+        let message = [CONTEXT, &bytes].concat();
+        let signature = KeyPair::from_seed(Seed::new(SEED)).sk.sign(message, None);
+        bytes.extend(signature.as_ref());
+        format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    #[test]
+    fn a_key_says_its_tier_and_each_tier_has_what_the_one_before_has() {
+        for tier in Tier::ALL {
+            let key = issue(&SEED, tier, 7, 20_768, "Tiered").expect("issued");
+            assert_eq!(read_with(&trusted(), &key).expect("read").tier, tier);
+            assert_eq!(Tier::from_name(tier.name()), Some(tier));
+        }
+        assert!(Tier::Supporter < Tier::Patron && Tier::Patron < Tier::Founder);
+        assert_eq!(Tier::default(), Tier::Supporter);
+        assert_eq!(Tier::from_name("Founder"), None);
+        // A key of one tier is not a key of another with a byte changed.
+        let supporter = issue(&SEED, Tier::Supporter, 7, 20_768, "Tiered").expect("issued");
+        let founder = issue(&SEED, Tier::Founder, 7, 20_768, "Tiered").expect("issued");
+        assert_ne!(supporter, founder);
+        let mut bytes = URL_SAFE_NO_PAD
+            .decode(&supporter[PREFIX.len()..])
+            .expect("base64");
+        bytes[1] = 3;
+        let raised = format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
+        assert_eq!(read_with(&trusted(), &raised), Err(KeyError::Forged));
+    }
+
+    #[test]
+    fn a_tier_from_a_later_build_counts_as_the_highest_known_and_none_is_refused() {
+        let later = read_with(&trusted(), &key_with_tier_byte(9)).expect("read");
+        assert_eq!(later.tier, Tier::Founder);
+        assert_eq!(
+            read_with(&trusted(), &key_with_tier_byte(0)),
+            Err(KeyError::Newer)
+        );
     }
 
     #[test]
