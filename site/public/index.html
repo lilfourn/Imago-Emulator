@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Imago Emulator</title>
+<meta name="description" content="One free app for Game Boy, Game Boy Advance, DS and 3DS games, with 1,650 free games built in. For Mac, Windows and Linux.">
+<meta property="og:title" content="Imago Emulator">
+<meta property="og:description" content="1,650 free games, and every one you own. For Mac, Windows and Linux.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://imagoemulator.com/">
+<link rel="canonical" href="https://imagoemulator.com/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/assets/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  @font-face {
+    font-family: "Geist";
+    src: url("/assets/geist-latin.woff2") format("woff2");
+    font-weight: 100 900;
+    font-display: swap;
+  }
+  :root {
+    /* Imago Light, as in the app (crates/emu-app/src/theme.rs) and on
+       getimago.app: white paper, ink type, cool grey lines. */
+    --bg: #ffffff;
+    --soft: #f4f4f5;
+    --ink: #0b0b0d;
+    --body: #55555e;
+    --muted: #6e6e78;
+    --line: #e4e4e7;
+    /* the four blocks of the app icon */
+    --blue: #3bb7fd;
+    --coral: #fc6146;
+    --amber: #fea220;
+    --green: #65c162;
+    /* what to press: the app's accent, which the supporters' section changes */
+    --press: #0070b5;
+    --sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --gap: 18px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { background: var(--bg); scroll-behavior: smooth; }
+  body {
+    overflow-x: clip;
+    font-family: var(--sans);
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: #d8efff; }
+  a { color: inherit; text-decoration: none; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--press); outline-offset: 3px; border-radius: 8px; }
+  img { display: block; max-width: 100%; height: auto; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 0 28px; }
+  section[id] { scroll-margin-top: 76px; }
+  .px { image-rendering: pixelated; }
+
+  /* buttons: a pill in the accent is the thing to press */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 46px;
+    padding: 0 22px;
+    border-radius: 999px;
+    font-size: 15.5px;
+    font-weight: 550;
+    letter-spacing: -0.005em;
+    background: var(--press);
+    color: #fff;
+    white-space: nowrap;
+    transition: background .2s, filter .15s, transform .15s;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:active { transform: translateY(1px); }
+  .btn.quiet { background: #fff; color: var(--ink); box-shadow: inset 0 0 0 1px #d4d4d8; }
+  .btn.quiet:hover { background: var(--soft); filter: none; }
+  .btn.small { height: 34px; padding: 0 15px; font-size: 14px; }
+
+  /* nav */
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(255, 255, 255, .82);
+    -webkit-backdrop-filter: saturate(180%) blur(16px);
+    backdrop-filter: saturate(180%) blur(16px);
+    border-bottom: 1px solid transparent;
+    transition: border-color .2s;
+  }
+  .nav.scrolled { border-bottom-color: var(--line); }
+  .nav .wrap { display: flex; align-items: center; gap: 26px; height: 64px; }
+  .logo { display: flex; align-items: center; gap: 10px; font-size: 16.5px; font-weight: 600; letter-spacing: -0.02em; }
+  .logo img { width: 28px; height: 28px; }
+  .nav nav { display: flex; gap: 4px; font-size: 14.5px; margin-right: auto; }
+  .nav nav a { padding: 6px 10px; color: var(--body); transition: color .15s; }
+  .nav nav a:hover { color: var(--ink); }
+
+  /* hero */
+  .hero { padding-top: 84px; text-align: center; }
+  h1 {
+    margin: 0 auto;
+    max-width: 900px;
+    font-size: clamp(42px, 7.4vw, 88px);
+    font-weight: 620;
+    letter-spacing: -0.05em;
+    line-height: .98;
+    text-wrap: balance;
+  }
+  h1 span { display: block; color: #9a9aa3; }
+  .lede { margin: 26px auto 0; max-width: 520px; font-size: 19px; line-height: 1.5; color: var(--body); text-wrap: pretty; }
+  .cta { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 32px; }
+  .free { margin-top: 16px; font-size: 14px; color: var(--muted); }
+
+  /* the shelf: two rows of pocket blocks, each showing a game's own
+     screenshot, drifting opposite ways. The page's script doubles each row
+     so the drift can loop; without it the rows stand still. */
+  .shelf {
+    margin-top: 68px;
+    display: grid;
+    gap: var(--gap);
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+    mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+  }
+  .row { display: flex; width: max-content; }
+  .row.loop { animation: drift 150s linear infinite; }
+  .row.loop:nth-child(2) { animation-direction: reverse; animation-duration: 180s; }
+  .shelf:hover .row { animation-play-state: paused; }
+  @keyframes drift { to { transform: translateX(-50%); } }
+  .pocket {
+    flex: none;
+    margin-right: var(--gap);
+    padding: 12px 12px 0;
+    border-radius: 28px;
+    background: var(--blue);
+  }
+  .pocket img { width: 208px; height: 156px; object-fit: cover; border-radius: 16px; background: var(--ink); }
+  /* the pad and the buttons, white as on the icon */
+  .pocket i {
+    display: block;
+    height: 50px;
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' d='M9.5 2h5a1.5 1.5 0 0 1 1.5 1.5V8h4.5A1.5 1.5 0 0 1 22 9.500v5a1.500 1.500 0 0 1-1.500 1.500H16v4.500a1.500 1.500 0 0 1-1.500 1.500h-5A1.500 1.500 0 0 1 8 20.500V16H3.500A1.500 1.500 0 0 1 2 14.500v-5A1.500 1.500 0 0 1 3.500 8H8V3.500A1.500 1.500 0 0 1 9.500 2z'/%3E%3C/svg%3E") left 10px center / 24px no-repeat,
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 24'%3E%3Ccircle fill='%23fff' cx='9' cy='15' r='7'/%3E%3Ccircle fill='%23fff' cx='30' cy='9' r='7'/%3E%3C/svg%3E") right 8px center / 40px 24px no-repeat;
+  }
+  .row .pocket:nth-child(4n+2) { background: var(--coral); }
+  .row .pocket:nth-child(4n+3) { background: var(--amber); }
+  .row .pocket:nth-child(4n+4) { background: var(--green); }
+  .row + .row .pocket:nth-child(4n+1) { background: var(--amber); }
+  .row + .row .pocket:nth-child(4n+2) { background: var(--green); }
+  .row + .row .pocket:nth-child(4n+3) { background: var(--blue); }
+  .row + .row .pocket:nth-child(4n+4) { background: var(--coral); }
+
+  /* sections */
+  .sect { padding-top: 136px; }
+  h2 {
+    max-width: 760px;
+    font-size: clamp(32px, 4.6vw, 54px);
+    font-weight: 620;
+    letter-spacing: -0.042em;
+    line-height: 1.02;
+    text-wrap: balance;
+  }
+  .say { margin-top: 18px; max-width: 560px; font-size: 18px; line-height: 1.55; color: var(--body); text-wrap: pretty; }
+
+  /* the systems: one plate each, in the colours the app gives them */
+  .plates { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 52px; }
+  .plate { display: flex; flex-direction: column; padding: 22px 22px 24px; border-radius: 28px; background: var(--green); }
+  .plate b { font-size: 46px; font-weight: 620; letter-spacing: -0.05em; line-height: 1; }
+  .plate h3 { margin-top: 44px; font-size: 16px; font-weight: 600; letter-spacing: -0.015em; }
+  .plate p { margin-top: 6px; font-size: 14.5px; line-height: 1.42; color: rgba(11, 11, 13, .74); }
+  .plate.gbc { background: var(--amber); }
+  .plate.gba { background: var(--blue); }
+  .plate.ds { background: var(--coral); }
+  .plate.n3ds { background: var(--ink); color: #fff; }
+  .plate.n3ds p { color: rgba(255, 255, 255, .7); }
+
+  /* the app, as captured */
+  .stage { margin-top: 52px; padding: 56px; border-radius: 32px; background: var(--soft); }
+  .window {
+    max-width: 800px;
+    margin: 0 auto;
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--ink);
+    box-shadow: 0 0 0 1px rgba(11, 11, 13, .1), 0 30px 70px -24px rgba(11, 11, 13, .45);
+  }
+  .window img { width: 100%; }
+  .does { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 40px; margin-top: 26px; }
+  .does div { padding: 22px 0 24px; border-bottom: 1px solid var(--line); }
+  .does h3 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
+  .does p { margin-top: 6px; font-size: 15.5px; line-height: 1.5; color: var(--body); }
+  .does div:nth-last-child(-n+3) { border-bottom: 0; }
+
+  /* free games */
+  .games { display: grid; grid-template-columns: repeat(4, 1fr); gap: 34px 20px; margin-top: 52px; }
+  .games img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 16px; background: var(--ink); }
+  .games h3 { margin-top: 12px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.012em; }
+  .games p { font-size: 14px; color: var(--muted); }
+  .own { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: end; margin-top: 96px; padding-top: 40px; border-top: 1px solid var(--line); }
+  .own .say { margin-top: 0; }
+
+  /* supporters: the two settings a key opens, set out as the app sets them */
+  .looks { margin-top: 52px; padding: 14px 40px; border-radius: 32px; background: var(--soft); }
+  .look { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 20px; padding: 26px 0; }
+  .look + .look { border-top: 1px solid var(--line); }
+  .look > span { font-size: 15.5px; font-weight: 550; }
+  .accents { display: flex; flex-wrap: wrap; gap: 8px; }
+  .accents button { display: inline-flex; align-items: center; gap: 9px; height: 38px; padding: 0 16px 0 11px; border-radius: 999px; background: #fff; font-size: 15px; font-weight: 500; box-shadow: inset 0 0 0 1px var(--line); }
+  .accents button::before { content: ""; width: 18px; height: 18px; border-radius: 50%; background: var(--c); }
+  .accents button[aria-pressed="true"] { background: var(--ink); color: #fff; box-shadow: none; }
+  .icons { display: flex; flex-wrap: wrap; gap: 6px; margin-left: -8px; }
+  .icons button { padding: 8px 8px 9px; border-radius: 20px; font-size: 13.5px; color: var(--body); }
+  .icons button[aria-pressed="true"] { background: rgba(11, 11, 13, .08); color: var(--ink); }
+  .icons img { width: 76px; height: 76px; margin-bottom: 5px; }
+  .tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 40px; margin-top: 40px; }
+  .tier { padding-top: 22px; border-top: 2px solid var(--ink); }
+  .tier h3 { display: flex; justify-content: space-between; align-items: baseline; font-size: 22px; font-weight: 620; letter-spacing: -0.03em; }
+  .tier p { margin: 8px 0 20px; min-height: 3em; font-size: 15.5px; line-height: 1.5; color: var(--body); }
+  .after { margin-top: 30px; font-size: 14px; color: var(--muted); }
+
+  /* download */
+  .get { margin-top: 136px; padding: 76px 28px 80px; border-radius: 32px; background: var(--ink); color: #fff; text-align: center; }
+  .get img { width: 84px; height: 84px; margin: 0 auto 26px; }
+  .get h2 { margin: 0 auto; }
+  .get .cta { margin-top: 30px; }
+  .get .btn.quiet { background: transparent; color: #fff; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .34); }
+  .get .btn.quiet:hover { background: rgba(255, 255, 255, .1); }
+  .get p { margin-top: 20px; font-size: 14px; color: rgba(255, 255, 255, .6); }
+
+  /* footer */
+  footer { padding: 56px 0 64px; font-size: 13.5px; line-height: 1.6; color: var(--muted); }
+  footer .wrap { display: grid; grid-template-columns: 1fr 1.5fr; gap: 40px; }
+  footer .logo { color: var(--ink); margin-bottom: 14px; }
+  footer h3 { font-size: 13.5px; font-weight: 600; color: var(--ink); margin-bottom: 6px; }
+
+  @media (max-width: 900px) {
+    .plates { grid-template-columns: repeat(2, 1fr); }
+    .plate.n3ds { grid-column: span 2; }
+    .does { grid-template-columns: repeat(2, 1fr); }
+    .does div:nth-last-child(-n+3) { border-bottom: 1px solid var(--line); }
+    .does div:nth-last-child(-n+2) { border-bottom: 0; }
+    .games { grid-template-columns: repeat(2, 1fr); }
+    .own, footer .wrap { grid-template-columns: 1fr; gap: 18px; }
+    .tiers { grid-template-columns: 1fr; gap: 34px; }
+    .tier p { min-height: 0; }
+    .stage { padding: 28px; }
+  }
+  @media (max-width: 620px) {
+    :root { --gap: 12px; }
+    .wrap { padding: 0 16px; }
+    .nav nav { display: none; }
+    .nav .wrap { justify-content: space-between; }
+    .hero { padding-top: 52px; }
+    h1 { font-size: min(8.6vw, 42px); }
+    .lede { font-size: 17px; }
+    .shelf { margin-top: 48px; }
+    .pocket { padding: 9px 9px 0; border-radius: 22px; }
+    .pocket img { width: 148px; height: 111px; border-radius: 13px; }
+    .pocket i { height: 38px; background-size: 18px, 30px 18px; }
+    .sect { padding-top: 92px; }
+    .say { font-size: 17px; }
+    .plates, .stage, .games, .looks { margin-top: 36px; }
+    .plate b { font-size: 38px; }
+    .does { grid-template-columns: 1fr; }
+    .does div:nth-last-child(-n+2) { border-bottom: 1px solid var(--line); }
+    .does div:last-child { border-bottom: 0; }
+    .stage { padding: 14px; border-radius: 24px; }
+    .window { border-radius: 8px; }
+    .own { margin-top: 64px; }
+    .looks { padding: 6px 18px; border-radius: 24px; }
+    .look { grid-template-columns: 1fr; gap: 12px; padding: 20px 0; }
+    .icons img { width: 62px; height: 62px; }
+    .get { margin-top: 92px; padding: 56px 20px 60px; border-radius: 24px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .row.loop { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="nav" id="top">
+  <div class="wrap">
+    <a class="logo" href="#top"><img id="mark" src="/assets/icons/classic.png" alt="">Imago Emulator</a>
+    <nav>
+      <a href="#systems">Systems</a>
+      <a href="#games">Games</a>
+      <a href="#supporters">Supporters</a>
+    </nav>
+    <a class="btn small" href="#download">Download</a>
+  </div>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wrap">
+    <h1>1,650 free games. <span>And every one you own.</span></h1>
+    <p class="lede">One app for Game Boy, Game Boy Advance, DS and 3DS games, on a Mac, a PC or Linux.</p>
+    <div class="cta">
+      <a class="btn" href="/download/mac">Download for Mac</a>
+      <a class="btn quiet" href="#download">Windows and Linux</a>
+    </div>
+    <p class="free">Free, with no ads and no account.</p>
+  </div>
+  <div class="shelf">
+    <div class="row">
+      <div class="pocket"><img class="px" src="/assets/games/ucity-advance-1.png" alt="uCity Advance" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/rebound-1.png" alt="Rebound" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/sushi-nights-1.png" alt="Sushi Nights" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/attack-on-voxelburg-1.png" alt="Attack on Voxelburg" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/big2small-1.png" alt="Big2Small" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/gbhack-1.png" alt="GBHack" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/maxpirateeb-0.png" alt="Max Pirate Extra Boom" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/grub-glide-1.png" alt="Grub Glide" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/flooder-1.png" alt="Flooder" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/geometrix-0.png" alt="Geometrix" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/geometrix-1.png" alt="Geometrix" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/renegade-rush-0.png" alt="Renegade Rush" width="208" height="156"><i></i></div>
+    </div>
+    <div class="row">
+      <div class="pocket"><img class="px" src="/assets/games/postbot-0.png" alt="PostBot" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/big2small-0.png" alt="Big2Small" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/gbhack-0.png" alt="GBHack" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/maxpirate-0.png" alt="Max Pirate" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/el-dueloroso-1.png" alt="El Dueloroso" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/deep-scan-0.png" alt="Deep Scan" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/ucity-advance-0.png" alt="uCity Advance" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/carazu-0.png" alt="Carazu" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/rebound-0.png" alt="Rebound" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/tobutobugirl-0.png" alt="Tobu Tobu Girl" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/sushi-nights-0.png" alt="Sushi Nights" width="208" height="156"><i></i></div>
+      <div class="pocket"><img class="px" src="/assets/games/ucity-0.png" alt="uCity" width="208" height="156"><i></i></div>
+    </div>
+  </div>
+</section>
+
+<section class="sect" id="systems">
+  <div class="wrap">
+    <h2>Five handhelds in one window.</h2>
+    <p class="say">Open a game and it plays. The app works out which system it is for.</p>
+    <div class="plates">
+      <div class="plate"><b>GB</b><h3>Game Boy</h3><p>In the colours a Game Boy Color would give each game.</p></div>
+      <div class="plate gbc"><b>GBC</b><h3>Game Boy Color</h3><p>Corrected to look as it did on the real screen.</p></div>
+      <div class="plate gba"><b>GBA</b><h3>Game Boy Advance</h3><p>With the link cable and the cartridge clock.</p></div>
+      <div class="plate ds"><b>DS</b><h3>Nintendo DS</h3><p>Both screens, touch, the microphone, and 3D at up to 4×.</p></div>
+      <div class="plate n3ds"><b>3DS</b><h3>Nintendo 3DS</h3><p>On Azahar's core, which the app fetches the first time.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sect" id="app">
+  <div class="wrap">
+    <h2>Save anywhere. Rewind. Fast-forward.</h2>
+    <p class="say">What the handhelds never had, without a settings screen to get right first.</p>
+    <div class="stage"><div class="window"><img src="/assets/app-game.jpg" alt="Imago Emulator running uCity Advance" width="1100" height="708"></div></div>
+    <div class="does">
+      <div><h3>Save states</h3><p>Slots with a picture of where you were, beside the game's own saves.</p></div>
+      <div><h3>Rewind and fast-forward</h3><p>Take back a mistake, or hurry through the slow parts.</p></div>
+      <div><h3>Sharp at any size</h3><p>Pixels stay square on any display. Filters are there if you want them.</p></div>
+      <div><h3>Link play</h3><p>The link cable, and local wireless between two copies of a DS game.</p></div>
+      <div><h3>Gamepads, cheats and patches</h3><p>Plug in a controller. Play ROM hacks from IPS, UPS, BPS and xdelta patches.</p></div>
+      <div><h3>Scripts and a debugger</h3><p>Lua that reads memory and presses buttons, and breakpoints on every CPU.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sect" id="games">
+  <div class="wrap">
+    <h2>1,650 free games are already inside.</h2>
+    <p class="say">Games, demos and music carts from people still making them for these systems. One click adds one to your library.</p>
+    <div class="games">
+      <div><img class="px" src="/assets/games/ucity-advance-1.png" alt="" loading="lazy"><h3>uCity Advance</h3><p>AntonioND</p></div>
+      <div><img class="px" src="/assets/games/rebound-1.png" alt="" loading="lazy"><h3>Rebound</h3><p>DevEd</p></div>
+      <div><img class="px" src="/assets/games/attack-on-voxelburg-1.png" alt="" loading="lazy"><h3>Attack on Voxelburg</h3><p>nuclear</p></div>
+      <div><img class="px" src="/assets/games/sushi-nights-1.png" alt="" loading="lazy"><h3>Sushi Nights</h3><p>Zalo</p></div>
+      <div><img class="px" src="/assets/games/big2small-1.png" alt="" loading="lazy"><h3>Big2Small</h3><p>mdsteele</p></div>
+      <div><img class="px" src="/assets/games/maxpirateeb-0.png" alt="" loading="lazy"><h3>Max Pirate Extra Boom</h3><p>Lemmy Hawkins</p></div>
+      <div><img class="px" src="/assets/games/gbhack-1.png" alt="" loading="lazy"><h3>GBHack</h3><p>statico</p></div>
+      <div><img class="px" src="/assets/games/renegade-rush-0.png" alt="" loading="lazy"><h3>Renegade Rush</h3><p>quinnp</p></div>
+    </div>
+    <div class="own">
+      <h2>And the games you own.</h2>
+      <p class="say">Imago Emulator plays the files you copy from your own cartridges, and keeps their saves beside them. It doesn't come with commercial games or link to them.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sect" id="supporters">
+  <div class="wrap">
+    <h2>Free for everyone.<br>Supporters choose its colours.</h2>
+    <p class="say">Everything that plays a game is free. If you'd like to pay for it anyway, a key opens two settings. Try them on this page.</p>
+    <div class="looks">
+      <div class="look">
+        <span>Accent</span>
+        <div class="accents" id="accents">
+          <button type="button" aria-pressed="true" style="--c:#0070b5">Blue</button>
+          <button type="button" aria-pressed="false" style="--c:#00796b">Teal</button>
+          <button type="button" aria-pressed="false" style="--c:#1e7b34">Green</button>
+          <button type="button" aria-pressed="false" style="--c:#8a6a00">Gold</button>
+          <button type="button" aria-pressed="false" style="--c:#6d4ad6">Violet</button>
+        </div>
+      </div>
+      <div class="look">
+        <span>Dock icon</span>
+        <div class="icons" id="icons">
+          <button type="button" aria-pressed="true"><img src="/assets/icons/classic.png" alt="" width="76" height="76">Classic</button>
+          <button type="button" aria-pressed="false"><img src="/assets/icons/night.png" alt="" width="76" height="76">Night</button>
+          <button type="button" aria-pressed="false"><img src="/assets/icons/ink.png" alt="" width="76" height="76">Ink</button>
+          <button type="button" aria-pressed="false"><img src="/assets/icons/chalk.png" alt="" width="76" height="76">Chalk</button>
+          <button type="button" aria-pressed="false"><img src="/assets/icons/blueprint.png" alt="" width="76" height="76">Blueprint</button>
+          <button type="button" aria-pressed="false"><img src="/assets/icons/ember.png" alt="" width="76" height="76">Ember</button>
+          <button type="button" aria-pressed="false"><img src="/assets/icons/founder.png" alt="" width="76" height="76">Founder</button>
+        </div>
+      </div>
+    </div>
+    <div class="tiers">
+      <div class="tier"><h3>Supporter <span>$10</span></h3><p>Every accent, and the Night, Ink, Chalk and Blueprint icons.</p><a class="btn" href="/buy/supporter">Get a Supporter key</a></div>
+      <div class="tier"><h3>Patron <span>$25</span></h3><p>The same, and the Ember icon.</p><a class="btn quiet" href="/buy/patron">Get a Patron key</a></div>
+      <div class="tier"><h3>Founder <span>$50</span></h3><p>The same, and the Founder icon, which is offered in the first year only.</p><a class="btn quiet" href="/buy/founder">Get a Founder key</a></div>
+    </div>
+    <p class="after">One payment, no subscription. Paste the key into Settings and it works offline, on every computer you use. Dock icons are for the Mac.</p>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <div class="get">
+      <img src="/assets/icons/classic.png" alt="" width="84" height="84" loading="lazy">
+      <h2>Get Imago Emulator.</h2>
+      <div class="cta">
+        <a class="btn" href="/download/mac">Download for Mac</a>
+        <a class="btn quiet" href="/download/windows">Windows</a>
+        <a class="btn quiet" href="/download/linux">Linux</a>
+      </div>
+      <p>Apple silicon with macOS 13 or later · Windows 10 or 11 · Ubuntu 22.04 or later, or an AppImage</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <a class="logo" href="#top"><img src="/assets/icons/classic.png" alt="" width="28" height="28" loading="lazy">Imago Emulator</a>
+      <p>Imago Emulator is not affiliated with, endorsed by or sponsored by Nintendo. Game Boy, Game Boy Color, Game Boy Advance, Nintendo DS and Nintendo 3DS are trademarks of Nintendo.</p>
+    </div>
+    <div>
+      <h3>Games shown</h3>
+      <p>uCity, uCity Advance and Geometrix by AntonioND (GPL-3.0-or-later). Rebound by DevEd, Sushi Nights by Zalo, GBHack by statico, Max Pirate and Max Pirate Extra Boom by Lemmy Hawkins, Flooder by Oliver Balfour, Renegade Rush by quinnp, PostBot by Tobias Rojahn, Deep Scan by TeamKNOx and Tobu Tobu Girl by Tangram Games (MIT). Attack on Voxelburg by nuclear, Big2Small by mdsteele and Carazu by Martin Holtkamp (GPL-3.0-or-later). El Dueloroso by Adrián JG (GPL-3.0). Grub Glide by Ethan Hazel (zlib). All are in the app's store, from Homebrew Hub.</p>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // The nav gains its line once the page has moved under it.
+  const nav = document.querySelector('.nav');
+  const lined = () => nav.classList.toggle('scrolled', window.scrollY > 8);
+  window.addEventListener('scroll', lined, { passive: true });
+  lined();
+
+  // Each shelf row is doubled, so that sliding it by half its width lands
+  // where it began. The copies are hidden from screen readers.
+  for (const row of document.querySelectorAll('.shelf .row')) {
+    for (const pocket of [...row.children]) {
+      const copy = pocket.cloneNode(true);
+      copy.setAttribute('aria-hidden', 'true');
+      row.append(copy);
+    }
+    row.classList.add('loop');
+  }
+
+  // The supporters' two settings, tried on the page: the accent recolours
+  // what there is to press, and the icon becomes the page's mark.
+  const choose = (group, chosen) => {
+    for (const button of group.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button === chosen));
+  };
+  const accents = document.getElementById('accents');
+  accents.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    choose(accents, button);
+    document.documentElement.style.setProperty('--press', button.style.getPropertyValue('--c'));
+  });
+  const icons = document.getElementById('icons');
+  icons.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    choose(icons, button);
+    document.getElementById('mark').src = button.querySelector('img').getAttribute('src');
+  });
+</script>
+</body>
+</html>

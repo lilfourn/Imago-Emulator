@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="32 32 960 960">
+  <!-- Pocket Blocks: Imago's white tile and its four colour blocks made
+       into a handheld, two screens (blue, coral), face buttons (amber) and
+       a d-pad (green). Drawn from Gridbloom's logo on the board "Emulator
+       rebrand (Imago family)". -->
+<rect x="40" y="40" width="944" height="944" rx="208" fill="#FFFFFF" stroke="#E7E7EA" stroke-width="16"/>
+<path fill="#3bb7fd" fill-rule="evenodd" d="M185 255A90 90 0 0 1 275 165H480A70 70 0 0 1 550 235V470Q550 488 532 491L255 529Q185 538 185 470ZM295 245H440A30 30 0 0 1 470 275V408A30 30 0 0 1 440 438H295A30 30 0 0 1 265 408V275A30 30 0 0 1 295 245Z"/>
+<path fill="#fea220" d="M640 198Q590 198 590 250V430Q590 478 640 471L795 450Q840 443 832 400Q828 375 812 358L690 228Q668 200 640 198Z"/>
+<path fill="#fc6146" fill-rule="evenodd" d="M500 535L790 491Q842 484 842 536V690Q842 858 695 858H520Q457 858 457 795V580Q457 541 500 535ZM573 582H722A30 30 0 0 1 752 612V742A30 30 0 0 1 722 772H573A30 30 0 0 1 543 742V612A30 30 0 0 1 573 582Z"/>
+<path fill="#65c162" d="M232 567L375 551Q415 547 415 590V790Q415 855 360 855Q340 855 320 835L238 752Q205 718 200 670L192 605Q188 572 232 567Z"/>
+<g fill="#ffffff">
+<circle cx="683" cy="318" r="22"/>
+<circle cx="638" cy="365" r="22"/>
+<circle cx="729" cy="365" r="22"/>
+<circle cx="683" cy="410" r="22"/>
+<rect x="290" y="606" width="42" height="132" rx="12"/>
+<rect x="245" y="651" width="132" height="42" rx="12"/>
+</g>
+</svg>

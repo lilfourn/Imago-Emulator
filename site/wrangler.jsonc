@@ -1,0 +1,29 @@
+{
+  // imagoemulator.com: one static page and the Worker's few redirects.
+  // See README.md for previewing, checking and publishing.
+  "name": "imago-emulator-site",
+  "compatibility_date": "2026-07-01",
+  // Files in public/ are served first; only paths with no file reach the script.
+  "main": "src/worker.js",
+  "routes": [
+    { "pattern": "imagoemulator.com", "custom_domain": true },
+    { "pattern": "www.imagoemulator.com", "custom_domain": true }
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  // Where the page's links lead (src/worker.js). Each is an https address;
+  // one left empty answers "Not available yet." Fill every one before
+  // publishing the site.
+  "vars": {
+    "DOWNLOAD_MAC": "",
+    "DOWNLOAD_WINDOWS": "",
+    "DOWNLOAD_LINUX": "",
+    "BUY_SUPPORTER": "",
+    "BUY_PATRON": "",
+    "BUY_FOUNDER": ""
+  }
+}
