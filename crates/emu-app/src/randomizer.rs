@@ -44,7 +44,17 @@
 //! writes it with its source into the randomizer's folder, where FVX's
 //! Java runs it as a program of its own.
 //!
+//! # PC fan games
+//!
+//! A fan game made with Pokémon Essentials is Ruby scripts, which FVX
+//! does not know and nothing rewrites. Its run is made by the app's own
+//! script, loaded into the run's hidden player ([`essentials`]). The rest
+//! is the same: a run in the hacks folder, with its own save, that the
+//! game's switch goes to and from.
+//!
 //! Everything here blocks; run it off the UI thread.
+
+pub mod essentials;
 
 use std::fs::{self, File};
 use std::hash::{BuildHasher, RandomState};
@@ -59,6 +69,7 @@ use emu_os::install::{Fetch, Install, Pinned};
 use zip::ZipArchive;
 
 use crate::archive;
+use crate::emulator;
 use crate::leftovers::WorkFolder;
 use crate::library::{file_title, random_name};
 use crate::persist::{self, GameFiles};
@@ -451,6 +462,35 @@ fn generation_of_title(title: u64) -> Option<u8> {
         Some(7)
     } else {
         None
+    }
+}
+
+/// How a game the randomizer knows is randomized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// One of the games FVX knows, of this generation.
+    Generation(u8),
+    /// A Pokémon Essentials fan game, by the app's own script.
+    Essentials,
+}
+
+/// How the game `path` names is randomized, if the randomizer knows it:
+/// one of the ROMs FVX does ([`generation`]), or a Pokémon Essentials
+/// game's folder ([`essentials::is_game`]).
+pub fn kind(path: &Path) -> Option<Kind> {
+    match generation(path) {
+        Some(generation) => Some(Kind::Generation(generation)),
+        None => essentials::is_game(path).then_some(Kind::Essentials),
+    }
+}
+
+/// Whether the game `path` names can be randomized on this system: a game
+/// the randomizer knows, and for FVX's, where FVX runs ([`UNSUPPORTED`]).
+pub fn offered(path: &Path) -> bool {
+    match kind(path) {
+        Some(Kind::Generation(_)) => UNSUPPORTED.is_none(),
+        Some(Kind::Essentials) => true,
+        None => false,
     }
 }
 
@@ -911,8 +951,19 @@ pub fn changes_label(settings: &str) -> &'static str {
     let presets = Preset::ALL.into_iter();
     let preset = presets
         .into_iter()
-        .find(|preset| preset.settings() == settings);
+        .find(|preset| preset.settings() == settings)
+        .or_else(|| essentials::Shuffle::of(settings).map(Preset::from));
     preset.map_or("Custom settings", Preset::label)
+}
+
+impl From<essentials::Shuffle> for Preset {
+    /// The preset a fan game's run is the like of.
+    fn from(shuffle: essentials::Shuffle) -> Self {
+        match shuffle {
+            essentials::Shuffle::Wild => Self::Wild,
+            essentials::Shuffle::Classic => Self::Classic,
+        }
+    }
 }
 
 /// Where the spoiler log of the randomized game at `image` is kept:
@@ -933,8 +984,12 @@ pub fn log_of(image: &Path) -> Option<PathBuf> {
 /// one that holds something. A game never saved in has a save file all the
 /// same, blank as an erased cartridge's memory is, every byte `0xFF` (or
 /// zero), which starts a new game wherever it is copied. A 3DS game has
-/// one if it has save data on its console's SD card.
+/// one if it has save data on its console's SD card, and a fan game if its
+/// save folder holds a save.
 pub fn has_save(base: &Path) -> bool {
+    if essentials::is_game(base) {
+        return essentials::has_save(base);
+    }
     if emu_3ds::is_game(base) {
         return emu_3ds::data_dir()
             .is_some_and(|shared| !saves_3ds(base, &shared).files().is_empty());
@@ -954,7 +1009,8 @@ fn saves_3ds(base: &Path, shared: &Path) -> emu_3ds::SaveData {
 /// `save`, its battery save, so the run goes on from where that game is.
 /// Each is a copy, and nothing `image` already has is replaced: the game
 /// it was made from keeps its files as they are. A 3DS game's save is its
-/// save data on its console's SD card, copied to the run's console.
+/// save data on its console's SD card, copied to the run's console, and a
+/// fan game's the saves in its save folder, copied to the run's.
 ///
 /// # Errors
 ///
@@ -969,7 +1025,11 @@ fn carry_over_from(base: &Path, image: &Path, save: bool, shared: Option<&Path>)
     if let Some(shared) = shared.filter(|_| save && emu_3ds::is_game(base)) {
         saves_3ds(base, shared).copy_to(&emu_3ds::own_console(image))?;
     }
-    let (from, to) = (GameFiles::of(base), GameFiles::of(image));
+    if save && essentials::is_run(image) {
+        essentials::copy_save(base, image)?;
+    }
+    // A fan game's are named for its folder.
+    let (from, to) = (emulator::files_of(base), emulator::files_of(image));
     let mut files = vec![
         (from.cheats(), to.cheats()),
         (from.bindings(), to.bindings()),
@@ -988,8 +1048,8 @@ fn carry_over_from(base: &Path, image: &Path, save: bool, shared: Option<&Path>)
 /// Removes the randomized game at `image`, and its spoiler log, if it was
 /// never played: it has no battery save, state or checkpoint beside it,
 /// and for a 3DS game, no game has saved on its console, which is removed
-/// with it. One that was played is kept, with its progress, where it is.
-/// Whether it was removed.
+/// with it; a fan game's run has no save in its save folder. One that was
+/// played is kept, with its progress, where it is. Whether it was removed.
 pub fn remove_unplayed(image: &Path) -> bool {
     romhack::hacks_dir().is_some_and(|hacks| remove_unplayed_in(&hacks, image))
 }
@@ -1001,7 +1061,8 @@ fn remove_unplayed_in(hacks: &Path, image: &Path) -> bool {
     if !image.starts_with(hacks) || random_name(image).is_none() {
         return false;
     }
-    let files = GameFiles::of(image);
+    let fan_game = essentials::is_run(image);
+    let files = emulator::files_of(image);
     let states =
         (0..=LAST_FILE_SLOT).flat_map(|slot| [files.state(slot, false), files.state(slot, true)]);
     let mut progress = [files.backup(), files.set_aside()]
@@ -1010,7 +1071,8 @@ fn remove_unplayed_in(hacks: &Path, image: &Path) -> bool {
     // A 3DS game's console is beside it, so in the folder too.
     let console = Some(emu_3ds::own_console(image))
         .filter(|console| emu_3ds::is_game(image) && console.is_dir());
-    let saved = console.as_deref().is_some_and(emu_3ds::has_saves);
+    let saved = console.as_deref().is_some_and(emu_3ds::has_saves)
+        || (fan_game && essentials::has_saved(image));
     if saved || progress.any(|file| file.exists()) {
         return false;
     }
@@ -1019,6 +1081,9 @@ fn remove_unplayed_in(hacks: &Path, image: &Path) -> bool {
     }
     if let Some(console) = console {
         fs::remove_dir_all(console).ok();
+    }
+    if fan_game {
+        return essentials::remove(image);
     }
     fs::remove_file(image).is_ok()
 }
@@ -1193,10 +1258,53 @@ mod tests {
     }
 
     #[test]
+    fn a_fan_games_run_is_known_and_removed_as_a_roms_is() {
+        let dir = temp_dir("fan-game");
+        let game = dir.join("Games/Imago Test Game");
+        write(
+            &game.join("Game.ini"),
+            b"[Game]\r\nTitle=Imago Test Game\r\n",
+        );
+        fs::create_dir_all(game.join("Imago Test Game.app/Contents")).expect("player app");
+        write(&game.join("Game.exe"), b"player");
+        fs::create_dir_all(game.join("PBS")).expect("PBS");
+        assert_eq!(kind(&game), Some(Kind::Essentials));
+        assert!(offered(&game), "needs no FVX");
+        assert_eq!(kind(&dir.join("Games")), None);
+
+        let hacks = dir.join("Hacks");
+        let made = essentials::make(
+            &game,
+            "Imago Test Game",
+            essentials::Shuffle::Classic,
+            123_456,
+            &hacks,
+        )
+        .expect("made");
+        assert_eq!(kind(&made.rom), None, "a run is not randomized again");
+        // Its bindings come along, named for its folder as the game's are.
+        write(&dir.join("Games/Imago Test Game.bindings.toml"), b"keys");
+        carry_over_from(&game, &made.rom, false, None).expect("copied");
+        let bindings = hacks.join("Imago Test Game (Random 123456).bindings.toml");
+        assert_eq!(fs::read(&bindings).expect("bindings"), b"keys");
+        // With a state beside it, it was played; without, it goes whole.
+        let state = hacks.join("Imago Test Game (Random 123456).ss0");
+        write(&state, b"state");
+        assert!(!remove_unplayed_in(&hacks, &made.rom));
+        fs::remove_file(&state).expect("removed");
+        assert!(!remove_unplayed_in(&dir.join("Games"), &game), "not a run");
+        assert!(remove_unplayed_in(&hacks, &made.rom));
+        assert!(!made.rom.exists() && game.join("Game.ini").is_file());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn settings_are_named_by_the_preset_they_are() {
         assert_eq!(changes_label(Preset::Wild.settings()), "Wild Pokémon");
         assert_eq!(changes_label(Preset::Everything.settings()), "Everything");
         assert_eq!(changes_label("428AAAA"), "Custom settings");
+        assert_eq!(changes_label("essentials:classic"), "Classic");
+        assert_eq!(changes_label("essentials:wild"), "Wild Pokémon");
     }
 
     #[test]

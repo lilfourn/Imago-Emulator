@@ -1415,8 +1415,7 @@ impl EmulatorView {
             .map_or_else(|| rom.clone(), |game| game.path.clone());
         let run = game.and_then(|game| game.randomized);
         let read = cx.background_executor().spawn(async move {
-            let known =
-                randomizer::UNSUPPORTED.is_none() && randomizer::generation(&base).is_some();
+            let known = randomizer::offered(&base);
             let log = run.is_some_and(|run| randomizer::log_of(&run.image).is_some());
             (known, log)
         });

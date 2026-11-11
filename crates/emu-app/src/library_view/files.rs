@@ -161,7 +161,7 @@ pub(super) fn read_facts(game: &Game) -> Facts {
         saved,
         states: held(1..=STATE_SLOTS),
         script_states: held(STATE_SLOTS + 1..=LAST_FILE_SLOT),
-        randomizable: randomizer::generation(&game.path).is_some(),
+        randomizable: randomizer::kind(&game.path).is_some(),
     }
 }
 

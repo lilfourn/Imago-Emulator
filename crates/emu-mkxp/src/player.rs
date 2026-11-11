@@ -46,6 +46,7 @@ use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use crate::display::Display;
+use crate::run::Run;
 use crate::{Error, config};
 
 /// The script the player runs before the game's own, ds-emulator's end of
@@ -101,18 +102,25 @@ struct Running {
 impl Player {
     /// Makes or brings up to date the hidden player of the game in `game`,
     /// in a folder of its own in `work_dir`, once the game has no other
-    /// player: an earlier one is waited for until it is dropped.
+    /// player: an earlier one is waited for until it is dropped. A run of
+    /// the game (the folder it is in, and what it is) has a player of its
+    /// own, named for the run's folder.
     ///
     /// # Errors
     ///
     /// Fails if there is no player for the game, its settings cannot be
     /// read, or the copy cannot be made.
-    pub fn prepare(game: &Path, work_dir: &Path) -> Result<Self, Error> {
+    pub fn prepare(
+        game: &Path,
+        work_dir: &Path,
+        run: Option<(&Path, &Run)>,
+    ) -> Result<Self, Error> {
         #[cfg(target_os = "macos")]
         let source = crate::player_app(game).ok_or_else(|| Error::NotAGame(game.to_owned()))?;
+        let played = run.map_or(game, |(folder, _)| folder);
         let id = format!(
             "{:08X}",
-            crc32fast::hash(game.as_os_str().as_encoded_bytes())
+            crc32fast::hash(played.as_os_str().as_encoded_bytes())
         );
         let dir = work_dir.join(&id);
         fs::create_dir_all(&dir).map_err(Error::io(format!("making {}", dir.display())))?;
@@ -127,7 +135,7 @@ impl Player {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(Error::io("reading the game's mkxp.json")(error)),
         };
-        let settings = config::player_settings(game_settings.as_deref(), game, &bridge)
+        let settings = config::player_settings(game_settings.as_deref(), game, &bridge, run)
             .map_err(Error::Settings)?;
         #[cfg(target_os = "macos")]
         let app = {
@@ -703,11 +711,11 @@ mod tests {
         let dir = crate::tests::temp_dir("one-player");
         let game = fake_game(&dir);
         let work = dir.join("work");
-        let first = Player::prepare(&game, &work).expect("first player");
+        let first = Player::prepare(&game, &work, None).expect("first player");
         let (prepared, second) = mpsc::channel();
         let waiting = {
             let (game, work) = (game.clone(), work.clone());
-            thread::spawn(move || prepared.send(Player::prepare(&game, &work).is_ok()))
+            thread::spawn(move || prepared.send(Player::prepare(&game, &work, None).is_ok()))
         };
         assert!(
             second.recv_timeout(Duration::from_millis(500)).is_err(),
@@ -733,7 +741,7 @@ mod tests {
         // Windows may refuse to empty a file another process holds locked,
         // so a player must not: what is in the file shows whether it did.
         fs::write(&lock, b"held by another player").expect("lock");
-        let player = Player::prepare(&game, &work).expect("player");
+        let player = Player::prepare(&game, &work, None).expect("player");
         // Read once the player has let go: on Windows nobody but its
         // holder can read a locked file.
         drop(player);

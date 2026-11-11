@@ -29,6 +29,7 @@ mod display;
 pub mod install;
 pub mod link;
 pub mod player;
+pub mod run;
 
 use std::cell::RefCell;
 use std::fs;
@@ -46,6 +47,7 @@ use emu_core::{Frame, rgb};
 use crate::audio::Capture;
 use crate::link::{Hello, Link};
 use crate::player::Player;
+pub use crate::run::Run;
 
 /// How long a game has to start: to draw its first frame.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -166,7 +168,7 @@ pub fn downloads_player(path: &Path, work_dir: &Path) -> bool {
         install::PIN.is_some()
             && install::installed(&players).is_none()
             && mkxp_z_in(&players).is_none()
-            && game_folder(path).is_some_and(|game| mkxp_z(&game).is_none())
+            && game_folder(path).is_some_and(|folder| mkxp_z(&played_game(&folder)).is_none())
     }
     #[cfg(target_os = "macos")]
     {
@@ -185,11 +187,33 @@ pub const SHARED_PLAYER: &str = "mkxp-z";
 
 /// The game folder `path` names: `path` itself, if it holds an RPG Maker
 /// game (its `Game.ini`) and a player app, or the folder of the player app
-/// `path` is.
+/// `path` is. The folder of a run of such a game ([`Run`]) is one too.
 pub fn game_folder(path: &Path) -> Option<PathBuf> {
     let folder = if is_app(path) { path.parent()? } else { path };
-    let game = folder.join("Game.ini").is_file() && player_app(folder).is_some();
+    let holds_game =
+        |folder: &Path| folder.join("Game.ini").is_file() && player_app(folder).is_some();
+    let game = match Run::read(folder) {
+        Some(run) => holds_game(&run.game),
+        None => holds_game(folder),
+    };
     game.then(|| folder.to_owned())
+}
+
+/// The folder of the game itself that the game folder `folder` plays:
+/// `folder`, or for a run's folder, the folder of the game it is a run of.
+#[must_use]
+pub fn played_game(folder: &Path) -> PathBuf {
+    Run::read(folder).map_or_else(|| folder.to_owned(), |run| run.game)
+}
+
+/// The settings of the game in `folder`, its `mkxp.json` as mkxp-z reads
+/// it, if it has one that can be read.
+#[must_use]
+pub fn game_settings(folder: &Path) -> Option<serde_json::Value> {
+    let text = fs::read_to_string(folder.join("mkxp.json")).ok()?;
+    config::game_settings(&text)
+        .ok()
+        .map(serde_json::Value::Object)
 }
 
 /// The player app in a game's folder: on macOS its first `.app`, by name,
@@ -442,8 +466,17 @@ impl Mkxp {
             std::path::absolute(path).map_err(Error::io(format!("finding {}", path.display())))
         };
         let (path, work_dir) = (absolute(path)?, absolute(work_dir)?);
-        let game = game_folder(&path).ok_or_else(|| Error::NotAGame(path.clone()))?;
-        let mut player = Player::prepare(&game, &work_dir)?;
+        let folder = game_folder(&path).ok_or_else(|| Error::NotAGame(path.clone()))?;
+        // A run plays the game it is a run of, in a player of its own.
+        let run = Run::read(&folder);
+        let game = run
+            .as_ref()
+            .map_or_else(|| folder.clone(), |run| run.game.clone());
+        let mut player = Player::prepare(
+            &game,
+            &work_dir,
+            run.as_ref().map(|run| (folder.as_path(), run)),
+        )?;
         let listener =
             link::listen(player.socket()).map_err(Error::io("listening for the game"))?;
         let sound = Capture::start(player.sound_pipe(), player.sound_settings())

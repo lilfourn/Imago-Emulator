@@ -630,6 +630,27 @@ randomizer changed (about 30 MB) and the run's own save in it, beside the
 game under the run's name, which takes no room on the same disk
 ([decision 0012](docs/decisions/0012-randomizer.md)).
 
+### PC fan games
+
+A fan game made with Pokémon Essentials that plays in the app (see RPG
+Maker games) has the same switch. FVX knows no fan game, so the app's own
+script does it, loaded into the game as it starts: every species becomes
+another of about the same strength, the same one each time for a seed.
+
+| Choice | What changes |
+|---|---|
+| Wild Pokémon | Wild Pokémon, and the ones events have you fight |
+| Classic | That, trainers' teams, and the Pokémon the game gives, trades and hatches |
+
+Trainers' Pokémon keep their levels and take the new species' own moves.
+Types, abilities and moves are not changed, and a settings string is not
+taken. The game's folder is not touched: the run is a small folder in the
+hacks folder, with a save folder of its own beside the game's, and its
+spoiler log (which species became which) is written the first time it is
+played. It is made for Essentials v18, as Pokémon This Gym of Mine is; in
+a game whose scripts it does not know it changes nothing, and the log says
+so.
+
 ## Cheats
 
 Choose File > Edit Cheats… to open the game's `game.cht` in your text
