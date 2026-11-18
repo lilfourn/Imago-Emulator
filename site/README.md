@@ -1,8 +1,8 @@
 # The site
 
 imagoemulator.com: one static page (`public/index.html`) and a Worker with a
-few redirects (`src/worker.js`). It is not published yet; see
-[Before publishing](#before-publishing).
+few redirects (`src/worker.js`). It is published, with the Mac's disk image
+beside it; see [Publishing](#publishing) and [Still to come](#still-to-come).
 
 The page is drawn in Imago Light, as the app and
 [getimago.app](https://getimago.app) are: white paper, ink type, Geist, and
@@ -20,8 +20,16 @@ systems, not commercial games, and shows only homebrew.
   entry's name. Only openly licensed games are shown, and the footer credits
   each maker with the licence its entry gives. A game added to the page is
   added to that list (`site.test.mjs` checks).
-- **The app window** (`public/assets/app-game.jpg`) is a capture of the app
-  running uCity Advance.
+- **The app's windows** (`public/assets/app-library.webp`, `app-game.webp`
+  and `app-menu.webp`) are captures of the released build, taken as
+  `scripts/macos/check-layout.sh` takes its own: behind the front window,
+  in a home of its own. The library is the games the page credits, each
+  with its Homebrew Hub screenshot as its picture, as the store leaves one
+  it adds. The game is uCity Advance, played into a city by a Lua macro
+  (`ds-emulator --script`), since keys posted to a covered window don't
+  reach the game.
+- **The link preview** (`public/assets/share.png`, 1200 by 630) is the
+  headline over five of the shelf's games.
 - **The accents and icons** in the supporters' section are the app's own:
   the colours are `Accent::colour` in `crates/emu-app/src/theme.rs` (checked
   by the test) and the icons are `assets/app-icon.png` and
@@ -41,7 +49,8 @@ Files in `public/` are served first. The Worker answers only:
 | `/supporter` | Redirects to `/#supporters`. The app's Become a Supporter button opens this address (`crates/emu-app/src/supporter.rs`) |
 
 The variables are in `wrangler.jsonc`. One that is empty, or is not an https
-address, answers 404 with "Not available yet."
+address, answers 404 with "Not available yet.", and the page links only to
+routes whose variable is filled (the tests check).
 
 ## Preview and check
 
@@ -53,18 +62,34 @@ wrangler deploy --dry-run --config site/wrangler.jsonc
 
 The tests check that every link, picture and font on the page exists, that
 the page loads nothing from another site, that every game shown is credited,
-that the accents are the app's, and what the Worker answers.
+that the accents are the app's, that the download is this version's disk
+image, and what the Worker answers.
 
-## Before publishing
+## Publishing
 
-1. Fill the six variables in `wrangler.jsonc`: a public release for each
-   system ([packaging](../packaging/README.md),
-   `scripts/macos/release.sh`), and a seller's checkout for each key
-   ([decision 0017](../docs/decisions/0017-supporter-keys.md)).
-2. Settle the prices on the page ($10, $25 and $50 are the advice in
-   decision 0017, not yet the owner's decision).
-3. Replace `app-game.jpg` with a capture taken in the middle of a game. The
-   current one is a title screen, as a covered window's game does not
-   advance.
-4. Point imagoemulator.com at Cloudflare, then
-   `wrangler deploy --config site/wrangler.jsonc`.
+```sh
+scripts/macos/release.sh   # the notarized disk image, in target/dist
+site/publish.sh            # the page, the Worker and that disk image
+```
+
+`publish.sh` copies `Imago-Emulator-VERSION.dmg` into `public/downloads/`
+(ignored by git) and deploys. It refuses a disk image Gatekeeper does not
+accept as notarized, or one whose SHA-256 is not the one the page prints.
+For a new version, change the version, the size and the SHA-256 in the
+page's download section and `DOWNLOAD_MAC` in `wrangler.jsonc`.
+
+The disk image is a static file of the Worker's, which may be 25 MiB at
+most (it is 9.3 MB). imagoemulator.com's zone is in the Cloudflare account
+named by `account_id` in `wrangler.jsonc`.
+
+## Still to come
+
+1. Windows and Linux. The page says "Not out yet" for both. Their packages
+   are built by `.github/workflows/release-linux-windows.yml`
+   ([packaging](../packaging/README.md)), whose last run failed its start
+   check on Ubuntu 22.04. Once they are released, fill `DOWNLOAD_WINDOWS`
+   and `DOWNLOAD_LINUX` and link the rows.
+2. Supporter keys. The page shows the looks and says keys are not on sale
+   yet; the prices are not settled and there is no seller
+   ([decision 0017](../docs/decisions/0017-supporter-keys.md)). With a
+   seller, fill the three `BUY_` variables and add the prices and buttons.

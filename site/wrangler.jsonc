@@ -2,6 +2,8 @@
   // imagoemulator.com: one static page and the Worker's few redirects.
   // See README.md for previewing, checking and publishing.
   "name": "imago-emulator-site",
+  // The Cloudflare account that holds imagoemulator.com's zone.
+  "account_id": "96d145babb48a3f24311abedad7714ba",
   "compatibility_date": "2026-07-01",
   // Files in public/ are served first; only paths with no file reach the script.
   "main": "src/worker.js",
@@ -16,10 +18,11 @@
     "binding": "ASSETS"
   },
   // Where the page's links lead (src/worker.js). Each is an https address;
-  // one left empty answers "Not available yet." Fill every one before
-  // publishing the site.
+  // one left empty answers "Not available yet.", and the page links only
+  // to those that are filled (site.test.mjs). The Mac's disk image is
+  // published beside the page by publish.sh.
   "vars": {
-    "DOWNLOAD_MAC": "",
+    "DOWNLOAD_MAC": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0.dmg",
     "DOWNLOAD_WINDOWS": "",
     "DOWNLOAD_LINUX": "",
     "BUY_SUPPORTER": "",

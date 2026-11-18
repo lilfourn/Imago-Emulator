@@ -58,10 +58,23 @@ test('the accents offered are the app\'s', () => {
   }
 });
 
-test('every route has a variable, and the page links only to routes', async () => {
+test('every route has a variable, and the page links only to routes that lead somewhere', () => {
   for (const variable of Object.values(LINKS)) assert.match(config, new RegExp(`"${variable}":`), `${variable} is not in wrangler.jsonc`);
   const linked = new Set([...html.matchAll(/href="(\/(?:download|buy)\/[^"]+)"/g)].map((match) => match[1]));
-  assert.deepEqual([...linked].sort(), Object.keys(LINKS).sort());
+  assert.ok(linked.has('/download/mac'), 'the page offers the Mac download');
+  for (const path of linked) {
+    assert.ok(path in LINKS, `no such route: ${path}`);
+    const address = config.match(new RegExp(`"${LINKS[path]}":\\s*"([^"]*)"`))[1];
+    assert.match(address, /^https:\/\//, `${path} is linked, but ${LINKS[path]} is empty: it would answer 404`);
+  }
+});
+
+test('the download is this version\'s disk image, and the page says which', () => {
+  const version = readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8').match(/^version = "(.+)"$/m)[1];
+  const file = `Imago-Emulator-${version}.dmg`;
+  assert.ok(config.includes(`"DOWNLOAD_MAC": "https://imagoemulator.com/downloads/${file}"`), `DOWNLOAD_MAC is not ${file}`);
+  assert.ok(html.includes(`Version ${version} ·`), `the page does not say version ${version}`);
+  assert.match(html, new RegExp(`SHA-256 of ${file.replaceAll('.', '\\.')}: <span id="sha256">[0-9a-f]{64}</span>`));
 });
 
 test('a link leads where its variable says, and says so when it has none', async () => {

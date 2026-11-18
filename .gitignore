@@ -37,3 +37,7 @@ seeddb.bin
 bios*.bin
 firmware*.bin
 /test-roms/
+
+# Disk images the site publishes (site/publish.sh), and wrangler's state.
+/site/public/downloads/
+/site/.wrangler/

@@ -4,13 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Imago Emulator</title>
-<meta name="description" content="One free app for Game Boy, Game Boy Advance, DS and 3DS games, with 1,650 free games built in. For Mac, Windows and Linux.">
-<meta property="og:title" content="Imago Emulator">
-<meta property="og:description" content="1,650 free games, and every one you own. For Mac, Windows and Linux.">
+<meta name="description" content="One free app for Game Boy, Game Boy Advance, DS and 3DS games, with 1,650 free games built in. Out now for Mac.">
+<meta property="og:title" content="Imago Emulator: the last emulator you’ll ever need">
+<meta property="og:description" content="Game Boy, Game Boy Advance, DS and 3DS games in one free app, with 1,650 free games built in. Out now for Mac.">
+<meta property="og:image" content="https://imagoemulator.com/assets/share.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://imagoemulator.com/">
 <link rel="canonical" href="https://imagoemulator.com/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/icons/classic.png">
 <link rel="preload" href="/assets/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
 <style>
   @font-face {
@@ -111,7 +116,7 @@
     text-wrap: balance;
   }
   h1 span { display: block; color: #9a9aa3; }
-  .lede { margin: 26px auto 0; max-width: 520px; font-size: 19px; line-height: 1.5; color: var(--body); text-wrap: pretty; }
+  .lede { margin: 26px auto 0; max-width: 560px; font-size: 19px; line-height: 1.5; color: var(--body); text-wrap: pretty; }
   .cta { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 32px; }
   .free { margin-top: 16px; font-size: 14px; color: var(--muted); }
 
@@ -179,17 +184,16 @@
   .plate.n3ds { background: var(--ink); color: #fff; }
   .plate.n3ds p { color: rgba(255, 255, 255, .7); }
 
-  /* the app, as captured */
-  .stage { margin-top: 52px; padding: 56px; border-radius: 32px; background: var(--soft); }
-  .window {
-    max-width: 800px;
-    margin: 0 auto;
-    border-radius: 12px;
-    overflow: hidden;
-    background: var(--ink);
-    box-shadow: 0 0 0 1px rgba(11, 11, 13, .1), 0 30px 70px -24px rgba(11, 11, 13, .45);
-  }
-  .window img { width: 100%; }
+  /* the app, as captured: its windows keep their own corners, so the
+     shadow is drawn around the picture's shape */
+  .stage { margin-top: 52px; padding: 56px 56px 0; border-radius: 32px; background: var(--soft); overflow: hidden; }
+  .stage img { width: 100%; max-width: 1000px; margin: 0 auto -8%; filter: drop-shadow(0 24px 40px rgba(11, 11, 13, .2)); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 52px; }
+  .panel { padding: 44px; border-radius: 32px; background: var(--coral); overflow: hidden; }
+  .pair figure + figure .panel { background: var(--amber); }
+  .panel img { width: 100%; filter: drop-shadow(0 18px 28px rgba(11, 11, 13, .32)); }
+  .pair figcaption { padding: 18px 4px 0; font-size: 15.5px; line-height: 1.5; color: var(--body); }
+  .pair figcaption b { display: block; font-size: 17px; font-weight: 600; letter-spacing: -0.015em; color: var(--ink); }
   .does { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 40px; margin-top: 26px; }
   .does div { padding: 22px 0 24px; border-bottom: 1px solid var(--line); }
   .does h3 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
@@ -217,11 +221,7 @@
   .icons button { padding: 8px 8px 9px; border-radius: 20px; font-size: 13.5px; color: var(--body); }
   .icons button[aria-pressed="true"] { background: rgba(11, 11, 13, .08); color: var(--ink); }
   .icons img { width: 76px; height: 76px; margin-bottom: 5px; }
-  .tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 40px; margin-top: 40px; }
-  .tier { padding-top: 22px; border-top: 2px solid var(--ink); }
-  .tier h3 { display: flex; justify-content: space-between; align-items: baseline; font-size: 22px; font-weight: 620; letter-spacing: -0.03em; }
-  .tier p { margin: 8px 0 20px; min-height: 3em; font-size: 15.5px; line-height: 1.5; color: var(--body); }
-  .after { margin-top: 30px; font-size: 14px; color: var(--muted); }
+  .after { margin-top: 28px; max-width: 560px; font-size: 15.5px; line-height: 1.5; color: var(--body); }
 
   /* download */
   .get { margin-top: 136px; padding: 76px 28px 80px; border-radius: 32px; background: var(--ink); color: #fff; text-align: center; }
@@ -231,6 +231,12 @@
   .get .btn.quiet { background: transparent; color: #fff; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .34); }
   .get .btn.quiet:hover { background: rgba(255, 255, 255, .1); }
   .get p { margin-top: 20px; font-size: 14px; color: rgba(255, 255, 255, .6); }
+  /* one row a system: what it needs, and whether it is out */
+  .builds { max-width: 720px; margin: 48px auto 0; text-align: left; list-style: none; }
+  .builds li { display: grid; grid-template-columns: 110px 1fr auto; align-items: center; gap: 20px; min-height: 64px; padding: 12px 0; border-top: 1px solid rgba(255, 255, 255, .14); font-size: 15px; color: rgba(255, 255, 255, .6); }
+  .builds b { font-size: 16px; font-weight: 600; color: #fff; }
+  .builds a { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
+  .sum { max-width: 720px; margin: 0 auto; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, .14); text-align: left; font-size: 12.5px; overflow-wrap: anywhere; }
 
   /* footer */
   footer { padding: 56px 0 64px; font-size: 13.5px; line-height: 1.6; color: var(--muted); }
@@ -246,9 +252,8 @@
     .does div:nth-last-child(-n+2) { border-bottom: 0; }
     .games { grid-template-columns: repeat(2, 1fr); }
     .own, footer .wrap { grid-template-columns: 1fr; gap: 18px; }
-    .tiers { grid-template-columns: 1fr; gap: 34px; }
-    .tier p { min-height: 0; }
-    .stage { padding: 28px; }
+    .stage { padding: 28px 28px 0; }
+    .pair { grid-template-columns: 1fr; gap: 34px; }
   }
   @media (max-width: 620px) {
     :root { --gap: 12px; }
@@ -264,13 +269,17 @@
     .pocket i { height: 38px; background-size: 18px, 30px 18px; }
     .sect { padding-top: 92px; }
     .say { font-size: 17px; }
-    .plates, .stage, .games, .looks { margin-top: 36px; }
+    .plates, .stage, .pair, .games, .looks { margin-top: 36px; }
     .plate b { font-size: 38px; }
     .does { grid-template-columns: 1fr; }
     .does div:nth-last-child(-n+2) { border-bottom: 1px solid var(--line); }
     .does div:last-child { border-bottom: 0; }
-    .stage { padding: 14px; border-radius: 24px; }
-    .window { border-radius: 8px; }
+    .stage { padding: 14px 0 0 14px; border-radius: 24px; }
+    /* a phone shows the library's left half, at a size that can be read */
+    .stage img { width: 180%; max-width: none; margin: 0 0 -14%; }
+    .panel { padding: 22px; border-radius: 24px; }
+    .builds li { grid-template-columns: 1fr auto; gap: 2px 16px; }
+    .builds b { grid-column: 1 / -1; }
     .own { margin-top: 64px; }
     .looks { padding: 6px 18px; border-radius: 24px; }
     .look { grid-template-columns: 1fr; gap: 12px; padding: 20px 0; }
@@ -289,6 +298,7 @@
   <div class="wrap">
     <a class="logo" href="#top"><img id="mark" src="/assets/icons/classic.png" alt="">Imago Emulator</a>
     <nav>
+      <a href="#app">The app</a>
       <a href="#systems">Systems</a>
       <a href="#games">Games</a>
       <a href="#supporters">Supporters</a>
@@ -300,13 +310,13 @@
 <main>
 <section class="hero">
   <div class="wrap">
-    <h1>1,650 free games. <span>And every one you own.</span></h1>
-    <p class="lede">One app for Game Boy, Game Boy Advance, DS and 3DS games, on a Mac, a PC or Linux.</p>
+    <h1>The last emulator <span>you’ll ever need.</span></h1>
+    <p class="lede">Game Boy, Game Boy Advance, DS and 3DS games in one app, with 1,650 free games built in. Out now for Mac.</p>
     <div class="cta">
       <a class="btn" href="/download/mac">Download for Mac</a>
-      <a class="btn quiet" href="#download">Windows and Linux</a>
+      <a class="btn quiet" href="#app">See the app</a>
     </div>
-    <p class="free">Free, with no ads and no account.</p>
+    <p class="free">Free, with no ads and no account. Apple silicon, macOS 13 or later.</p>
   </div>
   <div class="shelf">
     <div class="row">
@@ -340,6 +350,14 @@
   </div>
 </section>
 
+<section class="sect" id="app">
+  <div class="wrap">
+    <h2>Your games, kept in one library.</h2>
+    <p class="say">Add a game and the app finds its system and its picture. The one you played last waits at the top, where you left it.</p>
+    <div class="stage"><img src="/assets/app-library.webp" alt="Imago Emulator's library: uCity Advance to continue, above fourteen free games" width="2000" height="1356"></div>
+  </div>
+</section>
+
 <section class="sect" id="systems">
   <div class="wrap">
     <h2>Five handhelds in one window.</h2>
@@ -354,11 +372,20 @@
   </div>
 </section>
 
-<section class="sect" id="app">
+<section class="sect" id="play">
   <div class="wrap">
     <h2>Save anywhere. Rewind. Fast-forward.</h2>
     <p class="say">What the handhelds never had, without a settings screen to get right first.</p>
-    <div class="stage"><div class="window"><img src="/assets/app-game.jpg" alt="Imago Emulator running uCity Advance" width="1100" height="708"></div></div>
+    <div class="pair">
+      <figure>
+        <div class="panel"><img src="/assets/app-game.webp" alt="uCity Advance, a city by a river, playing in Imago Emulator" width="1200" height="907" loading="lazy"></div>
+        <figcaption><b>The window is the screen</b>Nothing sits around the game. This one is uCity Advance, a free city builder from the store.</figcaption>
+      </figure>
+      <figure>
+        <div class="panel"><img src="/assets/app-menu.webp" alt="The game's menu over uCity Advance: Resume, Cheats, Restart, Library and the keys" width="1200" height="907" loading="lazy"></div>
+        <figcaption><b>One menu, on Escape</b>Resume, cheats, restart and the keys you play with, over the game.</figcaption>
+      </figure>
+    </div>
     <div class="does">
       <div><h3>Save states</h3><p>Slots with a picture of where you were, beside the game's own saves.</p></div>
       <div><h3>Rewind and fast-forward</h3><p>Take back a mistake, or hurry through the slow parts.</p></div>
@@ -394,7 +421,7 @@
 <section class="sect" id="supporters">
   <div class="wrap">
     <h2>Free for everyone.<br>Supporters choose its colours.</h2>
-    <p class="say">Everything that plays a game is free. If you'd like to pay for it anyway, a key opens two settings. Try them on this page.</p>
+    <p class="say">Everything that plays a game is free. A supporter's key opens two settings, the accent colour and the Mac's Dock icon. Try them on this page.</p>
     <div class="looks">
       <div class="look">
         <span>Accent</span>
@@ -419,12 +446,7 @@
         </div>
       </div>
     </div>
-    <div class="tiers">
-      <div class="tier"><h3>Supporter <span>$10</span></h3><p>Every accent, and the Night, Ink, Chalk and Blueprint icons.</p><a class="btn" href="/buy/supporter">Get a Supporter key</a></div>
-      <div class="tier"><h3>Patron <span>$25</span></h3><p>The same, and the Ember icon.</p><a class="btn quiet" href="/buy/patron">Get a Patron key</a></div>
-      <div class="tier"><h3>Founder <span>$50</span></h3><p>The same, and the Founder icon, which is offered in the first year only.</p><a class="btn quiet" href="/buy/founder">Get a Founder key</a></div>
-    </div>
-    <p class="after">One payment, no subscription. Paste the key into Settings and it works offline, on every computer you use. Dock icons are for the Mac.</p>
+    <p class="after">Keys are not on sale yet. When they are, a key will be one payment with no subscription, and the app will stay complete without one.</p>
   </div>
 </section>
 
@@ -435,10 +457,14 @@
       <h2>Get Imago Emulator.</h2>
       <div class="cta">
         <a class="btn" href="/download/mac">Download for Mac</a>
-        <a class="btn quiet" href="/download/windows">Windows</a>
-        <a class="btn quiet" href="/download/linux">Linux</a>
       </div>
-      <p>Apple silicon with macOS 13 or later · Windows 10 or 11 · Ubuntu 22.04 or later, or an AppImage</p>
+      <p>Version 0.1.0 · 9.3 MB · Free</p>
+      <ul class="builds">
+        <li><b>Mac</b><span>Apple silicon, macOS 13 or later. Signed with a Developer ID and notarized by Apple.</span><a href="/download/mac">Download</a></li>
+        <li><b>Windows</b><span>Windows 10 and 11.</span><span>Not out yet</span></li>
+        <li><b>Linux</b><span>Ubuntu, Debian and an AppImage.</span><span>Not out yet</span></li>
+      </ul>
+      <p class="sum">SHA-256 of Imago-Emulator-0.1.0.dmg: <span id="sha256">f32badbbb6662ac2b7d0a6e79a1c10cac531ceca35e6d0f60e4350a730af1adb</span></p>
     </div>
   </div>
 </section>
