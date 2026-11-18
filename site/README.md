@@ -44,7 +44,7 @@ Files in `public/` are served first. The Worker answers only:
 
 | Path | What it does |
 |---|---|
-| `/download/mac`, `/download/windows`, `/download/linux` | Redirects to the address in `DOWNLOAD_MAC`, `DOWNLOAD_WINDOWS` or `DOWNLOAD_LINUX` |
+| `/download/mac`, `/download/windows`, `/download/windows-zip`, `/download/linux`, `/download/linux-deb`, `/download/linux-arm64`, `/download/linux-arm64-deb` | Redirects to the address in the variable of that name: `DOWNLOAD_MAC`, `DOWNLOAD_WINDOWS_ZIP` and so on |
 | `/buy/supporter`, `/buy/patron`, `/buy/founder` | Redirects to the checkout in `BUY_SUPPORTER`, `BUY_PATRON` or `BUY_FOUNDER` |
 | `/supporter` | Redirects to `/#supporters`. The app's Become a Supporter button opens this address (`crates/emu-app/src/supporter.rs`) |
 
@@ -68,15 +68,18 @@ image, and what the Worker answers.
 ## Publishing
 
 ```sh
-scripts/macos/release.sh   # the notarized disk image, in target/dist
-site/publish.sh            # the page, the Worker and that disk image
+scripts/macos/release.sh     # the notarized disk image, in target/dist
+site/publish.sh PACKAGES     # the page, the Worker and the downloads
 ```
 
-`publish.sh` copies `Imago-Emulator-VERSION.dmg` into `public/downloads/`
+`publish.sh PACKAGES` copies `Imago-Emulator-VERSION.dmg`, and the Windows
+and Linux packages found in the folder `PACKAGES` (the release workflow's
+artifacts, from `gh run download RUN -D PACKAGES`), into `public/downloads/`
 (ignored by git) and deploys. It refuses a disk image Gatekeeper does not
-accept as notarized, or one whose SHA-256 is not the one the page prints.
-For a new version, change the version, the size and the SHA-256 in the
-page's download section and `DOWNLOAD_MAC` in `wrangler.jsonc`.
+accept as notarized, a file whose SHA-256 is not the one the page prints,
+and a `DOWNLOAD_` variable naming a file that is not there. For a new
+version, change the version, the sizes and the SHA-256s in the page's
+download section and the `DOWNLOAD_` variables in `wrangler.jsonc`.
 
 The disk image is a static file of the Worker's, which may be 25 MiB at
 most (it is 9.3 MB). imagoemulator.com's zone is in the Cloudflare account
@@ -84,11 +87,12 @@ named by `account_id` in `wrangler.jsonc`.
 
 ## Still to come
 
-1. Windows and Linux. The page says "Not out yet" for both. Their packages
-   are built by `.github/workflows/release-linux-windows.yml`
-   ([packaging](../packaging/README.md)), whose last run failed its start
-   check on Ubuntu 22.04. Once they are released, fill `DOWNLOAD_WINDOWS`
-   and `DOWNLOAD_LINUX` and link the rows.
+1. Linux. The page says "Not out yet". Its packages are built by
+   `.github/workflows/release-linux-windows.yml`
+   ([packaging](../packaging/README.md)), and on Ubuntu 22.04 their window
+   stayed black in the workflow's start check. Once they are released,
+   fill the four `DOWNLOAD_LINUX` variables and link the row. Windows is
+   out, unsigned: its row says what Windows asks.
 2. Supporter keys. The page shows the looks and says keys are not on sale
    yet; the prices are not settled and there is no seller
    ([decision 0017](../docs/decisions/0017-supporter-keys.md)). With a

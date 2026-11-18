@@ -23,8 +23,12 @@
   // published beside the page by publish.sh.
   "vars": {
     "DOWNLOAD_MAC": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0.dmg",
-    "DOWNLOAD_WINDOWS": "",
+    "DOWNLOAD_WINDOWS": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0-windows-x86_64.exe",
+    "DOWNLOAD_WINDOWS_ZIP": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0-windows-x86_64-portable.zip",
     "DOWNLOAD_LINUX": "",
+    "DOWNLOAD_LINUX_DEB": "",
+    "DOWNLOAD_LINUX_ARM64": "",
+    "DOWNLOAD_LINUX_ARM64_DEB": "",
     "BUY_SUPPORTER": "",
     "BUY_PATRON": "",
     "BUY_FOUNDER": ""

@@ -9,8 +9,14 @@
 /** The paths that leave the site, and the variable holding each address. */
 export const LINKS = {
   '/download/mac': 'DOWNLOAD_MAC',
+  // The installer, and the same files as a zip to run from any folder.
   '/download/windows': 'DOWNLOAD_WINDOWS',
+  '/download/windows-zip': 'DOWNLOAD_WINDOWS_ZIP',
+  // The AppImage and the .deb, for x86-64 and for arm64.
   '/download/linux': 'DOWNLOAD_LINUX',
+  '/download/linux-deb': 'DOWNLOAD_LINUX_DEB',
+  '/download/linux-arm64': 'DOWNLOAD_LINUX_ARM64',
+  '/download/linux-arm64-deb': 'DOWNLOAD_LINUX_ARM64_DEB',
   '/buy/supporter': 'BUY_SUPPORTER',
   '/buy/patron': 'BUY_PATRON',
   '/buy/founder': 'BUY_FOUNDER',
