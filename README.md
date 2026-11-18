@@ -74,7 +74,7 @@ See the [roadmap](docs/ROADMAP.md).
 - [Architecture](docs/ARCHITECTURE.md): crates, the core contract, threads, file formats
 - [Scripting](docs/scripting.md): the Lua functions scripts can call
 - [Design system](docs/design-system.md): the app's layout rules, and the checks that hold it to them
-- [Site](site/README.md): imagoemulator.com's one page and its Worker, not yet published
+- [Site](site/README.md): imagoemulator.com's one page and its Worker
 - [Games we can't run](docs/research/games-we-cant-run.md): store games and homebrew for other systems that the cores can't run yet, with leads
 - [Fan games](docs/research/fan-games.md): famous ROM hacks, randomizers and PC fan games, what each needs, and the plan to run them all
 - [3DS games](docs/research/3ds.md): what hosting Azahar's core takes, what was measured, and what is left
