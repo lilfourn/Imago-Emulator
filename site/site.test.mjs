@@ -139,19 +139,25 @@ test('a key the Worker signs is one the app\'s format describes, and one sale gi
   await assert.rejects(issue('c2hvcnQ=', sale), /32 bytes/);
 });
 
-test('on Windows the buttons that get the app get the Windows installer, and elsewhere the Mac\'s disk image', async () => {
+test('the buttons that get the app get it for the visitor\'s system', async () => {
   const { runInNewContext } = await import('node:vm');
-  const block = html.match(/if \(\/win\/i\.test\([\s\S]*?\n  \}\n/)[0];
+  const block = html.match(/\n  \{\n    const system = [\s\S]*?\n  \}\n/)[0];
   const buttons = (navigator) => {
     const found = [...html.matchAll(/<a class="btn[^"]*" href="([^"]+)" data-get>([^<]+)<\/a>/g)].map(([, href, textContent]) => ({ href, textContent }));
     assert.equal(found.length, 2, 'the hero\'s button and the download section\'s');
     runInNewContext(block, { navigator, document: { querySelectorAll: (selector) => (selector === 'a[data-get]' ? found : []) } });
     return found;
   };
-  for (const navigator of [{ userAgentData: { platform: 'Windows' } }, { platform: 'Win32' }]) {
-    for (const button of buttons(navigator)) assert.deepEqual(button, { href: '/download/windows', textContent: 'Download for Windows' });
-  }
-  for (const navigator of [{ userAgentData: { platform: 'macOS' }, platform: 'MacIntel' }, { platform: 'Linux x86_64' }, {}]) {
-    for (const button of buttons(navigator)) assert.deepEqual(button, { href: '/download/mac', textContent: 'Download for Mac' });
+  const cases = [
+    [{ userAgentData: { platform: 'Windows' } }, '/download/windows', 'Download for Windows'],
+    [{ platform: 'Win32' }, '/download/windows', 'Download for Windows'],
+    [{ userAgentData: { platform: 'Linux' } }, '#download', 'Download for Linux'],
+    [{ platform: 'Linux x86_64' }, '#download', 'Download for Linux'],
+    [{ userAgentData: { platform: 'macOS' }, platform: 'MacIntel' }, '/download/mac', 'Download for Mac'],
+    [{ userAgentData: { platform: 'Android' }, platform: 'Linux armv81' }, '/download/mac', 'Download for Mac'],
+    [{}, '/download/mac', 'Download for Mac'],
+  ];
+  for (const [navigator, href, textContent] of cases) {
+    for (const button of buttons(navigator)) assert.deepEqual(button, { href, textContent }, JSON.stringify(navigator));
   }
 });

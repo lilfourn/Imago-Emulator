@@ -87,12 +87,10 @@ named by `account_id` in `wrangler.jsonc`.
 
 ## Still to come
 
-1. Linux. The page says "Not out yet". Its packages are built by
-   `.github/workflows/release-linux-windows.yml`
-   ([packaging](../packaging/README.md)), and on Ubuntu 22.04 their window
-   stayed black in the workflow's start check. Once they are released,
-   fill the four `DOWNLOAD_LINUX` variables and link the row. Windows is
-   out, unsigned: its row says what Windows asks.
+1. Ubuntu 22.04. The Linux row says it is for Ubuntu 24.04 or later and
+   Fedora 44, where the release workflow's start check passes; on Ubuntu
+   22.04 the window stays black in that check. Windows is unsigned: its row
+   says what Windows asks.
 2. Supporter keys. The page shows the looks and says keys are not on sale
    yet; the prices are not settled and there is no seller
    ([decision 0017](../docs/decisions/0017-supporter-keys.md)). With a

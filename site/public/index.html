@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Imago Emulator</title>
-<meta name="description" content="One free app for Game Boy, Game Boy Advance, DS and 3DS games, with 1,650 free games built in. Out now for Mac and Windows.">
+<meta name="description" content="One free app for Game Boy, Game Boy Advance, DS and 3DS games, with 1,650 free games built in. Out now for Mac, Windows and Linux.">
 <meta property="og:title" content="Imago Emulator: the last emulator you’ll ever need">
-<meta property="og:description" content="Game Boy, Game Boy Advance, DS and 3DS games in one free app, with 1,650 free games built in. Out now for Mac and Windows.">
+<meta property="og:description" content="Game Boy, Game Boy Advance, DS and 3DS games in one free app, with 1,650 free games built in. Out now for Mac, Windows and Linux.">
 <meta property="og:image" content="https://imagoemulator.com/assets/share.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -236,8 +236,10 @@
   .builds li { display: grid; grid-template-columns: 110px 1fr auto; align-items: center; gap: 20px; min-height: 64px; padding: 12px 0; border-top: 1px solid rgba(255, 255, 255, .14); font-size: 15px; color: rgba(255, 255, 255, .6); }
   .builds b { font-size: 16px; font-weight: 600; color: #fff; }
   .builds a { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
-  .builds li > :last-child { white-space: nowrap; }
-  .sum { max-width: 720px; margin: 0 auto; padding-top: 16px; line-height: 1.7; border-top: 1px solid rgba(255, 255, 255, .14); text-align: left; font-size: 12.5px; overflow-wrap: anywhere; }
+  .builds li > :last-child { white-space: nowrap; line-height: 1.7; }
+  .sum { max-width: 720px; margin: 0 auto; padding-top: 16px; line-height: 1.7; border-top: 1px solid rgba(255, 255, 255, .14); text-align: left; font-size: 12.5px; overflow-wrap: anywhere; color: rgba(255, 255, 255, .6); }
+  .sum summary { cursor: pointer; font-size: 14px; }
+  .get .sum p { margin-top: 10px; font-size: 12.5px; }
 
   /* footer */
   footer { padding: 56px 0 64px; font-size: 13.5px; line-height: 1.6; color: var(--muted); }
@@ -279,8 +281,7 @@
     /* a phone shows the library's left half, at a size that can be read */
     .stage img { width: 180%; max-width: none; margin: 0 0 -14%; }
     .panel { padding: 22px; border-radius: 24px; }
-    .builds li { grid-template-columns: 1fr auto; gap: 2px 16px; }
-    .builds b { grid-column: 1 / -1; }
+    .builds li { grid-template-columns: 1fr; gap: 4px; padding: 16px 0; }
     .own { margin-top: 64px; }
     .looks { padding: 6px 18px; border-radius: 24px; }
     .look { grid-template-columns: 1fr; gap: 12px; padding: 20px 0; }
@@ -312,12 +313,12 @@
 <section class="hero">
   <div class="wrap">
     <h1>The last emulator <span>you’ll ever need.</span></h1>
-    <p class="lede">Game Boy, Game Boy Advance, DS and 3DS games in one app, with 1,650 free games built in. Out now for Mac and Windows.</p>
+    <p class="lede">Game Boy, Game Boy Advance, DS and 3DS games in one app, with 1,650 free games built in. Out now for Mac, Windows and Linux.</p>
     <div class="cta">
       <a class="btn" href="/download/mac" data-get>Download for Mac</a>
       <a class="btn quiet" href="#download">All downloads</a>
     </div>
-    <p class="free">Free, with no ads and no account. For Apple silicon Macs and Windows 10 or 11.</p>
+    <p class="free">Free, with no ads and no account. For Apple silicon Macs, Windows 10 or 11, and Linux.</p>
   </div>
   <div class="shelf">
     <div class="row">
@@ -463,12 +464,16 @@
       <ul class="builds">
         <li><b>Mac</b><span>Apple silicon, macOS 13 or later. Signed with a Developer ID and notarized by Apple. 9.3 MB.</span><a href="/download/mac">Download</a></li>
         <li><b>Windows</b><span>Windows 10 and 11, x86-64. Not signed yet, so Windows asks before it opens: choose More info, then Run anyway. 5.5 MB.</span><span><a href="/download/windows">Installer</a> · <a href="/download/windows-zip">Zip</a></span></li>
-        <li><b>Linux</b><span>Ubuntu, Debian and an AppImage.</span><span>Not out yet</span></li>
+        <li><b>Linux</b><span>Ubuntu 24.04 or later, or Fedora 44. Not for Ubuntu 22.04 yet, where the window stays black. About 13 MB as an AppImage, 9 MB as a .deb.</span><span>x86-64: <a href="/download/linux">AppImage</a> · <a href="/download/linux-deb">.deb</a><br>arm64: <a href="/download/linux-arm64">AppImage</a> · <a href="/download/linux-arm64-deb">.deb</a></span></li>
       </ul>
-      <p class="sum">SHA-256<br>
+      <details class="sum"><summary>SHA-256 of each file</summary><p>
         Imago-Emulator-0.1.0.dmg <span data-sha256="Imago-Emulator-0.1.0.dmg">f32badbbb6662ac2b7d0a6e79a1c10cac531ceca35e6d0f60e4350a730af1adb</span><br>
         Imago-Emulator-0.1.0-windows-x86_64.exe <span data-sha256="Imago-Emulator-0.1.0-windows-x86_64.exe">08f6b42f51fb3a6181d87b453489d8fb96b09f4416cbe5b3ced25a181f61552b</span><br>
-        Imago-Emulator-0.1.0-windows-x86_64-portable.zip <span data-sha256="Imago-Emulator-0.1.0-windows-x86_64-portable.zip">6670bf76b84daa810072162c3fffb7b457783a2faf4513d5323b5c5263cc10f1</span></p>
+        Imago-Emulator-0.1.0-windows-x86_64-portable.zip <span data-sha256="Imago-Emulator-0.1.0-windows-x86_64-portable.zip">6670bf76b84daa810072162c3fffb7b457783a2faf4513d5323b5c5263cc10f1</span><br>
+        Imago-Emulator-0.1.0-linux-x86_64.AppImage <span data-sha256="Imago-Emulator-0.1.0-linux-x86_64.AppImage">a129565ae020ddb6232e50ada23468391359d5ce53d2b0faa318512f622b4287</span><br>
+        Imago-Emulator-0.1.0-linux-x86_64.deb <span data-sha256="Imago-Emulator-0.1.0-linux-x86_64.deb">2f9c7e424015bf6afbe05317d5d5d8a6f94cc2ebc01f8dd3cd5953d580863008</span><br>
+        Imago-Emulator-0.1.0-linux-aarch64.AppImage <span data-sha256="Imago-Emulator-0.1.0-linux-aarch64.AppImage">11fb42996fa2d9c578de9bc9ebb3ad0cdfe302e18674f060795f7aa8956a0b65</span><br>
+        Imago-Emulator-0.1.0-linux-aarch64.deb <span data-sha256="Imago-Emulator-0.1.0-linux-aarch64.deb">acba021904f734c0515f4d1611f88081f15a671a1cbecbe2971792adf7f9e166</span></p></details>
     </div>
   </div>
 </section>
@@ -488,11 +493,17 @@
 </footer>
 
 <script>
-  // On Windows, the buttons that get the app get the Windows installer.
-  if (/win/i.test(navigator.userAgentData?.platform ?? navigator.platform ?? '')) {
-    for (const button of document.querySelectorAll('a[data-get]')) {
-      button.href = '/download/windows';
-      button.textContent = 'Download for Windows';
+  // The buttons that get the app get it for the visitor's system: the
+  // Windows installer on Windows, and on Linux the list, since a browser
+  // does not say which processor it runs on.
+  {
+    const system = navigator.userAgentData?.platform ?? navigator.platform ?? '';
+    const get = /win/i.test(system) ? ['/download/windows', 'Download for Windows'] : /linux|x11/i.test(system) && !/android/i.test(system) ? ['#download', 'Download for Linux'] : null;
+    if (get) {
+      for (const button of document.querySelectorAll('a[data-get]')) {
+        button.href = get[0];
+        button.textContent = get[1];
+      }
     }
   }
 
