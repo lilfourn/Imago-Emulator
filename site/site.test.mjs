@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createHmac, generateKeyPairSync, verify } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import test, { mock } from 'node:test';
+import test from 'node:test';
 import { runInNewContext, Script } from 'node:vm';
 
 import { idOf, PREFIX, TIERS } from './src/keys.js';
@@ -470,58 +470,94 @@ test('Paddle\'s notice of a sale sends the buyer their key, once per notice and 
   assert.equal(unsent.status, 500);
 });
 
-test('a notice is answered inside Paddle\'s five seconds, however slow Paddle and the mail are', async (t) => {
+test('a notice is answered inside Paddle\'s five seconds, however slow Paddle and the mail are', { timeout: 20_000 }, async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_763_510_400_000 });
-  // Lets what waits on promises run, without moving the clock.
-  const turn = async () => { for (let at = 0; at < 20; at += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  // Waits for `ready` without moving the clock: what the Worker awaits
+  // (signing, reading an answer) takes real time, and no fixed number of
+  // turns is enough for it on every machine.
+  const until = async (ready) => {
+    while (!ready()) await new Promise((resolve) => setImmediate(resolve));
+  };
+  const turns = async () => {
+    for (let at = 0; at < 50; at += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
   const never = new Promise(() => {});
   const after = (wait, value) => new Promise((resolve) => setTimeout(() => resolve(value), wait));
-  /** The notice's answer once it has one, with the clock moved by each of `steps` in turn. */
-  const run = async (vars, paddle, steps) => {
-    let answer;
-    const [, asked] = await withPaddle(paddle, async () => {
-      const asking = ask('/api/paddle', vars, posted(completed())).then((got) => { answer = got; });
-      for (const step of steps) {
-        await turn();
-        if (answer) break;
-        t.mock.timers.tick(step);
-      }
-      await turn();
-      void asking;
-    });
-    return [answer, asked];
-  };
 
-  // Mail that never finishes: answered when the time is up, so that Paddle sends again.
-  const stuck = open({ EMAIL: { send: () => never } }).vars;
-  const [early] = await run(stuck, answers(sale()), [4499]);
-  assert.equal(early, undefined, 'not given up on before the time is up');
-  const [late] = await run(stuck, answers(sale()), [4500]);
-  assert.equal(late.status, 500);
+  /**
+   * A notice posted to a Worker whose Paddle answers as `paddle` says and
+   * whose mail is sent as `send` says, for `steps` to move the clock
+   * under: it is given what has happened so far.
+   */
+  const posting = async (paddle, send, steps) => {
+    const seen = { asked: 0, mailed: 0, answer: undefined, question: undefined };
+    const { vars } = open({
+      EMAIL: {
+        send: (message) => {
+          seen.mailed += 1;
+          return send(message);
+        },
+      },
+    });
+    await withPaddle(
+      (url, init) => {
+        seen.asked += 1;
+        seen.question = init.signal;
+        return paddle();
+      },
+      async () => {
+        const answered = ask('/api/paddle', vars, posted(completed())).then((answer) => {
+          seen.answer = answer;
+        });
+        await steps(seen);
+        await answered;
+      },
+    );
+    return seen;
+  };
+  const prompt = () => new Response(JSON.stringify({ data: sale() }));
+  const slow = () => after(3000, prompt());
+
+  // Mail that never finishes: answered when the time is up, and not before, so that Paddle sends again.
+  const stuck = await posting(prompt, () => never, async (seen) => {
+    await until(() => seen.mailed === 1);
+    t.mock.timers.tick(4499);
+    await turns();
+    assert.equal(seen.answer, undefined, 'not given up on before the time is up');
+    t.mock.timers.tick(1);
+  });
+  assert.equal(stuck.answer.status, 500);
 
   // Paddle never answering: the same, and the question is abandoned.
-  const { vars, mail } = open();
-  let question;
-  const silent = (url, init) => {
-    question = init.signal;
-    return never;
-  };
-  const [unanswered] = await run(vars, silent, [4500]);
-  assert.equal(unanswered.status, 502);
-  assert.ok(question.aborted, 'the question to Paddle is abandoned');
-  assert.equal(mail.length, 0);
+  const silent = await posting(() => never, () => never, async (seen) => {
+    await until(() => seen.asked === 1);
+    t.mock.timers.tick(4500);
+  });
+  assert.equal(silent.answer.status, 502);
+  assert.ok(silent.question.aborted, 'the question to Paddle is abandoned');
+  assert.equal(silent.mailed, 0);
 
   // The two share the time: after a slow answer from Paddle the mail has only what is left.
-  const slow = () => after(3000, new Response(JSON.stringify({ data: sale() })));
-  const [shared] = await run(stuck, slow, [3000, 1499, 1]);
-  assert.equal(shared.status, 500);
-  const [short] = await run(stuck, slow, [3000, 1499]);
-  assert.equal(short, undefined, 'the mail had not yet used up what was left');
+  const shared = await posting(slow, () => never, async (seen) => {
+    await until(() => seen.asked === 1);
+    t.mock.timers.tick(3000);
+    await until(() => seen.mailed === 1);
+    t.mock.timers.tick(1499);
+    await turns();
+    assert.equal(seen.answer, undefined, 'the mail had not yet used up what was left');
+    t.mock.timers.tick(1);
+  });
+  assert.equal(shared.answer.status, 500);
+
   // And both in time is a key sent.
-  const prompt = open({ EMAIL: { send: (message) => after(1000, mail.push(message)) } }).vars;
-  const [sent] = await run(prompt, slow, [3000, 1000]);
-  assert.equal(sent.status, 200);
-  assert.equal(mail.length, 1);
+  const sent = await posting(slow, () => after(1000, { messageId: 'sent' }), async (seen) => {
+    await until(() => seen.asked === 1);
+    t.mock.timers.tick(3000);
+    await until(() => seen.mailed === 1);
+    t.mock.timers.tick(1000);
+  });
+  assert.equal(sent.answer.status, 200);
+  assert.equal(sent.mailed, 1);
 });
 
 test('the keys offered are the app\'s three, at the prices the owner set, with a button each', () => {
