@@ -80,8 +80,15 @@ nothing is paywalled; this decision says what that rule protects.
   Dock of an app that is not running is the bundle's, which cannot change
   without breaking its signature. Linux and Windows take a program's icon
   from its file or package, so the choice is not offered there.
-- Selling is not built yet: the page at `imagoemulator.com/supporter`,
-  the seller, and whatever signs a key for each sale. `supporter-key issue`
-  makes keys by hand or in batches meanwhile.
+- The seller is Paddle, chosen by the owner on 2026-11-18 to keep this
+  apart from the owner's Stripe accounts, at prices set the next day: $5,
+  $15 and $30. Paddle is the merchant of record, and the site's Worker signs a
+  key for each sale and emails it (`site/README.md`, "Selling keys"), so a
+  copy of the signing key is a secret of that Worker. Considered and
+  passed over: Stripe Managed Payments (the same owner's other accounts),
+  FastSpring (a sales call and unpublished rates, though it sells PPSSPP
+  Gold), Polar (pays out through Stripe, and its rules ban cheat codes)
+  and Lemon Squeezy (closing). `supporter-key issue` still makes keys by
+  hand or in batches.
 - Public copy for supporting follows decision 0016: it names the app and
   its systems, never a game.

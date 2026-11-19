@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your key · Imago Emulator</title>
+<meta name="description" content="The supporter key you bought.">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/assets/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/page.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a class="logo" href="/"><img src="/assets/icons/classic.png" alt="">Imago Emulator</a>
+    <nav><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a></nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1 id="title">Getting your key</h1>
+    <p class="lede" id="say">Your payment went through. This takes a few seconds.</p>
+    <div id="ready" hidden>
+      <p class="key" id="key"></p>
+      <button class="btn" type="button" id="copy">Copy the key</button>
+      <h2>To use it</h2>
+      <ol>
+        <li>Copy the key.</li>
+        <li>Open Imago Emulator and choose Settings.</li>
+        <li>Under Supporter, press Paste Key.</li>
+      </ol>
+      <p>The key has also been emailed to the address you gave at the checkout, and your receipt comes from Paddle. The key works offline, on each of your own computers.</p>
+    </div>
+    <p id="help" hidden>If you have paid and your key does not come, write to <a href="mailto:support@imagoemulator.com">support@imagoemulator.com</a> with the order number from your receipt.</p>
+    <noscript><p>This page needs JavaScript to show your key. The key is also in your email.</p></noscript>
+<script>
+  // The key for the sale named in this page's address, asked of the site
+  // until the payment has been taken.
+  {
+    const sale = new URLSearchParams(location.search).get('txn') ?? '';
+    const show = (title, words, help = true) => {
+      document.getElementById('title').textContent = title;
+      document.getElementById('say').textContent = words;
+      document.getElementById('help').hidden = !help;
+    };
+    const none = () => show('No key here', 'This address does not name a sale of a key. Open the link in the email that came with your key.');
+    const late = () => show('Your key is on its way', 'This is taking longer than it should. Once your payment is confirmed, your key is emailed to the address you gave at the checkout, and this page will show it too: open it again in a few minutes.');
+    const ask = async (tries) => {
+      const answer = await fetch(`/api/key?txn=${encodeURIComponent(sale)}`, { cache: 'no-store' });
+      // Only these two say there is no such sale.
+      if (answer.status === 400 || answer.status === 404) return none();
+      // Not paid for yet, or something failed that may yet work: asked again.
+      if (answer.status !== 200) {
+        if (tries === 0) return late();
+        return setTimeout(() => ask(tries - 1).catch(late), 1500);
+      }
+      const found = await answer.json();
+      show(`Your ${found.tier} key`, 'Thank you for supporting Imago Emulator.', false);
+      document.getElementById('key').textContent = found.key;
+      document.getElementById('ready').hidden = false;
+    };
+    if (/^txn_[a-z\d]{26}$/.test(sale)) ask(20).catch(late);
+    else none();
+
+    const copy = document.getElementById('copy');
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(document.getElementById('key').textContent);
+        copy.textContent = 'Copied';
+      } catch {
+        getSelection().selectAllChildren(document.getElementById('key'));
+        copy.textContent = 'Selected: now copy it';
+      }
+    });
+  }
+</script>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a href="/">Imago Emulator</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="mailto:support@imagoemulator.com">support@imagoemulator.com</a>
+  </div>
+</footer>
+</body>
+</html>
