@@ -87,7 +87,7 @@ What it needs, all of it or nothing is sold:
 | Setting | Where | What |
 |---|---|---|
 | `PADDLE_ENVIRONMENT` | `wrangler.jsonc` | `production`. The published site never uses the sandbox, whose sales are paid for with a test card |
-| `PADDLE_CLIENT_TOKEN` | `wrangler.jsonc` | The client-side token (`live_…`), from Paddle > Developer tools > Authentication |
+| `PADDLE_CLIENT_TOKEN` | `wrangler.jsonc` | The client-side token (`live_…`), from Paddle > My account > Settings > Authentication |
 | `PADDLE_PRICE_SUPPORTER`, `_PATRON`, `_FOUNDER` | `wrangler.jsonc` | The three prices' ids (`pri_…`): one-time, quantity 1 |
 | `PADDLE_API_KEY` | `wrangler secret put` | An API key (`pdl_live_apikey_…`) with only `transaction.read` and `customer.read`. It expires: Paddle allows a year at most |
 | `PADDLE_WEBHOOK_SECRET` | `wrangler secret put` | The secret (`pdl_ntfset_…`) of the notification destination `https://imagoemulator.com/api/paddle`, subscribed to `transaction.completed` |
