@@ -385,7 +385,8 @@ later pin installs beside it. A lock keeps two installs from racing. With
 no build for the system, or a failed download, the game says where a
 build can be put instead.
 
-Imago itself stays closed source. It runs mkxp-z as a separate program
+Imago itself is not under the GPL (it was closed source then, and is
+MPL-2.0 since [decision 0018](0018-open-source.md)). It runs mkxp-z as a separate program
 that it starts and talks to over a socket and a pipe, as two programs
 communicate, and it neither links nor modifies mkxp-z. The bridge script
 is a game script that mkxp-z interprets, as it interprets any game's.

@@ -9,7 +9,9 @@ from your own cartridge dumps, and free homebrew from its built-in store.
 3DS games play too, on Azahar's core, which the app downloads the first
 time ([below](#3ds-games)).
 
-The app is free; its source is private ([license](#legal)). Everything
+The app is free and open source, under the Mozilla Public License 2.0
+([license](#legal)); its source is
+[on GitHub](https://github.com/lilfourn/Imago-Emulator). Everything
 that plays a game is in the one build everyone gets. People who pay to
 support it get a key that turns on an accent colour and a Dock icon of
 their choosing, and nothing else ([below](#supporters)). Imago Emulator
@@ -852,13 +854,26 @@ not in this repository and must never be: keep a copy somewhere safe.
 
 ## Legal
 
-Imago Emulator is copyright © 2026 Luke Fournier, all rights reserved. Its
-source is private. The app is free to download and use under the terms in
-[LICENSE](LICENSE), which ships in the app and on its disk image. The
-open-source components built into it are listed, with their licenses, in
-its About panel; `scripts/macos/release.sh` writes that list from
-`Cargo.lock` with `cargo-about` (decision
+Imago Emulator is copyright © 2026 Luke Fournier and is open source under
+the [Mozilla Public License 2.0](LICENSE), which ships in the app and with
+every download ([decision 0018](docs/decisions/0018-open-source.md)). You may
+use, change and share the code, in your own projects too; a copy you give
+out must keep this project's files, changed or not, under the MPL-2.0 and
+offer their source. The MPL grants no rights to the name Imago Emulator or
+its icon: a changed build given out needs a name and icon of its own.
+
+The open-source components built into the app are listed, with their
+licenses, in its About panel; `scripts/macos/release.sh` writes that list
+from `Cargo.lock` with `cargo-about` (decision
 [0016](docs/decisions/0016-public-release.md)).
+`assets/randomizer/Launch3ds.java` is a separate program under the GNU
+General Public License, version 3 or later, as its header says: it links
+to the randomizer, which is GPL, and the app only writes it out and starts
+it.
+
+Code from GPL projects, such as melonDS, is read to understand it and
+never copied in. Contributions are welcome under the MPL-2.0; they follow
+the same rule, and the [legal policy](docs/PRD.md#9-legal-policy).
 
 Nintendo, Game Boy, Game Boy Color, Game Boy Advance, Nintendo DS and
 Nintendo 3DS are trademarks of Nintendo. Imago Emulator is not affiliated

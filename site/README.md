@@ -37,6 +37,10 @@ systems, not commercial games, and shows only homebrew.
   by the test) and the icons are `assets/app-icon.png` and
   `assets/app-icons/`, scaled to 256 pixels with `sips -Z 256`. Choosing one
   on the page recolours the page's buttons or swaps its mark.
+- **The source** is [lilfourn/Imago-Emulator](https://github.com/lilfourn/Imago-Emulator),
+  public under the Mozilla Public License 2.0
+  ([decision 0018](../docs/decisions/0018-open-source.md)). The header,
+  the open-source section, the downloads and the footer link to it.
 - **Geist** (`public/assets/geist-latin.woff2`) is the font getimago.app
   uses, under the SIL Open Font License 1.1.
 
@@ -121,8 +125,10 @@ wrangler deploy --dry-run --config site/wrangler.jsonc
 ```
 
 The tests check that every link, picture and font on the pages exists, that
+they link out only to the source on GitHub and to Paddle's terms, that
 they load nothing from another site but Paddle's checkout when someone
-buys, that every game shown is credited, that the accents are the app's,
+buys, that the licence they name is the repository's, that every game
+shown is credited, that the accents are the app's,
 that the download is this version's disk image, and what the Worker
 answers: for the downloads, and for a sale (the signature of a notice, the
 key a transaction makes, the email, and everything that must sell nothing).

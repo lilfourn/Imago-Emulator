@@ -1,6 +1,8 @@
 # 0016 — The public release: closed source, Imago Emulator, Developer ID
 
-- Status: accepted
+- Status: accepted; item 1 superseded by
+  [decision 0018](0018-open-source.md), which opens the source under
+  MPL-2.0
 - Date: 2026-11-06
 - Deciders: Luke Fournier (license, name, menu label); Claude (the rest)
 - Related: [PRD](../PRD.md) §9 and open question Q1

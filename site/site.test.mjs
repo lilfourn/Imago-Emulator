@@ -17,6 +17,9 @@ const html = read('index.html');
 const POLICIES = ['terms', 'privacy', 'refunds'];
 const pages = Object.fromEntries(['index', ...POLICIES, 'thanks'].map((name) => [name, read(`${name}.html`)]));
 const config = readFileSync(new URL('wrangler.jsonc', import.meta.url), 'utf8');
+/** The app's source: the repository, its issues and its licence, which the pages may link to. */
+const SOURCE = 'https://github.com/lilfourn/Imago-Emulator';
+const SOURCE_LINKS = [SOURCE, `${SOURCE}/issues`, `${SOURCE}/blob/main/LICENSE`];
 /** The one script from another site: Paddle's checkout, loaded when someone buys. */
 const PADDLE_JS = 'https://cdn.paddle.com/paddle/v2/paddle.js';
 
@@ -38,8 +41,8 @@ test('every local link, picture and font is a file, an anchor or a route', () =>
         // A page is served at its name without ".html".
         const file = ref.slice(1);
         assert.ok(existsSync(new URL(file, publicRoot)) || POLICIES.includes(file), `${name}: no such file: ${ref}`);
-      } else if (ref === `mailto:${SUPPORT}`) continue;
-      // Only the policies link out, and only to the seller's own terms and help.
+      } else if (ref === `mailto:${SUPPORT}` || SOURCE_LINKS.includes(ref)) continue;
+      // Otherwise only the policies link out, and only to the seller's own terms and help.
       else if (POLICIES.includes(name)) assert.match(ref, /^https:\/\/(www\.paddle\.com\/legal\/[a-z-]+|paddle\.net)$/, `${name} links out: ${ref}`);
       else if (!ref.startsWith('/')) assert.equal(ref, 'https://imagoemulator.com/', `${name} links out: ${ref}`);
     }
@@ -581,6 +584,19 @@ test('every page leads to the terms, privacy and refunds, and they say who sells
   assert.match(pages.terms, /Paddle\.com is the Merchant of Record for all our orders/);
   for (const page of [html, pages.terms, pages.refunds]) assert.match(page, /refunded (?:in full )?within 30 days/);
   assert.doesNotMatch(Object.values(pages).join(''), /donat|\btip\b/i, 'a key is something bought, not a gift of money');
+});
+
+test('the front page and the terms say the app is open source, under the licence the repository gives it', () => {
+  const license = readFileSync(new URL('../LICENSE', import.meta.url), 'utf8');
+  assert.match(license, /^Mozilla Public License Version 2\.0\n/);
+  for (const page of [html, pages.terms]) {
+    assert.match(page, /open source/);
+    assert.ok(page.includes(`href="${SOURCE}"`), 'no link to the source');
+    assert.ok(page.includes(`<a href="${SOURCE}/blob/main/LICENSE">Mozilla Public License 2.0</a>`), 'the licence is not named and linked');
+  }
+  assert.match(html, /<nav>[\s\S]*?<a href="https:\/\/github\.com\/lilfourn\/Imago-Emulator">GitHub<\/a>\s*<\/nav>/, 'the header leads to GitHub');
+  // The repository's README leads back to the same place.
+  assert.ok(readFileSync(new URL('../README.md', import.meta.url), 'utf8').includes(`(${SOURCE})`));
 });
 
 /** A stand-in for a page: its elements by id, the buy buttons, and what was added to its head. */

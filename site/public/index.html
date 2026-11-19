@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Imago Emulator</title>
-<meta name="description" content="One free app for Game Boy, Game Boy Advance, DS and 3DS games, with 1,650 free games built in. Out now for Mac, Windows and Linux.">
+<meta name="description" content="One free, open-source app for Game Boy, Game Boy Advance, DS and 3DS games, with 1,650 free games built in. Out now for Mac, Windows and Linux.">
 <meta property="og:title" content="Imago Emulator: the last emulator you’ll ever need">
-<meta property="og:description" content="Game Boy, Game Boy Advance, DS and 3DS games in one free app, with 1,650 free games built in. Out now for Mac, Windows and Linux.">
+<meta property="og:description" content="Game Boy, Game Boy Advance, DS and 3DS games in one free, open-source app, with 1,650 free games built in. Out now for Mac, Windows and Linux.">
 <meta property="og:image" content="https://imagoemulator.com/assets/share.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -119,6 +119,7 @@
   .lede { margin: 26px auto 0; max-width: 560px; font-size: 19px; line-height: 1.5; color: var(--body); text-wrap: pretty; }
   .cta { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 32px; }
   .free { margin-top: 16px; font-size: 14px; color: var(--muted); }
+  .cta.left { justify-content: flex-start; margin-top: 28px; }
 
   /* the shelf: two rows of pocket blocks, each showing a game's own
      screenshot, drifting opposite ways. The page's script doubles each row
@@ -255,7 +256,7 @@
   footer .logo { color: var(--ink); margin-bottom: 14px; }
   footer h3 { font-size: 13.5px; font-weight: 600; color: var(--ink); margin-bottom: 6px; }
   footer .legal { margin-top: 14px; }
-  footer .legal a { margin-right: 14px; white-space: nowrap; }
+  footer .legal a { margin-right: 10px; white-space: nowrap; }
 
   @media (max-width: 900px) {
     .plates { grid-template-columns: repeat(2, 1fr); }
@@ -318,6 +319,7 @@
       <a href="#systems">Systems</a>
       <a href="#games">Games</a>
       <a href="#supporters">Supporters</a>
+      <a href="https://github.com/lilfourn/Imago-Emulator">GitHub</a>
     </nav>
     <a class="btn small" href="#download">Download</a>
   </div>
@@ -332,7 +334,7 @@
       <a class="btn" href="/download/mac" data-get>Download for Mac</a>
       <a class="btn quiet" href="#download">All downloads</a>
     </div>
-    <p class="free">Free, with no ads and no account. For Apple silicon Macs, Windows 10 or 11, and Linux.</p>
+    <p class="free">Free and open source, with no ads and no account. For Apple silicon Macs, Windows 10 or 11, and Linux.</p>
   </div>
   <div class="shelf">
     <div class="row">
@@ -434,10 +436,21 @@
   </div>
 </section>
 
+<section class="sect" id="source">
+  <div class="wrap">
+    <h2>Open source, on GitHub.</h2>
+    <p class="say">All of the app's code is public, under the Mozilla Public License 2.0. Read it, build it yourself, report a bug or send a fix.</p>
+    <div class="cta left">
+      <a class="btn" href="https://github.com/lilfourn/Imago-Emulator">View the source</a>
+      <a class="btn quiet" href="https://github.com/lilfourn/Imago-Emulator/issues">Report a bug</a>
+    </div>
+  </div>
+</section>
+
 <section class="sect" id="supporters">
   <div class="wrap">
     <h2>Free for everyone.<br>Supporters choose its colours.</h2>
-    <p class="say">Everything that plays a game is free. A supporter's key opens two settings, the accent colour and the Mac's Dock icon. Try them on this page.</p>
+    <p class="say">Everything that plays a game is free and open source. A supporter's key opens two settings, the accent colour and the Mac's Dock icon. Try them on this page.</p>
     <div class="looks">
       <div class="look">
         <span>Accent</span>
@@ -495,11 +508,12 @@
       <div class="cta">
         <a class="btn" href="/download/mac" data-get>Download for Mac</a>
       </div>
-      <p>Version 0.1.0 · Free</p>
+      <p>Version 0.1.0 · Free and open source</p>
       <ul class="builds">
         <li><b>Mac</b><span>Apple silicon, macOS 13 or later. Signed with a Developer ID and notarized by Apple. 9.3 MB.</span><a href="/download/mac">Download</a></li>
         <li><b>Windows</b><span>Windows 10 and 11, x86-64. Not signed yet, so Windows asks before it opens: choose More info, then Run anyway. 5.5 MB.</span><span><a href="/download/windows">Installer</a> · <a href="/download/windows-zip">Zip</a></span></li>
         <li><b>Linux</b><span>Ubuntu 24.04 or later, or Fedora 44. Not for Ubuntu 22.04 yet, where the window stays black. About 13 MB as an AppImage, 9 MB as a .deb.</span><span>x86-64: <a href="/download/linux">AppImage</a> · <a href="/download/linux-deb">.deb</a><br>arm64: <a href="/download/linux-arm64">AppImage</a> · <a href="/download/linux-arm64-deb">.deb</a></span></li>
+        <li><b>Source</b><span>Rust, under the Mozilla Public License 2.0. The README says how to build it.</span><a href="https://github.com/lilfourn/Imago-Emulator">GitHub</a></li>
       </ul>
       <details class="sum"><summary>SHA-256 of each file</summary><p>
         Imago-Emulator-0.1.0.dmg <span data-sha256="Imago-Emulator-0.1.0.dmg">f32badbbb6662ac2b7d0a6e79a1c10cac531ceca35e6d0f60e4350a730af1adb</span><br>
@@ -518,8 +532,8 @@
   <div class="wrap">
     <div>
       <a class="logo" href="#top"><img src="/assets/icons/classic.png" alt="" width="28" height="28" loading="lazy">Imago Emulator</a>
-      <p>Imago Emulator is not affiliated with, endorsed by or sponsored by Nintendo. Game Boy, Game Boy Color, Game Boy Advance, Nintendo DS and Nintendo 3DS are trademarks of Nintendo.</p>
-      <p class="legal"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="mailto:support@imagoemulator.com">support@imagoemulator.com</a></p>
+      <p>Imago Emulator is open source under the <a href="https://github.com/lilfourn/Imago-Emulator/blob/main/LICENSE">Mozilla Public License 2.0</a>. It is not affiliated with, endorsed by or sponsored by Nintendo. Game Boy, Game Boy Color, Game Boy Advance, Nintendo DS and Nintendo 3DS are trademarks of Nintendo.</p>
+      <p class="legal"><a href="https://github.com/lilfourn/Imago-Emulator">GitHub</a> <a href="/terms">Terms</a> <a href="/privacy">Privacy</a> <a href="/refunds">Refunds</a> <a href="mailto:support@imagoemulator.com">support@imagoemulator.com</a></p>
     </div>
     <div>
       <h3>Games shown</h3>
