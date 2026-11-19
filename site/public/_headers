@@ -3,3 +3,6 @@
   Cache-Control: public, max-age=3600
 /assets/*
   Cache-Control: public, max-age=86400
+/thanks
+  Referrer-Policy: no-referrer
+  X-Robots-Tag: noindex

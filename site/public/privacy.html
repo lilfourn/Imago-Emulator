@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy · Imago Emulator</title>
+<meta name="description" content="What Imago Emulator and its site send from your computer, and where it goes.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/assets/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/page.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a class="logo" href="/"><img src="/assets/icons/classic.png" alt="">Imago Emulator</a>
+    <nav><a href="/terms">Terms</a><a href="/privacy" aria-current="page">Privacy</a><a href="/refunds">Refunds</a></nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>Privacy</h1>
+    <p class="dated">Last changed on 19 November 2026.</p>
+    <p class="lede">Imago Emulator has no account, no ads, no analytics and no crash reports, in the app or on this site. The app never sends us anything. This page says what does leave your computer, and where it goes.</p>
+    <p>“We” is Imago Emulator, which makes the app and runs imagoemulator.com. Write to <a href="mailto:support@imagoemulator.com">support@imagoemulator.com</a>.</p>
+
+    <h2>This site</h2>
+    <p>The site is served by Cloudflare. As any web host does, Cloudflare handles your IP address and your browser's details to deliver each page and file and to stop abuse, and keeps its own records of that. We set no cookies, run no analytics and load nothing from other sites.</p>
+    <p>The one exception is buying a key. When you press a button to buy, the page loads Paddle's checkout, and Paddle may then set cookies it needs to take the payment and prevent fraud.</p>
+
+    <h2>Buying a key</h2>
+    <p>Keys are sold by Paddle, which collects your email address, your country or billing address, and your payment details, and works out the tax. We never see your card. <a href="https://www.paddle.com/legal/privacy">Paddle's privacy notice</a> covers what it does with them.</p>
+    <p>What we do with a sale:</p>
+    <ul>
+      <li>Paddle tells our site that a sale was made. Our site then reads the sale from Paddle, signs your key, and emails it to the address you gave. The email is sent through Cloudflare's email service.</li>
+      <li>Our site stores nothing about you. It makes your key again from the sale each time the key's page is opened.</li>
+      <li>We can see our sales in our Paddle account: your email address, your name if you gave one, your country, what you bought and when. Paddle keeps those records for as long as tax law requires.</li>
+      <li>A key holds no name and no email address: only a number, a date and which key it is. The number is made from the sale, so that we can cancel a key that was refunded.</li>
+    </ul>
+    <p>Mail you send to our support address is forwarded to our mailbox, and we keep it as long as it takes to help you.</p>
+
+    <h2>The app</h2>
+    <p>The app keeps your games, saves, settings and library on your own computer. It has no sign-in, does not check for updates, and sends no information about you, your games or how you play to us or to anyone for advertising or tracking.</p>
+    <p>Some features fetch things from the internet. Each such request shows the service your IP address and the app's name and version, as any download does.</p>
+    <ul>
+      <li><strong>Box art.</strong> When games are added to your library, the app downloads public lists of games from GitHub and matches your games against them on your computer. It then downloads each cover picture from the Libretro thumbnail server, or from GitHub if that fails. The request for a picture names the game it is for.</li>
+      <li><strong>The store.</strong> Opening the store downloads its catalogue from Homebrew Hub and Universal-DB. Pictures and games you install come from wherever the catalogue lists them, often GitHub.</li>
+      <li><strong>Parts downloaded when first needed.</strong> The core that plays 3DS games, the randomizer and, on Windows and Linux, the player for RPG Maker games are downloaded from GitHub the first time you use them.</li>
+      <li><strong>Guide.</strong> The in-game chat is off until you connect your own OpenRouter account. After that, each question you ask is sent to OpenRouter with the game's title, region and version, your play time, the earlier messages of that chat and any screenshots you attach. OpenRouter passes these to the AI model that answers and may search the web for you. The key OpenRouter gives the app is labelled with your computer's name. Pictures in an answer are downloaded from public game wikis. Your chats are kept on your computer, and your saves and game files are never sent.</li>
+    </ul>
+    <p>A supporter key is checked on your computer and is never sent anywhere.</p>
+
+    <h2>What is kept on your computer</h2>
+    <p>Settings, your library, your supporter key, Guide chats and downloaded pictures are in the app's own folders, named ds-emulator. Saves, save states and screenshots are beside each game. Deleting those folders and files removes everything the app has kept.</p>
+
+    <h2>Your choices</h2>
+    <p>To see, correct or delete what Paddle holds about a purchase, ask us or ask Paddle at <a href="https://paddle.net">paddle.net</a>. If you live in the European Union or the United Kingdom you may also complain to your data protection authority.</p>
+
+    <h2>Changes</h2>
+    <p>If this page changes, the date at the top changes with it.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a href="/">Imago Emulator</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="mailto:support@imagoemulator.com">support@imagoemulator.com</a>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,10 +1,13 @@
 // The site's few dynamic routes. Files in public/ are served before this
-// Worker runs, so it sees only paths with no file: the links that leave the
-// site (a download, a checkout) and the page the app opens for supporters.
+// Worker runs, so it sees only paths with no file: the downloads, the page
+// the app opens for supporters, and the selling of their keys (shop.js).
 //
-// Each link's address is a variable in wrangler.jsonc, so a new release or a
-// new seller is a change of configuration and not of the page. A link whose
-// variable is unset answers 404, in words, rather than pretending.
+// Each download's address is a variable in wrangler.jsonc, so a new release
+// is a change of configuration and not of the page. A link whose variable
+// is unset answers 404, in words, rather than pretending, and so does
+// everything to do with keys until all of what selling needs is set.
+
+import { checkout, key, notice, shop } from './shop.js';
 
 /** The paths that leave the site, and the variable holding each address. */
 export const LINKS = {
@@ -17,9 +20,17 @@ export const LINKS = {
   '/download/linux-deb': 'DOWNLOAD_LINUX_DEB',
   '/download/linux-arm64': 'DOWNLOAD_LINUX_ARM64',
   '/download/linux-arm64-deb': 'DOWNLOAD_LINUX_ARM64_DEB',
-  '/buy/supporter': 'BUY_SUPPORTER',
-  '/buy/patron': 'BUY_PATRON',
-  '/buy/founder': 'BUY_FOUNDER',
+};
+
+/**
+ * The paths that sell keys: what the page asks before opening a checkout,
+ * what the page a buyer lands on asks for their key, and where Paddle
+ * posts its notices.
+ */
+export const SELLING = {
+  '/api/checkout': (selling) => checkout(selling),
+  '/api/key': (selling, request, url) => key(selling, url, request),
+  '/api/paddle': (selling, request) => notice(selling, request),
 };
 
 /** `value` if it is an https address, or else nothing. */
@@ -33,6 +44,14 @@ function address(value) {
   }
 }
 
+/** The answer for what is not there, or not yet. */
+function unavailable() {
+  return new Response('Not available yet.\n', {
+    status: 404,
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -40,15 +59,13 @@ export default {
     // Settings > Supporter > Become a Supporter opens this address
     // (crates/emu-app/src/supporter.rs, PAGE).
     if (path === '/supporter') return Response.redirect(new URL('/#supporters', url).href, 302);
-    const variable = LINKS[path];
-    if (!variable) return env.ASSETS.fetch(request);
-    const target = address(env[variable]);
-    if (!target) {
-      return new Response('Not available yet.\n', {
-        status: 404,
-        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
-      });
+    if (Object.hasOwn(SELLING, path)) {
+      const selling = shop(env);
+      return selling ? SELLING[path](selling, request, url) : unavailable();
     }
+    if (!Object.hasOwn(LINKS, path)) return env.ASSETS.fetch(request);
+    const target = address(env[LINKS[path]]);
+    if (!target) return unavailable();
     return new Response(null, { status: 302, headers: { location: target, 'cache-control': 'no-store' } });
   },
 };

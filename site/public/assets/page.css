@@ -1,0 +1,83 @@
+/* The site's small pages (the terms, privacy, refunds and a buyer's key),
+   in Imago Light as the front page is: white paper, ink type, Geist. */
+@font-face {
+  font-family: "Geist";
+  src: url("/assets/geist-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+:root {
+  --bg: #ffffff;
+  --soft: #f4f4f5;
+  --ink: #0b0b0d;
+  --body: #55555e;
+  --muted: #6e6e78;
+  --line: #e4e4e7;
+  --press: #0070b5;
+  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--bg);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: #d8efff; }
+a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--press); outline-offset: 3px; border-radius: 8px; }
+.wrap { max-width: 720px; margin: 0 auto; padding: 0 28px; }
+
+header { border-bottom: 1px solid var(--line); }
+header .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+.logo { display: inline-flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; text-decoration: none; }
+.logo img { width: 28px; height: 28px; }
+header nav a { margin-left: 20px; font-size: 14.5px; color: var(--body); text-decoration: none; }
+header nav a[aria-current="page"] { color: var(--ink); }
+
+main { padding: 72px 0 96px; }
+h1 { font-size: 44px; font-weight: 650; letter-spacing: -0.035em; line-height: 1.08; }
+.dated { margin-top: 14px; font-size: 14.5px; color: var(--muted); }
+h2 { margin-top: 52px; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; }
+main p, main li { font-size: 16.5px; color: var(--body); }
+main p { margin-top: 14px; }
+main ul { margin: 14px 0 0 20px; }
+main li { margin-top: 8px; padding-left: 4px; }
+main strong { font-weight: 600; color: var(--ink); }
+.lede { margin-top: 22px; font-size: 19px; line-height: 1.5; }
+
+footer { padding: 28px 0 56px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
+footer a { margin-right: 14px; white-space: nowrap; }
+
+/* a buyer's key */
+.key { margin-top: 28px; padding: 22px 24px; border-radius: 24px; background: var(--soft); font: 15px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--ink); overflow-wrap: anywhere; user-select: all; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 46px;
+  margin-top: 18px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: 999px;
+  font: 550 15.5px var(--sans);
+  background: var(--press);
+  color: #fff;
+  cursor: pointer;
+}
+.btn:hover { filter: brightness(1.08); }
+main ol { margin: 14px 0 0 22px; }
+[hidden] { display: none !important; }
+
+@media (max-width: 620px) {
+  .wrap { padding: 0 16px; }
+  header nav a { margin-left: 14px; }
+  main { padding: 48px 0 72px; }
+  h1 { font-size: 34px; }
+  h2 { margin-top: 40px; font-size: 20px; }
+  .lede { font-size: 17.5px; }
+  .key { padding: 18px; border-radius: 20px; font-size: 14px; }
+}

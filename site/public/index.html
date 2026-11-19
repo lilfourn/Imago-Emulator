@@ -221,7 +221,15 @@
   .icons button { padding: 8px 8px 9px; border-radius: 20px; font-size: 13.5px; color: var(--body); }
   .icons button[aria-pressed="true"] { background: rgba(11, 11, 13, .08); color: var(--ink); }
   .icons img { width: 76px; height: 76px; margin-bottom: 5px; }
-  .after { margin-top: 28px; max-width: 560px; font-size: 15.5px; line-height: 1.5; color: var(--body); }
+  /* the three keys: what each opens, what it costs, and the button that buys it */
+  .tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap); margin-top: var(--gap); list-style: none; }
+  .tiers li { display: flex; flex-direction: column; padding: 28px; border-radius: 32px; box-shadow: inset 0 0 0 1px var(--line); }
+  .tiers h3 { font-size: 15.5px; font-weight: 550; }
+  .tiers b { margin-top: 6px; font-size: 44px; font-weight: 650; letter-spacing: -0.035em; line-height: 1.1; }
+  .tiers p { flex: 1; margin: 12px 0 24px; font-size: 15.5px; line-height: 1.5; color: var(--body); }
+  .btn:disabled { background: var(--soft); color: var(--muted); cursor: default; }
+  .after { margin-top: 28px; max-width: 640px; font-size: 15.5px; line-height: 1.5; color: var(--body); }
+  .after a, footer p a { text-decoration: underline; text-underline-offset: 3px; }
 
   /* download */
   .get { margin-top: 136px; padding: 76px 28px 80px; border-radius: 32px; background: var(--ink); color: #fff; text-align: center; }
@@ -246,6 +254,8 @@
   footer .wrap { display: grid; grid-template-columns: 1fr 1.5fr; gap: 40px; }
   footer .logo { color: var(--ink); margin-bottom: 14px; }
   footer h3 { font-size: 13.5px; font-weight: 600; color: var(--ink); margin-bottom: 6px; }
+  footer .legal { margin-top: 14px; }
+  footer .legal a { margin-right: 14px; white-space: nowrap; }
 
   @media (max-width: 900px) {
     .plates { grid-template-columns: repeat(2, 1fr); }
@@ -255,6 +265,9 @@
     .does div:nth-last-child(-n+2) { border-bottom: 0; }
     .games { grid-template-columns: repeat(2, 1fr); }
     .own, footer .wrap { grid-template-columns: 1fr; gap: 18px; }
+    .tiers { grid-template-columns: 1fr; }
+    .tiers li { padding: 24px; }
+    .tiers p { margin-bottom: 20px; }
     .stage { padding: 28px 28px 0; }
     .pair { grid-template-columns: 1fr; gap: 34px; }
   }
@@ -284,6 +297,7 @@
     .builds li { grid-template-columns: 1fr; gap: 4px; padding: 16px 0; }
     .own { margin-top: 64px; }
     .looks { padding: 6px 18px; border-radius: 24px; }
+    .tiers li { border-radius: 24px; }
     .look { grid-template-columns: 1fr; gap: 12px; padding: 20px 0; }
     .icons img { width: 62px; height: 62px; }
     .get { margin-top: 92px; padding: 56px 20px 60px; border-radius: 24px; }
@@ -448,7 +462,28 @@
         </div>
       </div>
     </div>
-    <p class="after">Keys are not on sale yet. When they are, a key will be one payment with no subscription, and the app will stay complete without one.</p>
+    <ul class="tiers">
+      <li>
+        <h3>Supporter</h3>
+        <b>$5</b>
+        <p>The five accent colours and, on a Mac, the Night, Ink, Chalk and Blueprint icons.</p>
+        <button class="btn" type="button" data-buy="supporter" disabled>Buy a Supporter key</button>
+      </li>
+      <li>
+        <h3>Patron</h3>
+        <b>$15</b>
+        <p>All that a Supporter's key opens, and the Ember icon.</p>
+        <button class="btn" type="button" data-buy="patron" disabled>Buy a Patron key</button>
+      </li>
+      <li>
+        <h3>Founder</h3>
+        <b>$30</b>
+        <p>All that a Patron's key opens, and the Founder icon. Sold only while the app is new.</p>
+        <button class="btn" type="button" data-buy="founder" disabled>Buy a Founder key</button>
+      </li>
+    </ul>
+    <p class="after" id="sale">Keys are not on sale yet. The buttons will work once they are.</p>
+    <p class="after">A key is one payment, with no subscription, and the app is complete without one. It comes by email, works offline on each of your computers, and can be refunded within 30 days. On Windows and Linux a key opens the accent colours, as there is no Dock icon to change. Prices are in US dollars, and your country's sales tax may be added. Keys are sold by Paddle: see the <a href="/terms">terms</a> and <a href="/refunds">refunds</a>.</p>
   </div>
 </section>
 
@@ -484,6 +519,7 @@
     <div>
       <a class="logo" href="#top"><img src="/assets/icons/classic.png" alt="" width="28" height="28" loading="lazy">Imago Emulator</a>
       <p>Imago Emulator is not affiliated with, endorsed by or sponsored by Nintendo. Game Boy, Game Boy Color, Game Boy Advance, Nintendo DS and Nintendo 3DS are trademarks of Nintendo.</p>
+      <p class="legal"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/refunds">Refunds</a><a href="mailto:support@imagoemulator.com">support@imagoemulator.com</a></p>
     </div>
     <div>
       <h3>Games shown</h3>
@@ -543,6 +579,58 @@
     choose(icons, button);
     document.getElementById('mark').src = button.querySelector('img').getAttribute('src');
   });
+
+  // Keys are sold by Paddle, in a checkout it lays over the page. The page
+  // asks the site whether keys are on sale, and only then do the buttons
+  // work. Paddle's script is the one thing loaded from another site, and
+  // only once someone presses a button to buy; it then takes the buyer to
+  // the page that shows their key.
+  {
+    const buttons = document.querySelectorAll('button[data-buy]');
+    let shop;
+    let checkout;
+    const paddle = () => checkout ??= new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.paddle.com/paddle/v2/paddle.js';
+      script.onload = () => {
+        if (shop.environment === 'sandbox') Paddle.Environment.set('sandbox');
+        Paddle.Initialize({
+          token: shop.token,
+          eventCallback: (event) => {
+            if (event.name === 'checkout.completed') location.assign(`/thanks?txn=${encodeURIComponent(event.data.transaction_id)}`);
+          },
+        });
+        resolve();
+      };
+      script.onerror = () => {
+        checkout = undefined;
+        reject(new Error('the checkout did not load'));
+      };
+      document.head.append(script);
+    });
+    const say = (words) => {
+      const sale = document.getElementById('sale');
+      sale.textContent = words;
+      sale.hidden = words === '';
+    };
+    for (const button of buttons) {
+      button.addEventListener('click', () => {
+        say('');
+        paddle().then(
+          () => Paddle.Checkout.open({ items: [{ priceId: shop.prices[button.dataset.buy], quantity: 1 }], settings: { displayMode: 'overlay', variant: 'one-page', theme: 'light' } }),
+          () => say('The checkout did not load. Check your connection, or anything that blocks paddle.com, and press the button again.'),
+        );
+      });
+    }
+    fetch('/api/checkout').then((answer) => (answer.ok ? answer.json() : undefined)).then((found) => {
+      if (!found) return;
+      shop = found;
+      say('');
+      for (const button of buttons) button.disabled = false;
+      // A link Paddle made for one sale opens that sale's checkout here.
+      if (new URLSearchParams(location.search).has('_ptxn')) paddle().catch(() => {});
+    }).catch(() => {});
+  }
 </script>
 </body>
 </html>

@@ -1,8 +1,10 @@
 # The site
 
-imagoemulator.com: one static page (`public/index.html`) and a Worker with a
-few redirects (`src/worker.js`). It is published, with the Mac's disk image
-beside it; see [Publishing](#publishing) and [Still to come](#still-to-come).
+imagoemulator.com: the front page (`public/index.html`), the terms, privacy
+and refunds pages, and a Worker (`src/worker.js`) that sends the downloads
+and sells supporter keys. It is published, with the downloads beside it; see
+[Publishing](#publishing), [Selling keys](#selling-keys) and
+[Still to come](#still-to-come).
 
 The page is drawn in Imago Light, as the app and
 [getimago.app](https://getimago.app) are: white paper, ink type, Geist, and
@@ -45,12 +47,70 @@ Files in `public/` are served first. The Worker answers only:
 | Path | What it does |
 |---|---|
 | `/download/mac`, `/download/windows`, `/download/windows-zip`, `/download/linux`, `/download/linux-deb`, `/download/linux-arm64`, `/download/linux-arm64-deb` | Redirects to the address in the variable of that name: `DOWNLOAD_MAC`, `DOWNLOAD_WINDOWS_ZIP` and so on |
-| `/buy/supporter`, `/buy/patron`, `/buy/founder` | Redirects to the checkout in `BUY_SUPPORTER`, `BUY_PATRON` or `BUY_FOUNDER` |
 | `/supporter` | Redirects to `/#supporters`. The app's Become a Supporter button opens this address (`crates/emu-app/src/supporter.rs`) |
+| `/api/checkout` | Tells the page what opens a checkout: the environment, the client-side token and the three prices' ids |
+| `/api/key?txn=…` | The key a paid transaction bought, for the page a buyer lands on (`public/thanks.html`) |
+| `/api/paddle` | Where Paddle posts its notices; a completed sale of a key has the key emailed to its buyer |
 
-The variables are in `wrangler.jsonc`. One that is empty, or is not an https
-address, answers 404 with "Not available yet.", and the page links only to
-routes whose variable is filled (the tests check).
+The variables are in `wrangler.jsonc`. A download whose variable is empty,
+or is not an https address, answers 404 with "Not available yet.", and the
+page links only to downloads whose variable is filled (the tests check).
+The three `/api/` paths answer the same 404 until everything selling needs
+is set.
+
+## Selling keys
+
+Keys are sold by [Paddle](https://www.paddle.com), which is the seller of
+record: it takes the payment, works out and pays the sales tax, and gives
+refunds ([decision 0017](../docs/decisions/0017-supporter-keys.md)). The
+Worker's part is `src/shop.js`:
+
+1. A buy button asks `/api/checkout`, loads Paddle's script (the only thing
+   the site loads from elsewhere, and only then) and opens the checkout for
+   that key's price.
+2. When the checkout completes, the page goes to `/thanks?txn=…`, which
+   asks `/api/key` until Paddle says the transaction is paid, and shows the
+   key.
+3. Paddle posts `transaction.completed` to `/api/paddle`. The Worker checks
+   the signature, reads the transaction from Paddle, and emails the key
+   from keys@imagoemulator.com through Cloudflare's Email Sending.
+
+Nothing is stored. A key's number is the first eight bytes of the SHA-256
+of the transaction's id and its day is the day the transaction began
+(`src/keys.js`), so one sale makes the same key every time: on the page, in
+the email, and in a notice Paddle sends twice. A refunded key is taken back
+by adding that number to `REVOKED` in `crates/emu-supporter` for the next
+build; `supporter-key check KEY` prints a key's number.
+
+What it needs, all of it or nothing is sold:
+
+| Setting | Where | What |
+|---|---|---|
+| `PADDLE_ENVIRONMENT` | `wrangler.jsonc` | `production`. The published site never uses the sandbox, whose sales are paid for with a test card |
+| `PADDLE_CLIENT_TOKEN` | `wrangler.jsonc` | The client-side token (`live_…`), from Paddle > My account > Settings > Authentication |
+| `PADDLE_PRICE_SUPPORTER`, `_PATRON`, `_FOUNDER` | `wrangler.jsonc` | The three prices' ids (`pri_…`): one-time, quantity 1 |
+| `PADDLE_API_KEY` | `wrangler secret put` | An API key (`pdl_live_apikey_…`) with only `transaction.read` and `customer.read`. It expires: Paddle allows a year at most |
+| `PADDLE_WEBHOOK_SECRET` | `wrangler secret put` | The secret (`pdl_ntfset_…`) of the notification destination `https://imagoemulator.com/api/paddle`, subscribed to `transaction.completed` |
+| `SUPPORTER_SIGNING_KEY` | `wrangler secret put` | The contents of `~/.config/imago-emulator/supporter-signing.key` |
+| `EMAIL` | `wrangler.jsonc` | The `send_email` binding. imagoemulator.com is set up for Email Sending, and support@ and keys@imagoemulator.com are forwarded to the owner by Email Routing |
+
+`KEY_ASKERS`, also in `wrangler.jsonc`, limits how often one address may
+ask `/api/key`, since each asking costs a question to Paddle. A notice is
+answered within 4.5 seconds whatever Paddle and the mail do, and anything
+that might yet work answers 5xx, so that Paddle sends the notice again (it
+tries for two days). A buyer may so get the same email twice, never a
+different key.
+
+In Paddle, the default payment link is `https://imagoemulator.com/`, whose
+page opens the checkout for a link Paddle makes (`?_ptxn=`).
+
+To try a sale without money, use a Paddle sandbox account and the local
+Worker. Put the sandbox's values in `site/.dev.vars` (ignored by git):
+`PADDLE_ENVIRONMENT=sandbox`, the `test_` token, the three sandbox prices,
+a `pdl_sdbx_apikey_` key, the sandbox destination's secret and a signing
+key of the test's own (`supporter-key keygen` into a scratch file, never
+the real one). Then `wrangler dev --config site/wrangler.jsonc` and pay
+with the card 4242 4242 4242 4242, code 100.
 
 ## Preview and check
 
@@ -60,10 +120,12 @@ node --test site/site.test.mjs
 wrangler deploy --dry-run --config site/wrangler.jsonc
 ```
 
-The tests check that every link, picture and font on the page exists, that
-the page loads nothing from another site, that every game shown is credited,
-that the accents are the app's, that the download is this version's disk
-image, and what the Worker answers.
+The tests check that every link, picture and font on the pages exists, that
+they load nothing from another site but Paddle's checkout when someone
+buys, that every game shown is credited, that the accents are the app's,
+that the download is this version's disk image, and what the Worker
+answers: for the downloads, and for a sale (the signature of a notice, the
+key a transaction makes, the email, and everything that must sell nothing).
 
 ## Publishing
 
@@ -91,7 +153,8 @@ named by `account_id` in `wrangler.jsonc`.
    Fedora 44, where the release workflow's start check passes; on Ubuntu
    22.04 the window stays black in that check. Windows is unsigned: its row
    says what Windows asks.
-2. Supporter keys. The page shows the looks and says keys are not on sale
-   yet; the prices are not settled and there is no seller
-   ([decision 0017](../docs/decisions/0017-supporter-keys.md)). With a
-   seller, fill the three `BUY_` variables and add the prices and buttons.
+2. Supporter keys. The page shows the three keys and their prices, with
+   buttons that do nothing yet, and says keys are not on sale. They go on
+   sale when Paddle has approved the site and the settings under
+   [Selling keys](#selling-keys) are filled. A sale has been tried only in
+   the tests, against Paddle's documented answers, not yet against Paddle.

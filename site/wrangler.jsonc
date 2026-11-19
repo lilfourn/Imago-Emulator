@@ -1,5 +1,5 @@
 {
-  // imagoemulator.com: one static page and the Worker's few redirects.
+  // imagoemulator.com: its pages, and the Worker's downloads and selling.
   // See README.md for previewing, checking and publishing.
   "name": "imago-emulator-site",
   // The Cloudflare account that holds imagoemulator.com's zone.
@@ -17,10 +17,24 @@
     "directory": "public",
     "binding": "ASSETS"
   },
+  // The mail that carries a buyer's key, from keys@imagoemulator.com
+  // (src/shop.js): the domain is set up for Cloudflare's Email Sending.
+  "send_email": [{ "name": "EMAIL" }],
+  // How often one address may ask for a key (src/shop.js): each asking
+  // costs a question to Paddle. The page a buyer lands on asks about every
+  // second and a half until the payment is taken.
+  "ratelimits": [{ "name": "KEY_ASKERS", "namespace_id": "2711", "simple": { "limit": 60, "period": 60 } }],
   // Where the page's links lead (src/worker.js). Each is an https address;
   // one left empty answers "Not available yet.", and the page links only
-  // to those that are filled (site.test.mjs). The Mac's disk image is
-  // published beside the page by publish.sh.
+  // to those that are filled (site.test.mjs). The downloads are published
+  // beside the page by publish.sh.
+  //
+  // The PADDLE_ variables are the shop's (src/shop.js): the live account's
+  // client-side token and the three keys' prices, none of them a secret.
+  // Keys are on sale only once these are filled and the three secrets are
+  // set (README.md, "Selling keys"). PADDLE_ENVIRONMENT is "production"
+  // here always: a sandbox sale is paid for with a test card, so the
+  // published site must never sign a key for one.
   "vars": {
     "DOWNLOAD_MAC": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0.dmg",
     "DOWNLOAD_WINDOWS": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0-windows-x86_64.exe",
@@ -29,8 +43,10 @@
     "DOWNLOAD_LINUX_DEB": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0-linux-x86_64.deb",
     "DOWNLOAD_LINUX_ARM64": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0-linux-aarch64.AppImage",
     "DOWNLOAD_LINUX_ARM64_DEB": "https://imagoemulator.com/downloads/Imago-Emulator-0.1.0-linux-aarch64.deb",
-    "BUY_SUPPORTER": "",
-    "BUY_PATRON": "",
-    "BUY_FOUNDER": ""
+    "PADDLE_ENVIRONMENT": "production",
+    "PADDLE_CLIENT_TOKEN": "",
+    "PADDLE_PRICE_SUPPORTER": "",
+    "PADDLE_PRICE_PATRON": "",
+    "PADDLE_PRICE_FOUNDER": ""
   }
 }
