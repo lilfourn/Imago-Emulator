@@ -74,7 +74,12 @@ test('the download is this version\'s disk image, and the page says which', () =
   const file = `Imago-Emulator-${version}.dmg`;
   assert.ok(config.includes(`"DOWNLOAD_MAC": "https://imagoemulator.com/downloads/${file}"`), `DOWNLOAD_MAC is not ${file}`);
   assert.ok(html.includes(`Version ${version} ·`), `the page does not say version ${version}`);
-  assert.match(html, new RegExp(`SHA-256 of ${file.replaceAll('.', '\\.')}: <span id="sha256">[0-9a-f]{64}</span>`));
+  assert.match(html, new RegExp(`<span data-sha256="${file.replaceAll('.', '\\.')}">[0-9a-f]{64}</span>`));
+  // Every download is this version's, and the page prints a checksum for each.
+  for (const [, name] of config.matchAll(/"DOWNLOAD_\w+": "https:\/\/imagoemulator\.com\/downloads\/([^"]+)"/g)) {
+    assert.ok(name.startsWith(`Imago-Emulator-${version}`), `${name} is not version ${version}`);
+    assert.ok(html.includes(`data-sha256="${name}"`), `the page prints no SHA-256 for ${name}`);
+  }
 });
 
 test('a link leads where its variable says, and says so when it has none', async () => {
@@ -101,5 +106,58 @@ test('the address the app opens for supporters lands on their section', async ()
 test('anything else is left to the files', async () => {
   for (const path of ['/', '/assets/geist-latin.woff2', '/download', '/buy/everything']) {
     assert.equal(await (await ask(path)).text(), 'a file', path);
+  }
+});
+
+test('a key the Worker signs is one the app\'s format describes, and one sale gives one key', async () => {
+  const { issue, idOf, dayOf, PREFIX } = await import('./src/keys.js');
+  const { generateKeyPairSync, verify } = await import('node:crypto');
+  // A signing key of the test's own: its seed is the last 32 bytes of its PKCS #8.
+  const pair = generateKeyPairSync('ed25519');
+  const seed = pair.privateKey.export({ type: 'pkcs8', format: 'der' }).subarray(-32).toString('base64');
+  const id = await idOf('cs_test_a1b2c3');
+  assert.equal(id, await idOf('cs_test_a1b2c3'));
+  assert.notEqual(id, await idOf('cs_test_a1b2c4'));
+
+  const sale = { tier: 'patron', id, day: dayOf(new Date('2026-11-18T12:00:00Z')), name: '  Zoë Ⅱ ' };
+  const key = await issue(seed, sale);
+  assert.equal(key, await issue(seed, sale), 'one sale, one key');
+  assert.ok(key.startsWith(PREFIX));
+  const bytes = Buffer.from(key.slice(PREFIX.length), 'base64url');
+  const body = bytes.subarray(0, -64);
+  assert.equal(body[0], 1, 'the format\'s version');
+  assert.equal(body[1], 2, 'a patron\'s byte');
+  assert.equal(body.readBigUInt64BE(2), id);
+  assert.equal(body.readUInt32BE(10), 20775, '2026-11-18 in days since 1970');
+  assert.equal(body.subarray(14).toString('utf8'), 'Zoë Ⅱ');
+  const signed = Buffer.concat([Buffer.from('imago-emulator supporter key\0'), body]);
+  assert.ok(verify(null, signed, pair.publicKey, bytes.subarray(-64)), 'the signature is over the context and the body');
+
+  await assert.rejects(issue(seed, { ...sale, tier: 'emperor' }), /no such tier/);
+  await assert.rejects(issue(seed, { ...sale, name: 'x'.repeat(65) }), /too long/);
+  await assert.rejects(issue(seed, { ...sale, name: 'a\u0007b' }), /control/);
+  await assert.rejects(issue('c2hvcnQ=', sale), /32 bytes/);
+});
+
+test('the buttons that get the app get it for the visitor\'s system', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const block = html.match(/\n  \{\n    const system = [\s\S]*?\n  \}\n/)[0];
+  const buttons = (navigator) => {
+    const found = [...html.matchAll(/<a class="btn[^"]*" href="([^"]+)" data-get>([^<]+)<\/a>/g)].map(([, href, textContent]) => ({ href, textContent }));
+    assert.equal(found.length, 2, 'the hero\'s button and the download section\'s');
+    runInNewContext(block, { navigator, document: { querySelectorAll: (selector) => (selector === 'a[data-get]' ? found : []) } });
+    return found;
+  };
+  const cases = [
+    [{ userAgentData: { platform: 'Windows' } }, '/download/windows', 'Download for Windows'],
+    [{ platform: 'Win32' }, '/download/windows', 'Download for Windows'],
+    [{ userAgentData: { platform: 'Linux' } }, '#download', 'Download for Linux'],
+    [{ platform: 'Linux x86_64' }, '#download', 'Download for Linux'],
+    [{ userAgentData: { platform: 'macOS' }, platform: 'MacIntel' }, '/download/mac', 'Download for Mac'],
+    [{ userAgentData: { platform: 'Android' }, platform: 'Linux armv81' }, '/download/mac', 'Download for Mac'],
+    [{}, '/download/mac', 'Download for Mac'],
+  ];
+  for (const [navigator, href, textContent] of cases) {
+    for (const button of buttons(navigator)) assert.deepEqual(button, { href, textContent }, JSON.stringify(navigator));
   }
 });
