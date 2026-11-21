@@ -101,6 +101,9 @@ pub struct Lock {
     /// How much to move the next frame's start, in seconds: later if
     /// positive.
     nudge: f64,
+    /// Scratch buffers reused by [`Lock::margin`] so it allocates nothing per frame.
+    over: Vec<f64>,
+    counted: Vec<(Duration, usize)>,
 }
 
 impl Lock {
@@ -116,6 +119,8 @@ impl Lock {
             drawn: 0,
             drawn_at: None,
             nudge: 0.0,
+            over: Vec::with_capacity(LENGTHS_KEPT),
+            counted: Vec::new(),
         }
     }
 
@@ -209,22 +214,24 @@ impl Lock {
     /// Up to one frame in [`OUTLIERS`] may be given up for a smaller one:
     /// a frame now and then that takes far longer, as when a game loads,
     /// misses its refresh whatever the margin.
-    fn margin(&self, refresh: Duration, typical: Option<f64>) -> Duration {
+    fn margin(&mut self, refresh: Duration, typical: Option<f64>) -> Duration {
         let Some(typical) = typical else {
             return MARGIN;
         };
         // How much longer than usual each frame took, shortest first.
-        let mut over: Vec<f64> = self
-            .lengths
-            .iter()
-            .map(|length| length.as_secs_f64() - typical)
-            .collect();
-        over.sort_by(f64::total_cmp);
+        self.over.clear();
+        self.over.extend(
+            self.lengths
+                .iter()
+                .map(|length| length.as_secs_f64() - typical),
+        );
+        self.over.sort_by(f64::total_cmp);
         let (refresh, slack) = (refresh.as_secs_f64(), SLACK.as_secs_f64());
         // With the margin `margin`, a frame `over` longer than usual is
         // ready `margin - over` before its refresh: in time while that is
         // at least the slack, and a refresh early once it is more than a
         // refresh less the slack.
+        let over = &self.over;
         let caught = |margin: f64| {
             let in_time = over.partition_point(|&over| over <= margin - slack);
             let early = over.partition_point(|&over| over < margin - refresh + slack);
@@ -232,12 +239,17 @@ impl Lock {
         };
         let margins = std::iter::successors(Some(MARGIN), |margin| Some(*margin + MARGIN_STEP))
             .take_while(|margin| margin.as_secs_f64() <= refresh - slack);
-        let counted: Vec<(Duration, usize)> = margins
-            .map(|margin| (margin, caught(margin.as_secs_f64())))
-            .collect();
-        let most = counted.iter().map(|(_, count)| *count).max().unwrap_or(0);
-        let enough = most.saturating_sub(over.len() / OUTLIERS);
-        counted
+        self.counted.clear();
+        self.counted
+            .extend(margins.map(|margin| (margin, caught(margin.as_secs_f64()))));
+        let most = self
+            .counted
+            .iter()
+            .map(|(_, count)| *count)
+            .max()
+            .unwrap_or(0);
+        let enough = most.saturating_sub(self.over.len() / OUTLIERS);
+        self.counted
             .iter()
             .find(|(_, count)| *count >= enough)
             .map_or(MARGIN, |(margin, _)| *margin)

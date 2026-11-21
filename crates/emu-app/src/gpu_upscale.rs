@@ -83,8 +83,11 @@ pub type Bgra = Vec<u8>;
 mod imp {
     use std::ffi::c_void;
     use std::ptr::NonNull;
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, PoisonError};
+    use std::time::Duration;
 
+    use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
     use objc2_foundation::NSString;
@@ -145,10 +148,55 @@ mod imp {
         in_flight: Option<InFlight>,
     }
 
-    /// A batch of screens on the GPU: its commands, and its jobs' keys, in
-    /// the order the screens were asked for.
+    /// Completion signal driven by Metal's `addCompletedHandler`, so a bounded
+    /// wait sleeps on a condvar instead of polling in 100 µs intervals.
+    struct Completion {
+        done: AtomicBool,
+        state: Mutex<bool>,
+        wake: Condvar,
+    }
+
+    impl Completion {
+        fn new() -> Self {
+            Self {
+                done: AtomicBool::new(false),
+                state: Mutex::new(false),
+                wake: Condvar::new(),
+            }
+        }
+
+        fn signal(&self) {
+            let mut finished = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            *finished = true;
+            self.done.store(true, Ordering::Release);
+            self.wake.notify_all();
+        }
+
+        fn is_done(&self) -> bool {
+            self.done.load(Ordering::Acquire)
+        }
+
+        fn wait_timeout(&self, timeout: Duration) -> bool {
+            if self.is_done() {
+                return true;
+            }
+            if timeout.is_zero() {
+                return false;
+            }
+            let guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let (guard, _) = self
+                .wake
+                .wait_timeout_while(guard, timeout, |finished| !*finished)
+                .unwrap_or_else(PoisonError::into_inner);
+            *guard
+        }
+    }
+
+    /// A batch of screens on the GPU: its commands, completion signal, and its
+    /// jobs' keys, in the order the screens were asked for.
     struct InFlight {
         commands: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        completion: Arc<Completion>,
         keys: Vec<Key>,
     }
 
@@ -298,10 +346,11 @@ mod imp {
         /// take without waiting; false with none.
         pub fn finished(&self) -> bool {
             self.in_flight.as_ref().is_some_and(|in_flight| {
-                matches!(
-                    in_flight.commands.status(),
-                    MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
-                )
+                in_flight.completion.is_done()
+                    || matches!(
+                        in_flight.commands.status(),
+                        MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
+                    )
             })
         }
 
@@ -388,8 +437,25 @@ mod imp {
             for job in &jobs {
                 self.encode(&commands, job)?;
             }
+            let completion = Arc::new(Completion::new());
+            let signal = Arc::clone(&completion);
+            let handler = RcBlock::new(
+                move |_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                    signal.signal();
+                },
+            );
+            // SAFETY: `handler` is a heap-allocated Objective-C block matching
+            // `MTLCommandBufferHandler`; Metal retains it until completion, and
+            // `RcBlock` keeps it alive across this call.
+            unsafe {
+                commands.addCompletedHandler(RcBlock::as_ptr(&handler));
+            }
             commands.commit();
-            self.in_flight = Some(InFlight { commands, keys });
+            self.in_flight = Some(InFlight {
+                commands,
+                completion,
+                keys,
+            });
             Ok(true)
         }
 
@@ -404,7 +470,7 @@ mod imp {
         /// [`GpuError::Failed`] if the GPU reported an error running it.
         pub fn finish(&mut self, wait: Option<Duration>) -> Option<Result<Vec<Bgra>, GpuError>> {
             let in_flight = self.in_flight.as_ref()?;
-            let done = |commands: &ProtocolObject<dyn MTLCommandBuffer>| {
+            let status_done = |commands: &ProtocolObject<dyn MTLCommandBuffer>| {
                 matches!(
                     commands.status(),
                     MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
@@ -413,18 +479,16 @@ mod imp {
             match wait {
                 None => in_flight.commands.waitUntilCompleted(),
                 Some(wait) => {
-                    let deadline = Instant::now() + wait;
-                    while !done(&in_flight.commands) {
-                        if Instant::now() >= deadline {
-                            return None;
-                        }
-                        // A tenth of a millisecond's nap: Metal's own wait
-                        // has no time limit.
-                        std::thread::sleep(Duration::from_micros(100));
+                    if !in_flight.completion.is_done()
+                        && !status_done(&in_flight.commands)
+                        && !in_flight.completion.wait_timeout(wait)
+                        && !status_done(&in_flight.commands)
+                    {
+                        return None;
                     }
                 }
             }
-            let InFlight { commands, keys } = self.in_flight.take()?;
+            let InFlight { commands, keys, .. } = self.in_flight.take()?;
             if commands.status() != MTLCommandBufferStatus::Completed {
                 let why = commands.error().map_or_else(
                     || "unknown error".to_owned(),

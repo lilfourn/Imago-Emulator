@@ -91,6 +91,9 @@ windows ={ version = "0.62", features = [
 # zoom buttons, the standard About panel, the Dock icon and the display's
 # refresh rate. The versions GPUI already uses.
 [target.'cfg(target_os = "macos")'.dependencies]
+# Completion blocks for Metal command buffers (gpu_upscale.rs); already in
+# GPUI's dependency tree.
+block2 = "0.6"
 # The emulation thread's quality of service (qos.rs); already used through
 # GPUI and emu-3ds.
 libc = "0.2"
@@ -119,6 +122,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # objc2-metal is the version already in GPUI's tree.
 objc2-metal = { version = "0.3", default-features = false, features = [
     "std",
+    "block2",
     "MTLAllocation",
     "MTLBlitCommandEncoder",
     "MTLBuffer",

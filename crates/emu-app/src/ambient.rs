@@ -98,6 +98,18 @@ pub const BORDER: u16 = 2;
 /// Red, green and blue, from 0 to 255.
 type Color = [f32; 3];
 
+/// Reusable working buffers for [`picture_into`], so updating the backdrop
+/// every frame allocates nothing on the heap.
+#[derive(Debug, Default)]
+pub struct Scratch {
+    sums: Vec<[u32; 3]>,
+    counts: Vec<u32>,
+    across: Vec<usize>,
+    down: Vec<usize>,
+    runs: Vec<(usize, usize)>,
+    blur: Vec<Color>,
+}
+
 /// A backdrop picture, in more precision than a frame holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Picture {
@@ -117,24 +129,69 @@ impl Picture {
         &self.colors
     }
 
+    /// Writes the picture as opaque pixels into `out`, with its edge pixels
+    /// repeated `border` times on every side, reusing `out`'s buffer when
+    /// sizes match.
+    pub fn frame_into(&self, border: u16, out: &mut Frame) {
+        let (width, height) = (usize::from(self.size.width), usize::from(self.size.height));
+        let border_width = usize::from(border);
+        let target = ScreenSize::new(self.size.width + 2 * border, self.size.height + 2 * border);
+        if out.size() != target {
+            *out = Frame::new(target);
+        }
+        for (row, line) in out.rows_mut().enumerate() {
+            let y = row.saturating_sub(border_width).min(height - 1);
+            let src = &self.colors[y * width..(y + 1) * width];
+            for (column, pixel) in line.iter_mut().enumerate() {
+                let x = column.saturating_sub(border_width).min(width - 1);
+                *pixel = opaque(src[x]);
+            }
+        }
+    }
+
     /// The picture as opaque pixels, with its edge pixels repeated
     /// `border` times on every side.
     pub fn frame(&self, border: u16) -> Frame {
-        let (width, height) = (usize::from(self.size.width), usize::from(self.size.height));
-        let border_width = usize::from(border);
         let mut frame = Frame::new(ScreenSize::new(
             self.size.width + 2 * border,
             self.size.height + 2 * border,
         ));
-        for (row, line) in frame.rows_mut().enumerate() {
-            let y = row.saturating_sub(border_width).min(height - 1);
-            for (column, pixel) in line.iter_mut().enumerate() {
-                let x = column.saturating_sub(border_width).min(width - 1);
-                *pixel = opaque(self.colors[y * width + x]);
-            }
-        }
+        self.frame_into(border, &mut frame);
         frame
     }
+}
+
+/// Writes the backdrop for `frames` drawn at `placements` into `out`, reusing
+/// `scratch` and `out`'s allocations. Returns `false` if nothing is placed.
+pub fn picture_into(
+    frames: &[Frame],
+    placements: &[Placement],
+    correction: Option<&Correction>,
+    scratch: &mut Scratch,
+    out: &mut Picture,
+) -> bool {
+    let Some(span) = span(placements) else {
+        return false;
+    };
+    let size = picture_size(span);
+    let (width, height) = (usize::from(size.width), usize::from(size.height));
+    sample_into(
+        frames,
+        placements,
+        span,
+        size,
+        correction,
+        scratch,
+        &mut out.colors,
+    );
+    scratch.blur.resize(out.colors.len(), [0.0; 3]);
+    for _ in 0..BLUR_PASSES {
+        blur_horizontal(&out.colors, &mut scratch.blur, width, height);
+        blur_vertical(&scratch.blur, &mut out.colors, width, height);
+    }
+    tone(&mut out.colors, size);
+    out.size = size;
+    true
 }
 
 /// The backdrop for `frames` drawn at `placements`: the area the
@@ -150,15 +207,12 @@ pub fn picture(
     placements: &[Placement],
     correction: Option<&Correction>,
 ) -> Option<Picture> {
-    let span = span(placements)?;
-    let size = picture_size(span);
-    let mut colors = sample(frames, placements, span, size, correction);
-    for _ in 0..BLUR_PASSES {
-        colors = blur(&colors, size, (1, 0));
-        colors = blur(&colors, size, (0, 1));
-    }
-    tone(&mut colors, size);
-    Some(Picture { size, colors })
+    let mut scratch = Scratch::default();
+    let mut out = Picture {
+        size: ScreenSize::new(0, 0),
+        colors: Vec::new(),
+    };
+    picture_into(frames, placements, correction, &mut scratch, &mut out).then_some(out)
 }
 
 /// Where to shadow the screens at `placements`: the area they span if they
@@ -194,11 +248,26 @@ impl Fade {
 
     /// Heads for `target` from wherever the fade has got to, or jumps
     /// there if it is a different size.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn aim(&mut self, target: Picture) {
         if target.size != self.shown.size {
             self.shown = target.clone();
         }
         self.target = target;
+    }
+
+    /// Updates the target picture in place with `build`, jumping straight to
+    /// it if its size changes. Returns `false` if `build` produced no picture.
+    pub fn aim_with(&mut self, build: impl FnOnce(&mut Picture) -> bool) -> bool {
+        if !build(&mut self.target) {
+            return false;
+        }
+        if self.target.size != self.shown.size {
+            self.shown.size = self.target.size;
+            self.shown.colors.clear();
+            self.shown.colors.extend_from_slice(&self.target.colors);
+        }
+        true
     }
 
     /// Moves on to `now`. Whether there is still further to go.
@@ -261,6 +330,7 @@ fn picture_size(span: Rect) -> ScreenSize {
 /// Each picture pixel's average colour over the screen pixels drawn in
 /// the part of `span` it covers. Picture pixels no screen covers take the
 /// colour of the nearest screen pixel.
+#[cfg(test)]
 fn sample(
     frames: &[Frame],
     placements: &[Placement],
@@ -268,14 +338,41 @@ fn sample(
     size: ScreenSize,
     correction: Option<&Correction>,
 ) -> Vec<Color> {
+    let mut scratch = Scratch::default();
+    let mut colors = Vec::new();
+    sample_into(
+        frames,
+        placements,
+        span,
+        size,
+        correction,
+        &mut scratch,
+        &mut colors,
+    );
+    colors
+}
+
+/// [`sample`] writing into `colors` using reusable buffers in `scratch`.
+fn sample_into(
+    frames: &[Frame],
+    placements: &[Placement],
+    span: Rect,
+    size: ScreenSize,
+    correction: Option<&Correction>,
+    scratch: &mut Scratch,
+    colors: &mut Vec<Color>,
+) {
     let (width, height) = (usize::from(size.width), usize::from(size.height));
     let scale = (
         f32::from(size.width) / span.width,
         f32::from(size.height) / span.height,
     );
+    let pixel_count = size.pixel_count();
     // Whole numbers, so they add up exactly in any order.
-    let mut sums = vec![[0_u32; 3]; size.pixel_count()];
-    let mut counts = vec![0_u32; size.pixel_count()];
+    scratch.sums.resize(pixel_count, [0; 3]);
+    scratch.sums.fill([0; 3]);
+    scratch.counts.resize(pixel_count, 0);
+    scratch.counts.fill(0);
     for placement in placements {
         let Some(frame) = frames.get(placement.screen) else {
             continue;
@@ -301,49 +398,134 @@ fn sample(
         // index in the picture is one offset for its column plus one for
         // its row, each worked out once rather than for every pixel.
         let turned = placement.rotation.swaps_axes();
-        let across: Vec<usize> = (first..source_width)
-            .step_by(stride)
-            .map(|x| match place(x, first) {
-                (_, row) if turned => row * width,
-                (column, _) => column,
-            })
-            .collect();
-        let down: Vec<usize> = (first..source_height)
-            .step_by(stride)
-            .map(|y| match place(first, y) {
-                (column, _) if turned => column,
-                (_, row) => row * width,
-            })
-            .collect();
+        scratch.across.clear();
+        scratch
+            .across
+            .extend(
+                (first..source_width)
+                    .step_by(stride)
+                    .map(|x| match place(x, first) {
+                        (_, row) if turned => row * width,
+                        (column, _) => column,
+                    }),
+            );
+        scratch.down.clear();
+        scratch
+            .down
+            .extend(
+                (first..source_height)
+                    .step_by(stride)
+                    .map(|y| match place(first, y) {
+                        (column, _) if turned => column,
+                        (_, row) => row * width,
+                    }),
+            );
         // Samples side by side in a row mostly land in one picture pixel:
         // each run of them is added up on its own, then added in at once.
-        let runs: Vec<(usize, usize)> = across
-            .chunk_by(|one, next| one == next)
-            .map(|run| (run[0], run.len()))
-            .collect();
-        for (line, offset) in frame.rows().skip(first).step_by(stride).zip(&down) {
-            let mut sampled = line.iter().skip(first).step_by(stride);
-            for &(along, length) in &runs {
-                let mut sum = [0; 3];
-                for &pixel in sampled.by_ref().take(length) {
-                    let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
-                    for (sum, level) in sum.iter_mut().zip(levels(pixel)) {
-                        *sum += level;
+        scratch.runs.clear();
+        scratch.runs.extend(
+            scratch
+                .across
+                .chunk_by(|one, next| one == next)
+                .map(|run| (run[0], run.len())),
+        );
+        let sums = &mut scratch.sums;
+        let counts = &mut scratch.counts;
+        let runs = &scratch.runs;
+        if stride == 1 {
+            if let Some(correction) = correction {
+                for (line, &offset) in frame.rows().zip(&scratch.down) {
+                    let mut pos = 0;
+                    for &(along, length) in runs {
+                        let mut sr = 0_u32;
+                        let mut sg = 0_u32;
+                        let mut sb = 0_u32;
+                        for &pixel in &line[pos..pos + length] {
+                            let pixel = correction.pixel(pixel);
+                            sr += (pixel >> 16) & 0xFF;
+                            sg += (pixel >> 8) & 0xFF;
+                            sb += pixel & 0xFF;
+                        }
+                        pos += length;
+                        let index = offset + along;
+                        sums[index][0] += sr;
+                        sums[index][1] += sg;
+                        sums[index][2] += sb;
+                        counts[index] += length as u32;
                     }
                 }
-                let index = offset + along;
-                for (total, sum) in sums[index].iter_mut().zip(sum) {
-                    *total += sum;
+            } else {
+                for (line, &offset) in frame.rows().zip(&scratch.down) {
+                    let mut pos = 0;
+                    for &(along, length) in runs {
+                        let mut sr = 0_u32;
+                        let mut sg = 0_u32;
+                        let mut sb = 0_u32;
+                        for &pixel in &line[pos..pos + length] {
+                            sr += (pixel >> 16) & 0xFF;
+                            sg += (pixel >> 8) & 0xFF;
+                            sb += pixel & 0xFF;
+                        }
+                        pos += length;
+                        let index = offset + along;
+                        sums[index][0] += sr;
+                        sums[index][1] += sg;
+                        sums[index][2] += sb;
+                        counts[index] += length as u32;
+                    }
                 }
-                // A run is at most a row of a frame, a few thousand pixels.
-                counts[index] += length as u32;
+            }
+        } else if let Some(correction) = correction {
+            for (line, &offset) in frame.rows().skip(first).step_by(stride).zip(&scratch.down) {
+                let mut sampled = line.iter().skip(first).step_by(stride);
+                for &(along, length) in runs {
+                    let mut sr = 0_u32;
+                    let mut sg = 0_u32;
+                    let mut sb = 0_u32;
+                    for &pixel in sampled.by_ref().take(length) {
+                        let pixel = correction.pixel(pixel);
+                        sr += (pixel >> 16) & 0xFF;
+                        sg += (pixel >> 8) & 0xFF;
+                        sb += pixel & 0xFF;
+                    }
+                    let index = offset + along;
+                    sums[index][0] += sr;
+                    sums[index][1] += sg;
+                    sums[index][2] += sb;
+                    counts[index] += length as u32;
+                }
+            }
+        } else {
+            for (line, &offset) in frame.rows().skip(first).step_by(stride).zip(&scratch.down) {
+                let mut sampled = line.iter().skip(first).step_by(stride);
+                for &(along, length) in runs {
+                    let mut sr = 0_u32;
+                    let mut sg = 0_u32;
+                    let mut sb = 0_u32;
+                    for &pixel in sampled.by_ref().take(length) {
+                        sr += (pixel >> 16) & 0xFF;
+                        sg += (pixel >> 8) & 0xFF;
+                        sb += pixel & 0xFF;
+                    }
+                    let index = offset + along;
+                    sums[index][0] += sr;
+                    sums[index][1] += sg;
+                    sums[index][2] += sb;
+                    counts[index] += length as u32;
+                }
             }
         }
     }
-    let mut colors = Vec::with_capacity(sums.len());
-    for (index, (sum, count)) in sums.into_iter().zip(counts).enumerate() {
+    colors.clear();
+    colors.reserve(pixel_count);
+    for (index, (&sum, &count)) in scratch.sums.iter().zip(&scratch.counts).enumerate() {
         if count > 0 {
-            colors.push(sum.map(|level| level as f32 / count as f32));
+            let inv = count as f32;
+            colors.push([
+                sum[0] as f32 / inv,
+                sum[1] as f32 / inv,
+                sum[2] as f32 / inv,
+            ]);
             continue;
         }
         let centre = (
@@ -354,7 +536,6 @@ fn sample(
         let pixel = correction.map_or(pixel, |correction| correction.pixel(pixel));
         colors.push(channels(pixel));
     }
-    colors
 }
 
 /// The pixel shown at window `point`, or, between screens, at the nearest
@@ -380,52 +561,96 @@ fn distance(rect: Rect, point: (f32, f32)) -> f32 {
     dx * dx + dy * dy
 }
 
-/// `colors`, a `size` picture, with each pixel averaged with its
-/// [`BLUR_RADIUS`] neighbours each way along `axis`, `(1, 0)` across or
-/// `(0, 1)` down. Past the edges the edge pixel repeats.
-fn blur(colors: &[Color], size: ScreenSize, axis: (usize, usize)) -> Vec<Color> {
-    let (width, height) = (usize::from(size.width), usize::from(size.height));
+/// Horizontal box blur of `src` into `dst`, averaging each pixel with its
+/// [`BLUR_RADIUS`] neighbours on each side, repeating edge pixels past ends.
+fn blur_horizontal(src: &[Color], dst: &mut [Color], width: usize, height: usize) {
     let taps = 2 * BLUR_RADIUS + 1;
-    let mut out = Vec::with_capacity(colors.len());
+    let divisor = taps as f32;
+    let left_end = BLUR_RADIUS.min(width);
+    let inner_end = width.saturating_sub(BLUR_RADIUS);
+    let right_start = inner_end.max(left_end);
     for y in 0..height {
-        for x in 0..width {
-            let mut sum = [0.0; 3];
+        let row = &src[y * width..(y + 1) * width];
+        let out = &mut dst[y * width..(y + 1) * width];
+        for x in 0..left_end {
+            let mut sum = [0.0_f32; 3];
             for offset in 0..taps {
-                // Steps from -BLUR_RADIUS to +BLUR_RADIUS, held at the edges.
-                let along = |position: usize, length: usize, on: usize| {
-                    (position + offset * on)
-                        .saturating_sub(BLUR_RADIUS * on)
-                        .min(length - 1)
-                };
-                let index = along(y, height, axis.1) * width + along(x, width, axis.0);
-                for (channel, value) in sum.iter_mut().zip(colors[index]) {
-                    *channel += value;
-                }
+                let c = row[(x + offset).saturating_sub(BLUR_RADIUS).min(width - 1)];
+                sum[0] += c[0];
+                sum[1] += c[1];
+                sum[2] += c[2];
             }
-            out.push(sum.map(|channel| channel / taps as f32));
+            out[x] = [sum[0] / divisor, sum[1] / divisor, sum[2] / divisor];
+        }
+        for x in left_end..inner_end {
+            let mut sum = [0.0_f32; 3];
+            for c in &row[x - BLUR_RADIUS..=x + BLUR_RADIUS] {
+                sum[0] += c[0];
+                sum[1] += c[1];
+                sum[2] += c[2];
+            }
+            out[x] = [sum[0] / divisor, sum[1] / divisor, sum[2] / divisor];
+        }
+        for x in right_start..width {
+            let mut sum = [0.0_f32; 3];
+            for offset in 0..taps {
+                let c = row[(x + offset).saturating_sub(BLUR_RADIUS).min(width - 1)];
+                sum[0] += c[0];
+                sum[1] += c[1];
+                sum[2] += c[2];
+            }
+            out[x] = [sum[0] / divisor, sum[1] / divisor, sum[2] / divisor];
         }
     }
-    out
+}
+
+/// Vertical box blur of `src` into `dst`, averaging each pixel with its
+/// [`BLUR_RADIUS`] neighbours above and below, repeating edge rows past ends.
+fn blur_vertical(src: &[Color], dst: &mut [Color], width: usize, height: usize) {
+    let taps = 2 * BLUR_RADIUS + 1;
+    let divisor = taps as f32;
+    for y in 0..height {
+        let rows: [&[Color]; 2 * BLUR_RADIUS + 1] = std::array::from_fn(|offset| {
+            let iy = (y + offset).saturating_sub(BLUR_RADIUS).min(height - 1);
+            &src[iy * width..(iy + 1) * width]
+        });
+        let out = &mut dst[y * width..(y + 1) * width];
+        for (x, pixel) in out.iter_mut().enumerate() {
+            let mut sum = [0.0_f32; 3];
+            for row in &rows {
+                let c = row[x];
+                sum[0] += c[0];
+                sum[1] += c[1];
+                sum[2] += c[2];
+            }
+            *pixel = [sum[0] / divisor, sum[1] / divisor, sum[2] / divisor];
+        }
+    }
 }
 
 /// Tones `colors`, a `size` picture, to sit behind the screens: richer,
 /// dimmer, darker toward the corners, and lit over the app's background
 /// so a black screen leaves it as it is.
 fn tone(colors: &mut [Color], size: ScreenSize) {
-    let (width, height) = (f32::from(size.width), f32::from(size.height));
+    let (width, height) = (usize::from(size.width), usize::from(size.height));
+    let (width_f, height_f) = (f32::from(size.width), f32::from(size.height));
     let background = channels(BACKGROUND);
-    for (index, color) in colors.iter_mut().enumerate() {
-        // From -1 to 1 across and down, from the middle.
-        let u = ((index % usize::from(size.width)) as f32 + 0.5) / width * 2.0 - 1.0;
-        let v = ((index / usize::from(size.width)) as f32 + 0.5) / height * 2.0 - 1.0;
-        let light = BRIGHTNESS * (1.0 - VIGNETTE * (u * u + v * v) / 2.0);
-        let [red, green, blue] = *color;
-        let luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-        for (channel, back) in color.iter_mut().zip(background) {
-            let lit = ((luma + (*channel - luma) * SATURATION).clamp(0.0, 255.0)) * light;
-            // Screen blending: light added to the background, never past
-            // white.
-            *channel = 255.0 - (255.0 - back) * (255.0 - lit) / 255.0;
+    for y in 0..height {
+        let v = (y as f32 + 0.5) / height_f * 2.0 - 1.0;
+        let vv = v * v;
+        let row = &mut colors[y * width..(y + 1) * width];
+        for (x, color) in row.iter_mut().enumerate() {
+            // From -1 to 1 across and down, from the middle.
+            let u = (x as f32 + 0.5) / width_f * 2.0 - 1.0;
+            let light = BRIGHTNESS * (1.0 - VIGNETTE * (u * u + vv) / 2.0);
+            let [red, green, blue] = *color;
+            let luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+            for (channel, back) in color.iter_mut().zip(background) {
+                let lit = ((luma + (*channel - luma) * SATURATION).clamp(0.0, 255.0)) * light;
+                // Screen blending: light added to the background, never past
+                // white.
+                *channel = 255.0 - (255.0 - back) * (255.0 - lit) / 255.0;
+            }
         }
     }
 }

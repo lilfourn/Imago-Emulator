@@ -1622,6 +1622,7 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "base64",
+ "block2",
  "cpal",
  "crc32fast",
  "embed-resource",

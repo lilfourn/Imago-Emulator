@@ -222,11 +222,12 @@ fn cpu_filter(look: Look, factor: usize, gpu_off: bool) -> Filter {
 }
 
 /// The ambient backdrop: what it was last sampled from, its fade toward
-/// that, and the image of where the fade has got to.
+/// that, the quantized 8-bit frame currently uploaded, and its GPUI image.
 pub(super) struct Glow {
     /// The placements and the newest change to a screen they show.
     sampled: (Vec<Placement>, u64),
     pub(super) fade: ambient::Fade,
+    shown_frame: Frame,
     pub(super) image: Arc<RenderImage>,
 }
 
@@ -247,6 +248,31 @@ fn note_screen_changes(sequences: &mut Vec<u64>, before: &[Frame], after: &[Fram
 }
 
 impl Session {
+    /// Updates `corrected_frames` in place for any screen that changed since
+    /// it was last colour-corrected, when colour correction is enabled.
+    fn sync_corrected(&mut self, color_correction: bool) {
+        let Some(correction) = self.correction.as_ref().filter(|_| color_correction) else {
+            return;
+        };
+        let count = self.frames.len();
+        self.corrected_frames.truncate(count);
+        self.corrected_sequences.truncate(count);
+        while self.corrected_frames.len() < count {
+            self.corrected_frames
+                .push(Frame::new(ScreenSize::new(0, 0)));
+            self.corrected_sequences.push(None);
+        }
+        for i in 0..count {
+            let seq = self.screen_sequences.get(i).copied();
+            if self.corrected_sequences[i] != seq
+                || self.corrected_frames[i].size() != self.frames[i].size()
+            {
+                correction.frame_into(&self.frames[i], &mut self.corrected_frames[i]);
+                self.corrected_sequences[i] = seq;
+            }
+        }
+    }
+
     /// Takes the emulation thread's latest frames, if they are new. The
     /// screen images drawn from the last ones stay until images of these
     /// replace them ([`Session::refresh_images`]), and the ambient
@@ -361,12 +387,17 @@ impl Session {
             .collect();
         // An earlier batch the GPU has finished meanwhile.
         let mut failed = self.place_upscaled(upscaler.take(Duration::ZERO), &wanted, window);
-        let correction = self.correction.as_ref().filter(|_| color_correction);
+        self.sync_corrected(color_correction);
+        let source_frames = if color_correction && self.correction.is_some() {
+            &self.corrected_frames
+        } else {
+            &self.frames
+        };
 
         // The screens to draw again, each frame colour corrected and turned.
         let mut redraws = Vec::new();
         for (index, (slot, placement)) in self.images.iter().zip(placements).enumerate() {
-            let (Some(frame), Some(key)) = (self.frames.get(placement.screen), wanted[index])
+            let (Some(frame), Some(key)) = (source_frames.get(placement.screen), wanted[index])
             else {
                 continue;
             };
@@ -377,13 +408,11 @@ impl Session {
             // to each console pixel.
             let native = self.info.screens.get(placement.screen);
             let cell = native.map_or(1, |native| frame.size().width / native.width.max(1));
-            let mut frame = Cow::Borrowed(frame);
-            if let Some(correction) = correction {
-                frame = Cow::Owned(correction.frame(&frame));
-            }
-            if key.rotation != Rotation::Upright {
-                frame = Cow::Owned(video::turn(&frame, key.rotation));
-            }
+            let frame = if key.rotation != Rotation::Upright {
+                Cow::Owned(video::turn(frame, key.rotation))
+            } else {
+                Cow::Borrowed(frame)
+            };
             redraws.push((index, key, frame, cell));
         }
 
@@ -512,26 +541,43 @@ impl Session {
             .as_ref()
             .is_some_and(|glow| glow.sampled.1 == sequence && glow.sampled.0 == placements);
         if !current {
-            let correction = self.correction.as_ref().filter(|_| color_correction);
-            let Some(target) = ambient::picture(&self.frames, placements, correction) else {
-                if let Some(glow) = self.ambient.take() {
-                    window.drop_image(glow.image).ok();
-                }
-                return false;
+            self.sync_corrected(color_correction);
+            let source_frames = if color_correction && self.correction.is_some() {
+                &self.corrected_frames
+            } else {
+                &self.frames
             };
-            let sampled = (placements.to_vec(), sequence);
-            let Some(glow) = &mut self.ambient else {
+            if let Some(glow) = &mut self.ambient {
+                let scratch = &mut self.ambient_scratch;
+                let ok = glow.fade.aim_with(|target| {
+                    ambient::picture_into(source_frames, placements, None, scratch, target)
+                });
+                if !ok {
+                    if let Some(glow) = self.ambient.take() {
+                        window.drop_image(glow.image).ok();
+                    }
+                    return false;
+                }
+                if glow.sampled.0 != placements {
+                    glow.sampled.0.clear();
+                    glow.sampled.0.extend_from_slice(placements);
+                }
+                glow.sampled.1 = sequence;
+            } else {
+                let Some(target) = ambient::picture(source_frames, placements, None) else {
+                    return false;
+                };
                 let fade = ambient::Fade::new(target, now);
-                let image = video::render_image(&fade.shown().frame(ambient::BORDER), 1);
+                let shown_frame = fade.shown().frame(ambient::BORDER);
+                let image = video::render_image(&shown_frame, 1);
                 self.ambient = Some(Glow {
-                    sampled,
+                    sampled: (placements.to_vec(), sequence),
                     fade,
+                    shown_frame,
                     image,
                 });
                 return false;
-            };
-            glow.sampled = sampled;
-            glow.fade.aim(target);
+            }
         }
         let Some(glow) = &mut self.ambient else {
             return false;
@@ -539,10 +585,16 @@ impl Session {
         let changed = !current || !glow.fade.settled();
         let moving = glow.fade.step(now);
         if changed {
-            let image = video::render_image(&glow.fade.shown().frame(ambient::BORDER), 1);
-            window
-                .drop_image(std::mem::replace(&mut glow.image, image))
-                .ok();
+            glow.fade
+                .shown()
+                .frame_into(ambient::BORDER, &mut self.ambient_frame);
+            if self.ambient_frame != glow.shown_frame {
+                std::mem::swap(&mut glow.shown_frame, &mut self.ambient_frame);
+                let image = video::render_image(&glow.shown_frame, 1);
+                window
+                    .drop_image(std::mem::replace(&mut glow.image, image))
+                    .ok();
+            }
         }
         moving
     }
