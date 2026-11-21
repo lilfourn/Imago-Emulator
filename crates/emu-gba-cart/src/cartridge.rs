@@ -97,6 +97,7 @@ impl Cartridge {
     /// Whether `address` (0x08000000-0x0DFFFFFF on a GBA) talks to the
     /// EEPROM: all of 0x0D000000 up, or with a 32 MiB ROM only its last 256
     /// bytes.
+    #[inline]
     #[must_use]
     pub fn eeprom_at(&self, address: u32) -> bool {
         matches!(self.backup, Backup::Eeprom(_))
@@ -115,6 +116,7 @@ impl Cartridge {
     /// on a GBA): ROM, the GPIO port, or the EEPROM where
     /// [`Cartridge::eeprom_at`] says so. Past the end of the ROM the bus
     /// returns the halfword address.
+    #[inline]
     pub fn read_16(&mut self, address: u32) -> u16 {
         if self.eeprom_at(address)
             && let Backup::Eeprom(eeprom) = &mut self.backup
@@ -122,7 +124,8 @@ impl Cartridge {
             return eeprom.read();
         }
         let offset = address & 0x01FF_FFFE;
-        if GPIO.contains(&offset)
+        if self.rtc.is_some()
+            && GPIO.contains(&offset)
             && let Some(value) = self.rtc.as_ref().and_then(|rtc| rtc.read(offset))
         {
             return value;
@@ -133,6 +136,20 @@ impl Cartridge {
             // Past the end, the cartridge bus returns the address.
             None => (address >> 1) as u16,
         }
+    }
+
+    /// Reads the aligned word at `address` in the ROM area as two halfwords,
+    /// fast-pathing plain ROM reads.
+    #[inline]
+    pub fn read_32(&mut self, address: u32) -> u32 {
+        let offset = (address & 0x01FF_FFFC) as usize;
+        if !self.eeprom_at(address)
+            && (self.rtc.is_none() || !(0xC4..=0xCA).contains(&offset))
+            && let Some(bytes) = self.rom.get(offset..offset + 4)
+        {
+            return u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        u32::from(self.read_16(address)) | u32::from(self.read_16(address | 2)) << 16
     }
 
     /// Writes the halfword at `address` in the ROM area at cycle `now` (of

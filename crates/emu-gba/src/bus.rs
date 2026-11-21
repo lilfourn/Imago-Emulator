@@ -245,6 +245,7 @@ impl Bus {
     /// `value`, read from the cartridge at `address`, as the ROM patches
     /// change it. Cheat devices watched the cartridge bus, so they patch
     /// whatever answers there.
+    #[inline]
     fn patch_rom_16(&self, address: u32, value: u16) -> u16 {
         if self.rom_patches.is_empty() {
             return value;
@@ -255,6 +256,16 @@ impl Bus {
             RomPatch::apply(&self.rom_patches, offset, low),
             RomPatch::apply(&self.rom_patches, offset | 1, high),
         ])
+    }
+
+    #[inline]
+    fn patch_rom_32(&self, address: u32, value: u32) -> u32 {
+        if self.rom_patches.is_empty() {
+            return value;
+        }
+        let low = self.patch_rom_16(address, value as u16);
+        let high = self.patch_rom_16(address | 2, (value >> 16) as u16);
+        u32::from(low) | u32::from(high) << 16
     }
 
     pub(crate) const fn cycles(&self) -> u64 {
@@ -380,7 +391,7 @@ impl Bus {
     /// small: the events run out of line in [`Bus::run_due_events`], since
     /// rendering a line, one of them, needs a large stack frame that every
     /// call would otherwise set up.
-    #[inline]
+    #[inline(always)]
     fn tick(&mut self, cycles: u32) {
         self.prefetch.run(cycles, self.prefetch_enabled());
         self.cycles += u64::from(cycles);
@@ -743,6 +754,7 @@ impl Bus {
         (bus >> ((address & 2) * 8)) as u16
     }
 
+    #[inline]
     fn read_16_raw(&mut self, address: u32) -> u16 {
         let half =
             |memory: &[u8], index: usize| u16::from_le_bytes([memory[index], memory[index + 1]]);
@@ -772,8 +784,9 @@ impl Bus {
         }
     }
 
-    /// The word at `address` (aligned): read whole from work RAM, as two
-    /// halfwords elsewhere.
+    /// The word at `address` (aligned): read whole from work RAM and plain
+    /// ROM, as two halfwords elsewhere.
+    #[inline]
     fn read_32_raw(&mut self, address: u32) -> u32 {
         let word = |memory: &[u8], index: usize| {
             u32::from_le_bytes([
@@ -786,6 +799,10 @@ impl Bus {
         match address >> 24 {
             0x02 => word(&self.ewram, (address & 0x3_FFFC) as usize),
             0x03 => word(&self.iwram, (address & 0x7FFC) as usize),
+            0x08..=0x0D => {
+                let value = self.cartridge.read_32(address);
+                self.patch_rom_32(address, value)
+            }
             _ => {
                 u32::from(self.read_16_raw(address))
                     | u32::from(self.read_16_raw(address | 2)) << 16
@@ -968,6 +985,7 @@ impl Bus {
     }
 
     /// Whether WAITCNT turns the Game Pak prefetch unit on.
+    #[inline(always)]
     fn prefetch_enabled(&self) -> bool {
         self.waitcnt & 0x4000 != 0
     }
@@ -992,6 +1010,7 @@ impl Bus {
     }
 
     /// [`Bus::wait_for_access`] for the cartridge's ROM and save memory.
+    #[inline]
     fn wait_for_cartridge(&mut self, address: u32, width: Width, access: Access) {
         if address >> 24 >= 0x0E {
             self.stop_prefetch();
@@ -1013,6 +1032,7 @@ impl Bus {
 
     /// The cycles of a code fetch from the cartridge, which the prefetch
     /// unit may already have read.
+    #[inline]
     fn fetch_from_cartridge(&mut self, address: u32, width: Width, sequential: bool) {
         let enabled = self.prefetch_enabled();
         match self.prefetch.look_up(address) {
@@ -1039,6 +1059,7 @@ impl Bus {
 
     /// Stops the prefetch unit for a data access to the cartridge, waiting
     /// a cycle if its read cannot be cut short.
+    #[inline]
     fn stop_prefetch(&mut self) {
         if self.prefetch.stop(self.code_in_cartridge) {
             self.tick(1);

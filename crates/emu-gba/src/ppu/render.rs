@@ -9,15 +9,30 @@
 
 use super::{HEIGHT, Ppu, WIDTH, color};
 
-/// Background or object pixel: BGR555 colour, or `None` for transparent.
-type Layer = [Option<u16>; WIDTH];
+/// Sentinel for a transparent pixel in a layer buffer (BGR555 uses bits 0–14).
+const TRANSPARENT: u16 = 0x8000;
+/// Mask for a 15-bit BGR555 colour.
+const COLOR_MASK: u16 = 0x7FFF;
+
+/// Background or object pixel: BGR555 colour (`0..=0x7FFF`), or [`TRANSPARENT`].
+type Layer = [u16; WIDTH];
 
 /// An object pixel with what composition needs to know.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct ObjPixel {
-    color: Option<u16>,
+    color: u16,
     priority: u8,
     semi_transparent: bool,
+}
+
+impl Default for ObjPixel {
+    fn default() -> Self {
+        Self {
+            color: TRANSPARENT,
+            priority: 0,
+            semi_transparent: false,
+        }
+    }
 }
 
 /// Where a text background's map and tiles are, and their format.
@@ -25,8 +40,6 @@ struct TextMap {
     screen_base: usize,
     char_base: usize,
     eight_bit: bool,
-    /// The map's width in pixels: 256 or 512.
-    width: usize,
 }
 
 /// Layer numbers in blend-target bit order.
@@ -41,6 +54,7 @@ const OBJ_SIZES: [[(u32, u32); 4]; 3] = [
 ];
 
 impl Ppu {
+    #[inline]
     fn reg(&self, offset: usize) -> u16 {
         self.register16(offset)
     }
@@ -49,24 +63,45 @@ impl Ppu {
     pub(super) fn draw_line(&self, line: usize, row: &mut [u32; WIDTH]) {
         let dispcnt = self.reg(0x00);
         let mode = dispcnt & 7;
-        let mut backgrounds: [Option<Layer>; 4] = [None; 4];
+        let mut backgrounds = [[TRANSPARENT; WIDTH]; 4];
+        let mut bg_mask = 0u8;
         for (index, layer) in backgrounds.iter_mut().enumerate() {
             if dispcnt & (1 << (8 + index)) == 0 {
                 continue;
             }
-            *layer = match (mode, index) {
-                (0, _) | (1, 0 | 1) => Some(self.text_layer(index, line)),
-                (1 | 2, 2) | (2, 3) => Some(self.affine_layer(index, false)),
-                (3..=5, 2) => Some(self.affine_layer(index, true)),
-                _ => None,
+            let drawn = match (mode, index) {
+                (0, _) | (1, 0 | 1) => {
+                    self.text_layer_into(index, line, layer);
+                    true
+                }
+                (1 | 2, 2) | (2, 3) => {
+                    self.affine_layer_into(index, false, layer);
+                    true
+                }
+                (3..=5, 2) => {
+                    self.affine_layer_into(index, true, layer);
+                    true
+                }
+                _ => false,
             };
+            if drawn {
+                bg_mask |= 1 << index;
+            }
         }
-        let (objects, object_window) = if dispcnt & (1 << 12) != 0 {
-            self.object_layer(line, dispcnt)
+        if dispcnt & (1 << 12) != 0 {
+            let (objects, object_window, any_semi) = self.object_layer(line, dispcnt);
+            self.compose(
+                line,
+                dispcnt,
+                &backgrounds,
+                bg_mask,
+                Some((&objects, &object_window)),
+                any_semi,
+                row,
+            );
         } else {
-            ([ObjPixel::default(); WIDTH], [false; WIDTH])
-        };
-        self.compose(line, dispcnt, &backgrounds, &objects, &object_window, row);
+            self.compose(line, dispcnt, &backgrounds, bg_mask, None, false, row);
+        }
     }
 
     // ----- Backgrounds -------------------------------------------------
@@ -77,7 +112,14 @@ impl Ppu {
         (size(0), size(4), size(8), size(12))
     }
 
+    #[cfg(test)]
     fn text_layer(&self, index: usize, line: usize) -> Layer {
+        let mut layer = [TRANSPARENT; WIDTH];
+        self.text_layer_into(index, line, &mut layer);
+        layer
+    }
+
+    fn text_layer_into(&self, index: usize, line: usize, layer: &mut Layer) {
         let control = self.reg(0x08 + index * 2);
         let scroll_x = usize::from(self.reg(0x10 + index * 4) & 0x1FF);
         let scroll_y = usize::from(self.reg(0x12 + index * 4) & 0x1FF);
@@ -93,67 +135,95 @@ impl Ppu {
         let (mosaic_x, mosaic_y, ..) = self.mosaic();
         let mosaic = control & (1 << 6) != 0;
         let line = if mosaic { line - line % mosaic_y } else { line };
-        let y = (line + scroll_y) % height;
+        let y = (line + scroll_y) & (height - 1);
         let map = TextMap {
             screen_base,
             char_base,
             eight_bit,
-            width,
         };
 
         // Whole tile rows, from the one under the left edge: a tile more
         // than the screen, starting `skip` pixels left of it.
-        let skip = scroll_x % 8;
-        let rows: [[Option<u16>; 8]; WIDTH / 8 + 1] = std::array::from_fn(|tile| {
-            // The width is a power of two.
-            let x = (scroll_x - skip + tile * 8) & (width - 1);
-            self.text_tile_row(&map, x / 8, y)
-        });
-        let mut layer: Layer = rows.as_flattened()[skip..skip + WIDTH]
-            .try_into()
-            .expect("a tile's width more than the screen");
-        if mosaic {
-            apply_mosaic(&mut layer, mosaic_x);
+        let skip = scroll_x & 7;
+        let base_x = scroll_x - skip;
+        let width_mask = width - 1;
+        let block_y_offset = (y >> 8) * (width >> 8) * 0x800 + ((y & 0xFF) >> 3) * 64;
+        let y_in_tile = y & 7;
+        let mut buf = [TRANSPARENT; WIDTH + 8];
+        for tile in 0..(WIDTH / 8 + 1) {
+            let x = (base_x + tile * 8) & width_mask;
+            let entry_offset =
+                map.screen_base + block_y_offset + (x >> 8) * 0x800 + ((x & 0xFF) >> 3) * 2;
+            let dst = &mut buf[tile * 8..tile * 8 + 8];
+            self.write_text_tile_row(&map, entry_offset, y_in_tile, dst);
         }
-        layer
+        layer.copy_from_slice(&buf[skip..skip + WIDTH]);
+        if mosaic {
+            apply_mosaic(layer, mosaic_x);
+        }
     }
 
-    /// The colours of the eight pixels of line `y` (in map pixels) of the
-    /// tile in map column `column`, left to right after flipping, `None`
-    /// where transparent.
-    fn text_tile_row(&self, map: &TextMap, column: usize, y: usize) -> [Option<u16>; 8] {
-        let x = column * 8;
-        // Maps wider or taller than 256 are made of 32x32-tile blocks.
-        let block = x / 256 + (y / 256) * (map.width / 256);
-        let entry_offset =
-            map.screen_base + block * 0x800 + ((y % 256) / 8) * 64 + ((x % 256) / 8) * 2;
+    /// Writes the eight pixels of tile row `y_in_tile` into `dst`, left to
+    /// right after flipping, leaving transparent pixels as [`TRANSPARENT`].
+    #[inline]
+    fn write_text_tile_row(
+        &self,
+        map: &TextMap,
+        entry_offset: usize,
+        y_in_tile: usize,
+        dst: &mut [u16],
+    ) {
         let entry = self.vram_16(entry_offset);
         let tile = usize::from(entry & 0x3FF);
         let row = if entry & (1 << 11) != 0 {
-            7 - y % 8
+            7 - y_in_tile
         } else {
-            y % 8
+            y_in_tile
         };
-        // Colour numbers, left to right as stored.
-        let mut indices: [u8; 8] = if map.eight_bit {
-            self.bg_tile_bytes(map.char_base + tile * 64 + row * 8)
+        let hflip = entry & (1 << 10) != 0;
+        if map.eight_bit {
+            let offset = map.char_base + tile * 64 + row * 8;
+            if offset >= 0x1_0000 {
+                return;
+            }
+            let bytes = &self.vram[offset..offset + 8];
+            for (i, &index) in bytes.iter().enumerate() {
+                if index != 0 {
+                    let slot = if hflip { 7 - i } else { i };
+                    dst[slot] = self.palette_16(usize::from(index) * 2) & COLOR_MASK;
+                }
+            }
         } else {
-            let bytes: [u8; 4] = self.bg_tile_bytes(map.char_base + tile * 32 + row * 4);
-            let palette = (entry >> 12) as u8 * 16;
-            std::array::from_fn(|pixel| {
-                let nibble = (bytes[pixel / 2] >> (pixel % 2 * 4)) & 0xF;
-                if nibble == 0 { 0 } else { palette + nibble }
-            })
-        };
-        if entry & (1 << 10) != 0 {
-            indices.reverse();
+            let offset = map.char_base + tile * 32 + row * 4;
+            if offset >= 0x1_0000 {
+                return;
+            }
+            let bytes = &self.vram[offset..offset + 4];
+            if bytes == [0, 0, 0, 0] {
+                return;
+            }
+            let palette_base = usize::from(entry >> 12) * 32;
+            for (pair, &byte) in bytes.iter().enumerate() {
+                if byte == 0 {
+                    continue;
+                }
+                let lo = usize::from(byte & 0xF);
+                if lo != 0 {
+                    let slot = if hflip { 7 - pair * 2 } else { pair * 2 };
+                    dst[slot] = self.palette_16(palette_base + lo * 2) & COLOR_MASK;
+                }
+                let hi = usize::from(byte >> 4);
+                if hi != 0 {
+                    let slot = if hflip { 6 - pair * 2 } else { pair * 2 + 1 };
+                    dst[slot] = self.palette_16(palette_base + hi * 2) & COLOR_MASK;
+                }
+            }
         }
-        indices.map(|index| (index != 0).then(|| self.palette_16(usize::from(index) * 2)))
     }
 
     /// Affine background (modes 1–2) or bitmap (modes 3–5) for BG2/BG3,
     /// sampled through the rotation/scaling matrix.
-    fn affine_layer(&self, index: usize, bitmap: bool) -> Layer {
+    fn affine_layer_into(&self, index: usize, bitmap: bool, layer: &mut Layer) {
         let control = self.reg(0x08 + index * 2);
         let base = 0x20 + (index - 2) * 0x10;
         let pa = i32::from(self.reg(base) as i16);
@@ -161,7 +231,6 @@ impl Ppu {
         let (mut x, mut y) = self.affine_reference[index - 2];
         let (mosaic_x, ..) = self.mosaic();
         let mosaic = control & (1 << 6) != 0;
-        let mut layer = [None; WIDTH];
         for (screen_x, pixel) in layer.iter_mut().enumerate() {
             if mosaic && screen_x % mosaic_x != 0 {
                 // Filled from the start of its mosaic block below.
@@ -179,20 +248,19 @@ impl Ppu {
             };
         }
         if mosaic {
-            apply_mosaic(&mut layer, mosaic_x);
+            apply_mosaic(layer, mosaic_x);
         }
-        layer
     }
 
-    fn affine_tile_pixel(&self, control: u16, tx: i32, ty: i32) -> Option<u16> {
+    fn affine_tile_pixel(&self, control: u16, tx: i32, ty: i32) -> u16 {
         let size = 128 << (control >> 14);
         let wrap = control & (1 << 13) != 0;
         let (tx, ty) = if wrap {
-            (tx.rem_euclid(size), ty.rem_euclid(size))
+            (tx & (size - 1), ty & (size - 1))
         } else if (0..size).contains(&tx) && (0..size).contains(&ty) {
             (tx, ty)
         } else {
-            return None;
+            return TRANSPARENT;
         };
         let char_base = usize::from((control >> 2) & 3) * 0x4000;
         let screen_base = usize::from((control >> 8) & 0x1F) * 0x800;
@@ -200,10 +268,14 @@ impl Ppu {
         let tiles_per_row = size as usize / 8;
         let tile = usize::from(self.bg_vram_byte(screen_base + (ty / 8) * tiles_per_row + tx / 8));
         let index = self.bg_vram_byte(char_base + tile * 64 + (ty % 8) * 8 + tx % 8);
-        (index != 0).then(|| self.palette_16(usize::from(index) * 2))
+        if index != 0 {
+            self.palette_16(usize::from(index) * 2) & COLOR_MASK
+        } else {
+            TRANSPARENT
+        }
     }
 
-    fn bitmap_pixel(&self, tx: i32, ty: i32) -> Option<u16> {
+    fn bitmap_pixel(&self, tx: i32, ty: i32) -> u16 {
         let dispcnt = self.reg(0x00);
         let frame = if dispcnt & (1 << 4) != 0 { 0xA000 } else { 0 };
         let (width, height) = if dispcnt & 7 == 5 {
@@ -212,32 +284,35 @@ impl Ppu {
             (WIDTH as i32, HEIGHT as i32)
         };
         if !(0..width).contains(&tx) || !(0..height).contains(&ty) {
-            return None;
+            return TRANSPARENT;
         }
         let offset = (ty * width + tx) as usize;
         match dispcnt & 7 {
-            3 => Some(self.vram_16(offset * 2) & 0x7FFF),
+            3 => self.vram_16(offset * 2) & COLOR_MASK,
             4 => {
                 let index = self.vram[frame + offset];
-                (index != 0).then(|| self.palette_16(usize::from(index) * 2))
+                if index != 0 {
+                    self.palette_16(usize::from(index) * 2) & COLOR_MASK
+                } else {
+                    TRANSPARENT
+                }
             }
-            _ => Some(self.vram_16(frame + offset * 2) & 0x7FFF),
+            _ => self.vram_16(frame + offset * 2) & COLOR_MASK,
         }
     }
 
     // ----- Objects -----------------------------------------------------
 
-    fn object_layer(&self, line: usize, dispcnt: u16) -> ([ObjPixel; WIDTH], [bool; WIDTH]) {
+    fn object_layer(&self, line: usize, dispcnt: u16) -> ([ObjPixel; WIDTH], [bool; WIDTH], bool) {
         let mut pixels = [ObjPixel::default(); WIDTH];
         let mut window = [false; WIDTH];
+        let mut any_semi = false;
         let one_dimensional = dispcnt & (1 << 6) != 0;
         let bitmap_mode = (3..=5).contains(&(dispcnt & 7));
         let (.., mosaic_x, mosaic_y) = self.mosaic();
 
         for index in 0..128 {
             let attr0 = self.oam_16(index * 8);
-            let attr1 = self.oam_16(index * 8 + 2);
-            let attr2 = self.oam_16(index * 8 + 4);
             let affine = attr0 & (1 << 8) != 0;
             if !affine && attr0 & (1 << 9) != 0 {
                 continue; // disabled
@@ -250,6 +325,7 @@ impl Ppu {
             if shape == 3 {
                 continue;
             }
+            let attr1 = self.oam_16(index * 8 + 2);
             let (width, height) = OBJ_SIZES[shape][usize::from(attr1 >> 14)];
             let double = affine && attr0 & (1 << 9) != 0;
             let (box_width, box_height) = if double {
@@ -272,7 +348,13 @@ impl Ppu {
             if left >= 256 {
                 left -= 512;
             }
+            let start_x = (-left).max(0);
+            let end_x = (box_width as i32).min(WIDTH as i32 - left);
+            if start_x >= end_x {
+                continue;
+            }
 
+            let attr2 = self.oam_16(index * 8 + 4);
             let tile = u32::from(attr2 & 0x3FF);
             if bitmap_mode && tile < 512 {
                 continue; // that VRAM holds the bitmap
@@ -280,6 +362,44 @@ impl Ppu {
             let priority = ((attr2 >> 10) & 3) as u8;
             let eight_bit = attr0 & (1 << 13) != 0;
             let palette = (attr2 >> 12) as u8;
+
+            if !affine && !mosaic {
+                let h_flip = attr1 & (1 << 12) != 0;
+                let v_flip = attr1 & (1 << 13) != 0;
+                let ty = if v_flip {
+                    height - 1 - row_in_box as u32
+                } else {
+                    row_in_box as u32
+                };
+                for box_x in start_x..end_x {
+                    let screen_x = (left + box_x) as usize;
+                    let tx = if h_flip {
+                        width - 1 - box_x as u32
+                    } else {
+                        box_x as u32
+                    };
+                    let color =
+                        self.object_texel(tile, eight_bit, palette, one_dimensional, width, tx, ty);
+                    if color == TRANSPARENT {
+                        continue;
+                    }
+                    if mode == 2 {
+                        window[screen_x] = true;
+                        continue;
+                    }
+                    let current = &mut pixels[screen_x];
+                    if current.color == TRANSPARENT || priority < current.priority {
+                        let semi = mode == 1;
+                        any_semi |= semi;
+                        *current = ObjPixel {
+                            color,
+                            priority,
+                            semi_transparent: semi,
+                        };
+                    }
+                }
+                continue;
+            }
 
             let (pa, pb, pc, pd) = if affine {
                 let group = usize::from((attr1 >> 9) & 0x1F) * 32;
@@ -293,12 +413,8 @@ impl Ppu {
             let half_box = (box_width as i32 / 2, box_height as i32 / 2);
             let half = (width as i32 / 2, height as i32 / 2);
 
-            for box_x in 0..box_width as i32 {
-                let screen_x = left + box_x;
-                if !(0..WIDTH as i32).contains(&screen_x) {
-                    continue;
-                }
-                let screen_x = screen_x as usize;
+            for box_x in start_x..end_x {
+                let screen_x = (left + box_x) as usize;
                 let sample_x = if mosaic {
                     box_x - (screen_x % mosaic_x) as i32
                 } else {
@@ -323,11 +439,11 @@ impl Ppu {
                 if v_flip {
                     ty = height - 1 - ty;
                 }
-                let Some(color) =
-                    self.object_texel(tile, eight_bit, palette, one_dimensional, width, tx, ty)
-                else {
+                let color =
+                    self.object_texel(tile, eight_bit, palette, one_dimensional, width, tx, ty);
+                if color == TRANSPARENT {
                     continue;
-                };
+                }
                 if mode == 2 {
                     window[screen_x] = true;
                     continue;
@@ -335,19 +451,22 @@ impl Ppu {
                 let current = &mut pixels[screen_x];
                 // Lower OAM index wins among objects; a lower priority
                 // number wins over that.
-                if current.color.is_none() || priority < current.priority {
+                if current.color == TRANSPARENT || priority < current.priority {
+                    let semi = mode == 1;
+                    any_semi |= semi;
                     *current = ObjPixel {
-                        color: Some(color),
+                        color,
                         priority,
-                        semi_transparent: mode == 1,
+                        semi_transparent: semi,
                     };
                 }
             }
         }
-        (pixels, window)
+        (pixels, window, any_semi)
     }
 
     #[allow(clippy::too_many_arguments)] // The texel lookup needs each attribute.
+    #[inline]
     fn object_texel(
         &self,
         tile: u32,
@@ -357,7 +476,7 @@ impl Ppu {
         width: u32,
         tx: u32,
         ty: u32,
-    ) -> Option<u16> {
+    ) -> u16 {
         let tile_step = if eight_bit { 2 } else { 1 };
         let row_stride = if one_dimensional {
             width / 8 * tile_step
@@ -371,7 +490,7 @@ impl Ppu {
             self.vram_byte(address + row * 8 + column)
         } else {
             let byte = self.vram_byte(address + row * 4 + column / 2);
-            let nibble = if column % 2 == 0 {
+            let nibble = if column & 1 == 0 {
                 byte & 0xF
             } else {
                 byte >> 4
@@ -382,7 +501,11 @@ impl Ppu {
                 palette * 16 + nibble
             }
         };
-        (index != 0).then(|| self.palette_16(0x200 + usize::from(index) * 2))
+        if index != 0 {
+            self.palette_16(0x200 + usize::from(index) * 2) & COLOR_MASK
+        } else {
+            TRANSPARENT
+        }
     }
 
     // ----- Composition -------------------------------------------------
@@ -393,7 +516,7 @@ impl Ppu {
         &self,
         dispcnt: u16,
         line: usize,
-        object_window: &[bool; WIDTH],
+        object_window: Option<&[bool; WIDTH]>,
     ) -> [u8; WIDTH] {
         if dispcnt & 0xE000 == 0 {
             return [0x3F; WIDTH];
@@ -416,12 +539,13 @@ impl Ppu {
         let (horizontal0, horizontal1) = (self.reg(0x40), self.reg(0x42));
         let winin = self.reg(0x48);
         let winout = self.reg(0x4A);
+        let obj_win_on = dispcnt & (1 << 15) != 0;
         std::array::from_fn(|x| {
             if window0 && span(horizontal0, x, WIDTH) {
                 (winin & 0x3F) as u8
             } else if window1 && span(horizontal1, x, WIDTH) {
                 ((winin >> 8) & 0x3F) as u8
-            } else if dispcnt & (1 << 15) != 0 && object_window[x] {
+            } else if obj_win_on && object_window.is_some_and(|w| w[x]) {
                 ((winout >> 8) & 0x3F) as u8
             } else {
                 (winout & 0x3F) as u8
@@ -429,50 +553,127 @@ impl Ppu {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compose(
         &self,
         line: usize,
         dispcnt: u16,
-        backgrounds: &[Option<Layer>; 4],
-        objects: &[ObjPixel; WIDTH],
-        object_window: &[bool; WIDTH],
+        backgrounds: &[Layer; 4],
+        bg_mask: u8,
+        objects: Option<(&[ObjPixel; WIDTH], &[bool; WIDTH])>,
+        any_semi_transparent: bool,
         row: &mut [u32; WIDTH],
     ) {
-        let backdrop = self.palette_16(0) & 0x7FFF;
+        let backdrop = self.palette_16(0) & COLOR_MASK;
         let bldcnt = self.reg(0x50);
+        let blend_mode = (bldcnt >> 6) & 3;
+        let priorities: [u16; 4] = std::array::from_fn(|bg| self.reg(0x08 + bg * 2) & 3);
+
+        // Active backgrounds sorted in front-to-back order (lowest priority,
+        // then lowest BG number).
+        let mut active = [0usize; 4];
+        let mut active_len = 0usize;
+        for priority in 0..4u16 {
+            for (bg, &p) in priorities.iter().enumerate() {
+                if bg_mask & (1 << bg) != 0 && p == priority {
+                    active[active_len] = bg;
+                    active_len += 1;
+                }
+            }
+        }
+        let active = &active[..active_len];
+
+        // Fast path: no windows, no color effects, and no semi-transparent
+        // objects, so only the single front-most opaque pixel matters.
+        if dispcnt & 0xE000 == 0 && blend_mode == 0 && !any_semi_transparent {
+            let backdrop_argb = color(backdrop);
+            match (objects, active) {
+                (None, []) => row.fill(backdrop_argb),
+                (None, &[bg]) => {
+                    let layer = &backgrounds[bg];
+                    for (out, &px) in row.iter_mut().zip(layer) {
+                        *out = if px != TRANSPARENT {
+                            color(px)
+                        } else {
+                            backdrop_argb
+                        };
+                    }
+                }
+                (None, bgs) => {
+                    for (x, out) in row.iter_mut().enumerate() {
+                        let mut chosen = backdrop;
+                        for &bg in bgs {
+                            let px = backgrounds[bg][x];
+                            if px != TRANSPARENT {
+                                chosen = px;
+                                break;
+                            }
+                        }
+                        *out = color(chosen);
+                    }
+                }
+                (Some((objs, _)), bgs) => {
+                    for (x, out) in row.iter_mut().enumerate() {
+                        let obj = objs[x];
+                        let mut chosen = if obj.color != TRANSPARENT {
+                            obj.color
+                        } else {
+                            backdrop
+                        };
+                        let obj_prio = if obj.color != TRANSPARENT {
+                            u16::from(obj.priority)
+                        } else {
+                            4
+                        };
+                        for &bg in bgs {
+                            // Objects beat backgrounds of equal priority.
+                            if priorities[bg] >= obj_prio {
+                                break;
+                            }
+                            let px = backgrounds[bg][x];
+                            if px != TRANSPARENT {
+                                chosen = px;
+                                break;
+                            }
+                        }
+                        *out = color(chosen);
+                    }
+                }
+            }
+            return;
+        }
+
         let bldalpha = self.reg(0x52);
         let eva = u32::from(bldalpha & 0x1F).min(16);
         let evb = u32::from((bldalpha >> 8) & 0x1F).min(16);
         let evy = u32::from(self.reg(0x54) & 0x1F).min(16);
-        let priorities: [u16; 4] = std::array::from_fn(|bg| self.reg(0x08 + bg * 2) & 3);
-        let masks = self.window_masks(dispcnt, line, object_window);
+        let masks = self.window_masks(dispcnt, line, objects.map(|(_, w)| w));
 
-        for x in 0..WIDTH {
+        for (x, out_pixel) in row.iter_mut().enumerate() {
             let mask = masks[x];
             // Keep the two visible layers with the lowest sort key: priority
             // first, then objects before backgrounds, then background number.
             let mut first = (u16::MAX, BACKDROP, backdrop);
             let mut second = first;
-            let mut consider = |key: u16, layer: usize, color: u16| {
+            let mut consider = |key: u16, layer: usize, c: u16| {
                 if key < first.0 {
                     second = first;
-                    first = (key, layer, color);
+                    first = (key, layer, c);
                 } else if key < second.0 {
-                    second = (key, layer, color);
+                    second = (key, layer, c);
                 }
             };
-            for bg in 0..4 {
-                if mask & (1 << bg) != 0
-                    && let Some(color) = backgrounds[bg].as_ref().and_then(|layer| layer[x])
-                {
-                    consider(priorities[bg] * 8 + 1 + bg as u16, bg, color);
+            for &bg in active {
+                if mask & (1 << bg) != 0 {
+                    let px = backgrounds[bg][x];
+                    if px != TRANSPARENT {
+                        consider(priorities[bg] * 8 + 1 + bg as u16, bg, px);
+                    }
                 }
             }
-            let object = objects[x];
-            if mask & (1 << OBJ) != 0
-                && let Some(color) = object.color
-            {
-                consider(u16::from(object.priority) * 8, OBJ, color);
+            let object = objects.map_or(ObjPixel::default(), |(objs, _)| objs[x]);
+            if mask & (1 << OBJ) != 0 && object.color != TRANSPARENT {
+                consider(u16::from(object.priority) * 8, OBJ, object.color);
             }
 
             let effects = mask & (1 << 5) != 0;
@@ -482,7 +683,7 @@ impl Ppu {
             let out = if semi_transparent && second_target {
                 alpha(first.2, second.2, eva, evb)
             } else if effects && first_target {
-                match (bldcnt >> 6) & 3 {
+                match blend_mode {
                     1 if second_target => alpha(first.2, second.2, eva, evb),
                     2 => brightness(first.2, evy, true),
                     3 => brightness(first.2, evy, false),
@@ -491,17 +692,19 @@ impl Ppu {
             } else {
                 first.2
             };
-            row[x] = color(out);
+            *out_pixel = color(out);
         }
     }
 
     // ----- Memory helpers ----------------------------------------------
 
+    #[inline]
     fn vram_byte(&self, offset: usize) -> u8 {
         self.vram.get(offset).copied().unwrap_or(0)
     }
 
     /// Backgrounds cannot reach object VRAM (0x10000 and up).
+    #[inline]
     fn bg_vram_byte(&self, offset: usize) -> u8 {
         if offset < 0x1_0000 {
             self.vram[offset]
@@ -510,24 +713,17 @@ impl Ppu {
         }
     }
 
-    /// [`Ppu::bg_vram_byte`] for the `N` bytes from `offset`, a row of a
-    /// tile: aligned to `N`, so all of them or none are in object VRAM.
-    fn bg_tile_bytes<const N: usize>(&self, offset: usize) -> [u8; N] {
-        if offset < 0x1_0000 {
-            std::array::from_fn(|index| self.vram[offset + index])
-        } else {
-            [0; N]
-        }
-    }
-
+    #[inline]
     fn vram_16(&self, offset: usize) -> u16 {
         u16::from_le_bytes([self.vram_byte(offset), self.vram_byte(offset + 1)])
     }
 
+    #[inline]
     fn palette_16(&self, offset: usize) -> u16 {
         u16::from_le_bytes([self.palette[offset], self.palette[offset + 1]])
     }
 
+    #[inline]
     fn oam_16(&self, offset: usize) -> u16 {
         u16::from_le_bytes([self.oam[offset], self.oam[offset + 1]])
     }
@@ -674,7 +870,9 @@ mod tests {
             for line in 0..HEIGHT {
                 let layer = ppu.text_layer(0, line);
                 for (x, pixel) in layer.iter().enumerate() {
-                    assert_eq!(*pixel, text_pixel(&ppu, 0, line, x), "line {line}, x {x}");
+                    let got = (*pixel != TRANSPARENT).then_some(*pixel);
+                    let expected = text_pixel(&ppu, 0, line, x).map(|c| c & COLOR_MASK);
+                    assert_eq!(got, expected, "line {line}, x {x}");
                 }
             }
         }
@@ -722,7 +920,7 @@ mod tests {
             let dispcnt = next(&mut seed) as u16 & 0xE000;
             let object_window: [bool; WIDTH] = std::array::from_fn(|_| next(&mut seed) & 1 != 0);
             for line in 0..HEIGHT {
-                let masks = ppu.window_masks(dispcnt, line, &object_window);
+                let masks = ppu.window_masks(dispcnt, line, Some(&object_window));
                 for (x, mask) in masks.iter().enumerate() {
                     assert_eq!(*mask, window_mask(&ppu, dispcnt, line, x, object_window[x]));
                 }

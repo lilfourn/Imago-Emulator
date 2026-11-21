@@ -60,6 +60,7 @@ impl WaitStates {
     }
 
     /// Cycles for an access of `width` to `address`.
+    #[inline(always)]
     pub(crate) fn cycles(&self, address: u32, width: Width, sequential: bool) -> u32 {
         let region = (address >> 24) as usize & 0xF;
         let wide = usize::from(width == Width::Word);
