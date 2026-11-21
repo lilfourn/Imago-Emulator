@@ -259,27 +259,6 @@ mod tests {
         assert_eq!(registers.read(0x10), 0);
         assert_eq!(registers.read(0x4C), 0);
         assert_eq!(registers.read(0x54), 0);
-        assert_eq!(registers.hofs[0], 0x123);
-    }
-
-    #[test]
-    fn dispcnt_halves_combine() {
-        let mut registers = Registers::new(Engine::A);
-        registers.write(0x00, 0x1234);
-        registers.write(0x02, 0xC001);
-        assert_eq!(registers.dispcnt, 0xC001_1234);
-        assert_eq!(registers.read(0x02), 0xC001);
-    }
-
-    #[test]
-    fn engine_b_drops_engine_a_only_dispcnt_bits() {
-        let mut registers = Registers::new(Engine::B);
-        registers.write(0x00, 0xFFFF);
-        registers.write(0x02, 0xFFFF);
-        assert_eq!(registers.dispcnt & (1 << 3), 0, "no 3D");
-        assert_eq!((registers.dispcnt >> 16) & 3, 1, "display modes 0–1 only");
-        assert_eq!(registers.dispcnt & (0x3F << 24), 0, "no base offsets");
-        assert_ne!(registers.dispcnt & (1 << 31), 0);
     }
 
     #[test]

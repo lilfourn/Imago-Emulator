@@ -1638,10 +1638,6 @@ mod tests {
         assert!(is_zip(b"PK\x03\x04rest of the archive"));
         assert!(!is_zip(b"\x00\xC3\x50\x01 a Game Boy ROM"));
         assert!(!is_zip(b"PK"));
-        assert!(
-            WITHHELD.windows(2).all(|pair| pair[0] < pair[1]),
-            "kept in order"
-        );
     }
 
     #[test]

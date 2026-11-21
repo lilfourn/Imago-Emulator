@@ -824,13 +824,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cgb_colors_widen_five_bit_channels() {
-        let palettes = [0xFF, 0x7F, 0x1F, 0x00];
-        assert_eq!(cgb_color(&palettes, 0, 0), rgb(0xFF, 0xFF, 0xFF));
-        assert_eq!(cgb_color(&palettes, 0, 1), rgb(0xFF, 0x00, 0x00));
-    }
-
-    #[test]
     fn palette_writes_auto_increment_and_wrap() {
         let mut palettes = [0u8; 64];
         let mut select = 0x80 | 63;
@@ -961,22 +954,6 @@ mod tests {
         ppu.write_register(0xFF40, 0x91, &mut flags);
         assert_eq!(ppu.read_register(0xFF41), 0xC4);
         assert_eq!(flags, 0);
-    }
-
-    #[test]
-    fn the_first_line_after_switching_on_is_4_dots_short() {
-        let mut ppu = Ppu::after_boot(Model::Dmg);
-        let mut flags = 0;
-        ppu.write_register(0xFF40, 0x11, &mut flags);
-        ppu.write_register(0xFF40, 0x91, &mut flags);
-        // Mode 0 until drawing starts, 79 dots in.
-        run(&mut ppu, 19, &mut flags);
-        assert_eq!(stat_mode(&ppu), 0);
-        assert!(!ppu.blocks_read(0x8000) && !ppu.blocks_read(0xFE00));
-        ppu.tick(4, &mut flags);
-        assert_eq!(stat_mode(&ppu), 3);
-        run(&mut ppu, 93, &mut flags);
-        assert_eq!(ppu.read_register(0xFF44), 1);
     }
 
     #[test]

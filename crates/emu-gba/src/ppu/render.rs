@@ -798,12 +798,8 @@ mod tests {
         ppu.write_register(0x50, 1 << 8); // second target: BG0
         ppu.write_register(0x52, 8 | 8 << 8); // EVA = EVB = 8/16
         let row = draw(&ppu, 0);
-        assert_eq!(row[0], color(alpha(GREEN, RED, 8, 8)));
-    }
-
-    #[test]
-    fn alpha_blend_halves() {
-        assert_eq!(alpha(0x001F, 0x7C00, 8, 8), 0x3C0F);
+        // Half of green and half of red: 15 of 31 in each.
+        assert_eq!(row[0], color(15 | 15 << 5));
     }
 
     #[test]

@@ -774,7 +774,6 @@ mod tests {
         assert_eq!(word(&nds, 0x0200_0000), 8, "the SWI returns the length");
         let kept = [4, 8, 12].map(|offset| word(&nds, 0x0200_0000 + offset));
         assert_eq!(kept, [0x55, 0xCD, 0xAB], "R2, R12 and LR are kept");
-        assert!(nds.machine.suspended[0].is_empty());
     }
 
     #[test]

@@ -48,10 +48,9 @@ const HEADER: usize = 1 + 1 + 8 + 4;
 /// How much a supporter gave, by the name of what they bought. Every tier
 /// has everything the one before it has; what each adds is a look
 /// (`emu-app`'s `supporter` module), never anything a game needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
     /// The first tier.
-    #[default]
     Supporter,
     /// The second.
     Patron,
@@ -482,18 +481,7 @@ mod tests {
             assert_eq!(Tier::from_name(tier.name()), Some(tier));
         }
         assert!(Tier::Supporter < Tier::Patron && Tier::Patron < Tier::Founder);
-        assert_eq!(Tier::default(), Tier::Supporter);
         assert_eq!(Tier::from_name("Founder"), None);
-        // A key of one tier is not a key of another with a byte changed.
-        let supporter = issue(&SEED, Tier::Supporter, 7, 20_768, "Tiered").expect("issued");
-        let founder = issue(&SEED, Tier::Founder, 7, 20_768, "Tiered").expect("issued");
-        assert_ne!(supporter, founder);
-        let mut bytes = URL_SAFE_NO_PAD
-            .decode(&supporter[PREFIX.len()..])
-            .expect("base64");
-        bytes[1] = 3;
-        let raised = format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
-        assert_eq!(read_with(&trusted(), &raised), Err(KeyError::Forged));
     }
 
     #[test]

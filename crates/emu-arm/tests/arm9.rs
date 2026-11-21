@@ -442,6 +442,7 @@ fn mrc_reads_the_id_registers() {
         0xEE10_0F10, // MRC p15, 0, R0, c0, c0, 0
         0xEE10_1F30, // MRC p15, 0, R1, c0, c0, 1
         0xEE10_2F50, // MRC p15, 0, R2, c0, c0, 2
+        0xEE10_3FB0, // MRC p15, 0, R3, c0, c0, 5: repeats the main ID
         0xEE10_FF10, // MRC p15, 0, R15, c0, c0, 0: flags from bits 28–31
     ];
     let mut cpu = arm9_running(&mut ram, MAIN, &program);
@@ -451,8 +452,9 @@ fn mrc_reads_the_id_registers() {
     assert_eq!(cpu.reg(0), 0x4105_9461);
     assert_eq!(cpu.reg(1), 0x0F0D_2112);
     assert_eq!(cpu.reg(2), 0x0014_0180);
+    assert_eq!(cpu.reg(3), 0x4105_9461);
     assert_eq!(cpu.cpsr() & 0xF000_0000, psr::Z);
-    assert_eq!(next_pc(&cpu), MAIN + 16);
+    assert_eq!(next_pc(&cpu), MAIN + 20);
 }
 
 #[test]
@@ -812,17 +814,6 @@ fn the_arm7_keeps_armv4_behaviour() {
     cpu.step(&mut ram);
     assert_eq!(cpu.mode(), Mode::Undefined);
     assert_eq!(next_pc(&cpu), 0x0004);
-}
-
-#[test]
-fn registers_round_trip_on_the_arm9() {
-    let mut ram = Ram::new();
-    let mut cpu: Arm9 = start(&mut ram, MAIN, false);
-    cpu.set_cpsr(Mode::Irq.bits() | psr::Q);
-    cpu.set_reg(13, 0x0080_3FA0);
-    let registers = cpu.registers();
-    let copy = Arm9::from_registers(&registers, cpu.pipeline(), cpu.fetch_access());
-    assert_eq!(copy.registers(), registers);
 }
 
 #[test]

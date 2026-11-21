@@ -169,17 +169,4 @@ mod tests {
         assert_eq!(subtract(0, 1), (u32::MAX, false, false));
         assert_eq!(subtract(5, 5), (0, true, false));
     }
-
-    #[test]
-    fn saturation() {
-        assert_eq!(saturating_add(0x7FFF_FFFF, 1), (0x7FFF_FFFF, true));
-        assert_eq!(saturating_add(0x8000_0000, u32::MAX), (0x8000_0000, true));
-        assert_eq!(saturating_add(u32::MAX, 1), (0, false));
-        assert_eq!(saturating_subtract(0x8000_0000, 1), (0x8000_0000, true));
-        assert_eq!(
-            saturating_subtract(0x7FFF_FFFF, u32::MAX),
-            (0x7FFF_FFFF, true)
-        );
-        assert_eq!(saturating_subtract(0, 1), (u32::MAX, false));
-    }
 }

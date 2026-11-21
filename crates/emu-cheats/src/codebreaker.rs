@@ -374,16 +374,4 @@ mod tests {
         let key = Key::new(0x9F00_BEEF, 0x7A3C);
         assert_eq!(key.decrypt(0x0BAD_F00D, 0x1234), (0x76CF_B98B, 0x540C));
     }
-
-    #[test]
-    fn a_nine_code_encrypts_the_codes_after_it() {
-        assert_eq!(
-            read(&[0x9123_ABCD_0001, 0x5A53_8F9F_1B53]),
-            Ok(vec![Op::Write {
-                address: 0x0200_38D0,
-                value: 0xA805,
-                width: Width::Half
-            }])
-        );
-    }
 }

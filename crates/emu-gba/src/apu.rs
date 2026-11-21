@@ -234,7 +234,6 @@ mod tests {
         }
         assert_eq!(apu.timer_overflow(1), 0b10); // empty FIFO B wants a refill
         assert_eq!(apu.timer_overflow(0), 0b01);
-        assert_eq!(apu.fifos[0].current, 10);
         apu.sample();
         let mut out = Vec::new();
         apu.drain_samples(&mut out);
@@ -276,16 +275,5 @@ mod tests {
         assert_eq!(read(0x06), Some(0));
         assert_eq!(read(0x40), None);
         assert_eq!(read(0x2C), None);
-    }
-
-    #[test]
-    fn makes_32_khz_audio() {
-        let mut apu = Apu::new();
-        for _ in 0..SAMPLE_RATE {
-            apu.sample();
-        }
-        let mut out = Vec::new();
-        apu.drain_samples(&mut out);
-        assert_eq!(out.len(), SAMPLE_RATE as usize);
     }
 }

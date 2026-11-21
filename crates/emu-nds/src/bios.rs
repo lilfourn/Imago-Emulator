@@ -452,11 +452,9 @@ mod tests {
         let mut ram = Ram::new();
         ram.0[0x100..0x10A].copy_from_slice(b"123456789\0");
         let effects = run(0x0E, &call(Side::Arm7, [0, 0x100, 9, 0]), &mut ram);
-        // Nine bytes round down to four halfwords: "12345678".
-        assert_eq!(
-            effects.registers,
-            [(0, u32::from(crc16(0, b"12345678"))), (3, 0x3837)]
-        );
+        // Nine bytes round down to four halfwords: "12345678", whose
+        // CRC-16/ARC is 3C9Dh.
+        assert_eq!(effects.registers, [(0, 0x3C9D), (3, 0x3837)]);
     }
 
     /// A bus that counts its reads and holds nothing, for calls that

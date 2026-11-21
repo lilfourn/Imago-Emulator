@@ -330,9 +330,13 @@ mod tests {
         assert_eq!(first_picture(b"<html>"), None);
     }
 
+    /// Requests the stand-in wiki has answered.
+    static WIKI_ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     /// The stand-in wiki: no page called "Route 210 Sinnoh", a search that
     /// finds "Route 210", and the picture itself.
     fn wiki_reply(request: &fake::Request) -> (u16, String) {
+        WIKI_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let line = &request.line;
         if line.contains("/picture.png") {
             return (200, "PNG bytes".to_owned());
@@ -368,20 +372,22 @@ mod tests {
         let fetched = store.fetch(&wiki, "wiki:Route_210_Sinnoh").unwrap();
         assert_eq!(fetched.bytes, b"PNG bytes");
         assert_eq!(fetched.page, "https://w/Route_210");
-        // Kept: the same picture comes back with the wiki gone.
-        let gone = Wiki {
-            api: "http://127.0.0.1:9/api.php".to_owned(),
-            ..wiki.clone()
-        };
-        let (image, _) = store.paths(&wiki, "Route 210 Sinnoh");
-        assert!(image.exists());
-        let kept_store = PictureStore { dir: dir.clone() };
+        // Kept: asked again, by a store on the same folder as after a
+        // relaunch, it comes back without asking the wiki.
+        let asked = WIKI_ASKED.load(std::sync::atomic::Ordering::SeqCst);
+        let kept_store = PictureStore::new(&dir);
         assert_eq!(
             kept_store.fetch(&wiki, "wiki:Route 210 Sinnoh").unwrap(),
             fetched
         );
+        assert_eq!(WIKI_ASKED.load(std::sync::atomic::Ordering::SeqCst), asked);
+        // Another wiki's picture of the same title is its own.
+        let other = Wiki {
+            api: "http://127.0.0.1:9/api.php".to_owned(),
+            ..wiki.clone()
+        };
         assert!(matches!(
-            kept_store.fetch(&gone, "wiki:Route_210_Sinnoh"),
+            kept_store.fetch(&other, "wiki:Route_210_Sinnoh"),
             Err(PictureError::Network(_))
         ));
         assert_eq!(

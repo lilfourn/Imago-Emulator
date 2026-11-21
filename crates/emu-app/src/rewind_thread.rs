@@ -187,11 +187,9 @@ mod tests {
     fn records_again_after_stepping_back() {
         let mut rewind = RewindThread::start(1 << 20).expect("the thread starts");
         for frame in 0..5 {
-            assert!(rewind.push_with(|out| out.extend_from_slice(&state(frame, 64))));
-            // Give the worker time, so none is skipped.
-            while rewind.pending > 0 {
-                let reply = rewind.replies.recv().expect("worker running");
-                rewind.take(reply);
+            // Sent again while the worker is busy, so none is skipped.
+            while !rewind.push_with(|out| out.extend_from_slice(&state(frame, 64))) {
+                std::thread::yield_now();
             }
         }
         assert_eq!(pop(&mut rewind), Some(state(4, 64)));

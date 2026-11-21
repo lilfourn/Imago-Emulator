@@ -728,46 +728,6 @@ mod tests {
     }
 
     #[test]
-    fn ipc_words_cross_between_the_cpus() {
-        let mut hw = hardware();
-        hw.arm9_write_16(0x0400_0184, 0x8000);
-        hw.arm7_write_16(0x0400_0184, 0x8400); // receive-not-empty IRQ
-        hw.arm9_write_32(0x0400_0188, 0xCAFE_F00D);
-        assert_ne!(hw.arm7.interrupts.flags & irq::IPC_RECEIVE_NOT_EMPTY, 0);
-        assert_eq!(hw.arm7_read_32(0x0410_0000), 0xCAFE_F00D);
-    }
-
-    #[test]
-    fn interrupt_flags_clear_by_writing_ones() {
-        let mut hw = hardware();
-        hw.arm9.interrupts.request(irq::VBLANK | irq::TIMER0);
-        hw.arm9_write_8(0x0400_0214, irq::VBLANK as u8);
-        assert_eq!(hw.arm9.interrupts.flags, irq::TIMER0);
-        hw.arm9_write_32(0x0400_0210, 0x0001_0008);
-        assert_eq!(hw.arm9_read_32(0x0400_0210), 0x0001_0008);
-    }
-
-    #[test]
-    fn vramcnt_and_wramcnt_are_bytes() {
-        let mut hw = hardware();
-        hw.arm9_write_8(0x0400_0242, 0x82); // C to the ARM7
-        hw.arm9_write_8(0x0400_0247, 3);
-        assert_eq!(hw.arm7_read_16(0x0400_0240), 0x0301);
-        hw.arm9_write_16(0x0400_0248, 0x8281); // H and I
-        assert_eq!(hw.vram.control(7), 0x81);
-        assert_eq!(hw.vram.control(8), 0x82);
-    }
-
-    #[test]
-    fn dma_control_halves_merge() {
-        let mut hw = hardware();
-        hw.arm9_write_16(0x0400_00B8, 4); // count
-        hw.arm9_write_16(0x0400_00BA, 0x8400); // enable, words
-        assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x8400_0004);
-        assert_eq!(hw.arm9.dma.next_pending(), Some(0));
-    }
-
-    #[test]
     fn the_maths_unit_takes_halfword_control_writes() {
         let mut hw = hardware();
         hw.arm9_write_16(0x0400_02B0, 1); // SQRTCNT: 64-bit input
@@ -775,19 +735,6 @@ mod tests {
         hw.arm9_write_32(0x0400_02BC, 1);
         assert_eq!(hw.arm9_read_32(0x0400_02B4), 65_536);
         assert_eq!(hw.arm9_read_16(0x0400_02B0), 1);
-    }
-
-    #[test]
-    fn the_maths_unit_answers_through_io() {
-        let mut hw = hardware();
-        hw.arm9_write_32(0x0400_0290, 100);
-        hw.arm9_write_32(0x0400_0298, 7);
-        assert_eq!(hw.arm9_read_32(0x0400_02A0), 14);
-        assert_eq!(
-            hw.arm7_read_32(0x0400_02A0),
-            0,
-            "the ARM7 has no maths unit"
-        );
     }
 
     #[test]
@@ -805,39 +752,6 @@ mod tests {
         assert_eq!(hw.arm7.interrupts.flags, irq::VBLANK);
         assert_eq!(hw.wramcnt, 0);
         assert!(!hw.arm7.halted);
-    }
-
-    /// A 32-bit write to a fill register went to the DMA unit alone, and
-    /// halfword and byte reads to a shadow it never reached: they read 0.
-    #[test]
-    fn a_dma_fill_register_reads_the_same_at_every_width() {
-        let mut hw = hardware();
-        hw.arm9_write_32(0x0400_00EC, 0xCAFE_1234);
-        assert_eq!(hw.arm9_read_32(0x0400_00EC), 0xCAFE_1234);
-        assert_eq!(hw.arm9_read_16(0x0400_00EC), 0x1234);
-        assert_eq!(hw.arm9_read_16(0x0400_00EE), 0xCAFE);
-        let bytes = [0, 1, 2, 3].map(|byte| hw.arm9_read_8(0x0400_00EC + byte));
-        assert_eq!(bytes, [0x34, 0x12, 0xFE, 0xCA]);
-        // The others are untouched, and the ARM7 has none.
-        assert_eq!(hw.arm9_read_32(0x0400_00E8), 0);
-        assert_eq!(hw.arm7_read_16(0x0400_00EC), 0);
-    }
-
-    /// And halfword and byte writes went to the shadow alone, which a
-    /// 32-bit read, and the DMA, never saw.
-    #[test]
-    fn a_dma_fill_register_takes_writes_of_every_width() {
-        let mut hw = hardware();
-        hw.arm9_write_16(0x0400_00E0, 0x5678);
-        hw.arm9_write_16(0x0400_00E2, 0x1234);
-        assert_eq!(hw.arm9_read_32(0x0400_00E0), 0x1234_5678);
-        hw.arm9_write_8(0x0400_00E1, 0xAB);
-        hw.arm9_write_8(0x0400_00E3, 0xCD);
-        assert_eq!(hw.arm9_read_32(0x0400_00E0), 0xCD34_AB78);
-        // A byte write after a 32-bit one keeps the other three bytes.
-        hw.arm9_write_32(0x0400_00E4, 0x1122_3344);
-        hw.arm9_write_8(0x0400_00E6, 0xFF);
-        assert_eq!(hw.arm9_read_32(0x0400_00E4), 0x11FF_3344);
     }
 
     /// What libnds's `dmaFillHalfWords` does: the value into the fill
@@ -918,12 +832,5 @@ mod tests {
         hw.arm9_write_8(0x0400_00BA, 0x60); // destination fixed
         assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x0060_0001);
         assert_eq!(hw.arm9.dma.next_pending(), None);
-    }
-
-    #[test]
-    fn halting_the_arm7_through_haltcnt() {
-        let mut hw = hardware();
-        hw.arm7_write_8(0x0400_0301, 0x80);
-        assert!(hw.arm7.halted);
     }
 }

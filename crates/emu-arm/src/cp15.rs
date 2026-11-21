@@ -355,15 +355,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn id_registers() {
-        let cp15 = Cp15::default();
-        assert_eq!(cp15.read(0, 0, 0), 0x4105_9461);
-        assert_eq!(cp15.read(0, 0, 1), 0x0F0D_2112);
-        assert_eq!(cp15.read(0, 0, 2), 0x0014_0180);
-        assert_eq!(cp15.read(0, 0, 5), 0x4105_9461);
-    }
-
-    #[test]
     fn control_keeps_fixed_bits() {
         let mut cp15 = Cp15::default();
         assert_eq!(cp15.control(), 0x2078);

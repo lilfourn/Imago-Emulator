@@ -875,12 +875,10 @@ mod tests {
     }
 
     #[test]
-    fn screen_lists_are_made_once_per_size() {
-        let size = ScreenSize::new(512, 384);
-        assert!(std::ptr::eq(screens_of(size), screens_of(size)));
-        assert_eq!(
-            screens_of(ScreenSize::new(640, 480)),
-            [ScreenSize::new(640, 480)]
-        );
+    fn a_game_s_screen_list_is_its_own_size() {
+        let (small, large) = (ScreenSize::new(512, 384), ScreenSize::new(640, 480));
+        assert_eq!(screens_of(small), [small]);
+        assert_eq!(screens_of(large), [large]);
+        assert_eq!(screens_of(small), [small], "not the last size made");
     }
 }

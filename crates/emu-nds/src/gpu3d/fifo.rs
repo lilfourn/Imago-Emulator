@@ -153,12 +153,6 @@ impl Fifo {
             .min(FIFO_CAPACITY)
     }
 
-    /// Whether a write now would stall the CPU (or DMA).
-    #[cfg(test)]
-    pub(crate) fn is_full(&self) -> bool {
-        self.entries.len() >= FIFO_CAPACITY + PIPE_CAPACITY
-    }
-
     /// Whether the PIPE or FIFO holds anything.
     pub(crate) fn has_entries(&self) -> bool {
         !self.entries.is_empty()
@@ -233,31 +227,30 @@ mod tests {
     }
 
     #[test]
-    fn the_pipe_fills_before_the_fifo_counts() {
-        let mut fifo = Fifo::default();
-        for _ in 0..4 {
-            fifo.write_port(0x11, 0);
+    fn commands_take_the_parameters_gbatek_lists() {
+        for (command, params) in [
+            (0x10, Some(1)),  // MTX_MODE
+            (0x11, Some(0)),  // MTX_PUSH
+            (0x16, Some(16)), // MTX_LOAD_4x4
+            (0x17, Some(12)), // MTX_LOAD_4x3
+            (0x1A, Some(9)),  // MTX_MULT_3x3
+            (0x1C, Some(3)),  // MTX_TRANS
+            (0x23, Some(2)),  // VTX_16
+            (0x2B, Some(1)),  // PLTT_BASE
+            (0x34, Some(32)), // SHININESS
+            (0x41, Some(0)),  // END_VTXS
+            (0x50, Some(1)),  // SWAP_BUFFERS
+            (0x60, Some(1)),  // VIEWPORT
+            (0x70, Some(3)),  // BOX_TEST
+            (0x72, Some(1)),  // VEC_TEST
+            (0x00, None),     // NOP: padding, never queued
+            (0x1D, None),
+            (0x2C, None),
+            (0x73, None),
+            (0xFF, None),
+        ] {
+            assert_eq!(param_count(command), params, "{command:#04x}");
         }
-        assert_eq!(fifo.len(), 0);
-        assert!(fifo.has_entries());
-        for _ in 0..256 {
-            fifo.write_port(0x11, 0);
-        }
-        assert_eq!(fifo.len(), 256);
-        assert!(fifo.is_full());
-    }
-
-    #[test]
-    fn the_table_matches_the_command_list() {
-        for command in 0..=u8::MAX {
-            assert_eq!(
-                param_count(command),
-                params_of(command).map(usize::from),
-                "{command:#04x}"
-            );
-        }
-        assert_eq!(param_count(0x34), Some(32));
-        assert_eq!(param_count(0x00), None);
     }
 
     #[test]

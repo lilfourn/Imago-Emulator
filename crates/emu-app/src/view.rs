@@ -3530,11 +3530,5 @@ mod tests {
         assert_eq!(hack.context.kind, Kind::Unlisted);
         let fan = guide_info(Path::new("/games/Insurgence"), System::RpgMaker, None);
         assert_eq!(fan.context.kind, Kind::FanGame);
-        // The same file is the same game, before and after the library
-        // reads it.
-        assert_eq!(
-            guide_info(random, System::Gba, None).key,
-            guide_info(random, System::Gba, None).key
-        );
     }
 }

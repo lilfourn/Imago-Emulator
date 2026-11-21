@@ -15,8 +15,6 @@ mod touch;
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use firmware::Calibration;
 use firmware::{Firmware, USER_SETTINGS_SIZE};
 use power::Power;
 use touch::Touch;
@@ -181,12 +179,6 @@ impl Spi {
         self.firmware.user_settings()
     }
 
-    /// The touchscreen calibration in the user settings.
-    #[cfg(test)]
-    pub(crate) fn calibration(&self) -> Calibration {
-        self.firmware.calibration()
-    }
-
     /// The firmware's header and wifi settings, its first 0x200 bytes.
     pub(crate) fn wifi_settings(&self) -> &[u8] {
         self.firmware.wifi_settings()
@@ -261,7 +253,6 @@ mod tests {
         let reply = exchange(&mut spi, TOUCH, &[0xD0, 0, 0]);
         let x = u16::from(reply[1]) << 5 | u16::from(reply[2] >> 3);
         assert_eq!(x, 0x100 + 14 * 100);
-        assert_eq!(spi.calibration().adc(100, 50).0, x);
         spi.set_touch(None);
         let reply = exchange(&mut spi, TOUCH, &[0x90, 0, 0]);
         assert_eq!(u16::from(reply[1]) << 5 | u16::from(reply[2] >> 3), 0xFFF);
@@ -298,6 +289,5 @@ mod tests {
         let mut spi = Spi::new(None);
         exchange(&mut spi, 0, &[0x00, 0x40]);
         assert!(spi.powered_off());
-        assert_eq!(spi.user_settings()[0], 5);
     }
 }

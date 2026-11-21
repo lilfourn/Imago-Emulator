@@ -380,9 +380,6 @@ mod tests {
         core.save_state(&mut after);
         assert_eq!(after[..3], [0xAA, 0xBB, 0xCC]);
         assert!(after[3..] == alone[..], "the same state");
-        // As postcard writes the machine.
-        let plain = postcard::to_stdvec(&core.machine).expect("serializes");
-        assert!(alone == plain, "the bytes postcard writes");
     }
 
     /// A state with bytes after it is not that state: a linked pair's

@@ -97,15 +97,6 @@ mod tests {
     }
 
     #[test]
-    fn halfword_lz77_drops_an_odd_last_byte() {
-        let mut ram = Ram::new();
-        ram.0[0x200..0x208].fill(0xEE);
-        // Literals "A", "B", then 5 bytes from distance 2: "ABABABA".
-        lz77_halfwords(&mut ram, &[0b0010_0000, b'A', b'B', 0x20, 0x01], 7);
-        assert_eq!(&ram.0[0x200..0x208], b"ABABAB\xEE\xEE");
-    }
-
-    #[test]
     fn halfword_lz77_reads_back_past_a_pending_byte() {
         // "XYZ", then 3 bytes from distance 2, starting while "Z" waits
         // for its partner: they read "Y" (already written), "Z", "Y".

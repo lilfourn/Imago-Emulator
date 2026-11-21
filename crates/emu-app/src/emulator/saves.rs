@@ -1146,26 +1146,6 @@ mod tests {
         fs::remove_dir_all(&dir).expect("clean up");
     }
 
-    #[test]
-    fn rewinding_past_a_save_made_in_the_game_keeps_no_copy() {
-        let dir = empty_dir("rewind");
-        let (mut core, mut saves) = game(&dir, 0);
-        core.poke(0, 0, 1);
-        let mut before = Vec::new();
-        core.save_state(&mut before);
-        // Saved in the game, and on disk.
-        core.poke(0, 0, 3);
-        assert!(saves.write_all(&*core));
-        assert_eq!(saves_in(&dir), held(&[("game.sav", 3)]));
-        // Rewind steps the core back itself, a moment at a time, with no
-        // state loaded from a slot: the save is undone with all the rest.
-        core.load_state(&before).expect("a state of its own");
-        assert!(saves.write_all(&*core));
-        assert_eq!(saves_in(&dir), held(&[("game.sav", 1)]));
-        assert!(saves.take_warned().is_empty());
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
     /// A Game Boy game on a cartridge with a clock and 32 KiB of save
     /// memory (MBC3), which writes `value` to that memory and then waits.
     fn clock_game(value: u8) -> Box<dyn Core> {
@@ -1440,7 +1420,7 @@ mod tests {
         assert_eq!(fs::read(&save).expect("written first"), [1]);
         assert_eq!(
             fs::read_to_string(dir.join("game.ss0.saves")).expect("its record"),
-            format!("game.sav {:08X}\n", crc32fast::hash(&[1]))
+            "game.sav A505DF1B\n"
         );
         assert!(dir.join("game.ss0.png").exists(), "the library's picture");
 

@@ -581,14 +581,8 @@ mod tests {
         assert_eq!(adler32(b""), 1);
         // RFC 1950's own example is not given; Wikipedia's is.
         assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
-        let long = vec![0xFF; 100_000];
-        let mut a: u64 = 1;
-        let mut b: u64 = 0;
-        for &byte in &long {
-            a = (a + u64::from(byte)) % 65_521;
-            b = (b + a) % 65_521;
-        }
-        assert_eq!(u64::from(adler32(&long)), b << 16 | a);
+        // Long enough that the sums wrap many times over: zlib's value.
+        assert_eq!(adler32(&[0xFF; 100_000]), 0x149A_302C);
     }
 
     #[test]

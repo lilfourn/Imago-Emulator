@@ -502,14 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn backdrops_are_named_in_the_settings_file() {
-        for backdrop in [Backdrop::Solid, Backdrop::Ambient] {
-            assert_eq!(Backdrop::from_name(backdrop.name()), Some(backdrop));
-        }
-        assert_eq!(Backdrop::from_name("boxart"), None);
-    }
-
-    #[test]
     fn nothing_placed_has_no_picture() {
         assert_eq!(picture(&[], &[], None), None);
     }

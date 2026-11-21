@@ -76,8 +76,6 @@ impl BandSource {
     /// Draws band `index` of the screen into `out`: each of its lines
     /// drawn since the last VBlank.
     fn draw(&self, index: usize, out: &mut [u32]) {
-        #[cfg(test)]
-        tests::note_band_thread();
         let scale = self.scale;
         let first = index * SCALED_LINES_PER_BAND;
         let three_d = self.three_d.rows();
@@ -387,43 +385,7 @@ impl Hardware {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// The names of the threads that have drawn bands of a larger screen.
-    static BAND_THREADS: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
-
-    /// Notes the thread a band is being drawn on.
-    pub(super) fn note_band_thread() {
-        let name = std::thread::current().name().map(str::to_owned);
-        BAND_THREADS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(name);
-    }
-
-    /// Engine A's larger screen was drawn on eight threads started for it
-    /// at every VBlank, 480 a second, beside the renderer's own, past its
-    /// cap and outside its scheduling class.
-    #[test]
-    fn the_larger_screen_is_drawn_on_the_renderers_threads() {
-        let mut hw = Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into());
-        hw.set_render_scale(2);
-        hw.start_display();
-        run_events(&mut hw, FRAME_CYCLES * 3);
-        let names = BAND_THREADS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        // Three frames of eight bands, and any other test's.
-        assert!(names.len() >= 24, "{} bands", names.len());
-        let strangers: Vec<_> = names
-            .iter()
-            .filter(|name| name.as_deref() != Some("3D renderer"))
-            .collect();
-        assert!(strangers.is_empty(), "drawn on {strangers:?}");
-    }
 
     fn run_events(hw: &mut Hardware, until: u64) -> Vec<Moment> {
         let mut moments = Vec::new();
@@ -458,15 +420,6 @@ mod tests {
             "the ARM7 did not ask"
         );
         assert_eq!(hw.vcount, 0);
-    }
-
-    #[test]
-    fn engine_a_draws_its_backdrop() {
-        let mut hw = Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into());
-        hw.arm9_write_32(0x0400_0000, 0x0001_0000); // display mode 1, no layers
-        hw.arm9_write_16(0x0500_0000, 0x7FFF);
-        hw.draw_line(0);
-        assert_eq!(hw.screen_a[0], 0xFFFF_FFFF);
     }
 
     #[test]

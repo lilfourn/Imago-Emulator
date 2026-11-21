@@ -1705,7 +1705,6 @@ dependencies = [
  "emu-psg",
  "emu-state",
  "png 0.18.1",
- "postcard",
  "serde",
 ]
 

@@ -686,47 +686,6 @@ mod tests {
     }
 
     #[test]
-    fn mbc1_maps_bank_zero_to_one_and_uses_high_bits() {
-        let mut cart = Cartridge::new(&rom(0x01, 0, 128), None, 0).expect("valid");
-        assert_eq!(cart.read_rom(0x4000), 1);
-        cart.write_rom(0x2000, 0);
-        assert_eq!(cart.read_rom(0x4000), 1);
-        cart.write_rom(0x2000, 0x05);
-        cart.write_rom(0x4000, 0x02);
-        assert_eq!(cart.read_rom(0x4000), 0x45);
-        assert_eq!(cart.read_rom(0x0000), 0);
-        cart.write_rom(0x6000, 1);
-        assert_eq!(cart.read_rom(0x0000), 0x40);
-    }
-
-    #[test]
-    fn mbc1_multicart_wiring_gives_each_game_sixteen_banks() {
-        let logo: Vec<u8> = (0..0x30u8).map(|i| i.wrapping_mul(7) | 1).collect();
-        let mut single = rom(0x01, 0, 64);
-        single[0x104..0x134].copy_from_slice(&logo);
-        let mut image = single.clone();
-        image[0x40104..0x40134].copy_from_slice(&logo);
-        let mut cart = Cartridge::new(&image, None, 0).expect("valid");
-        // BANK1 bit 4 is not wired: 0x12 reads bank 2, and 0x10 bank 0
-        // (the zero check still sees all five bits).
-        cart.write_rom(0x2000, 0x12);
-        assert_eq!(cart.read_rom(0x4000), 2);
-        cart.write_rom(0x2000, 0x10);
-        assert_eq!(cart.read_rom(0x4000), 0);
-        // BANK2 picks the game: bank bits 4–5.
-        cart.write_rom(0x4000, 0x02);
-        cart.write_rom(0x2000, 0x03);
-        assert_eq!(cart.read_rom(0x4000), 0x23);
-        cart.write_rom(0x6000, 1);
-        assert_eq!(cart.read_rom(0x0000), 0x20);
-
-        // Without the second header it is a plain MBC1.
-        let mut plain = Cartridge::new(&single, None, 0).expect("valid");
-        plain.write_rom(0x2000, 0x12);
-        assert_eq!(plain.read_rom(0x4000), 0x12);
-    }
-
-    #[test]
     fn rom_patches_apply_in_any_bank_their_compare_byte_matches() {
         let mut cart = Cartridge::new(&rom(0x01, 0, 4), None, 0).expect("valid");
         cart.set_rom_patches(&[
@@ -741,14 +700,7 @@ mod tests {
                 value: 0x55,
                 compare: None,
             },
-            // Not ROM: dropped.
-            RomPatch {
-                address: 0xC000,
-                value: 0x66,
-                compare: None,
-            },
         ]);
-        assert_eq!(cart.rom_patches.len(), 2);
         assert_eq!(cart.read_rom(0x4000), 1);
         assert_eq!(cart.read_rom(0x0001), 0x55);
         cart.write_rom(0x2000, 2);

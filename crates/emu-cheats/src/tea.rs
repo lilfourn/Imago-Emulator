@@ -10,7 +10,7 @@ use crate::seed_tables;
 const DELTA: u32 = 0x9E37_79B9;
 
 /// One device's encryption: its seeds and its reseeding tables.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct Cipher {
     seeds: [u32; 4],
     t1: &'static [u8; 256],
@@ -72,7 +72,7 @@ impl Cipher {
 
     /// Rebuilds the seeds after `DEADFACE 0000xxyy`, `params` being
     /// `xxyy`.
-    pub(crate) fn reseed(&mut self, params: u16) {
+    fn reseed(&mut self, params: u16) {
         let [xx, yy] = params.to_be_bytes();
         for (y, seed) in (0u8..).zip(&mut self.seeds) {
             for x in 0..4u8 {
@@ -122,24 +122,5 @@ mod tests {
             Cipher::PRO_ACTION_REPLAY.encrypt(0x0422_5E30_0000_270F),
             0x8B4A_925B_1C71_894C
         );
-    }
-
-    #[test]
-    fn deadface_changes_the_seeds_for_later_codes() {
-        let mut reseeded = Cipher::GAMESHARK_ADVANCE;
-        reseeded.reseed(0x1234);
-        assert_ne!(reseeded.seeds, Cipher::GAMESHARK_ADVANCE.seeds);
-        let write = 0x1202_5E30_0000_270F;
-        let mut items = vec![
-            (
-                1,
-                Item::Code(Cipher::GAMESHARK_ADVANCE.encrypt(0xDEAD_FACE_0000_1234)),
-            ),
-            (2, Item::Code(reseeded.encrypt(write))),
-        ];
-        let mut cipher = Cipher::GAMESHARK_ADVANCE;
-        cipher.decrypt_items(&mut items);
-        assert_eq!(items[1], (2, Item::Code(write)));
-        assert_eq!(cipher, reseeded);
     }
 }

@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn the_key_and_body_never_reach_the_command_line() {
+    fn the_key_title_and_question_reach_openrouter() {
         let endpoints = fake::stream(
             |request| {
                 let fine = request.header("authorization") == Some("Bearer sk-or-test")

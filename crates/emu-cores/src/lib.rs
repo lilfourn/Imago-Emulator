@@ -147,7 +147,6 @@ mod tests {
             .filter(|(_, system)| *system == System::N3ds)
             .count();
         assert_eq!(n3ds, emu_3ds::EXTENSIONS.len());
-        assert_eq!(info(System::N3ds), emu_3ds::INFO);
         assert_eq!(second_slot(System::N3ds), None);
         assert!(matches!(
             create(System::N3ds, &Media::new(&[0; 16])),

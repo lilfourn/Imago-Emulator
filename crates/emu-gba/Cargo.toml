@@ -17,7 +17,7 @@ serde.workspace = true
 
 [dev-dependencies]
 png.workspace = true
-# States are written with emu-state; tests compare them with postcard's own.
+# Tests serialize the bus on its own, as emu-state would.
 postcard.workspace = true
 
 [lints]

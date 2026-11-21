@@ -192,11 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn unclear_gba_shapes_ask_for_a_tag() {
-        let lines = ["82025E30 270F 82025E32 0001 82025E34 0002 82025E36 0003"];
-        let (line, message) = guess_lines(System::Gba, &lines).expect_err("48 digits");
-        assert_eq!(line, 1);
-        assert!(message.contains("device tag"), "{message}");
+    fn unreadable_gba_shapes_are_errors() {
         assert!(guess_lines(System::Gba, &["1234"]).is_err());
         assert_eq!(
             guess_lines(System::Gba, &["", "x"]).expect_err("not hex").0,

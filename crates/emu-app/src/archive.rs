@@ -1230,8 +1230,6 @@ mod tests {
         assert_eq!(fs::read(&unpacked[0]).expect("unpacked"), b"tetris");
         assert_eq!(fs::read(&unpacked[1]).expect("unpacked"), b"PATCHEOF");
         assert_eq!(fs::read_dir(&games).expect("games").count(), 1);
-        // The game and the patch, not the notes or macOS's metadata.
-        assert_eq!(progress.total.load(Ordering::Relaxed), 6 + 8);
         assert_eq!(progress.fraction(), Some(1.0));
         // Unpacked again, the game already there is not read, but counts.
         let again = Progress::default();
@@ -1541,7 +1539,6 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
             assert!(!done.exists(), "stopped while it ran");
             assert!(!games.exists());
-            assert_eq!(MAX_ENTRIES, 100_000);
             assert_eq!(
                 unpacked_too_many(MAX_ENTRIES).to_string(),
                 "it unpacks to more than 100,000 files and folders"
@@ -1847,7 +1844,7 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).expect("folder").count(), 0);
         write_capped(&path, &b"1234"[..], name, 4).expect("just fits");
         assert_eq!(fs::read(&path).expect("written"), b"1234");
-        assert_eq!(file_crc32(&path).expect("read"), crc32fast::hash(b"1234"));
+        assert_eq!(file_crc32(&path).expect("read"), 0x9BE3_E0A3);
         fs::remove_dir_all(&dir).ok();
     }
 

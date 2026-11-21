@@ -303,9 +303,8 @@ mod tests {
     const W: u32 = rgb(0xFF, 0xFF, 0xFF);
     const K: u32 = rgb(0, 0, 0);
 
-    /// White shaded by `weight` 256ths.
-    fn grey(weight: u16) -> u32 {
-        let level = u8::try_from((255 * u32::from(weight)) >> 8).expect("at most 255");
+    /// A grey of `level` in each channel.
+    fn grey(level: u8) -> u32 {
         rgb(level, level, level)
     }
 
@@ -328,10 +327,11 @@ mod tests {
         let source = frame(2, 1, &[W, K]);
         let (out, factor) = Filter::LcdGrid.apply(&source, 3, 1, Rotation::Upright);
         assert_eq!((out.size(), factor), (ScreenSize::new(6, 3), 1));
-        let line = grid_line_weight(3);
+        // At 3x a grid line leaves white 62% as bright, and the corner
+        // where two cross 39%.
         let pixels = out.pixels();
-        assert_eq!(&pixels[..3], [W, W, grey(line)]);
-        assert_eq!(pixels[2 * 6 + 2], grey(line * line / 256), "the corner");
+        assert_eq!(&pixels[..3], [W, W, grey(0x9F)]);
+        assert_eq!(pixels[2 * 6 + 2], grey(0x63), "the corner");
         assert!(pixels[3..6].iter().all(|pixel| *pixel == K), "black stays");
     }
 
@@ -352,7 +352,8 @@ mod tests {
         let source = frame(1, 2, &[W, W]);
         let (out, _) = Filter::Scanlines.apply(&source, 3, 1, Rotation::Upright);
         let column: Vec<u32> = out.rows().map(|row| row[0]).collect();
-        let dark = grey(SCANLINE_GAP);
+        // The dark part of a scanline: 55% as bright.
+        let dark = grey(0x8B);
         assert_eq!(column, [W, W, dark, W, W, dark]);
         // Turned a quarter, rows run down the window: the lines do too.
         let (out, _) = Filter::Scanlines.apply(&source, 3, 1, Rotation::Clockwise);
@@ -363,10 +364,10 @@ mod tests {
     #[test]
     fn masks_follow_console_pixels_on_upscaled_frames() {
         // A 2x 3D frame drawn 2x: each console pixel is four device pixels
-        // wide, and only its last column is a grid line.
+        // wide, and only its last column is a grid line, darker than at 3x.
         let source = frame(2, 2, &[W; 4]);
         let (out, _) = Filter::LcdGrid.apply(&source, 2, 2, Rotation::Upright);
-        let line = grey(grid_line_weight(4));
+        let line = grey(0x8B);
         assert_eq!(out.rows().next().expect("a row"), [W, W, W, line]);
     }
 

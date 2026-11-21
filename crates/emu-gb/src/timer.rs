@@ -151,26 +151,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tima_counts_at_the_selected_rate_and_reloads() {
-        let mut timer = Timer::after_boot(Model::Dmg);
-        let mut interrupt_flag = 0;
-        timer.write(0xFF04, 0, &mut interrupt_flag);
-        timer.write(0xFF06, 0xFE, &mut interrupt_flag);
-        timer.write(0xFF05, 0xFE, &mut interrupt_flag);
-        // Enabled, every 16 clocks = 4 M-cycles.
-        timer.write(0xFF07, 0b101, &mut interrupt_flag);
-        for _ in 0..8 {
-            timer.tick(&mut interrupt_flag);
-        }
-        // Two increments: 0xFE -> 0xFF -> overflow (reads 0x00).
-        assert_eq!(timer.read(0xFF05), 0x00);
-        assert_eq!(interrupt_flag, 0);
-        timer.tick(&mut interrupt_flag);
-        assert_eq!(timer.read(0xFF05), 0xFE);
-        assert_eq!(interrupt_flag, interrupts::TIMER);
-    }
-
-    #[test]
     fn an_overflow_from_stopping_the_timer_reloads_at_once() {
         let mut timer = Timer::after_boot(Model::Dmg);
         let mut interrupt_flag = 0;

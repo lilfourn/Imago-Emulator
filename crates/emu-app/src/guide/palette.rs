@@ -399,8 +399,10 @@ mod tests {
         let accent = to_oklch(palette.accent)[2];
         let danger = to_oklch(palette.danger)[2];
         assert!(hue_distance(accent, danger) >= 20.0, "{accent} vs {danger}");
+        // Any other game's errors are Imago's coral.
         let green = Palette::from_picture(&flat([40.0, 160.0, 60.0], 64)).expect("green");
-        assert_eq!(green.danger, readable(CORAL, green.glass, MUTED_CONTRAST));
+        let (danger, coral) = (to_oklch(green.danger)[2], to_oklch(CORAL)[2]);
+        assert!(hue_distance(danger, coral) < 5.0, "{danger} vs {coral}");
     }
 
     #[test]

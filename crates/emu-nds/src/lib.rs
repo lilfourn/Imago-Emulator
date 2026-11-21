@@ -940,12 +940,14 @@ mod tests {
         // calls are still emulated, by the emulated BIOS's own images.
         with_dumps.load_state(&emulated_state).expect("loads");
         assert_eq!(quotient(&mut with_dumps), 14);
-        // The machine is still one whose calls are emulated, as a state
-        // saved from it will say.
-        assert!(with_dumps.machine.hle_bios);
+        // A state saved from it says so, and loads where there are none.
+        let mut resaved = Vec::new();
+        with_dumps.save_state(&mut resaved);
+        emulating
+            .load_state(&resaved)
+            .expect("an emulated BIOS's state");
         // A reset goes back to the session's BIOS: the dumps.
         with_dumps.reset();
-        assert!(!with_dumps.machine.hle_bios);
         assert_eq!(quotient(&mut with_dumps), 100);
         // And its own states still load.
         with_dumps.load_state(&dump_state).expect("loads");

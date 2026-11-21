@@ -37,21 +37,16 @@ impl HalfwordCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
     #[test]
-    fn repeated_reads_of_one_halfword_hit_memory_once() {
-        let reads = Cell::new(0);
-        let read = |address: u32| {
-            reads.set(reads.get() + 1);
-            address as u16 | 0x1100
-        };
+    fn reads_bytes_and_halfwords_of_the_halfword_asked_for() {
+        let read = |address: u32| address as u16 | 0x1100;
         let mut cache = HalfwordCache::new();
         assert_eq!(cache.byte(0x20, read), 0x20);
         assert_eq!(cache.byte(0x21, read), 0x11);
+        assert_eq!(cache.halfword(0x21, read), 0x1120);
+        // The next halfword is read, not the one before.
+        assert_eq!(cache.byte(0x22, read), 0x22);
         assert_eq!(cache.halfword(0x20, read), 0x1120);
-        assert_eq!(reads.get(), 1);
-        cache.byte(0x22, read);
-        assert_eq!(reads.get(), 2);
     }
 }

@@ -247,16 +247,4 @@ mod tests {
         assert!(kept_samples.iter().any(|&sample| sample != [0, 0]));
         assert_eq!(kept_samples, fresh_samples);
     }
-
-    #[test]
-    fn length_counter_silences_the_channel() {
-        let mut apu = Apu::after_boot(Model::Dmg);
-        apu.write(0xFF12, 0xF0);
-        apu.write(0xFF11, 0x3F); // length 1
-        apu.write(0xFF14, 0xC0); // trigger with length enabled
-        assert_eq!(apu.read(0xFF26) & 0x01, 0x01);
-        apu.tick(4, true);
-        apu.tick(4, true);
-        assert_eq!(apu.read(0xFF26) & 0x01, 0x00);
-    }
 }

@@ -214,14 +214,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_and_load_mode_windows() {
-        let off = Window::new(0x0000_0020, false, false);
-        assert!(!off.contains(0) && !off.readable(0));
-        let load = Window::new(0x0000_0020, true, true);
-        assert!(load.contains(0) && !load.readable(0));
-    }
-
-    #[test]
     fn block_mirrors_and_aligns() {
         let mut block = Block::new(DTCM_SIZE);
         block.write_32(0x0000_0102, 0x4433_2211);

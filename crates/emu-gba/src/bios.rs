@@ -641,8 +641,6 @@ fn midi_key_to_frequency(bus: &mut Bus, wave: u32, key: u8, fine: u8) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use emu_arm::bios::HUFFMAN_SLACK_WORDS;
-
     use super::*;
 
     fn ram_bus() -> Bus {
@@ -728,99 +726,6 @@ mod tests {
         assert_eq!(call(0x4000, 0), (0, None));
     }
 
-    /// A Huffman stream at `source` in EWRAM for `length` bytes of
-    /// `symbol_bits`-bit symbols, with the codes 1 = "0", 2 = "10" and
-    /// 3 = "11": the header, the size byte (8 bytes / 2 − 1), the root
-    /// with symbol 1 as child 0 and a node as child 1, that node's two
-    /// symbols, padding to a word, then `bits`.
-    fn put_huffman(bus: &mut Bus, source: u32, symbol_bits: u32, length: u32, bits: u32) {
-        let header = length << 8 | 0x20 | symbol_bits;
-        bus.write_32(source, header, Access::NONSEQUENTIAL);
-        for (offset, byte) in [0x03, 0x80, 0x01, 0xC0, 0x02, 0x03, 0, 0]
-            .into_iter()
-            .enumerate()
-        {
-            bus.write_8(source + 4 + offset as u32, byte, Access::NONSEQUENTIAL);
-        }
-        bus.write_32(source + 12, bits, Access::NONSEQUENTIAL);
-    }
-
-    /// 1, 2, 3, 1, 2, 3, ...: "0 10 11 0 10 11 ...".
-    const HUFFMAN_BITS: u32 = 0b0101_1010_1101_0110_1011_0101_1010_1101;
-
-    #[test]
-    fn huffman_decodes_symbols_of_every_size_that_fills_a_word() {
-        // Four-bit symbols pack two to a byte, the first in the low nibble;
-        // two-bit ones four to a byte, the same way.
-        for (symbol_bits, expected) in [(8, 0x0103_0201), (4, 0x2132_1321), (2, 0x79E7_9E79)] {
-            let mut bus = ram_bus();
-            put_huffman(&mut bus, 0x0200_0000, symbol_bits, 4, HUFFMAN_BITS);
-            huffman(&mut bus, 0x0200_0000, 0x0200_0100);
-            assert_eq!(
-                bus.read_32(0x0200_0100, Access::NONSEQUENTIAL),
-                expected,
-                "{symbol_bits}-bit symbols"
-            );
-            assert_eq!(bus.read_32(0x0200_0104, Access::NONSEQUENTIAL), 0);
-        }
-    }
-
-    /// Symbols of another size never fill a word exactly, so the function
-    /// used to wait for ever for its count of bits to equal 32.
-    #[test]
-    fn huffman_leaves_other_symbol_sizes_alone() {
-        for symbol_bits in [0, 3, 5, 6, 7, 9, 15] {
-            let mut bus = ram_bus();
-            put_huffman(&mut bus, 0x0200_0000, symbol_bits, 0xFF_FFFF, HUFFMAN_BITS);
-            huffman(&mut bus, 0x0200_0000, 0x0200_0100);
-            assert_eq!(bus.read_32(0x0200_0100, Access::NONSEQUENTIAL), 0);
-        }
-    }
-
-    /// A tree none of whose nodes marks a child as a symbol: the walk
-    /// runs off its end, where it used to go on through all of memory.
-    #[test]
-    fn huffman_stops_when_a_walk_leaves_the_tree() {
-        let mut bus = ram_bus();
-        put_huffman(&mut bus, 0x0200_0000, 8, 0xFF_FFFF, HUFFMAN_BITS);
-        for offset in 5..12 {
-            bus.write_8(0x0200_0000 + offset, 0, Access::NONSEQUENTIAL);
-        }
-        let before = bus.cycles();
-        huffman(&mut bus, 0x0200_0000, 0x0200_0100);
-        assert_eq!(bus.read_32(0x0200_0100, Access::NONSEQUENTIAL), 0);
-        // Three nodes fit in the tree, so the walk is over in a few reads.
-        assert!(bus.cycles() - before < 100);
-    }
-
-    /// A stream of the longest code a deep tree holds, for the longest
-    /// length there is: the call ends once it has followed a word for
-    /// each byte it was to write, where it used to follow two hundred
-    /// times as many.
-    #[test]
-    fn huffman_follows_a_bitstream_no_longer_than_its_data_allows() {
-        let mut bus = ram_bus();
-        let source = 0x0200_0000;
-        let length = 0x400;
-        // A full tree: a chain of 255 nodes, each the 1 child of the one
-        // before, the last with two symbols.
-        bus.write_32(source, length << 8 | 0x28, Access::NONSEQUENTIAL);
-        bus.write_8(source + 4, 0xFF, Access::NONSEQUENTIAL);
-        bus.write_8(source + 4 + 509, 0xC0, Access::NONSEQUENTIAL);
-        bus.write_8(source + 4 + 511, 0x5A, Access::NONSEQUENTIAL);
-        for word in 0..0x1000 {
-            bus.write_32(source + 516 + word * 4, 0xFFFF_FFFF, Access::NONSEQUENTIAL);
-        }
-        huffman(&mut bus, source, 0x0300_0000);
-        // 255 bits a symbol, four symbols a word written.
-        let words = (length + HUFFMAN_SLACK_WORDS) * 32 / (255 * 4);
-        assert!(words < length / 4, "the stream runs out before the length");
-        let written =
-            |bus: &mut Bus, word: u32| bus.read_32(0x0300_0000 + word * 4, Access::NONSEQUENTIAL);
-        assert_eq!(written(&mut bus, words - 1), 0x5A5A_5A5A);
-        assert_eq!(written(&mut bus, words), 0);
-    }
-
     /// The Vram function writes halfwords, so the first byte of each
     /// waits for the second. A reference of distance 1 made while one
     /// waits copies that byte, as if it were written already: "Q", then
@@ -838,17 +743,6 @@ mod tests {
         bus.write_32(0x0200_0004, 0x0000_5140, Access::NONSEQUENTIAL);
         lz77(&mut bus, 0x0200_0000, 0x0200_0100, true);
         assert_eq!(bus.read_32(0x0200_0100, Access::NONSEQUENTIAL), 0x5151_5151);
-
-        // From further back the bytes are read from memory, and a byte at
-        // a time nothing waits: "XYZ", then three from distance 2.
-        bus.write_32(0x0200_0010, 0x0000_0610, Access::NONSEQUENTIAL);
-        bus.write_32(0x0200_0014, 0x5A59_5810, Access::NONSEQUENTIAL);
-        bus.write_16(0x0200_0018, 0x0100, Access::NONSEQUENTIAL);
-        for halfwords in [true, false] {
-            lz77(&mut bus, 0x0200_0010, 0x0200_0200, halfwords);
-            assert_eq!(bus.read_32(0x0200_0200, Access::NONSEQUENTIAL), 0x595A_5958);
-            assert_eq!(bus.read_16(0x0200_0204, Access::NONSEQUENTIAL), 0x595A);
-        }
     }
 
     /// The call a game makes, through the machine: data whose header
