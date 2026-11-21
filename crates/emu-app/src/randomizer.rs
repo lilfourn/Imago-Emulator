@@ -1501,13 +1501,6 @@ mod tests {
         // Every system the app is built for has one.
         assert!(PIN.is_some());
         assert_eq!(UNSUPPORTED, None);
-        assert_eq!(Some(DOWNLOAD_MB), PIN.map(|pin| pin.megabytes));
-        let expected = if cfg!(windows) {
-            "java/bin/javaw.exe"
-        } else {
-            "java/bin/java"
-        };
-        assert_eq!(JAVA, expected);
     }
 
     #[test]

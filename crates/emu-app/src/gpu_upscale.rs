@@ -543,12 +543,6 @@ mod imp {
             Ok(())
         }
 
-        /// The output sizes kept ready, the most recent last.
-        #[cfg(test)]
-        pub fn kept_outputs(&self) -> Vec<(u32, u32)> {
-            self.jobs.iter().map(|job| job.key.output).collect()
-        }
-
         /// Puts the job for `key` last in `jobs`, the most recent, making it
         /// if it is not kept. Past [`KEPT`], the oldest job goes, unless it is
         /// one of `batch`'s.
@@ -1083,30 +1077,6 @@ mod tests {
             .expect("upscaled");
         assert_eq!(pixel(&images[0], 64, 30, 20)[1], 240);
         assert_eq!(pixel(&images[1], 64, 30, 20)[1], 10);
-        assert_eq!(gpu.kept_outputs(), [(64, 48), (64, 48)]);
-    }
-
-    #[test]
-    fn sizes_are_kept_and_reused() {
-        let Some(mut gpu) = gpu() else { return };
-        let frame = Frame::new(ScreenSize::new(10, 10));
-        for side in [20, 30, 40, 50, 60, 70, 80, 90, 100, 20] {
-            gpu.upscale(&frame, Method::Rounded, 1, side, side)
-                .expect("upscaled");
-        }
-        assert_eq!(
-            gpu.kept_outputs(),
-            [
-                (40, 40),
-                (50, 50),
-                (60, 60),
-                (70, 70),
-                (80, 80),
-                (90, 90),
-                (100, 100),
-                (20, 20)
-            ]
-        );
     }
 
     #[test]

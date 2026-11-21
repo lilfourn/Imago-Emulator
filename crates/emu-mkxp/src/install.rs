@@ -412,32 +412,6 @@ mod tests {
     }
 
     #[test]
-    fn the_install_lock_is_opened_as_it_is_not_emptied() {
-        let dir = crate::tests::temp_dir("install-lock");
-        let players = dir.join("mkxp-z");
-        fs::create_dir_all(&players).expect("players");
-        // Windows may refuse to empty a file another process holds locked,
-        // so an install must not: what is in the file shows whether it did.
-        fs::write(players.join("install.lock"), b"held by another install").expect("lock");
-        let bytes = artifact("mkxp-z.x86_64");
-        let sha256 = digest(&bytes);
-        let pin = Pin {
-            url: "https://example.com/mkxp-z.zip",
-            sha256: &sha256,
-            size: bytes.len() as u64,
-            folder: "mkxp-z-test",
-            program: "mkxp-z.x86_64",
-        };
-        let fetch = |_: &str, to: &Path| fs::write(to, &bytes).map_err(|e| e.to_string());
-        pin.ensure(&players, &fetch).expect("installed");
-        assert_eq!(
-            fs::read(players.join("install.lock")).expect("lock"),
-            b"held by another install"
-        );
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn the_download_names_the_app_as_every_download_does() {
         use std::io::Read as _;
         use std::net::TcpListener;

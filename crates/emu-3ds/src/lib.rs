@@ -629,27 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn a_games_save_data_is_its_titles_folder_on_the_sd_card() {
-        let root = std::env::temp_dir().join(format!("emu-3ds-save-data-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let ids = root.join("Azahar/sdmc/Nintendo 3DS/0000/1111");
-        let mine = ids.join("title/00040000/0011c400/data/00000001");
-        let other = ids.join("title/00040000/00055d00/data/00000001");
-        let content = ids.join("title/00040000/0011c400/content");
-        for folder in [&mine, &other, &content] {
-            std::fs::create_dir_all(folder).unwrap();
-            std::fs::write(folder.join("main"), b"save").unwrap();
-        }
-        let saves = SaveData {
-            sd: root.join("Azahar/sdmc/Nintendo 3DS"),
-            folders: vec![PathBuf::from("title/00040000/0011c400/data")],
-        };
-        assert_eq!(saves.files(), [mine.join("main")]);
-        assert!(SaveData::default().files().is_empty());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
     fn a_game_with_a_console_of_its_own_plays_on_it_with_a_copy_of_its_saves() {
         let root = std::env::temp_dir().join(format!("emu-3ds-own-console-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -736,8 +715,14 @@ mod tests {
         let ids = data.join("Azahar/sdmc/Nintendo 3DS/0000/1111");
         let save = ids.join("title/00040000/00123400/data/00000001/main");
         let extdata = ids.join("extdata/00000000/000123AB/user/progress");
-        let other = ids.join("extdata/00000000/00055D00/user/progress");
-        for file in [&save, &extdata, &other] {
+        // Another game's extdata and save data, and the title's installed
+        // files, which are not saves.
+        let others = [
+            ids.join("extdata/00000000/00055D00/user/progress"),
+            ids.join("title/00040000/00055d00/data/00000001/main"),
+            ids.join("title/00040000/00123400/content/00000000.app"),
+        ];
+        for file in [&save, &extdata].into_iter().chain(&others) {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, b"save").unwrap();
         }
@@ -757,6 +742,12 @@ mod tests {
             SaveData::of(&encrypted, &data).files().len(),
             1,
             "its extended header can't be read"
+        );
+        // A file whose headers can't be read has no title ID, so no saves.
+        assert!(
+            SaveData::of(&root.join("missing.cxi"), &data)
+                .files()
+                .is_empty()
         );
         std::fs::remove_dir_all(&root).unwrap();
     }

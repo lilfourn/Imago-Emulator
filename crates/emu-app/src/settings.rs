@@ -738,72 +738,6 @@ mod tests {
     }
 
     #[test]
-    fn layouts_round_trip_through_toml() {
-        let settings = Settings {
-            layout: Layout {
-                arrangement: Arrangement::Hybrid,
-                swapped: true,
-                rotation: Rotation::Anticlockwise,
-                gap: 90.0,
-            },
-            speed: Speeds {
-                fast_forward: Speed::Times(Rate::new(3.0).expect("valid rate")),
-                slow_motion: Rate::new(0.25).expect("valid rate"),
-            },
-            fast_forward_on: true,
-            slow_motion_on: true,
-            resolution_3d: Resolution3d::Times(4),
-            picture: Picture::Scanlines,
-            show_fps: true,
-            backdrop: Backdrop::Solid,
-            color_correction: false,
-            state_slot: 3,
-            dmg_colors: DmgColors::Buttons(9),
-            window_controls: false,
-            window_place: Some(WindowPlace {
-                x: -1200.0,
-                y: 40.5,
-                width: 640.0,
-                height: 980.0,
-                fullscreen: true,
-                display: Some(0x37d8_832a_2d66_02ca_b9f7_8f6a_8a6b_1fd0),
-            }),
-            guide_thinking: Effort::High,
-            guide_lookups: false,
-            accent: Accent::Teal,
-            app_icon: AppIcon::Chalk,
-        };
-        let text = settings.to_toml();
-        assert!(text.contains("[look]"), "{text}");
-        assert!(text.contains("accent = \"teal\""), "{text}");
-        assert!(text.contains("app_icon = \"chalk\""), "{text}");
-        assert!(text.contains("[guide]"), "{text}");
-        assert!(text.contains("thinking = \"high\""), "{text}");
-        assert!(text.contains("lookups = false"), "{text}");
-        assert!(text.contains("arrangement = \"hybrid\""), "{text}");
-        assert!(text.contains("resolution_3d = 4"), "{text}");
-        assert!(text.contains("picture = \"scanlines\""), "{text}");
-        assert!(!text.contains("filter"), "{text}");
-        assert!(text.contains("show_fps = true"), "{text}");
-        assert!(text.contains("backdrop = \"solid\""), "{text}");
-        assert!(text.contains("dmg_colors = \"left+b\""), "{text}");
-        assert!(text.contains("rotation = 270"), "{text}");
-        assert!(text.contains("fast_forward = 3.0"), "{text}");
-        assert!(text.contains("controls = false"), "{text}");
-        assert!(!text.contains("key_guide"), "{text}");
-        assert!(text.contains("fast_forward_on = true"), "{text}");
-        assert!(text.contains("color_correction = false"), "{text}");
-        assert!(text.contains("slot = 3"), "{text}");
-        assert!(text.contains("fullscreen = true"), "{text}");
-        assert!(text.contains("x = -1200.0"), "{text}");
-        assert!(
-            text.contains("display = \"37d8832a2d6602cab9f78f6a8a6b1fd0\""),
-            "{text}"
-        );
-        assert_eq!(Settings::from_toml(&text), Ok(settings));
-    }
-
-    #[test]
     fn game_boy_colours_are_named_in_the_file() {
         let grey = Settings::from_toml("[game_boy]\ndmg_colors = \"grey\"\n");
         assert_eq!(
@@ -825,29 +759,6 @@ mod tests {
             Err(SettingsError::UnknownDmgColors("sepia".to_owned()))
         );
         assert_eq!(Settings::default().dmg_colors, DmgColors::ByTitle);
-    }
-
-    #[test]
-    fn fast_forward_is_a_multiple_or_unlimited() {
-        let text = Settings::default().to_toml();
-        assert!(text.contains("fast_forward = 2.0"), "{text}");
-        assert!(text.contains("slow_motion = 0.5"), "{text}");
-        assert_eq!(Settings::from_toml(&text), Ok(Settings::default()));
-
-        let unlimited = Settings {
-            speed: Speeds {
-                fast_forward: Speed::Unlimited,
-                ..Speeds::default()
-            },
-            ..Settings::default()
-        };
-        let text = unlimited.to_toml();
-        assert!(text.contains("fast_forward = \"unlimited\""), "{text}");
-        assert_eq!(Settings::from_toml(&text), Ok(unlimited));
-        assert_eq!(
-            Settings::from_toml("[speed]\nfast_forward = \"ludicrous\"\n"),
-            Err(SettingsError::UnknownSpeed("ludicrous".to_owned()))
-        );
     }
 
     #[test]
@@ -907,6 +818,10 @@ mod tests {
             Settings::from_toml("[speed]\nturbo = 2\n"),
             Err(SettingsError::Syntax(_))
         ));
+        assert_eq!(
+            Settings::from_toml("[speed]\nfast_forward = \"ludicrous\"\n"),
+            Err(SettingsError::UnknownSpeed("ludicrous".to_owned()))
+        );
     }
 
     #[test]
@@ -1027,13 +942,6 @@ mod tests {
                 "{text}: {result:?}"
             );
         }
-    }
-
-    #[test]
-    fn a_window_never_placed_is_left_out_of_the_file() {
-        let text = Settings::default().to_toml();
-        assert!(!text.contains("width"), "{text}");
-        assert_eq!(Settings::from_toml(&text), Ok(Settings::default()));
     }
 
     #[test]

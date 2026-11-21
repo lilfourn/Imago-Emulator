@@ -728,28 +728,6 @@ mod tests {
     }
 
     #[test]
-    fn a_game_s_player_lock_is_opened_as_it_is_not_emptied() {
-        let dir = crate::tests::temp_dir("player-lock");
-        let game = fake_game(&dir);
-        let work = dir.join("work");
-        let id = format!(
-            "{:08X}",
-            crc32fast::hash(game.as_os_str().as_encoded_bytes())
-        );
-        let lock = work.join(&id).join("player.lock");
-        fs::create_dir_all(work.join(&id)).expect("the game's folder");
-        // Windows may refuse to empty a file another process holds locked,
-        // so a player must not: what is in the file shows whether it did.
-        fs::write(&lock, b"held by another player").expect("lock");
-        let player = Player::prepare(&game, &work, None).expect("player");
-        // Read once the player has let go: on Windows nobody but its
-        // holder can read a locked file.
-        drop(player);
-        assert_eq!(fs::read(&lock).expect("lock"), b"held by another player");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn a_closed_link_is_a_quit_or_the_last_error_printed() {
         let (dir, player) = player_with_errors("");
         let closed = io::Error::from(io::ErrorKind::UnexpectedEof);

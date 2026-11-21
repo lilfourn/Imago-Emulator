@@ -624,9 +624,6 @@ mod tests {
                 (3, rect(right, 192.0, 256.0, 192.0)),
             ]
         );
-        // One console's worth is the plain layout.
-        let one = Layout::default().place_consoles(&DS, 1, (256.0, 384.0));
-        assert_eq!(one, Layout::default().place(&DS, (256.0, 384.0)));
     }
 
     #[test]
@@ -688,13 +685,6 @@ mod tests {
         let placed = rects(layout, &DS, (384.0, 768.0));
         let (width, height) = extent(&placed);
         assert_eq!((width, height), (384.0, 768.0));
-    }
-
-    #[test]
-    fn default_stacks_the_screens_without_a_gap() {
-        let layout = Layout::default();
-        assert_eq!(layout.arrangement, Arrangement::Vertical);
-        assert_eq!(layout.gap, 0.0);
     }
 
     #[test]

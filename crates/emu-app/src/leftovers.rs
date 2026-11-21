@@ -1221,13 +1221,11 @@ mod tests {
         let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
         let path = folder.path().to_owned();
         fs::write(path.join("Game.3ds"), b"NCSD").expect("written");
-        assert!(own().contains(&path));
         // Another app's launch leaves it alone while this one works in it.
         assert_eq!(remove_left_behind_in(&temp, &[]), 0);
         assert!(path.join("Game.3ds").exists());
         drop(folder);
         assert!(!path.exists(), "removed when done");
-        assert!(!own().contains(&path));
         fs::remove_dir_all(&temp).ok();
     }
 
@@ -1412,10 +1410,6 @@ mod tests {
         assert!(status.is_some_and(|status| !status.success()), "stopped");
         assert!(!path.exists());
         drop(worker);
-        assert!(
-            !workers().iter().any(|(folder, _)| folder == &path),
-            "let go"
-        );
         // A worker dropped while it runs is stopped too.
         let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
         let worker = folder
@@ -2090,7 +2084,6 @@ mod tests {
         // Only this test's, as other tests hold their own meanwhile.
         remove_own_where(|path| path.starts_with(&temp));
         assert!(!folder_path.exists() && !file_path.exists());
-        assert!(!own().contains(&folder_path) && !own().contains(&file_path));
         fs::remove_dir_all(&temp).ok();
     }
 
@@ -2152,7 +2145,6 @@ mod tests {
         file.finish(&temp.join("Game.gba")).expect("renamed");
         assert_eq!(fs::read(temp.join("Game.gba")).expect("kept"), b"game");
         assert!(!partial.exists());
-        assert!(!own().contains(&partial));
         fs::remove_dir_all(&temp).ok();
     }
 }

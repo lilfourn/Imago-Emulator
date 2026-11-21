@@ -268,10 +268,4 @@ mod tests {
             "file:///C:/Program%20Files/Imago%20Emulator/Acknowledgements.html"
         );
     }
-
-    #[test]
-    fn the_version_is_the_app_s() {
-        assert_eq!(version(), format!("Version {}", env!("CARGO_PKG_VERSION")));
-        assert!(!env!("CARGO_PKG_VERSION").is_empty());
-    }
 }

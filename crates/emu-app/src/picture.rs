@@ -667,12 +667,21 @@ mod tests {
         play(&mut keeper, 1, 2, wanted);
         assert_eq!(keeper.ceiling(), 3);
         // Tries never come further apart than about five minutes.
-        let mut keeper = SpeedKeeper::new(4);
-        play(&mut keeper, 4, 1, wanted);
-        for _ in 0..12 {
-            play(&mut keeper, MOST_PATIENCE + 1, 1, wanted);
+        let mut keeper = SpeedKeeper::new(2);
+        play(&mut keeper, 2, 1, wanted);
+        assert_eq!(keeper.ceiling(), 1);
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            let mut waited = 0;
+            while keeper.ceiling() == 1 {
+                play(&mut keeper, 1, 1, wanted);
+                waited += 1;
+            }
+            waits.push(waited);
+            // The try falls behind at once.
+            play(&mut keeper, 1, 1, wanted);
         }
-        assert_eq!(keeper.patience, MOST_PATIENCE);
+        assert_eq!(waits, [10, 20, 40, 80, 160, 320, 320, 320]);
     }
 
     #[test]

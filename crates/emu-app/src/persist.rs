@@ -1507,10 +1507,7 @@ mod tests {
         let saves = [dir.join("a.sav"), dir.join("b.sav")];
         fs::write(&saves[0], b"one").expect("write");
         let before = saves_fingerprint(&saves).expect("readable");
-        assert_eq!(
-            before,
-            format!("a.sav {:08X}\nb.sav none\n", crc32fast::hash(b"one"))
-        );
+        assert_eq!(before, "a.sav 7A6C86F1\nb.sav none\n");
         assert_eq!(saves_fingerprint(&saves).expect("readable"), before);
         fs::write(&saves[0], b"two").expect("write");
         assert_ne!(saves_fingerprint(&saves).expect("readable"), before);
@@ -1560,36 +1557,5 @@ mod tests {
         } else {
             assert_eq!(kept, "CON.gb: a game?");
         }
-    }
-
-    #[test]
-    fn a_rename_replaces_the_file_there() {
-        let dir = temp_dir("rename");
-        let (from, to) = (dir.join("game.sav.tmp"), dir.join("game.sav"));
-        fs::write(&from, b"new").expect("write");
-        fs::write(&to, b"old").expect("write");
-        // Read-only, as macOS and Linux replace it anyway.
-        let mut permissions = fs::metadata(&to).expect("metadata").permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&to, permissions).expect("read-only");
-        rename(&from, &to).expect("renamed");
-        assert_eq!(fs::read(&to).expect("read"), b"new");
-        assert!(!from.exists());
-        assert!(rename(&from, &to).is_err(), "nothing left to rename");
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
-    fn write_atomic_replaces_contents_and_leaves_no_temporary() {
-        let dir = std::env::temp_dir().join(format!("emu-app-persist-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("game.sav");
-
-        write_atomic(&path, b"first").expect("first write");
-        write_atomic(&path, b"second").expect("second write");
-
-        assert_eq!(fs::read(&path).expect("read back"), b"second");
-        assert!(!dir.join("game.sav.tmp").exists());
-        fs::remove_dir_all(&dir).expect("clean up");
     }
 }

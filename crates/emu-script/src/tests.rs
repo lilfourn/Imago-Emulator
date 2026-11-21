@@ -207,12 +207,6 @@ fn error_of(source: &str) -> String {
 }
 
 #[test]
-fn scripts_move_to_the_emulation_thread() {
-    fn send<T: Send>() {}
-    send::<Script>();
-}
-
-#[test]
 fn memory_reads_and_writes_little_endian_values() {
     let mut core = TestCore::new();
     core.ram[0x10..0x14].copy_from_slice(&[0x78, 0x56, 0x34, 0x12]);

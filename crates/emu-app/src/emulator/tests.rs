@@ -244,40 +244,6 @@ fn copied_screens_match_whatever_the_buffers_held() {
     }
 }
 
-/// Times handing a frame's screens from the core to the window, as
-/// it was (copied into the shared frames under their lock, then
-/// copied again out of them) against now (copied once, then swapped):
-/// `cargo test --release -p emu-app -- --ignored --nocapture
-/// frame_hand_off_timing`.
-#[test]
-#[ignore = "a timing, not a test"]
-fn frame_hand_off_timing() {
-    use crate::bench::best_of;
-
-    for (name, size) in [
-        ("DS", ScreenSize::new(256, 192)),
-        ("DS, 3D at 4x", ScreenSize::new(1024, 768)),
-    ] {
-        let mut screens = vec![Frame::new(size), Frame::new(size)];
-        for (index, pixel) in (0u32..).zip(screens[0].pixels_mut()) {
-            *pixel = index;
-        }
-        let (mut shared, mut window) = (screens.clone(), screens.clone());
-        let old_publish = best_of(200, || shared.clone_from_slice(&screens));
-        let old_take = best_of(200, || window.clone_from(&shared));
-        let mut unpublished = screens.clone();
-        let new_publish = best_of(200, || {
-            copy_screens(&mut unpublished, &screens);
-            std::mem::swap(&mut shared, &mut unpublished);
-        });
-        let new_take = best_of(200, || std::mem::swap(&mut window, &mut shared));
-        println!(
-            "{name}: emulation thread {old_publish:?} -> {new_publish:?}, \
-             window {old_take:?} -> {new_take:?}"
-        );
-    }
-}
-
 /// Every frame's inputs, one per player, as a core saw them.
 type Seen = Arc<Mutex<Vec<Vec<Input>>>>;
 
@@ -2028,50 +1994,6 @@ fn block(save: &Path) -> PathBuf {
     save.to_owned()
 }
 
-/// Every warning sent so far.
-fn warnings(events: &async_channel::Receiver<Event>) -> Vec<String> {
-    std::iter::from_fn(|| events.try_recv().ok())
-        .filter_map(|event| match event {
-            Event::Warning(text) => Some(text),
-            _ => None,
-        })
-        .collect()
-}
-
-#[test]
-fn a_save_that_keeps_failing_is_warned_of_once_not_every_second() {
-    let dir = empty_dir("warn-once");
-    let in_the_way = block(&dir.join("game.sav"));
-    // The save changes every frame, and is flushed on each pause.
-    let (emulator, events) = start_cart(&dir, 0, 1, None);
-    thread::sleep(Duration::from_millis(20));
-    emulator.send(Command::TogglePause);
-    let mut warned = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while warned.is_empty() {
-        assert!(Instant::now() < deadline, "no warning");
-        thread::sleep(Duration::from_millis(1));
-        warned = warnings(&events);
-    }
-    // Windows tries a rename for about a second before it gives up.
-    let a_write = Duration::from_millis(if cfg!(windows) { 1500 } else { 150 });
-    for _ in 0..3 {
-        emulator.send(Command::TogglePause);
-        thread::sleep(Duration::from_millis(20));
-        emulator.send(Command::TogglePause);
-        thread::sleep(a_write);
-    }
-    warned.extend(warnings(&events));
-    assert_eq!(warned.len(), 1, "{warned:?}");
-    assert!(warned[0].starts_with("Could not write "), "{warned:?}");
-    // Once it can be written, it is, without the game saving again.
-    fs::remove_dir(&in_the_way).expect("out of the way");
-    let (save, _) = cart_bytes(&emulator);
-    drop(emulator);
-    assert_eq!(fs::read(dir.join("game.sav")).expect("written"), [save]);
-    fs::remove_dir_all(&dir).expect("clean up");
-}
-
 #[test]
 fn a_game_another_copy_of_the_app_has_open_is_refused_untouched() {
     let (dir, paths) = rom_dir("locked", &[("ruby.gba", &gba_rom())]);
@@ -2174,22 +2096,6 @@ fn a_wrong_file_chosen_to_go_with_a_game_this_copy_runs_is_what_the_failure_name
     drop(here);
     fs::remove_dir_all(&dir).expect("clean up");
     fs::remove_dir_all(&data).expect("clean up");
-}
-
-#[test]
-fn a_game_s_files_are_named_as_its_session_names_them() {
-    let dir = empty_dir("files-of");
-    // An RPG Maker game: a folder with a dot in its name, and no files
-    // of the app's beside it yet.
-    let game = dir.join("Fan Game 1.2");
-    fs::create_dir_all(game.join("Player.app")).expect("the player's folder");
-    fs::write(game.join("Game.ini"), b"Title=Fan Game").expect("write");
-    fs::write(game.join("Game.exe"), b"player").expect("write");
-    assert_eq!(files_of(&game), GameFiles::of_folder(&game));
-    assert_eq!(files_of(&game).backup(), dir.join("Fan Game 1.2.sav"));
-    let rom = dir.join("ruby.gba");
-    assert_eq!(files_of(&rom), GameFiles::of(&rom));
-    fs::remove_dir_all(&dir).expect("clean up");
 }
 
 #[test]

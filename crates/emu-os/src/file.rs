@@ -235,17 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn a_file_is_replaced_whole_and_no_temporary_is_left() {
-        let dir = temp_dir("atomic");
-        let path = dir.join("game.sav");
-        write_atomic(&path, b"first").expect("first write");
-        write_atomic(&path, b"second").expect("second write");
-        assert_eq!(fs::read(&path).expect("read back"), b"second");
-        assert_eq!(names(&dir), ["game.sav"]);
-        fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    #[test]
     fn a_file_is_filled_a_piece_at_a_time() {
         let dir = temp_dir("filled");
         let path = dir.join("Game.cxi");

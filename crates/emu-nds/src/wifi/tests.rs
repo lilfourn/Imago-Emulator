@@ -582,12 +582,25 @@ fn frames_wait_while_the_receiver_is_sending() {
     }
 }
 
+/// A console saved and loaded while it hears a CMD still answers it.
 #[test]
-fn the_state_survives_a_round_trip() {
+fn a_state_saved_mid_frame_carries_on() {
     let (mut pair, start) = mp_exchange(0x0002, 0x0100);
-    run(&mut pair, start, start + us(150));
+    // Halfway through the CMD's 34 bytes.
+    let saved = start + us(96 + 17 * 4);
+    run(&mut pair, start, saved);
+    let heard = read(&mut pair[1], W_IF, saved) & 0x0041;
+    assert_eq!(heard, 0x0040, "receiving: started, not done");
     let bytes = postcard::to_stdvec(&pair[1]).expect("serializes");
-    let restored: Wifi = postcard::from_bytes(&bytes).expect("deserializes");
-    assert_eq!(postcard::to_stdvec(&restored).expect("serializes"), bytes);
-    assert!(restored.rx.is_some(), "mid-frame");
+    pair[1] = postcard::from_bytes(&bytes).expect("deserializes");
+    let done = start + us(96 + 34 * 4 + 16 + 96 + 266 + 96 + 32 * 4 + 8);
+    run(&mut pair, saved, done);
+    let ring = RX_BEGIN & 0x1FFF;
+    assert_eq!(ram(&mut pair[1], ring, done), 0x801C, "the CMD");
+    assert_eq!(
+        ram(&mut pair[0], 0x0100, done),
+        0x0001,
+        "the client answered"
+    );
+    assert_eq!(ram(&mut pair[0], ring + 12 + 24, done), 0xC0DE);
 }

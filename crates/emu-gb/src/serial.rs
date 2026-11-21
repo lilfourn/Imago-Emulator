@@ -178,7 +178,8 @@ mod tests {
         let mut interrupt_flag = 0;
         serial.write(0xFF01, 0x42, 0);
         serial.write(0xFF02, 0x81, 0);
-        for _ in 0..transfer_cycles(0, BIT_CLOCKS) - 1 {
+        // From counter 0 the first edge is 127 M-cycles away, then 7 bits.
+        for _ in 0..127 + 7 * 128 - 1 {
             serial.tick(&mut interrupt_flag);
         }
         assert_eq!((serial.read(0xFF02), interrupt_flag), (0xFF, 0));

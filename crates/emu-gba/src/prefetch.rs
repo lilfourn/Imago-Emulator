@@ -166,17 +166,29 @@ mod tests {
         assert_eq!(prefetch.look_up(0x0800_0010), Lookup::Miss);
     }
 
+    /// How many opcodes from `address` on, `width` bytes apart, the unit
+    /// hands over in one cycle each, taken without letting it read more.
+    fn buffered(prefetch: &mut Prefetch, mut address: u32, width: u32) -> u32 {
+        let mut count = 0;
+        while prefetch.look_up(address) == Lookup::Buffered {
+            prefetch.take(address, false);
+            address += width;
+            count += 1;
+        }
+        count
+    }
+
     #[test]
     fn the_buffer_holds_eight_halfwords() {
         let mut prefetch = Prefetch::default();
         prefetch.start(0x0800_0000, 2, 2);
         prefetch.run(100, true);
-        assert_eq!(prefetch.count, 8);
         assert_eq!(prefetch.look_up(0x0800_0012), Lookup::Miss);
+        assert_eq!(buffered(&mut prefetch, 0x0800_0002, 2), 8);
         // ARM: four words.
         prefetch.start(0x0800_0000, 4, 4);
         prefetch.run(100, true);
-        assert_eq!(prefetch.count, 4);
+        assert_eq!(buffered(&mut prefetch, 0x0800_0004, 4), 4);
     }
 
     #[test]
@@ -184,7 +196,7 @@ mod tests {
         let mut prefetch = Prefetch::default();
         prefetch.start(0x0800_0000, 2, 3);
         prefetch.run(10, false);
-        assert_eq!(prefetch.count, 1);
+        assert_eq!(prefetch.look_up(0x0800_0002), Lookup::Buffered);
         assert_eq!(prefetch.look_up(0x0800_0004), Lookup::Miss);
     }
 

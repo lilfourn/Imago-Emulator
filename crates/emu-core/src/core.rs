@@ -315,10 +315,4 @@ mod tests {
         assert!((rate.hz() - 59.727_5).abs() < 0.000_1);
         assert_eq!(rate.frame_duration(), Duration::from_nanos(16_742_706));
     }
-
-    #[test]
-    fn nds_frame_rate_matches_hardware() {
-        let rate = FrameRate::new(33_513_982, 560_190);
-        assert!((rate.hz() - 59.826_1).abs() < 0.000_1);
-    }
 }

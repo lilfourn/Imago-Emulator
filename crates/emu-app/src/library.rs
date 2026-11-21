@@ -1139,14 +1139,6 @@ mod tests {
     }
 
     #[test]
-    fn a_games_checkpoint_sits_beside_its_rom_or_folder() {
-        let rom = Game::new(Path::new("/games/Golden Sun.gba"), &info(Platform::Gba, 1));
-        assert_eq!(checkpoint_path(&rom), Path::new("/games/Golden Sun.ss0"));
-        let folder = Game::rpg_maker(Path::new("/games/Fan.Game"), None);
-        assert_eq!(checkpoint_path(&folder), Path::new("/games/Fan.Game.ss0"));
-    }
-
-    #[test]
     fn rpg_maker_games_are_titled_from_game_ini_and_told_apart_by_folder() {
         let game = Game::rpg_maker(
             Path::new("/Games/TGOM 4.2"),

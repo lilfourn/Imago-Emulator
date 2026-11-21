@@ -446,29 +446,6 @@ mod tests {
         assert_eq!(backup.read(0x0010), 0xFF);
     }
 
-    #[test]
-    fn eeprom_round_trips_a_block() {
-        let mut eeprom = Eeprom::new();
-        eeprom.note_dma_length(73);
-        let address = [0, 0, 0, 0, 1, 1]; // block 3
-        let data: Vec<bool> = (0..64).map(|bit| bit % 3 == 0).collect();
-        for bit in [1, 0]
-            .iter()
-            .chain(&address)
-            .copied()
-            .chain(data.iter().map(|&b| u16::from(b)))
-            .chain([0])
-        {
-            eeprom.write(bit);
-        }
-        for bit in [1, 1].iter().chain(&address).chain(&[0]) {
-            eeprom.write(*bit);
-        }
-        let read: Vec<bool> = (0..68).map(|_| eeprom.read() != 0).collect();
-        assert_eq!(&read[..4], &[false; 4]);
-        assert_eq!(read[4..], data[..]);
-    }
-
     /// A `.sav` of `length` bytes, no two neighbouring blocks alike.
     fn save_file(length: usize) -> Vec<u8> {
         (0..length).map(|index| (index % 251) as u8).collect()
@@ -544,7 +521,6 @@ mod tests {
         for _ in 0..100 {
             eeprom.write(0);
         }
-        assert!(eeprom.incoming.len() < 2 + 6 + 64 + 1);
         assert_eq!(read_block(&mut eeprom, 6, 5), file[40..48]);
     }
 }

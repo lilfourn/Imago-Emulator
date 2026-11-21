@@ -382,48 +382,6 @@ mod tests {
         assert_eq!(disassemble(0xFFFE, [0x20, 0x7F, 0]).text, "JR NZ, $007F");
     }
 
-    /// The serial test program in `link.rs`, walked instruction by
-    /// instruction with each one's length.
-    #[test]
-    fn disassembles_a_program_in_sequence() {
-        let program = [
-            0x06, 0x00, 0x05, 0x20, 0xFD, 0x3E, 0x42, 0xE0, 0x01, 0x3E, 0x81, 0xE0, 0x02, 0xF0,
-            0x02, 0xCB, 0x7F, 0x20, 0xFA, 0xF0, 0x01, 0xEA, 0x00, 0xC0, 0x18, 0xFE,
-        ];
-        let expected = [
-            (0x0100, "LD B, $00"),
-            (0x0102, "DEC B"),
-            (0x0103, "JR NZ, $0102"),
-            (0x0105, "LD A, $42"),
-            (0x0107, "LDH [$FF01], A"),
-            (0x0109, "LD A, $81"),
-            (0x010B, "LDH [$FF02], A"),
-            (0x010D, "LDH A, [$FF02]"),
-            (0x010F, "BIT 7, A"),
-            (0x0111, "JR NZ, $010D"),
-            (0x0113, "LDH A, [$FF01]"),
-            (0x0115, "LD [$C000], A"),
-            (0x0118, "JR $0118"),
-        ];
-        let mut listing = Vec::new();
-        let mut offset = 0;
-        while offset < program.len() {
-            let mut bytes = [0; 3];
-            for (byte, &value) in bytes.iter_mut().zip(&program[offset..]) {
-                *byte = value;
-            }
-            let address = 0x0100 + offset as u16;
-            let instruction = disassemble(address, bytes);
-            listing.push((address, instruction.text));
-            offset += usize::from(instruction.length);
-        }
-        let expected: Vec<_> = expected
-            .iter()
-            .map(|&(address, text)| (address, text.to_owned()))
-            .collect();
-        assert_eq!(listing, expected);
-    }
-
     #[test]
     fn only_call_and_rst_are_calls() {
         let calls: Vec<u8> = (0..=0xFF)

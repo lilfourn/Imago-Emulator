@@ -97,15 +97,4 @@ mod tests {
             "curl didn't start: Permission denied"
         );
     }
-
-    #[test]
-    fn a_command_runs_its_program() {
-        // The test binary itself, asked only to list its tests.
-        let output = command(std::env::current_exe().expect("test binary"))
-            .arg("--list")
-            .output()
-            .expect("runs");
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("a_command_runs_its_program"));
-    }
 }

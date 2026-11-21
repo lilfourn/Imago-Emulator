@@ -176,13 +176,6 @@ impl Gpu3d {
         self.fifo.len() < FIFO_CAPACITY / 2
     }
 
-    /// The FIFO is full: a CPU or DMA write now must wait until
-    /// [`Self::vblank`] lets commands run again.
-    #[cfg(test)]
-    pub(crate) fn fifo_full(&self) -> bool {
-        self.fifo.is_full()
-    }
-
     /// The GXFIFO interrupt condition (IF bit 21). It is a level: while
     /// true, IF bit 21 stays set however often the CPU acknowledges it.
     pub(crate) fn irq_requested(&self) -> bool {
@@ -727,7 +720,7 @@ mod tests {
         let gxstat = gpu.read_register(0x600);
         assert_eq!((gxstat >> 16) & 0x1FF, 204);
         assert_eq!(gxstat & (3 << 25), 0, "neither empty nor below half");
-        assert!(!gpu.fifo_wants_dma() && !gpu.irq_requested() && !gpu.fifo_full());
+        assert!(!gpu.fifo_wants_dma() && !gpu.irq_requested());
         assert_eq!(gpu.read_register(0x604), 0, "no polygon yet");
         gpu.vblank();
         let gxstat = gpu.read_register(0x600);
@@ -741,13 +734,14 @@ mod tests {
     fn the_fifo_fills_at_260_entries() {
         let mut gpu = Gpu3d::new();
         send(&mut gpu, SWAP_BUFFERS_PORT, &[0]);
+        // 259 entries wait behind the swap: four in the PIPE, 255 in the
+        // FIFO.
         for _ in 0..259 {
             send(&mut gpu, MTX_IDENTITY, &[]);
         }
-        assert!(!gpu.fifo_full());
+        assert_eq!((gpu.read_register(0x600) >> 16) & 0x1FF, 255);
         send(&mut gpu, MTX_IDENTITY, &[]);
-        assert!(gpu.fifo_full());
-        assert_eq!((gpu.read_register(0x600) >> 16) & 0x1FF, 256);
+        assert_eq!((gpu.read_register(0x600) >> 16) & 0x1FF, 256, "full");
     }
 
     #[test]

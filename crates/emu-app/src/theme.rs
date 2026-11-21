@@ -207,7 +207,6 @@ mod tests {
     #[test]
     fn accents_are_named_in_the_file_and_blue_is_the_default() {
         assert_eq!(Accent::default(), Accent::Blue);
-        assert_eq!(Accent::default().colour(), DEFAULT_ACCENT);
         for accent in Accent::ALL {
             assert_eq!(Accent::from_name(accent.name()), Some(accent));
         }

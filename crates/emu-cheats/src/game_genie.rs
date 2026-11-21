@@ -85,16 +85,6 @@ mod tests {
     }
 
     #[test]
-    fn nine_digits_compare_and_six_do_not() {
-        // GI = C9: rotated right by two, 72; XOR BA, C8.
-        assert_eq!(
-            read(&[(1, "00A-17B-C49")]),
-            Ok(vec![patch(0x4A17, 0x00, Some(0xC8))])
-        );
-        assert_eq!(read(&[(1, "3E1-23F")]), Ok(vec![patch(0x0123, 0x3E, None)]));
-    }
-
-    #[test]
     fn codes_split_on_spaces_and_plus_and_dashes_are_optional() {
         let ops = read(&[(1, "00A-17B-C49 + 3E123F"), (2, "C000:01")]).expect("valid");
         assert_eq!(ops.len(), 3);

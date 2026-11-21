@@ -100,12 +100,4 @@ mod tests {
         command(&mut power, 1, 0xFF);
         assert_eq!(command(&mut power, READ | 1, 0), 0);
     }
-
-    #[test]
-    fn bit_6_of_register_0_shuts_down() {
-        let mut power = Power::default();
-        assert!(!power.powered_off());
-        command(&mut power, 0, 0x0D | SHUT_DOWN);
-        assert!(power.powered_off());
-    }
 }

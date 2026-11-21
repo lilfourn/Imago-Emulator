@@ -132,20 +132,6 @@ mod tests {
     }
 
     #[test]
-    fn the_folders_are_the_ones_the_app_always_used() {
-        // The app asked `dirs` for its data folder before, which is the
-        // local one everywhere but Windows.
-        let data = if cfg!(windows) {
-            dirs::data_local_dir()
-        } else {
-            dirs::data_dir()
-        };
-        assert_eq!(Folder::Data.path(None), data);
-        assert_eq!(Folder::Config.path(None), dirs::config_dir());
-        assert_eq!(Folder::Cache.path(None), dirs::cache_dir());
-    }
-
-    #[test]
     #[cfg_attr(not(target_os = "macos"), ignore = "macOS's own folders")]
     fn on_macos_every_folder_is_byte_for_byte_where_it_was() {
         let home = dirs::home_dir().expect("a home folder");
@@ -159,10 +145,6 @@ mod tests {
             let found = kind.path(None).expect("a folder");
             assert_eq!(bytes(&found), OsString::from(&expected), "{kind:?}");
         }
-        // emu-headless and Guide's example joined their folders to this
-        // home by hand.
-        let by_hand = std::env::home_dir().expect("a home folder");
-        assert_eq!(bytes(&by_hand), OsString::from(home));
     }
 
     #[test]

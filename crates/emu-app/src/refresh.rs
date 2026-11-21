@@ -285,12 +285,6 @@ impl Lock {
             self.native.as_secs_f64() / locked.as_secs_f64()
         })
     }
-
-    /// The newest frame drawn that has been counted.
-    #[cfg(test)]
-    fn frames_drawn(&self) -> u64 {
-        self.drawn
-    }
 }
 
 #[cfg(test)]
@@ -391,9 +385,10 @@ mod tests {
     fn only_newer_frames_count() {
         let now = Instant::now();
         let mut lock = drawing(DS, HZ_120, now);
+        // Frame 1 again, drawn 5 ms later than first: counted, it would
+        // nudge the next start.
         lock.drawn(1, now + Duration::from_millis(7));
         assert_eq!(lock.step(now, DS), HZ_120 * 2);
-        assert_eq!(lock.frames_drawn(), 1);
     }
 
     #[test]

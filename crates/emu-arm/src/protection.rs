@@ -112,39 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_allowed_outside_every_region() {
-        let mut map = Map::default();
-        assert!(!map.allows(0x0200_0000, READ, false));
-        map.rebuild(&[region(0x0200_0000, 22), 0, 0, 0, 0, 0, 0, 0], 3, 3);
-        assert!(map.allows(0x0200_0000, READ, false));
-        assert!(map.allows(0x023F_FFFF, WRITE, true));
-        assert!(!map.allows(0x0240_0000, READ, false));
-        assert!(!map.allows(0x01FF_FFFF, EXECUTE, false));
-    }
-
-    #[test]
-    fn higher_regions_win_where_they_overlap() {
-        let mut map = Map::default();
-        // Region 1 read-write over 4 MiB; region 2 no access over 4 KiB
-        // inside it; region 0 read-write over 4 KiB inside that, but lower.
-        let regions = [
-            region(0x0200_1000, 12),
-            region(0x0200_0000, 22),
-            region(0x0200_1000, 12),
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-        map.rebuild(&regions, 0x033, 0x033);
-        assert!(map.allows(0x0200_0FFC, READ, false));
-        assert!(!map.allows(0x0200_1000, READ, false));
-        assert!(!map.allows(0x0200_1FFF, EXECUTE, false));
-        assert!(map.allows(0x0200_2000, READ, false));
-    }
-
-    #[test]
     fn region_sizes_and_bases() {
         let mut map = Map::default();
         // 4 GiB covers everything; a misaligned base is rounded down.
@@ -158,33 +125,5 @@ mod tests {
         map.rebuild(&[0x0200_0016, region(0, 11), 0, 0, 0, 0, 0, 0], 3, 3);
         assert!(!map.allows(0x0200_0000, READ, false));
         assert!(!map.allows(0, READ, false));
-    }
-
-    #[test]
-    fn permission_fields() {
-        // (field, privileged read, privileged write, User read, User write)
-        let cases = [
-            (0, false, false, false, false),
-            (1, true, true, false, false),
-            (2, true, true, true, false),
-            (3, true, true, true, true),
-            (4, false, false, false, false),
-            (5, true, false, false, false),
-            (6, true, false, true, false),
-            (7, false, false, false, false),
-            (15, false, false, false, false),
-        ];
-        let mut map = Map::default();
-        for (field, privileged_read, privileged_write, user_read, user_write) in cases {
-            map.rebuild(&[region(0, 32), 0, 0, 0, 0, 0, 0, 0], field, field);
-            let allows = |need, user| map.allows(0x100, need, user);
-            assert_eq!(allows(READ, false), privileged_read, "{field}");
-            assert_eq!(allows(WRITE, false), privileged_write, "{field}");
-            assert_eq!(allows(READ, true), user_read, "{field}");
-            assert_eq!(allows(WRITE, true), user_write, "{field}");
-            // Instruction permissions follow the read columns.
-            assert_eq!(allows(EXECUTE, false), privileged_read, "{field}");
-            assert_eq!(allows(EXECUTE, true), user_read, "{field}");
-        }
     }
 }

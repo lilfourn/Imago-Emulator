@@ -134,12 +134,6 @@ impl Rewind {
         self.delta_bytes = 0;
     }
 
-    /// How many states can be stepped back through.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.deltas.len() + usize::from(self.newest.is_some())
-    }
-
     /// `delta`, XORed at `shifts`, compressed.
     fn compress(&mut self, delta: &[u8], shifts: Vec<Shift>) -> Delta {
         self.compressed
@@ -288,17 +282,19 @@ mod tests {
         }
     }
 
+    /// How many states `rewind` steps back through, taking them all.
+    fn steps_back(rewind: &mut Rewind) -> usize {
+        std::iter::from_fn(|| rewind.pop()).count()
+    }
+
     #[test]
     fn deltas_are_much_smaller_than_states() {
-        let mut rewind = Rewind::new(1 << 20);
+        // A twentieth of the states' size keeps them all.
+        let mut rewind = Rewind::new(100 * 4096 / 20);
         for frame in 0..100 {
             rewind.push(state(frame));
         }
-        assert!(
-            rewind.delta_bytes < 100 * 4096 / 20,
-            "{} bytes",
-            rewind.delta_bytes
-        );
+        assert_eq!(steps_back(&mut rewind), 100);
     }
 
     #[test]
@@ -307,13 +303,16 @@ mod tests {
         for frame in 0..100 {
             rewind.push(state(frame));
         }
-        assert!(rewind.len() < 100);
-        assert_eq!(rewind.pop(), Some(state(99)));
+        let kept: Vec<Vec<u8>> = std::iter::from_fn(|| rewind.pop()).collect();
+        assert!(kept.len() < 100, "{} kept", kept.len());
+        let newest: Vec<Vec<u8>> = (0..100).rev().take(kept.len()).map(state).collect();
+        assert_eq!(kept, newest);
     }
 
     #[test]
     fn deltas_stay_small_when_a_field_grows() {
-        let mut rewind = Rewind::new(1 << 24);
+        // A twentieth of the states' size keeps them all.
+        let mut rewind = Rewind::new(100 * 65536 / 20);
         for frame in 0..100u8 {
             // A field near the start takes one byte more every few frames,
             // moving the 64 KB after it, as a varint register does.
@@ -322,11 +321,7 @@ mod tests {
             state[40000] = frame;
             rewind.push(state);
         }
-        assert!(
-            rewind.delta_bytes < 100 * 65536 / 20,
-            "{} bytes",
-            rewind.delta_bytes
-        );
+        assert_eq!(steps_back(&mut rewind), 100);
     }
 
     #[test]

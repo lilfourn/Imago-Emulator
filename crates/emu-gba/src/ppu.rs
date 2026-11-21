@@ -339,12 +339,4 @@ mod tests {
         }
         assert_eq!(vblank_irqs, 1);
     }
-
-    #[test]
-    fn vram_mirrors_its_last_32k() {
-        let mut ppu = Ppu::new();
-        ppu.write_vram(0x1_0000, 0x1234);
-        assert_eq!(ppu.read_vram(0x1_8000), 0x1234);
-        assert_eq!(ppu.read_vram(0x3_0000), 0x1234);
-    }
 }

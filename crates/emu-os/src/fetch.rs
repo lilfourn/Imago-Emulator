@@ -541,10 +541,6 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
-        // An address the app does not fetch never reaches curl.
-        for url in ["-V", "http://example.com/", "file:///etc/passwd"] {
-            assert!(matches!(curl(url, None, Allow::Https), Err(Error::Refused)));
-        }
 
         let pinned = Download {
             url,

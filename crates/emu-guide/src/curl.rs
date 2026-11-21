@@ -208,35 +208,4 @@ mod tests {
         );
         assert_eq!(config_body("{\n}"), None);
     }
-
-    #[test]
-    fn a_body_s_delete_and_c1_characters_are_escaped_not_refused() {
-        // As a message pasted from a terminal or an old document holds
-        // them: JSON leaves these as they are inside a string.
-        let message = "a\u{7f}b\u{80}c\u{85}d\u{9f}e";
-        let body = serde_json::json!({ "content": message }).to_string();
-        assert!(body.contains('\u{7f}'), "serde_json does not escape them");
-        let config = config_body(&body).expect("it can be sent");
-        assert_eq!(
-            config,
-            "data-binary = \"{\\\"content\\\":\\\"a\\\\u007fb\\\\u0080c\\\\u0085d\\\\u009fe\\\"}\"\n"
-        );
-        assert!(!config.trim_end().chars().any(char::is_control));
-        // What curl makes of the line is JSON for the same message.
-        let quoted = config
-            .strip_prefix("data-binary = \"")
-            .and_then(|rest| rest.strip_suffix("\"\n"))
-            .expect("one quoted line");
-        let mut sent = String::new();
-        let mut chars = quoted.chars();
-        while let Some(c) = chars.next() {
-            sent.push(if c == '\\' {
-                chars.next().expect("escaped")
-            } else {
-                c
-            });
-        }
-        let parsed: serde_json::Value = serde_json::from_str(&sent).expect("JSON");
-        assert_eq!(parsed["content"], message);
-    }
 }

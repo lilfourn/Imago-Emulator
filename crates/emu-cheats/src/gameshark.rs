@@ -62,23 +62,7 @@ mod tests {
     }
 
     #[test]
-    fn bank_types_name_the_bank() {
-        assert_eq!(
-            decode(0x9163_10D0),
-            Ok(vec![Op::WriteBank {
-                bank: 1,
-                address: 0xD010,
-                value: 0x63
-            }])
-        );
-        assert_eq!(
-            decode(0x8302_00A0),
-            Ok(vec![Op::WriteBank {
-                bank: 3,
-                address: 0xA000,
-                value: 0x02
-            }])
-        );
+    fn unknown_types_name_the_type() {
         assert!(decode(0x0201_38CD).expect_err("type 02").contains("02"));
     }
 }

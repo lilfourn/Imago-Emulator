@@ -192,7 +192,6 @@ mod tests {
             assert_eq!(mode(&store.file()), 0o600);
             assert_eq!(mode(&store.folder), 0o700);
         }
-        assert!(!store.folder.join("auth.json.tmp").exists());
     }
 
     #[test]

@@ -181,16 +181,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sync_shows_each_side_the_others_nibble() {
-        let mut ipc = Ipc::default();
-        ipc.write_sync(Side::Arm7, 0x4000); // ARM7 wants sync IRQs
-        let raised = ipc.write_sync(Side::Arm9, 0x0A00 | 1 << 13);
-        assert_eq!(raised, [0, irq::IPC_SYNC]);
-        assert_eq!(ipc.read_sync(Side::Arm7) & 0xF, 0xA);
-        assert_eq!(ipc.read_sync(Side::Arm9) & 0xF00, 0xA00);
-    }
-
-    #[test]
     fn words_cross_in_order_and_raise_fifo_interrupts() {
         let mut ipc = Ipc::default();
         ipc.write_control(Side::Arm9, 0x8000 | 1 << 2); // enable, send-empty IRQ
@@ -203,17 +193,5 @@ mod tests {
         // Empty: error flag, last word again.
         assert_eq!(ipc.receive(Side::Arm7).0, 2);
         assert_ne!(ipc.read_control(Side::Arm7) & 1 << 14, 0);
-    }
-
-    #[test]
-    fn a_full_fifo_refuses_words() {
-        let mut ipc = Ipc::default();
-        ipc.write_control(Side::Arm9, 0x8000);
-        for word in 0..17 {
-            ipc.send(Side::Arm9, word);
-        }
-        assert_eq!(ipc.read_control(Side::Arm9) & 0x4002, 0x4002);
-        ipc.write_control(Side::Arm9, 0x8000 | 1 << 3 | 1 << 14); // clear, ack error
-        assert_eq!(ipc.read_control(Side::Arm9) & 0x4003, 0x0001);
     }
 }

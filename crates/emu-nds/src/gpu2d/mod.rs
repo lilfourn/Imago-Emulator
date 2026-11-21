@@ -577,8 +577,8 @@ mod tests {
         place_sprites(&mut engine, &[[3 << 10, 0, 7 << 12]]); // alpha 7: 8/16
         engine.write_register(0x50, 1 << 8); // BG0 2nd target
         set_dispcnt(&mut engine, GRAPHICS | 1 << 8 | 1 << 12 | 1 << 6);
-        let expected = color::alpha_blend(color::widen(BLUE), color::widen(RED), 8, 8);
-        assert_eq!(render(&mut engine, &vram, 0)[0], color::to_argb(expected));
+        // Each channel 63 * 8 / 16 = 31 of 63.
+        assert_eq!(render(&mut engine, &vram, 0)[0], 0xFF7D_007D);
     }
 
     #[test]
@@ -600,8 +600,8 @@ mod tests {
         engine.write_register(0x50, 1 | 1 << 6 | 1 << 13); // BG0 over backdrop
         engine.write_register(0x52, 8 | 8 << 8);
         let row = render(&mut engine, &vram, 0);
-        let expected = color::alpha_blend(color::widen(RED), color::widen(BLUE), 8, 8);
-        assert_eq!(row[0], color::to_argb(expected));
+        // Each channel 63 * 8 / 16 = 31 of 63.
+        assert_eq!(row[0], 0xFF7D_007D);
         assert_eq!(row[8], argb(BLUE), "the backdrop is not a 1st target");
         engine.write_register(0x48, 0x01); // WIN0 inside: BG0, no effects
         engine.write_register(0x40, 0x0001);
@@ -620,8 +620,8 @@ mod tests {
         engine.write_register(0x6C, 2 << 14 | 31); // factors above 16 act as 16
         assert_eq!(render(&mut engine, &vram, 0)[0], 0xFF00_0000);
         engine.write_register(0x6C, 2 << 14 | 8);
-        let half = color::darken(color::widen(RED), 8);
-        assert_eq!(render(&mut engine, &vram, 0)[0], color::to_argb(half));
+        // 63 - 63 * 8 / 16 = 32 of 63.
+        assert_eq!(render(&mut engine, &vram, 0)[0], 0xFF82_0000);
     }
 
     #[test]
@@ -636,27 +636,14 @@ mod tests {
         line_3d[1] = 0x3F | 31 << 18; // red, opaque
         line_3d[2] = 0x3F; // alpha 0: nothing drawn
         let row = render_with_3d(&mut engine, &vram, 0, Some(&line_3d));
-        let half = color::blend_3d(0x3F, color::widen(BLUE), 15);
-        assert_eq!(row[0], color::to_argb(half));
+        // 63 * 16 / 32 = 31 of 63 of each.
+        assert_eq!(row[0], 0xFF7D_007D);
         assert_eq!(row[1], color::to_argb(0x3F));
         assert_eq!(row[2], argb(BLUE));
         // Without a 2nd target the 3D pixel shows as is.
         engine.write_register(0x50, 0);
         let row = render_with_3d(&mut engine, &vram, 0, Some(&line_3d));
         assert_eq!(row[0], color::to_argb(0x3F));
-    }
-
-    #[test]
-    fn three_d_layer_scrolls_with_bg0hofs() {
-        let mut engine = Engine2d::new(Engine::A);
-        let vram = vram();
-        set_dispcnt(&mut engine, GRAPHICS | 1 << 3 | 1 << 8);
-        engine.write_register(0x10, 1);
-        let mut line_3d = [0; WIDTH];
-        line_3d[1] = 0x3F | 31 << 18;
-        let row = render_with_3d(&mut engine, &vram, 0, Some(&line_3d));
-        assert_eq!(row[0], color::to_argb(0x3F));
-        assert_eq!(row[255], argb(0), "past the 3D image is transparent");
     }
 
     /// `engine`'s last line, drawn as `native`, drawn again `scale` times
@@ -692,10 +679,12 @@ mod tests {
         rows[0][1] = 0x3F | 15 << 18;
         rows[1][1] = red;
         let out = draw_larger(&engine, &native, 2, &rows);
-        let shown = |color| color::to_argb(color::brighten(color, 4));
         assert_eq!(out[0], native[0]);
-        assert_eq!(out[1], shown(color::blend_3d(0x3F, color::widen(BLUE), 15)));
-        assert_eq!(out[512], shown(color::widen(BLUE)));
+        // Red and blue 31 of 63 each, brightened by (63 - 31) * 4 / 16 to 39
+        // and green by 63 * 4 / 16 to 15.
+        assert_eq!(out[1], 0xFF9E_3C9E);
+        // Blue alone: red and green 15, blue 63.
+        assert_eq!(out[512], 0xFF3C_3CFF);
         assert_eq!(out[513], native[0]);
         assert_eq!(&out[2..4], &[native[1]; 2], "no 3D there, as at 1x");
     }

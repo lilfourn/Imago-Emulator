@@ -1331,6 +1331,7 @@ mod tests {
     fn rom_patches_cover_every_mirror_and_width() {
         let rom: Vec<u8> = (0..0x400).map(|index| index as u8).collect();
         let mut bus = Bus::new(Cartridge::new(rom.into(), None, 0), Box::default());
+        let unpatched = postcard::to_stdvec(&bus).expect("serializes");
         let patch = |address, value| RomPatch {
             address,
             value,
@@ -1339,10 +1340,12 @@ mod tests {
         bus.set_rom_patches(&[
             patch(0x0800_0100, 0xCD),
             patch(0x0800_0101, 0xAB),
-            // Not the cartridge's ROM: dropped.
+            // Not the cartridge's ROM: dropped, not applied at ROM offset 0.
             patch(0x0200_0000, 0x11),
         ]);
-        assert_eq!(bus.rom_patches.len(), 2);
+        let patched = postcard::to_stdvec(&bus).expect("serializes");
+        assert!(patched == unpatched, "patches are not machine state");
+        assert_eq!(bus.read_8(0x0800_0000, Access::NONSEQUENTIAL), 0x00);
         for mirror in [0x0800_0100, 0x0A00_0100, 0x0C00_0100] {
             assert_eq!(bus.read_16(mirror, Access::NONSEQUENTIAL), 0xABCD);
         }
@@ -1350,12 +1353,10 @@ mod tests {
         assert_eq!(bus.read_32(0x0800_0100, Access::NONSEQUENTIAL), 0x0302_ABCD);
         assert_eq!(bus.read_16(0x0800_0102, Access::NONSEQUENTIAL), 0x0302);
 
-        // States leave them out, but resets and loaded states keep them;
-        // an empty list removes them.
+        // Resets and loaded states keep them; an empty list removes them.
         let mut bus = Bus::reset_from(&mut bus);
         let state = postcard::to_stdvec(&bus).expect("serializes");
         let mut loaded: Bus = postcard::from_bytes(&state).expect("deserializes");
-        assert!(loaded.rom_patches.is_empty());
         loaded.take_media_from(&mut bus);
         assert_eq!(loaded.read_16(0x0800_0100, Access::NONSEQUENTIAL), 0xABCD);
         loaded.set_rom_patches(&[]);
@@ -1468,6 +1469,7 @@ mod tests {
     #[test]
     fn halt_wakes_two_cycles_after_the_request_and_a_cycle_later_runs() {
         let mut bus = blank_bus();
+        // IE only: with IME off, HALT still wakes.
         bus.write_io_16(0x200, 0x0001);
         bus.halt();
         let start = bus.cycles();
@@ -1476,6 +1478,9 @@ mod tests {
             bus.idle_to_next_event();
         }
         assert_eq!(bus.cycles() - start, 3);
+        // But the CPU's IRQ input stays low.
+        bus.tick(4);
+        assert!(!bus.irq_line());
     }
 
     #[test]

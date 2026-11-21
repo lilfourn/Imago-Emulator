@@ -580,11 +580,9 @@ mod tests {
         for byte in 0..300_000u32 {
             backup.transfer(byte as u8);
         }
-        let Chip::Unknown(detector) = &backup.chip else {
-            panic!("still unknown while select is held");
-        };
-        assert_eq!(detector.written.len(), WRITTEN_MOST);
-        assert_eq!(detector.count, 300_000, "every byte is counted");
+        // A state saved while select is still held.
+        let state = postcard::to_stdvec(&backup).expect("backup state serializes");
+        assert!(state.len() < 132 * KIB, "{} bytes", state.len());
 
         // A write longer than a page, as a chip without pages takes, is
         // replayed whole into the chip it shows: none of it is dropped.

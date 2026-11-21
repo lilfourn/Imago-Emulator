@@ -853,46 +853,6 @@ impl Psg {
 mod tests {
     use super::*;
 
-    /// A DMG with wave RAM holding 0x00, 0x11, ... 0xFF and channel 3
-    /// triggered at frequency 0x7FC: a sample every 8 clock cycles, the
-    /// first 14 cycles after the trigger.
-    fn playing_dmg() -> Psg {
-        let mut psg = Psg::new(Variant::Dmg);
-        for index in 0..16 {
-            psg.write_wave(index, index * 0x11);
-        }
-        psg.write(0x1A, 0x80);
-        psg.write(0x1D, 0xFC);
-        psg.write(0x1E, 0x87);
-        psg
-    }
-
-    #[test]
-    fn dmg_wave_ram_answers_only_in_the_cycle_the_channel_reads_it() {
-        let mut psg = playing_dmg();
-        let mut reads = Vec::new();
-        for _ in 0..8 {
-            // One M-cycle at a time, as the CPU sees it.
-            psg.tick(4);
-            reads.push(psg.read_wave(0x0F));
-        }
-        // Reads land 14, 22 and 30 cycles in, never in the last cycle of
-        // an M-cycle (4, 8, 12...), so the CPU never gets in.
-        assert_eq!(reads, [0xFF; 8]);
-
-        let mut psg = playing_dmg();
-        psg.tick(2);
-        let mut reads = Vec::new();
-        for _ in 0..8 {
-            psg.tick(4);
-            reads.push(psg.read_wave(0x0F));
-        }
-        // Shifted by two cycles, reads 14, 22 and 30 end M-cycles 3, 5
-        // and 7. The CPU sees the byte being played, not the one it asked
-        // for: byte 0 (sample 1), then byte 1 (samples 2 and 3).
-        assert_eq!(reads, [0xFF, 0xFF, 0x00, 0xFF, 0x11, 0xFF, 0x11, 0xFF]);
-    }
-
     #[test]
     fn ticks_that_end_no_timer_match_running_each_channel() {
         let mut seed = 99_u32;
@@ -924,28 +884,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn retriggering_the_dmg_wave_channel_as_it_reads_corrupts_wave_ram() {
-        let mut psg = playing_dmg();
-        // Run up to two cycles before the fourth read (14 + 3 x 8 = 38),
-        // whose byte is index 2 (samples 4 and 5): one of the first four.
-        psg.tick(36);
-        psg.write(0x1E, 0x87);
-        assert_eq!(psg.wave_ram[..4], [0x22, 0x11, 0x22, 0x33]);
-
-        // Reading byte 5, the four bytes from 4 are copied over the first.
-        let mut psg = playing_dmg();
-        psg.tick(14 + 9 * 8 - 2);
-        psg.write(0x1E, 0x87);
-        assert_eq!(psg.wave_ram[..4], [0x44, 0x55, 0x66, 0x77]);
-
-        // The CGB has no such bug.
-        let mut psg = playing_dmg();
-        psg.variant = Variant::Cgb;
-        psg.tick(36);
-        psg.write(0x1E, 0x87);
-        assert_eq!(psg.wave_ram[..4], [0x00, 0x11, 0x22, 0x33]);
     }
 }

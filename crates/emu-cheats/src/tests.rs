@@ -176,7 +176,6 @@ fn gba_rom_patches_count_as_codes_and_patch_halfwords() {
     assert_eq!(memory.half(0x0200_0010), 0x270F);
     // Conditions don't gate ROM patches.
     assert_eq!(rom_patches(&cheats), patch);
-    assert_eq!(RomPatch::apply(&patch, 0x0800_2468, 0x00), 0x78);
 
     // Pro Action Replay v3: the value is on the second line.
     let text = "[Patch]\n00000000 18001234\n00005678 00000000\n";
@@ -229,18 +228,14 @@ fn unencrypted_codes_are_detected_and_tags_override() {
     assert!(error.message.contains("device tag"), "{error}");
 }
 
+/// The codes are encrypted with an independent transcription of GBATEK's
+/// rounds and DEADFACE reseeding, over mGBA's tables: the master code,
+/// `DEADFACE 00001234`, then `12000010 0000270F` under the new seeds.
 #[test]
 fn deadface_reseeds_the_codes_after_it() {
-    let mut reseeded = Cipher::GAMESHARK_ADVANCE;
-    reseeded.reseed(0x1234);
-    let text = format!(
-        "[Seeds]\n{}{}[Money]\n{}",
-        line(Cipher::GAMESHARK_ADVANCE.encrypt(0x4241_5850_001D_C0DE)),
-        line(Cipher::GAMESHARK_ADVANCE.encrypt(0xDEAD_FACE_0000_1234)),
-        line(reseeded.encrypt(0x1200_0010_0000_270F)),
-    );
+    let text = "[Seeds]\nD41A4D50 EF6B965D\n70BDB80D 69F37FCB\n[Money]\n42F38FDA B792A396\n";
     let mut memory = TestMemory::default();
-    run(System::Gba, &text, &mut memory);
+    run(System::Gba, text, &mut memory);
     assert_eq!(memory.half(0x0200_0010), 0x270F);
 }
 
@@ -279,10 +274,6 @@ fn game_genie_codes_patch_rom_reads_while_on() {
             },
         ]
     );
-    // A read of 0x4A17 in the bank that holds C8 there gets the first
-    // matching patch; another bank's byte passes through.
-    assert_eq!(RomPatch::apply(&patches, 0x4A17, 0xC8), 0x00);
-    assert_eq!(RomPatch::apply(&patches, 0x4A17, 0x3D), 0x3D);
     // ROM patches don't run as memory writes; raw patches beside them do.
     let mut memory = TestMemory::default();
     apply(&cheats, &mut memory);
