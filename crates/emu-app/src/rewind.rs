@@ -69,11 +69,17 @@ const SEGMENT: usize = 4096;
 /// Bytes from the start of a segment that are looked for in the next
 /// state.
 const ANCHOR: usize = 32;
-/// How far a segment is looked for from where the one before it went.
+/// Narrow local search radius: catches varint shifts (almost always a few
+/// bytes) without scanning 128 KiB on every changed framebuffer segment.
+const NARROW_REACH: usize = 256;
+/// How far a wide search looks when a variable-length buffer moves later
+/// sections by kilobytes.
 const REACH: usize = 64 * 1024;
-/// The most segments looked for per delta, so states that differ
-/// everywhere cost no more than a few hundred microseconds to line up.
-const SEARCHES: usize = 64;
+/// Most narrow searches per delta.
+const NARROW_SEARCHES: usize = 256;
+/// Most failed wide searches per delta, spaced exponentially across changed
+/// regions so animated frames do not scan megabytes fruitlessly.
+const WIDE_MISSES: usize = 8;
 
 impl Rewind {
     /// An empty history that keeps at most `budget_bytes` of deltas.
@@ -197,31 +203,65 @@ impl Delta {
 /// since stepping back XORs at the same shifts.
 fn line_up(older: &[u8], newer: &[u8]) -> Vec<Shift> {
     let mut shifts = Vec::new();
-    let mut by = 0;
-    let mut searches = SEARCHES;
+    let mut by = 0isize;
+    let mut narrow_left = NARROW_SEARCHES;
+    let mut wide_misses_left = WIDE_MISSES;
+    let mut consecutive_wide_misses = 0u32;
+    let mut skip_wide = 0usize;
     for (segment, start) in (0..older.len()).step_by(SEGMENT).enumerate() {
         let anchor = &older[start..older.len().min(start + ANCHOR)];
         let expected = start.checked_add_signed(by);
         let there = expected.and_then(|at| newer.get(at..at + anchor.len()));
-        if there == Some(anchor) || searches == 0 {
+        if there == Some(anchor) {
+            consecutive_wide_misses = 0;
+            skip_wide = 0;
             continue;
         }
         // A run of one byte value would match anywhere.
         if anchor.iter().all(|&byte| byte == anchor[0]) {
             continue;
         }
-        searches -= 1;
         let near = expected.unwrap_or(0);
-        let low = near.saturating_sub(REACH);
-        let high = newer.len().min(near.saturating_add(REACH + anchor.len()));
-        let Some(found) = newer
-            .get(low..high)
-            .and_then(|window| memchr::memmem::find(window, anchor))
-        else {
+        // Check a small window first: varint shifts are almost always a few bytes.
+        let mut found_at = None;
+        if narrow_left > 0 {
+            narrow_left -= 1;
+            let low = near.saturating_sub(NARROW_REACH);
+            let high = newer
+                .len()
+                .min(near.saturating_add(NARROW_REACH + anchor.len()));
+            if let Some(found) = newer
+                .get(low..high)
+                .and_then(|window| memchr::memmem::find(window, anchor))
+            {
+                found_at = Some(low + found);
+            }
+        }
+        if found_at.is_none() && wide_misses_left > 0 {
+            if skip_wide > 0 {
+                skip_wide -= 1;
+            } else {
+                let low = near.saturating_sub(REACH);
+                let high = newer.len().min(near.saturating_add(REACH + anchor.len()));
+                if let Some(found) = newer
+                    .get(low..high)
+                    .and_then(|window| memchr::memmem::find(window, anchor))
+                {
+                    found_at = Some(low + found);
+                } else {
+                    wide_misses_left -= 1;
+                    consecutive_wide_misses += 1;
+                    skip_wide = (1usize << consecutive_wide_misses.min(5)) - 1;
+                }
+            }
+        }
+        let Some(at) = found_at else {
             continue;
         };
+        consecutive_wide_misses = 0;
+        skip_wide = 0;
         // Both are below isize::MAX, as they index slices.
-        let moved = (low + found) as isize - start as isize;
+        let moved = at as isize - start as isize;
         if moved != by {
             by = moved;
             shifts.push(Shift { from: segment, by });
