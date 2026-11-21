@@ -53,16 +53,28 @@ struct Append<'a>(&'a mut Vec<u8>);
 impl postcard::ser_flavors::Flavor for Append<'_> {
     type Output = ();
 
+    #[inline(always)]
     fn try_push(&mut self, data: u8) -> postcard::Result<()> {
         self.0.push(data);
         Ok(())
     }
 
+    #[inline(always)]
     fn try_extend(&mut self, data: &[u8]) -> postcard::Result<()> {
-        self.0.extend_from_slice(data);
+        // Postcard writes varints as 1..=10 byte slices; pushing those inline
+        // avoids a libc memmove call on every pixel of a screen buffer.
+        if data.len() <= 10 {
+            self.0.reserve(data.len());
+            for &byte in data {
+                self.0.push(byte);
+            }
+        } else {
+            self.0.extend_from_slice(data);
+        }
         Ok(())
     }
 
+    #[inline(always)]
     fn finalize(self) -> postcard::Result<()> {
         Ok(())
     }
