@@ -1601,7 +1601,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "emu-3ds"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ash",
  "crc32fast",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "emu-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -1666,28 +1666,28 @@ dependencies = [
 
 [[package]]
 name = "emu-arm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "emu-cheats"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-core",
 ]
 
 [[package]]
 name = "emu-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "emu-cores"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-3ds",
  "emu-core",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "emu-gb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-core",
  "emu-psg",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "emu-gba"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-arm",
  "emu-core",
@@ -1726,14 +1726,14 @@ dependencies = [
 
 [[package]]
 name = "emu-gba-cart"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "emu-guide"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "emu-os",
@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "emu-headless"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "emu-mkxp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crc32fast",
  "emu-core",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "emu-nds"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-arm",
  "emu-cheats",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "emu-os"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs 7.0.0",
  "libc",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "emu-patch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bzip2-rs",
  "crc32fast",
@@ -1816,21 +1816,21 @@ dependencies = [
 
 [[package]]
 name = "emu-psg"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "emu-sched"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "emu-script"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-core",
  "mlua",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "emu-state"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crc32fast",
  "emu-core",
@@ -1849,7 +1849,7 @@ dependencies = [
 
 [[package]]
 name = "emu-supporter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "ed25519-compact",
