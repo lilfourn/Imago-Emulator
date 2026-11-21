@@ -232,6 +232,10 @@ struct Session {
     /// Where the game keeps the saves it makes itself.
     own_saves: OwnSaves,
     frames: Vec<Frame>,
+    /// Exchanged with the publisher so pixel comparisons run outside its lock.
+    incoming_frames: Vec<Frame>,
+    /// The last frame number on which each screen's pixels or size changed.
+    screen_sequences: Vec<u64>,
     sequence: u64,
     /// Per player: the cheat file's text when last sent to the emulator.
     cheat_texts: Vec<Option<String>>,

@@ -27,7 +27,9 @@ pub(super) struct ImageKey {
     look: Look,
     /// The placement's size in device pixels.
     target: (u32, u32),
-    /// The frames' sequence number ([`Session::sequence`]).
+    /// Output size after sharing the GPU pixel budget across placements.
+    drawn: (u32, u32),
+    /// The last frame number on which this screen changed.
     sequence: u64,
 }
 
@@ -222,10 +224,26 @@ fn cpu_filter(look: Look, factor: usize, gpu_off: bool) -> Filter {
 /// The ambient backdrop: what it was last sampled from, its fade toward
 /// that, and the image of where the fade has got to.
 pub(super) struct Glow {
-    /// The placements and the frames' sequence number sampled.
+    /// The placements and the newest change to a screen they show.
     sampled: (Vec<Placement>, u64),
     pub(super) fade: ambient::Fade,
     pub(super) image: Arc<RenderImage>,
+}
+
+/// Records the frame number of each changed screen. A new frame still
+/// reaches the timing lock even if every image can be reused.
+fn note_screen_changes(sequences: &mut Vec<u64>, before: &[Frame], after: &[Frame], sequence: u64) {
+    if before.len() != after.len() {
+        // Adding or removing a screen can change the combined backdrop too.
+        sequences.clear();
+        sequences.resize(after.len(), sequence);
+        return;
+    }
+    for ((stamp, previous), current) in sequences.iter_mut().zip(before).zip(after) {
+        if previous != current {
+            *stamp = sequence;
+        }
+    }
 }
 
 impl Session {
@@ -234,9 +252,19 @@ impl Session {
     /// replace them ([`Session::refresh_images`]), and the ambient
     /// backdrop fades over to them.
     pub(super) fn take_frames(&mut self) {
-        let Some(sequence) = self.emulator.take_latest(self.sequence, &mut self.frames) else {
+        let Some(sequence) = self
+            .emulator
+            .take_latest(self.sequence, &mut self.incoming_frames)
+        else {
             return;
         };
+        note_screen_changes(
+            &mut self.screen_sequences,
+            &self.frames,
+            &self.incoming_frames,
+            sequence,
+        );
+        std::mem::swap(&mut self.frames, &mut self.incoming_frames);
         self.sequence = sequence;
         self.taken_at = Some(Instant::now());
     }
@@ -317,15 +345,18 @@ impl Session {
         // What each placement should show now.
         let wanted: Vec<Option<ImageKey>> = placements
             .iter()
-            .zip(&targets)
-            .map(|(placement, &target)| {
-                self.frames.get(placement.screen).map(|_| ImageKey {
-                    screen: placement.screen,
-                    rotation: placement.rotation,
-                    look,
-                    target,
-                    sequence: self.sequence,
-                })
+            .zip(targets.iter().zip(&drawn))
+            .map(|(placement, (&target, &drawn))| {
+                self.screen_sequences
+                    .get(placement.screen)
+                    .map(|&sequence| ImageKey {
+                        screen: placement.screen,
+                        rotation: placement.rotation,
+                        look,
+                        target,
+                        drawn,
+                        sequence,
+                    })
             })
             .collect();
         // An earlier batch the GPU has finished meanwhile.
@@ -365,13 +396,13 @@ impl Session {
         let requests: Vec<(usize, Request<'_>)> = redraws
             .iter()
             .enumerate()
-            .filter_map(|(at, (index, key, frame, cell))| {
+            .filter_map(|(at, (_, key, frame, cell))| {
                 let Look::Upscaled(method) = key.look else {
                     return None;
                 };
                 let shown = frame.size();
                 let cell = (*cell).max(1);
-                let (width, height) = drawn[*index];
+                let (width, height) = key.drawn;
                 let enlarges = |(across, down): (u16, u16)| {
                     width > u32::from(across) && height > u32::from(down)
                 };
@@ -470,10 +501,16 @@ impl Session {
         window: &mut Window,
     ) -> bool {
         let now = Instant::now();
+        let sequence = placements
+            .iter()
+            .filter_map(|placement| self.screen_sequences.get(placement.screen))
+            .max()
+            .copied()
+            .unwrap_or(0);
         let current = self
             .ambient
             .as_ref()
-            .is_some_and(|glow| glow.sampled.1 == self.sequence && glow.sampled.0 == placements);
+            .is_some_and(|glow| glow.sampled.1 == sequence && glow.sampled.0 == placements);
         if !current {
             let correction = self.correction.as_ref().filter(|_| color_correction);
             let Some(target) = ambient::picture(&self.frames, placements, correction) else {
@@ -482,7 +519,7 @@ impl Session {
                 }
                 return false;
             };
-            let sampled = (placements.to_vec(), self.sequence);
+            let sampled = (placements.to_vec(), sequence);
             let Some(glow) = &mut self.ambient else {
                 let fade = ambient::Fade::new(target, now);
                 let image = video::render_image(&fade.shown().frame(ambient::BORDER), 1);
@@ -516,12 +553,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_changed_screens_get_new_image_keys() {
+        let screen = Frame::new(ScreenSize::new(3, 2));
+        let first = [screen.clone(), screen];
+        let mut stamps = Vec::new();
+        note_screen_changes(&mut stamps, &[], &first, 1);
+        let mut second = first.clone();
+        second[1].pixels_mut()[5] ^= 1;
+        note_screen_changes(&mut stamps, &first, &second, 3);
+        assert_eq!(stamps, [1, 3]);
+        let mut third = second.clone();
+        third[0] = Frame::new(ScreenSize::new(2, 3));
+        note_screen_changes(&mut stamps, &second, &third, 4);
+        assert_eq!(stamps, [4, 3]);
+        note_screen_changes(&mut stamps, &third, &third, 5);
+        assert_eq!(stamps, [4, 3]);
+        note_screen_changes(&mut stamps, &third, &third[..1], 6);
+        assert_eq!(stamps, [6]);
+    }
+
+    #[test]
     fn an_older_frame_stands_in_until_the_new_one_is_drawn() {
         let key = |sequence, target| ImageKey {
             screen: 0,
             rotation: Rotation::Upright,
             look: Look::Upscaled(Method::Sharp),
             target,
+            drawn: target,
             sequence,
         };
         let wanted = key(10, (1309, 982));
@@ -539,6 +597,11 @@ mod tests {
             ..wanted
         };
         assert!(!smooth.stands_in(wanted, None));
+        let smaller_budget = ImageKey {
+            drawn: (800, 600),
+            ..wanted
+        };
+        assert!(!smaller_budget.stands_in(wanted, None));
         assert!(key(9, (1309, 982)).stands_in(wanted, Some(key(12, (800, 600)))));
     }
 }

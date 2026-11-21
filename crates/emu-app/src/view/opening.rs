@@ -400,6 +400,8 @@ impl EmulatorView {
             states,
             own_saves,
             frames: Vec::new(),
+            incoming_frames: Vec::new(),
+            screen_sequences: Vec::new(),
             sequence: 0,
             cheat_texts: vec![None; info.players.max(1)],
             bindings: Vec::new(),
