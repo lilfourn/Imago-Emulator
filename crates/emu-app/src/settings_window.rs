@@ -11,6 +11,9 @@
 //! ([`OpenRouter`]): its buttons sit in a track as the choices do, with a
 //! line under them saying how the connection stands.
 //!
+//! Then the Updates section, which turns the app's own checks for a newer
+//! version on or off (`crate::update`).
+//!
 //! Last, the Supporter section ([`crate::supporter`]): a row of buttons to
 //! become a supporter or paste a supporter's key, which Paste's shortcut
 //! does too from anywhere in the window, and, once a key is in, the looks
@@ -58,7 +61,7 @@ const ACCOUNT: &str = "OpenRouter";
 const KEY: &str = "Key";
 /// The window's size, in logical pixels: wide enough for the widest row,
 /// and tall enough for the rows everyone has.
-const SIZE: (f32, f32) = (720.0, 800.0);
+const SIZE: (f32, f32) = (720.0, 870.0);
 /// How much taller each of a supporter's rows makes it: a row and the gap
 /// before it.
 const LOOK_ROW: f32 = 43.0;
@@ -434,6 +437,17 @@ fn rows(settings: &Settings) -> Vec<Row> {
     ]
 }
 
+/// The Updates section's row, for `settings`.
+fn update_row(settings: &Settings) -> Row {
+    Row::new(
+        "Check for Updates",
+        vec![("On".into(), true), ("Off".into(), false)],
+        settings.check_updates,
+        |settings, on| settings.check_updates = on,
+    )
+    .under("Updates")
+}
+
 /// The rows a supporter of `tier` gets, after the supporter's row, for
 /// `settings`: the accent, and where there is a Dock, the icons the tier
 /// is offered.
@@ -545,9 +559,10 @@ impl SettingsWindow {
         }
     }
 
-    /// Which row the supporter's is: after the settings' and OpenRouter's.
+    /// Which row the supporter's is: after the settings', OpenRouter's and
+    /// the updates'.
     fn key_row(&self) -> usize {
-        rows(&self.settings).len() + 1
+        rows(&self.settings).len() + 2
     }
 
     /// Puts the keyboard on the supporter's row and scrolls to it.
@@ -558,7 +573,8 @@ impl SettingsWindow {
     }
 
     /// The window's rows, top to bottom: the settings, OpenRouter's
-    /// buttons, the supporter's, and with a key in, a supporter's looks.
+    /// buttons, the updates', the supporter's, and with a key in, a
+    /// supporter's looks.
     fn entries(&self, cx: &App) -> Vec<Entry> {
         let mut entries: Vec<Entry> = rows(&self.settings)
             .into_iter()
@@ -576,6 +592,7 @@ impl SettingsWindow {
             caption,
             problem,
         }));
+        entries.push(Entry::Choices(update_row(&self.settings)));
         let supporter = supporter::current(cx);
         let (caption, problem) = support_caption(
             supporter.map(|supporter| (supporter.name.as_str(), supporter.tier)),
@@ -1177,6 +1194,16 @@ mod tests {
     }
 
     #[test]
+    fn the_updates_row_turns_the_apps_checks_on_and_off() {
+        let mut settings = Settings::default();
+        let row = update_row(&settings);
+        assert_eq!((row.heading, row.chosen), (Some("Updates"), Some(0)));
+        (row.choose)(&mut settings, 1);
+        assert!(!settings.check_updates);
+        assert_eq!(update_row(&settings).chosen, Some(1));
+    }
+
+    #[test]
     fn a_supporters_rows_mark_and_store_the_look() {
         let mut settings = Settings::default();
         let rows = look_rows(&settings, Tier::Supporter);
@@ -1233,10 +1260,10 @@ mod tests {
 
     #[test]
     fn the_window_fits_its_rows_and_is_no_taller_than_the_display_has_room_for() {
-        assert_eq!(window_height(None, 0), 800.0);
-        assert_eq!(window_height(Some(1080.0), 0), 800.0);
+        assert_eq!(window_height(None, 0), 870.0);
+        assert_eq!(window_height(Some(1080.0), 0), 870.0);
         // A supporter's rows make it taller, each by a row and its gap.
-        assert_eq!(window_height(Some(1080.0), 2), 886.0);
+        assert_eq!(window_height(Some(1080.0), 2), 956.0);
         assert_eq!(window_height(Some(982.0), 2), 862.0);
         assert_eq!(window_height(Some(768.0), 0), 648.0);
         assert_eq!(window_height(Some(300.0), 2), 320.0);

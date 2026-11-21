@@ -22,6 +22,12 @@ pub const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") {
 /// as far from the window's right side as the close button is from the
 /// left.
 pub const HEADER_END: f32 = 8.0;
+/// Height of the update pill in the header.
+const UPDATE_PILL: f32 = 26.0;
+/// The narrowest header, besides the window's own buttons, whose update
+/// pill has its words and a button to dismiss it; a narrower one shows the
+/// pill's icon alone, so the header's other buttons stay in the window.
+const ROOM_FOR_UPDATE_WORDS: f32 = 560.0;
 /// Space between the games, in logical pixels.
 const GAP: f32 = 12.0;
 /// Room around a game's picture and words, inside its tile, as in the
@@ -100,6 +106,7 @@ impl LibraryView {
                     .on_click(cx.listener(|this, _, _, cx| this.open_store(cx))),
             ])))
             .child(div().flex_1())
+            .children(self.update_pill(window, cx))
             .child(chrome::over_drag_area(
                 icons::button("settings", icons::SETTINGS)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::OpenSettings)))
@@ -111,6 +118,59 @@ impl LibraryView {
                     .children(probe::part("button:add")),
             ))
             .into_any_element()
+    }
+
+    /// The pill that says a newer version is out, and downloads it,
+    /// restarts into it or opens its page; with a button to put an offer
+    /// away until the next launch.
+    fn update_pill(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pill = self.updater.read(cx).pill()?;
+        let room = f32::from(window.viewport_size().width) - chrome::trailing_room(window, true);
+        let worded = room >= ROOM_FOR_UPDATE_WORDS;
+        let updater = self.updater.clone();
+        let button = div()
+            .id("update")
+            .flex_none()
+            .h(px(UPDATE_PILL))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .when(worded, |button| button.pl(px(10.0)).pr(px(12.0)))
+            .when(!worded, |button| button.w(px(UPDATE_PILL)))
+            .rounded_full()
+            .bg(rgb(accent()))
+            .text_color(rgb(ON_ACCENT))
+            .text_size(px(12.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .whitespace_nowrap()
+            .when(pill.busy, |button| button.opacity(0.8))
+            .when(!pill.busy, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(|button| button.opacity(0.9))
+                    .on_click(move |_, _, cx| updater.update(cx, |updater, cx| updater.press(cx)))
+            })
+            .child(icons::icon(icons::DOWNLOAD, 14.0, ON_ACCENT))
+            .when(worded, |button| button.child(pill.label))
+            .children(probe::part("button:update"));
+        let updater = self.updater.clone();
+        let dismiss = (pill.dismissable && worded).then(|| {
+            chrome::over_drag_area(
+                icons::button("dismiss-update", icons::WINDOW_CLOSE)
+                    .on_click(move |_, _, cx| updater.update(cx, |updater, cx| updater.dismiss(cx)))
+                    .children(probe::part("button:dismiss-update")),
+            )
+        });
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .mr_1()
+                .child(chrome::over_drag_area(button))
+                .children(dismiss)
+                .into_any_element(),
+        )
     }
 
     fn search_field(&self, cx: &mut Context<Self>) -> AnyElement {

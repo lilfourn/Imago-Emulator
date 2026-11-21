@@ -143,5 +143,8 @@ fades only as a signed release builds reputation.
 ## What's left
 
 - Code signing on Windows, and AppImage signing and update information.
+  Until then the app's update pill opens the download page on Windows and
+  Linux, rather than installing the update itself
+  ([decision 0019](../docs/decisions/0019-updates.md)).
 - Flatpak, once the app has settled how it reaches saves beside the ROM.
 - Windows file associations and an MSI; Windows on Arm.

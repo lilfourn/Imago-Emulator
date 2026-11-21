@@ -63,6 +63,8 @@ own dumps. The app has:
 - Lua scripts that read and write memory, press buttons and draw over the
   screens;
 - RPG Maker XP games, played through mkxp-z in the app's window;
+- updates: it says when a new version is out, and installs it on a Mac
+  ([decision 0019](docs/decisions/0019-updates.md));
 - a debugger: breakpoints and watchpoints on every CPU, disassembly,
   registers, a memory editor, graphics viewers, I/O registers and the
   scheduler's queue.

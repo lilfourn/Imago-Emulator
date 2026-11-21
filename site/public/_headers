@@ -1,6 +1,8 @@
 /downloads/*
   Content-Disposition: attachment
   Cache-Control: public, max-age=3600
+/update.json
+  Cache-Control: public, max-age=300
 /assets/*
   Cache-Control: public, max-age=86400
 /thanks
