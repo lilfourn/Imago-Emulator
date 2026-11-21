@@ -44,6 +44,9 @@
 //! width = 640.0           # until the window has been moved or resized
 //! height = 960.0
 //!
+//! [updates]               # left out while on
+//! check = false           # don't ask imagoemulator.com for a newer version
+//!
 //! [look]                  # a supporter's choices; left out while both are the app's own
 //! accent = "violet"       # "blue", "teal", "green", "gold" or "violet"
 //! app_icon = "night"      # in the Dock: "classic", "night", "ink", "chalk", "blueprint",
@@ -126,6 +129,9 @@ pub struct Settings {
     pub accent: Accent,
     /// The Dock icon a supporter chose, shown on the same terms.
     pub app_icon: AppIcon,
+    /// Whether the app asks imagoemulator.com for a newer version on its
+    /// own (`update.rs`).
+    pub check_updates: bool,
 }
 
 /// Where the main window was and how large, to open it there again.
@@ -166,6 +172,7 @@ impl Default for Settings {
             guide_lookups: true,
             accent: Accent::default(),
             app_icon: AppIcon::default(),
+            check_updates: true,
         }
     }
 }
@@ -184,6 +191,23 @@ struct SettingsFile {
     /// file of someone who is not a supporter stays as it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     look: Option<LookSection>,
+    /// Left out while updates are checked for, as they are by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updates: Option<UpdatesSection>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct UpdatesSection {
+    check: bool,
+}
+
+impl Default for UpdatesSection {
+    fn default() -> Self {
+        Self {
+            check: Settings::default().check_updates,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -591,6 +615,7 @@ impl Settings {
             guide_lookups: file.guide.lookups,
             accent,
             app_icon,
+            check_updates: file.updates.unwrap_or_default().check,
         })
     }
 
@@ -617,6 +642,7 @@ impl Settings {
                     app_icon: self.app_icon.name().to_owned(),
                 },
             ),
+            updates: (!self.check_updates).then_some(UpdatesSection { check: false }),
         };
         let body = toml::to_string(&file).expect("plain tables and values always serialize");
         format!("# Saved by ds-emulator whenever a setting changes.\n\n{body}")
@@ -1019,12 +1045,14 @@ mod tests {
             guide_lookups: false,
             accent: Accent::Violet,
             app_icon: AppIcon::Night,
+            check_updates: false,
         }
     }
 
     /// [`every_setting_changed`] as the build before the window held its
     /// settings as one value wrote it, byte for byte, and after it a
-    /// supporter's look, which that build did not have.
+    /// supporter's look and updates turned off, which that build did not
+    /// have.
     const EVERY_SETTING_CHANGED: &str = r#"# Saved by ds-emulator whenever a setting changes.
 
 [layout]
@@ -1068,6 +1096,9 @@ lookups = false
 [look]
 accent = "violet"
 app_icon = "night"
+
+[updates]
+check = false
 "#;
 
     #[test]
@@ -1186,6 +1217,24 @@ lookups = true
         );
         assert!(matches!(
             Settings::from_toml("[look]\ntheme = \"dark\"\n"),
+            Err(SettingsError::Syntax(_))
+        ));
+    }
+
+    #[test]
+    fn updates_are_checked_for_unless_the_file_turns_them_off() {
+        assert!(Settings::default().check_updates);
+        assert!(!Settings::default().to_toml().contains("[updates]"));
+        let off = Settings::from_toml("[updates]\ncheck = false\n").expect("valid file");
+        assert!(!off.check_updates);
+        assert!(off.to_toml().ends_with("[updates]\ncheck = false\n"));
+        assert!(
+            Settings::from_toml("[updates]\n")
+                .expect("valid file")
+                .check_updates
+        );
+        assert!(matches!(
+            Settings::from_toml("[updates]\nchannel = \"beta\"\n"),
             Err(SettingsError::Syntax(_))
         ));
     }

@@ -91,6 +91,7 @@ mod theme;
 mod trace;
 mod turbo;
 mod ui;
+mod update;
 mod video;
 mod view;
 mod window_chrome;

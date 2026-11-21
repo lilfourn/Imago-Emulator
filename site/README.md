@@ -143,7 +143,13 @@ site/publish.sh PACKAGES     # the page, the Worker and the downloads
 `publish.sh PACKAGES` copies `Imago-Emulator-VERSION.dmg`, and the Windows
 and Linux packages found in the folder `PACKAGES` (the release workflow's
 artifacts, from `gh run download RUN -D PACKAGES`), into `public/downloads/`
-(ignored by git) and deploys. It refuses a disk image Gatekeeper does not
+(ignored by git), writes `public/update.json` (also ignored) and deploys.
+`update.json` is the feed the app asks for a newer version
+([decision 0019](../docs/decisions/0019-updates.md)): this version, the
+download page, and each download's address, SHA-256 and size, written by
+`update-feed.mjs` from the page and `wrangler.jsonc`. Copies of the app
+from before this version see it within six hours, and on a Mac install it
+in place. It refuses a disk image Gatekeeper does not
 accept as notarized, a file whose SHA-256 is not the one the page prints,
 and a `DOWNLOAD_` variable naming a file that is not there. For a new
 version, change the version, the sizes and the SHA-256s in the page's

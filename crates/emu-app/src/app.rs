@@ -24,6 +24,7 @@ actions!(
     ds_emulator,
     [
         About,
+        CheckForUpdates,
         OpenSettings,
         OpenSupporter,
         HideApp,
@@ -220,6 +221,10 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
                     window.update(cx, |_, window, _| window.zoom_window()).ok();
                 }
             });
+            cx.on_action(|_: &CheckForUpdates, cx| {
+                crate::update::Updater::global(cx)
+                    .update(cx, |updater, cx| updater.check(true, cx));
+            });
             cx.bind_keys(bindings());
             cx.bind_keys(crate::guide::composer::bindings());
             // Before the window, which draws in the supporter's colours.
@@ -274,6 +279,7 @@ pub fn run(roms: Vec<PathBuf>, script: Option<PathBuf>) {
             // The Dock icon, which is a supporter's to choose.
             main.update(cx, |view, _, cx| view.apply_look(cx)).ok();
             cx.activate(true);
+            crate::update::start(cx);
         });
 }
 
@@ -520,6 +526,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
             name: "Imago Emulator".into(),
             items: vec![
                 MenuItem::action("About Imago Emulator", About),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::action(SUPPORT, OpenSupporter),
@@ -664,6 +671,7 @@ pub fn menus(checks: MenuChecks) -> Vec<Menu> {
             name: "Help".into(),
             items: vec![
                 MenuItem::action("About Imago Emulator", About),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
                 MenuItem::action(SUPPORT, OpenSupporter),
             ],
         });
@@ -940,6 +948,7 @@ mod tests {
     /// menus' choices became actions that carry their value.
     const MAC_MENUS: &str = r#"Imago Emulator
   About Imago Emulator
+  Check for Updates…
   -
   Settings…  [cmd-,]
   Support Imago Emulator…
@@ -1171,6 +1180,7 @@ Window
   Maximize
 Help
   About Imago Emulator
+  Check for Updates…
   Support Imago Emulator…
 "#;
 

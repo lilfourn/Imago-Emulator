@@ -7,6 +7,7 @@ import test from 'node:test';
 import { runInNewContext, Script } from 'node:vm';
 
 import { idOf, PREFIX, TIERS } from './src/keys.js';
+import { feed, PAGE } from './update-feed.mjs';
 import { signed, SUPPORT } from './src/shop.js';
 import worker, { LINKS, SELLING } from './src/worker.js';
 
@@ -111,6 +112,29 @@ test('the download is this version\'s disk image, and the page says which', () =
     assert.ok(name.startsWith(`Imago-Emulator-${version}`), `${name} is not version ${version}`);
     assert.ok(html.includes(`data-sha256="${name}"`), `the page prints no SHA-256 for ${name}`);
   }
+});
+
+test('the update feed names this version and every download, with the SHA-256 the page prints', () => {
+  const cargo = readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8');
+  const version = cargo.match(/^version = "(.+)"$/m)[1];
+  const made = feed({ cargo, wrangler: config, html, sizeOf: (file) => file.length });
+  assert.equal(made.version, version);
+  assert.equal(made.page, PAGE);
+  assert.ok(html.includes('id="download"'), 'the page the feed sends people to has no download section');
+  const app = readFileSync(new URL('../crates/emu-app/src/update.rs', import.meta.url), 'utf8');
+  assert.match(app, /"https:\/\/imagoemulator\.com\/update\.json"/, 'the app asks another address');
+  assert.match(app, /Some\("mac"\)/, 'the app looks for another package name');
+  const variables = [...config.matchAll(/"DOWNLOAD_(\w+)": "(https:[^"]+)"/g)];
+  assert.deepEqual(Object.keys(made.downloads).sort(), variables.map(([, name]) => name.toLowerCase().replaceAll('_', '-')).sort());
+  for (const [, name, url] of variables) {
+    const entry = made.downloads[name.toLowerCase().replaceAll('_', '-')];
+    const file = url.slice(url.lastIndexOf('/') + 1);
+    assert.equal(entry.url, url);
+    assert.equal(entry.size, file.length);
+    assert.ok(html.includes(`<span data-sha256="${file}">${entry.sha256}</span>`), `${file}'s SHA-256 is not the page's`);
+  }
+  // A page that prints no SHA-256 for a download makes no feed.
+  assert.throws(() => feed({ cargo, wrangler: config, html: '', sizeOf: () => 1 }), /SHA-256/);
 });
 
 test('a link leads where its variable says, and says so when it has none', async () => {

@@ -1,7 +1,8 @@
 #!/bin/sh
-# Publishes imagoemulator.com: the page, the Worker, and the downloads
+# Publishes imagoemulator.com: the page, the Worker, the downloads
 # beside them at /downloads/, where the DOWNLOAD_ variables in
-# wrangler.jsonc point.
+# wrangler.jsonc point, and update.json, which tells the app this version
+# is out (update-feed.mjs).
 #
 # usage: site/publish.sh [PACKAGES]
 #
@@ -44,5 +45,8 @@ sed -n 's|.*<span data-sha256="\([^"]*\)">\([0-9a-f]\{64\}\)</span>.*|\1 \2|p' p
 done || exit 1
 grep -q "data-sha256=\"Imago-Emulator-$version.dmg\"" public/index.html || fail "the page prints no SHA-256 for this version's disk image"
 
+# The feed the app asks for a newer version: this version, its downloads
+# and their SHA-256s, as the page prints them.
+node update-feed.mjs || fail "the update feed can't be written (node site/update-feed.mjs)"
 node --test site.test.mjs >/dev/null || fail "the site's tests fail (node --test site/site.test.mjs)"
 wrangler deploy --config wrangler.jsonc

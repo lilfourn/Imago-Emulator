@@ -57,6 +57,7 @@ use crate::romhack::{self, MakeError};
 use crate::slots::{LAST_FILE_SLOT, STATE_SLOTS};
 use crate::store_view::{StoreEvent, StoreView, platform_name, pulse};
 use crate::ui::{self, Section};
+use crate::update::Updater;
 
 use crate::theme::{
     BACKGROUND as TOP, CHOSEN, DANGER, HOVER, INSET, LINE, MUTED as DIM, ON_ACCENT, PANEL, TEXT,
@@ -274,6 +275,9 @@ pub struct LibraryView {
     adding_shown: usize,
     /// Removes what adding games has under way when the app quits.
     _quit: Subscription,
+    /// The app's updates, whose pill the header shows.
+    updater: Entity<Updater>,
+    _updates: Subscription,
 }
 
 impl EventEmitter<LibraryEvent> for LibraryView {}
@@ -310,6 +314,7 @@ impl LibraryView {
                 }
             })
             .detach();
+        let updater = Updater::global(cx);
         let mut view = Self {
             on_disk,
             told_left_out: HashSet::new(),
@@ -341,6 +346,8 @@ impl LibraryView {
                 leftovers::remove_own();
                 async {}
             }),
+            _updates: cx.observe(&updater, |_, _, cx| cx.notify()),
+            updater,
         };
         // Box art and icons, in the cache, are read at once, so the games
         // don't open on plates that their pictures replace a moment later.
