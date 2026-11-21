@@ -31,20 +31,24 @@ pub(crate) enum Width {
 // The bytes are taken as one slice, so an access costs one bounds check
 // and one load rather than one per byte.
 
+#[inline(always)]
 pub(crate) fn half(memory: &[u8], index: usize) -> u16 {
     let bytes = &memory[index..index + 2];
     u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
+#[inline(always)]
 pub(crate) fn word(memory: &[u8], index: usize) -> u32 {
     let bytes = &memory[index..index + 4];
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
+#[inline(always)]
 pub(crate) fn put_half(memory: &mut [u8], index: usize, value: u16) {
     memory[index..index + 2].copy_from_slice(&value.to_le_bytes());
 }
 
+#[inline(always)]
 pub(crate) fn put_word(memory: &mut [u8], index: usize, value: u32) {
     memory[index..index + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -192,6 +196,7 @@ impl Hardware {
     /// A word from `place`, where the ARM9 (if `arm9`) or the ARM7 sees
     /// `address` with its low two bits cleared; `address` as the access
     /// gave it.
+    #[inline]
     pub(crate) fn read_place_32(&mut self, arm9: bool, place: Place, address: u32) -> u32 {
         let unaligned = address;
         let address = address & !3;
@@ -229,6 +234,7 @@ impl Hardware {
     }
 
     /// A halfword from `place`, where `address` lands with bit 0 cleared.
+    #[inline]
     pub(crate) fn read_place_16(&mut self, arm9: bool, place: Place, address: u32) -> u16 {
         let unaligned = address;
         let address = address & !1;
@@ -251,6 +257,7 @@ impl Hardware {
     }
 
     /// A byte from `place`, where `address` lands.
+    #[inline]
     pub(crate) fn read_place_8(&mut self, arm9: bool, place: Place, address: u32) -> u8 {
         match place {
             Place::MainRam(index) => self.main_ram[index],
@@ -272,6 +279,7 @@ impl Hardware {
 
     /// Writes a word to `place`, where `address` lands with its low two
     /// bits cleared.
+    #[inline]
     pub(crate) fn write_place_32(&mut self, arm9: bool, place: Place, address: u32, value: u32) {
         let unaligned = address;
         let address = address & !3;
@@ -316,6 +324,7 @@ impl Hardware {
 
     /// Writes a halfword to `place`, where `address` lands with bit 0
     /// cleared.
+    #[inline]
     pub(crate) fn write_place_16(&mut self, arm9: bool, place: Place, address: u32, value: u16) {
         let unaligned = address;
         let address = address & !1;
@@ -343,6 +352,7 @@ impl Hardware {
     }
 
     /// Writes a byte to `place`, where `address` lands.
+    #[inline]
     pub(crate) fn write_place_8(&mut self, arm9: bool, place: Place, address: u32, value: u8) {
         match place {
             Place::MainRam(index) => self.main_ram[index] = value,
@@ -480,7 +490,7 @@ impl Hardware {
     /// its cycles as [`Hardware::arm9_wait`] does; `None` for every other
     /// access. Nearly all the ARM9's bus traffic is these, so its bus tries
     /// them before the memory map.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn arm9_cache_hit(&mut self, address: u32, access: Access) -> Option<usize> {
         if address >> 24 != 0x02 || access.contains(Access::DMA) {
             return None;
@@ -493,6 +503,7 @@ impl Hardware {
     /// own main RAM accesses are charged as cache hits, which nearly all of
     /// them are on hardware; DMA bypasses the caches and pays the full
     /// cost.
+    #[inline]
     pub(crate) fn arm9_wait(&self, place: Place, width: Width, access: Access) -> u64 {
         let sequential = access.contains(Access::SEQUENTIAL);
         match place {
@@ -512,27 +523,43 @@ impl Hardware {
         }
     }
 
-    /// The ARM7's working RAM, shared or its own, if that is where
-    /// `address` is, and the index there, after charging the access's
-    /// cycle as [`Hardware::arm7_wait`] does; `None` for every other
-    /// address. The ARM7's code and stacks live there, so its bus tries it
-    /// before the rest of the memory map.
-    #[inline]
-    pub(crate) fn arm7_wram_hit(&mut self, address: u32) -> Option<(&mut [u8], usize)> {
-        if address >> 24 != 0x03 {
-            return None;
+    /// The ARM7's working RAM or main RAM if that is where `address` lands,
+    /// and the index there, after charging the access's cycles as
+    /// [`Hardware::arm7_wait`] does; `None` for every other address.
+    #[inline(always)]
+    pub(crate) fn arm7_fast_ram(
+        &mut self,
+        address: u32,
+        width: Width,
+        access: Access,
+    ) -> Option<(&mut [u8], usize)> {
+        match address >> 24 {
+            0x03 => {
+                let (memory, index) = match self.arm7_wram_place(address) {
+                    Place::SharedWram(index) => (&mut self.shared_wram, index),
+                    Place::Arm7Wram(index) => (&mut self.arm7_wram, index),
+                    // Not a place `arm7_wram_place` gives.
+                    _ => return None,
+                };
+                self.arm7.cycles += ARM7_WRAM;
+                Some((memory, index))
+            }
+            0x02 => {
+                let sequential = access.contains(Access::SEQUENTIAL);
+                self.arm7.cycles += match (width, sequential) {
+                    (Width::Word, false) => 9,
+                    (_, false) => 8,
+                    (Width::Word, true) => 2,
+                    (_, true) => 1,
+                };
+                Some((&mut self.main_ram, address as usize & (MAIN_RAM_SIZE - 1)))
+            }
+            _ => None,
         }
-        let (memory, index) = match self.arm7_wram_place(address) {
-            Place::SharedWram(index) => (&mut self.shared_wram, index),
-            Place::Arm7Wram(index) => (&mut self.arm7_wram, index),
-            // Not a place `arm7_wram_place` gives.
-            _ => return None,
-        };
-        self.arm7.cycles += ARM7_WRAM;
-        Some((memory, index))
     }
 
     /// ARM7 cycles (bus cycles) for an access to `address`, at `place`.
+    #[inline]
     pub(crate) fn arm7_wait(
         &self,
         place: Place,

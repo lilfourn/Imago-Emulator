@@ -7,6 +7,7 @@ use crate::multiplier;
 use crate::{Access, Bus, Model, Processor, psr};
 
 impl<M: Model> Processor<M> {
+    #[inline(always)]
     pub(crate) fn execute_thumb<B: Bus>(&mut self, bus: &mut B, instruction: u16) {
         let op = u32::from(instruction);
         match op >> 8 {
@@ -38,6 +39,7 @@ impl<M: Model> Processor<M> {
         }
     }
 
+    #[inline(always)]
     fn low(op: u32, shift: u32) -> usize {
         ((op >> shift) & 7) as usize
     }
@@ -49,9 +51,8 @@ impl<M: Model> Processor<M> {
         let (result, carry) =
             alu::shift_immediate(shift, self.r[Self::low(op, 3)], amount, self.carry());
         self.r[Self::low(op, 0)] = result;
-        self.set_nz(result);
-        self.set_flag(psr::C, carry);
-        self.advance();
+        self.set_nzc(result, carry);
+        self.advance_thumb();
     }
 
     /// Format 2: ADD and SUB with a register or 3-bit immediate.
@@ -65,10 +66,10 @@ impl<M: Model> Processor<M> {
         let outcome = if op & (1 << 9) != 0 {
             alu::subtract(lhs, rhs)
         } else {
-            alu::add_with_carry(lhs, rhs, false)
+            alu::add(lhs, rhs)
         };
         self.r[Self::low(op, 0)] = self.set_arithmetic_flags(outcome);
-        self.advance();
+        self.advance_thumb();
     }
 
     /// Format 3: MOV, CMP, ADD, SUB with an 8-bit immediate.
@@ -83,13 +84,10 @@ impl<M: Model> Processor<M> {
             1 => {
                 self.set_arithmetic_flags(alu::subtract(self.r[rd], value));
             }
-            2 => {
-                self.r[rd] =
-                    self.set_arithmetic_flags(alu::add_with_carry(self.r[rd], value, false))
-            }
+            2 => self.r[rd] = self.set_arithmetic_flags(alu::add(self.r[rd], value)),
             _ => self.r[rd] = self.set_arithmetic_flags(alu::subtract(self.r[rd], value)),
         }
-        self.advance();
+        self.advance_thumb();
     }
 
     /// Format 4: register-to-register ALU operations.
@@ -103,8 +101,7 @@ impl<M: Model> Processor<M> {
             bus.idle();
             nonsequential = true;
             let (result, carry_out) = alu::shift_register(kind, lhs, rhs & 0xFF, carry);
-            cpu.set_flag(psr::C, carry_out);
-            cpu.set_nz(result);
+            cpu.set_nzc(result, carry_out);
             Some(result)
         };
         let result = match (op >> 6) & 0xF {
@@ -126,7 +123,7 @@ impl<M: Model> Processor<M> {
                 None
             }
             0xB => {
-                self.set_arithmetic_flags(alu::add_with_carry(lhs, rhs, false));
+                self.set_arithmetic_flags(alu::add(lhs, rhs));
                 None
             }
             0xC => Some(self.set_logical(lhs | rhs)),
@@ -147,9 +144,9 @@ impl<M: Model> Processor<M> {
             self.r[rd] = result;
         }
         if nonsequential {
-            self.advance_after_data();
+            self.advance_thumb_after_data();
         } else {
-            self.advance();
+            self.advance_thumb();
         }
     }
 
@@ -163,7 +160,7 @@ impl<M: Model> Processor<M> {
                 self.r[rd] = self.r[rd].wrapping_add(value);
                 if rd == 15 {
                     self.r[15] &= !1;
-                    self.reload_pipeline(bus);
+                    self.reload_pipeline_thumb(bus);
                     return;
                 }
             }
@@ -174,7 +171,7 @@ impl<M: Model> Processor<M> {
                 self.r[rd] = value;
                 if rd == 15 {
                     self.r[15] &= !1;
-                    self.reload_pipeline(bus);
+                    self.reload_pipeline_thumb(bus);
                     return;
                 }
             }
@@ -189,13 +186,13 @@ impl<M: Model> Processor<M> {
                 return;
             }
         }
-        self.advance();
+        self.advance_thumb();
     }
 
     /// Format 6: LDR Rd, [PC, #imm], with PC word-aligned.
     fn thumb_load_pc_relative<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let address = (self.r[15] & !2).wrapping_add((op & 0xFF) * 4);
-        self.advance_after_data();
+        self.advance_thumb_after_data();
         let value = self.read_32(bus, address, Access::NONSEQUENTIAL);
         self.finish_load(bus, Self::low(op, 8), value);
     }
@@ -204,7 +201,7 @@ impl<M: Model> Processor<M> {
     fn thumb_load_store_register<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let address = self.r[Self::low(op, 3)].wrapping_add(self.r[Self::low(op, 6)]);
         let rd = Self::low(op, 0);
-        self.advance_after_data();
+        self.advance_thumb_after_data();
         let kind = (op >> 9) & 7;
         let value = match kind {
             0 => {
@@ -233,6 +230,7 @@ impl<M: Model> Processor<M> {
 
     /// Ends a single load: the internal cycle, then Rd, unless the load
     /// aborted.
+    #[inline(always)]
     fn finish_load<B: Bus>(&mut self, bus: &mut B, rd: usize, value: u32) {
         if self.abort_if_refused(bus) {
             return;
@@ -249,7 +247,7 @@ impl<M: Model> Processor<M> {
         let base = self.r[Self::low(op, 3)];
         let address = base.wrapping_add(if byte { offset } else { offset * 4 });
         let rd = Self::low(op, 0);
-        self.advance_after_data();
+        self.advance_thumb_after_data();
         match (load, byte) {
             (false, false) => {
                 self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
@@ -274,7 +272,7 @@ impl<M: Model> Processor<M> {
     fn thumb_load_store_half<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let address = self.r[Self::low(op, 3)].wrapping_add(((op >> 6) & 0x1F) * 2);
         let rd = Self::low(op, 0);
-        self.advance_after_data();
+        self.advance_thumb_after_data();
         if op & (1 << 11) != 0 {
             let value = self.read_half(bus, address, Access::NONSEQUENTIAL);
             self.finish_load(bus, rd, value);
@@ -288,7 +286,7 @@ impl<M: Model> Processor<M> {
     fn thumb_load_store_sp<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let address = self.r[13].wrapping_add((op & 0xFF) * 4);
         let rd = Self::low(op, 8);
-        self.advance_after_data();
+        self.advance_thumb_after_data();
         if op & (1 << 11) != 0 {
             let value = self.read_word_rotated(bus, address, Access::NONSEQUENTIAL);
             self.finish_load(bus, rd, value);
@@ -306,7 +304,7 @@ impl<M: Model> Processor<M> {
             self.r[15] & !2
         };
         self.r[Self::low(op, 8)] = base.wrapping_add((op & 0xFF) * 4);
-        self.advance();
+        self.advance_thumb();
     }
 
     /// Format 13: ADD SP, #±imm.
@@ -317,7 +315,7 @@ impl<M: Model> Processor<M> {
         } else {
             self.r[13].wrapping_add(offset)
         };
-        self.advance();
+        self.advance_thumb();
     }
 
     /// Format 14: PUSH {list, LR} and POP {list, PC}.
@@ -347,37 +345,37 @@ impl<M: Model> Processor<M> {
     fn thumb_transfer<B: Bus>(&mut self, bus: &mut B, rb: usize, list: u32, load: bool) {
         // POP {PC} stays in Thumb on ARMv4T; on ARMv5 bit 0 of the loaded
         // value picks the state, as for LDM.
-        self.transfer_multiple(bus, rb, list, false, true, false, true, load);
+        self.transfer_multiple::<B, true>(bus, rb, list, false, true, false, true, load);
     }
 
     /// PUSH: a descending store, lowest register at the lowest address.
     fn thumb_store_descending<B: Bus>(&mut self, bus: &mut B, list: u32) {
-        self.transfer_multiple(bus, 13, list, true, false, false, true, false);
+        self.transfer_multiple::<B, true>(bus, 13, list, true, false, false, true, false);
     }
 
     /// Format 16: conditional branch.
     fn thumb_conditional_branch<B: Bus>(&mut self, bus: &mut B, op: u32) {
         if !self.condition_passed((op >> 8) & 0xF) {
-            self.advance();
+            self.advance_thumb();
             return;
         }
         let offset = (((op & 0xFF) as u8 as i8) as i32 * 2) as u32;
         self.r[15] = self.r[15].wrapping_add(offset);
-        self.reload_pipeline(bus);
+        self.reload_pipeline_thumb(bus);
     }
 
     /// Format 18: unconditional branch.
     fn thumb_branch<B: Bus>(&mut self, bus: &mut B, op: u32) {
         let offset = (((op << 21) as i32) >> 20) as u32;
         self.r[15] = self.r[15].wrapping_add(offset);
-        self.reload_pipeline(bus);
+        self.reload_pipeline_thumb(bus);
     }
 
     /// Format 19, first half: LR = PC + (offset << 12).
     fn thumb_branch_link_high(&mut self, op: u32) {
         let offset = (((op << 21) as i32) >> 9) as u32;
         self.r[14] = self.r[15].wrapping_add(offset);
-        self.advance();
+        self.advance_thumb();
     }
 
     /// Format 19, second half: jump to LR + (offset << 1), LR = return
@@ -386,7 +384,7 @@ impl<M: Model> Processor<M> {
         let target = self.r[14].wrapping_add((op & 0x7FF) << 1);
         self.r[14] = self.r[15].wrapping_sub(2) | 1;
         self.r[15] = target & !1;
-        self.reload_pipeline(bus);
+        self.reload_pipeline_thumb(bus);
     }
 
     /// ARMv5 BLX suffix: like format 19's second half, but to ARM state at
@@ -400,18 +398,18 @@ impl<M: Model> Processor<M> {
         self.r[14] = self.r[15].wrapping_sub(2) | 1;
         self.set_flag(psr::T, false);
         self.r[15] = target & !3;
-        self.reload_pipeline(bus);
+        self.reload_pipeline_arm(bus);
     }
 
+    #[inline(always)]
     fn set_logical(&mut self, result: u32) -> u32 {
         self.set_nz(result);
         result
     }
 
+    #[inline(always)]
     fn set_arithmetic_flags(&mut self, (result, carry, overflow): (u32, bool, bool)) -> u32 {
-        self.set_nz(result);
-        self.set_flag(psr::C, carry);
-        self.set_flag(psr::V, overflow);
+        self.set_nzcv(result, carry, overflow);
         result
     }
 }

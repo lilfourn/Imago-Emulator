@@ -361,9 +361,23 @@ impl Hardware {
     /// Mixes one audio sample, with channels reading and captures writing
     /// memory as the ARM7 sees it, and schedules the next.
     pub(crate) fn sound_sample(&mut self, time: u64) {
-        let mut sound = std::mem::take(&mut self.sound);
-        sound.sample(self);
-        self.sound = sound;
+        if self.sound.is_idle() {
+            self.sound.push_silence();
+        } else if !self.sound.needs_full_bus() {
+            let mut memory = SoundRamBus {
+                main_ram: &mut self.main_ram,
+                shared_wram: &mut self.shared_wram,
+                arm7_wram: &mut self.arm7_wram,
+                vram: &mut self.vram,
+                arm7_bios: &self.arm7_bios,
+                wramcnt: self.wramcnt,
+            };
+            self.sound.sample(&mut memory);
+        } else {
+            let mut sound = std::mem::take(&mut self.sound);
+            sound.sample(self);
+            self.sound = sound;
+        }
         self.scheduler
             .schedule_at(time + sound::CYCLES_PER_SAMPLE, Event::SoundSample);
     }
@@ -403,6 +417,66 @@ impl Hardware {
         self.scheduler.cancel(|pending| *pending == event);
         if let Some(time) = self.cpu(side).timers.overflow_time(index) {
             self.scheduler.schedule_at(time, event);
+        }
+    }
+}
+
+/// Direct borrow of the ARM7's RAM, VRAM and BIOS for [`Sound::sample`],
+/// avoiding `std::mem::take(&mut self.sound)` on every 32.7 kHz sample.
+struct SoundRamBus<'a> {
+    main_ram: &'a mut [u8],
+    shared_wram: &'a mut [u8],
+    arm7_wram: &'a mut [u8],
+    vram: &'a mut Vram,
+    arm7_bios: &'a [u8],
+    wramcnt: u8,
+}
+
+impl sound::Memory for SoundRamBus<'_> {
+    #[inline]
+    fn read_8(&mut self, address: u32) -> u8 {
+        match address >> 24 {
+            0x02 => self.main_ram[address as usize & (MAIN_RAM_SIZE - 1)],
+            0x03 => {
+                if address >= 0x0380_0000 {
+                    self.arm7_wram[address as usize & 0xFFFF]
+                } else {
+                    match self.wramcnt & 3 {
+                        0 => self.arm7_wram[address as usize & 0xFFFF],
+                        1 => self.shared_wram[address as usize & 0x3FFF],
+                        2 => self.shared_wram[0x4000 + (address as usize & 0x3FFF)],
+                        _ => self.shared_wram[address as usize & 0x7FFF],
+                    }
+                }
+            }
+            0x06 => self
+                .vram
+                .read_8(crate::vram::Region::Arm7, address & 0x3_FFFF),
+            0x00 if address < 0x4000 => self.arm7_bios[address as usize],
+            _ => 0xFF,
+        }
+    }
+
+    #[inline]
+    fn write_8(&mut self, address: u32, value: u8) {
+        match address >> 24 {
+            0x02 => self.main_ram[address as usize & (MAIN_RAM_SIZE - 1)] = value,
+            0x03 => {
+                if address >= 0x0380_0000 {
+                    self.arm7_wram[address as usize & 0xFFFF] = value;
+                } else {
+                    match self.wramcnt & 3 {
+                        0 => self.arm7_wram[address as usize & 0xFFFF] = value,
+                        1 => self.shared_wram[address as usize & 0x3FFF] = value,
+                        2 => self.shared_wram[0x4000 + (address as usize & 0x3FFF)] = value,
+                        _ => self.shared_wram[address as usize & 0x7FFF] = value,
+                    }
+                }
+            }
+            0x06 => self
+                .vram
+                .write_8(crate::vram::Region::Arm7, address & 0x3_FFFF, value),
+            _ => {}
         }
     }
 }

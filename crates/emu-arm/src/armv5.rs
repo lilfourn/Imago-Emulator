@@ -49,6 +49,7 @@ pub(crate) const fn decode(key: u32) -> Option<Kind> {
 impl<M: Model> Processor<M> {
     /// Runs an instruction with condition 0b1111, which ARMv5 uses for BLX
     /// with an immediate, PLD, and the coprocessor "2" forms.
+    #[inline(never)]
     pub(crate) fn execute_unconditional<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         if instruction & 0x0E00_0000 == 0x0A00_0000 {
             self.branch_link_exchange_immediate(bus, instruction);
@@ -58,19 +59,20 @@ impl<M: Model> Processor<M> {
         } else {
             // PLD (a cache hint), and the encodings ARMv5 leaves
             // unpredictable, do nothing, as condition "never" did on ARMv4.
-            self.advance();
+            self.advance_arm();
         }
     }
 
     /// Writes an instruction's result and moves on. A result for R15
     /// (unpredictable for these instructions) jumps, as data processing
     /// does.
+    #[inline(always)]
     fn finish_write<B: Bus>(&mut self, bus: &mut B, rd: usize, value: u32) {
         self.r[rd] = value;
         if rd == 15 {
-            self.reload_pipeline(bus);
+            self.reload_pipeline_arm(bus);
         } else {
-            self.advance();
+            self.advance_arm();
         }
     }
 
@@ -95,12 +97,13 @@ impl<M: Model> Processor<M> {
         self.r[14] = self.r[15].wrapping_sub(4);
         self.set_flag(psr::T, true);
         self.r[15] = self.r[15].wrapping_add(offset);
-        self.reload_pipeline(bus);
+        self.reload_pipeline_thumb(bus);
     }
 
     /// QADD, QSUB, QDADD, QDSUB: Rd = Rm ± Rn, where the D forms first
     /// double Rn; each step saturates, and any saturation sets the sticky
     /// Q flag.
+    #[inline(never)]
     pub(crate) fn saturating_arithmetic<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let rm = self.r[reg(instruction, 0)];
         let rn = self.r[reg(instruction, 16)];
@@ -125,6 +128,7 @@ impl<M: Model> Processor<M> {
     /// forms use all of Rm and keep the product's top 32 of 48 bits). The
     /// 32-bit accumulations wrap and set Q on overflow; no other flags
     /// change.
+    #[inline(never)]
     pub(crate) fn signed_halfword_multiply<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let rd = reg(instruction, 16);
         let rn = reg(instruction, 12);
@@ -155,9 +159,9 @@ impl<M: Model> Processor<M> {
                 self.r[rn] = result as u32;
                 self.r[rd] = (result >> 32) as u32;
                 if rd == 15 || rn == 15 {
-                    self.reload_pipeline(bus);
+                    self.reload_pipeline_arm(bus);
                 } else {
-                    self.advance_after_data();
+                    self.advance_arm_after_data();
                 }
             }
             _ => {
@@ -180,6 +184,7 @@ impl<M: Model> Processor<M> {
     /// LDRH. An odd Rd (unpredictable) is treated as undefined. The bus
     /// sees a two-register LDM or STM. Writeback to Rd or Rd+1
     /// (unpredictable) loses to the loaded value, as for LDR.
+    #[inline(never)]
     pub(crate) fn doubleword_transfer<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let pre = instruction & (1 << 24) != 0;
         let add = instruction & (1 << 23) != 0;
@@ -207,7 +212,7 @@ impl<M: Model> Processor<M> {
         let address = if pre { offset_address } else { base };
         let second = address.wrapping_add(4);
 
-        self.advance_after_data();
+        self.advance_arm_after_data();
         if store {
             self.write_32(bus, address, self.r[rd], Access::NONSEQUENTIAL);
             self.write_32(bus, second, self.r[rd + 1], Access::SEQUENTIAL);
@@ -241,6 +246,7 @@ impl<M: Model> Processor<M> {
     /// MRC and MCR. CP15, the only coprocessor, answers privileged code
     /// only; anything else is an undefined instruction. MRC to R15 sets N,
     /// Z, C and V from the value's top bits.
+    #[inline(never)]
     pub(crate) fn coprocessor_register_transfer<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         if self.mode() == Mode::User {
             self.undefined(bus);
@@ -264,6 +270,6 @@ impl<M: Model> Processor<M> {
             self.undefined(bus);
             return;
         }
-        self.advance();
+        self.advance_arm();
     }
 }

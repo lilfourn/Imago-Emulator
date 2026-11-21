@@ -273,6 +273,7 @@ impl Cp15 {
     /// Whether loads into R15 take the state from bit 0 (ARMv5), which
     /// [`control::PRE_V5`] turns off.
     #[must_use]
+    #[inline(always)]
     pub fn loads_interwork(&self) -> bool {
         self.control & control::PRE_V5 == 0
     }
@@ -280,11 +281,12 @@ impl Cp15 {
     /// Whether the protection unit lets an access of kind `need`
     /// (`protection::READ`, `WRITE` or `EXECUTE`) through, with User mode's
     /// permissions if `user` is set. Everything passes while it is off.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn permits(&self, address: u32, need: u8, user: bool) -> bool {
         !self.protecting() || self.protection.allows(address, need, user)
     }
 
+    #[inline(always)]
     fn protecting(&self) -> bool {
         self.control & control::PROTECTION_UNIT != 0
     }
@@ -312,10 +314,12 @@ impl Cp15 {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn itcm(&self) -> Window {
         self.itcm
     }
 
+    #[inline(always)]
     pub(crate) fn dtcm(&self) -> Window {
         self.dtcm
     }

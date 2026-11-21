@@ -274,6 +274,10 @@ const fn passes(condition: u32, nzcv: u32) -> bool {
 /// CPSR after reset: Supervisor mode, ARM state, IRQs and FIQs off.
 const RESET_CPSR: u32 = Mode::Supervisor.bits() | psr::I | psr::F;
 
+/// Bit `m` is set iff CPSR mode bits `m` select a privileged mode (not User).
+const PRIVILEGED_MODES: u32 =
+    (1 << 0x11) | (1 << 0x12) | (1 << 0x13) | (1 << 0x17) | (1 << 0x1B) | (1 << 0x1F);
+
 /// Every register: the current mode's view plus every bank.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Registers {
@@ -341,18 +345,21 @@ impl<M: Model> Default for Processor<M> {
 impl<M: Model> Processor<M> {
     /// The current mode.
     #[must_use]
+    #[inline(always)]
     pub fn mode(&self) -> Mode {
         Mode::from_bits(self.cpsr)
     }
 
     /// Whether the CPU is in Thumb state.
     #[must_use]
+    #[inline(always)]
     pub fn thumb(&self) -> bool {
         self.cpsr & psr::T != 0
     }
 
     /// Register `index` (0–15) as the current mode sees it.
     #[must_use]
+    #[inline(always)]
     pub fn reg(&self, index: usize) -> u32 {
         self.r[index]
     }
@@ -531,59 +538,91 @@ impl<M: Model> Processor<M> {
             } else if M::V5TE && condition == 0xF {
                 self.execute_unconditional(bus, instruction);
             } else {
-                self.advance();
+                self.advance_arm();
             }
         }
     }
 
-    /// Moves past the current instruction without a jump: the next fetch
+    /// Moves past the current ARM instruction without a jump: the next fetch
     /// follows sequentially.
-    fn advance(&mut self) {
-        self.r[15] = self.r[15].wrapping_add(if self.thumb() { 2 } else { 4 });
+    #[inline(always)]
+    fn advance_arm(&mut self) {
+        self.r[15] = self.r[15].wrapping_add(4);
         self.fetch_access = Access::SEQUENTIAL;
     }
 
-    /// Like [`Processor::advance`], but the bus was used for data, so the
+    /// Moves past the current Thumb instruction without a jump: the next fetch
+    /// follows sequentially.
+    #[inline(always)]
+    fn advance_thumb(&mut self) {
+        self.r[15] = self.r[15].wrapping_add(2);
+        self.fetch_access = Access::SEQUENTIAL;
+    }
+
+    /// Like [`Processor::advance_arm`], but the bus was used for data, so the
     /// next fetch is non-sequential.
-    fn advance_after_data(&mut self) {
-        self.advance();
+    #[inline(always)]
+    fn advance_arm_after_data(&mut self) {
+        self.r[15] = self.r[15].wrapping_add(4);
         self.fetch_access = Access::NONSEQUENTIAL;
+    }
+
+    /// Like [`Processor::advance_thumb`], but the bus was used for data, so the
+    /// next fetch is non-sequential.
+    #[inline(always)]
+    fn advance_thumb_after_data(&mut self) {
+        self.r[15] = self.r[15].wrapping_add(2);
+        self.fetch_access = Access::NONSEQUENTIAL;
+    }
+
+    /// Refills the pipeline from R15 after a jump in ARM state.
+    #[inline]
+    fn reload_pipeline_arm<B: Bus>(&mut self, bus: &mut B) {
+        let sequential = Access::CODE | Access::SEQUENTIAL;
+        let user = self.user_permissions();
+        let pc = self.r[15];
+        self.pipeline[0] = self.model.fetch_32(bus, pc & !3, Access::CODE, user);
+        let next = pc.wrapping_add(4);
+        self.pipeline[1] = self.model.fetch_32(bus, next & !3, sequential, user);
+        self.r[15] = next.wrapping_add(4);
+        self.fetch_access = Access::SEQUENTIAL;
+    }
+
+    /// Refills the pipeline from R15 after a jump in Thumb state.
+    #[inline]
+    fn reload_pipeline_thumb<B: Bus>(&mut self, bus: &mut B) {
+        let sequential = Access::CODE | Access::SEQUENTIAL;
+        let user = self.user_permissions();
+        let pc = self.r[15];
+        self.pipeline[0] = u32::from(self.model.fetch_16(bus, pc & !1, Access::CODE, user));
+        let next = pc.wrapping_add(2);
+        self.pipeline[1] = u32::from(self.model.fetch_16(bus, next & !1, sequential, user));
+        self.r[15] = next.wrapping_add(2);
+        self.fetch_access = Access::SEQUENTIAL;
     }
 
     /// Refills the pipeline from R15 after a jump: one non-sequential and
     /// one sequential fetch, leaving R15 two instructions ahead. R15 is not
     /// aligned here (a jump to an odd address keeps its low bits until the
     /// next instruction starts), matching the hardware's PC register.
+    #[inline]
     fn reload_pipeline<B: Bus>(&mut self, bus: &mut B) {
-        let sequential = Access::CODE | Access::SEQUENTIAL;
-        let user = self.user_permissions();
         if self.thumb() {
-            let first = self
-                .model
-                .fetch_16(bus, self.r[15] & !1, Access::CODE, user);
-            self.pipeline[0] = u32::from(first);
-            self.r[15] = self.r[15].wrapping_add(2);
-            let second = self.model.fetch_16(bus, self.r[15] & !1, sequential, user);
-            self.pipeline[1] = u32::from(second);
-            self.r[15] = self.r[15].wrapping_add(2);
+            self.reload_pipeline_thumb(bus);
         } else {
-            self.pipeline[0] = self
-                .model
-                .fetch_32(bus, self.r[15] & !3, Access::CODE, user);
-            self.r[15] = self.r[15].wrapping_add(4);
-            self.pipeline[1] = self.model.fetch_32(bus, self.r[15] & !3, sequential, user);
-            self.r[15] = self.r[15].wrapping_add(4);
+            self.reload_pipeline_arm(bus);
         }
-        self.fetch_access = Access::SEQUENTIAL;
     }
 
     /// Whether a load into R15 (LDR, LDM, Thumb POP) takes the state from
     /// bit 0: ARMv5, unless CP15 asks for ARMv4 behaviour.
+    #[inline(always)]
     fn loads_interwork(&self) -> bool {
         M::V5TE && self.model.loads_interwork()
     }
 
     /// After a load into R15 on ARMv5: bit 0 selects Thumb.
+    #[inline(always)]
     fn set_state_from_pc(&mut self) {
         let pc = self.r[15];
         self.set_flag(psr::T, pc & 1 != 0);
@@ -592,43 +631,50 @@ impl<M: Model> Processor<M> {
 
     /// Whether accesses have User mode's permissions rather than
     /// privileged ones, for a protection unit to check.
+    #[inline(always)]
     fn user_permissions(&self) -> bool {
-        M::PROTECTION_UNIT && self.mode() == Mode::User
+        M::PROTECTION_UNIT && (PRIVILEGED_MODES & (1 << (self.cpsr & 0x1F))) == 0
     }
 
     /// Reads a data word through the model (TCM or the bus). Data accesses
     /// the protection unit refuses read 0 and write nothing; the
     /// instruction then calls [`Processor::abort_if_refused`].
+    #[inline(always)]
     fn read_32<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u32 {
         let user = self.user_permissions();
         self.model.read_32(bus, address, access, user)
     }
 
     /// Reads a data halfword through the model.
+    #[inline(always)]
     fn read_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u16 {
         let user = self.user_permissions();
         self.model.read_16(bus, address, access, user)
     }
 
     /// Reads a data byte through the model.
+    #[inline(always)]
     fn read_8<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u8 {
         let user = self.user_permissions();
         self.model.read_8(bus, address, access, user)
     }
 
     /// Writes a data word through the model.
+    #[inline(always)]
     fn write_32<B: Bus>(&mut self, bus: &mut B, address: u32, value: u32, access: Access) {
         let user = self.user_permissions();
         self.model.write_32(bus, address, value, access, user);
     }
 
     /// Writes a data halfword through the model.
+    #[inline(always)]
     fn write_16<B: Bus>(&mut self, bus: &mut B, address: u32, value: u16, access: Access) {
         let user = self.user_permissions();
         self.model.write_16(bus, address, value, access, user);
     }
 
     /// Writes a data byte through the model.
+    #[inline(always)]
     fn write_8<B: Bus>(&mut self, bus: &mut B, address: u32, value: u8, access: Access) {
         let user = self.user_permissions();
         self.model.write_8(bus, address, value, access, user);
@@ -638,6 +684,7 @@ impl<M: Model> Processor<M> {
     /// refused one, takes the data abort and returns true. The instruction
     /// must then stop, loading no register and writing no base back
     /// (ARMv5's base-restored abort model).
+    #[inline(always)]
     fn abort_if_refused<B: Bus>(&mut self, bus: &mut B) -> bool {
         let refused = self.model.data_refused();
         if refused {
@@ -649,6 +696,7 @@ impl<M: Model> Processor<M> {
     /// Whether condition `condition` (0–15) passes with the current flags.
     /// Most instructions run always, and those need not wait for the
     /// previous instruction's flags.
+    #[inline(always)]
     fn condition_passed(&self, condition: u32) -> bool {
         condition == 0xE || CONDITIONS[condition as usize] >> (self.cpsr >> 28) & 1 != 0
     }
@@ -688,6 +736,7 @@ impl<M: Model> Processor<M> {
 
     /// Enters an exception: saves CPSR, switches mode in ARM state with
     /// IRQs off, sets LR, and jumps to `vector` from the model's base.
+    #[inline(never)]
     fn enter_exception<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -703,6 +752,7 @@ impl<M: Model> Processor<M> {
         self.reload_pipeline(bus);
     }
 
+    #[inline(never)]
     fn take_irq<B: Bus>(&mut self, bus: &mut B) {
         // The cycle that decides to take the interrupt still fetches the
         // next instruction, which the exception then throws away with the
@@ -725,11 +775,13 @@ impl<M: Model> Processor<M> {
         self.enter_exception(bus, Mode::Irq, vector::IRQ, return_address);
     }
 
+    #[inline(never)]
     fn software_interrupt<B: Bus>(&mut self, bus: &mut B) {
         let return_address = self.r[15].wrapping_sub(if self.thumb() { 2 } else { 4 });
         self.enter_exception(bus, Mode::Supervisor, vector::SWI, return_address);
     }
 
+    #[inline(never)]
     fn undefined<B: Bus>(&mut self, bus: &mut B) {
         let return_address = self.r[15].wrapping_sub(if self.thumb() { 2 } else { 4 });
         bus.idle();
@@ -741,6 +793,7 @@ impl<M: Model> Processor<M> {
     /// their accesses, so the instruction is 12 (ARM) or 6 (Thumb) bytes
     /// behind it. LR is its address plus 8 in either state, so `SUBS PC,
     /// LR, #8` retries it.
+    #[inline(never)]
     fn data_abort<B: Bus>(&mut self, bus: &mut B) {
         let return_address = if self.thumb() {
             self.r[15].wrapping_add(2)
@@ -753,6 +806,7 @@ impl<M: Model> Processor<M> {
     /// BKPT (ARMv5): a prefetch abort. LR is the breakpoint's address plus
     /// 4 in either state, so `SUBS PC, LR, #4` retries it. A fetch the
     /// protection unit refuses becomes BKPT, so this is its abort too.
+    #[inline(never)]
     fn breakpoint<B: Bus>(&mut self, bus: &mut B) {
         let return_address = if self.thumb() {
             self.r[15]
@@ -762,12 +816,31 @@ impl<M: Model> Processor<M> {
         self.enter_exception(bus, Mode::Abort, vector::PREFETCH_ABORT, return_address);
     }
 
+    #[inline(always)]
     fn set_nz(&mut self, value: u32) {
         self.cpsr = (self.cpsr & !(psr::N | psr::Z))
             | (value & psr::N)
             | if value == 0 { psr::Z } else { 0 };
     }
 
+    #[inline(always)]
+    fn set_nzc(&mut self, value: u32, carry: bool) {
+        self.cpsr = (self.cpsr & !(psr::N | psr::Z | psr::C))
+            | (value & psr::N)
+            | if value == 0 { psr::Z } else { 0 }
+            | if carry { psr::C } else { 0 };
+    }
+
+    #[inline(always)]
+    fn set_nzcv(&mut self, value: u32, carry: bool, overflow: bool) {
+        self.cpsr = (self.cpsr & !(psr::N | psr::Z | psr::C | psr::V))
+            | (value & psr::N)
+            | if value == 0 { psr::Z } else { 0 }
+            | if carry { psr::C } else { 0 }
+            | if overflow { psr::V } else { 0 };
+    }
+
+    #[inline(always)]
     fn set_flag(&mut self, flag: u32, on: bool) {
         if on {
             self.cpsr |= flag;
@@ -776,6 +849,7 @@ impl<M: Model> Processor<M> {
         }
     }
 
+    #[inline(always)]
     fn carry(&self) -> bool {
         self.cpsr & psr::C != 0
     }

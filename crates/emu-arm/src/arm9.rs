@@ -67,6 +67,7 @@ impl Arm946es {
     /// Whether a data access of kind `need` may go ahead: the protection
     /// unit allows it and has refused nothing earlier in the instruction.
     /// A refused access spends a cycle.
+    #[inline(always)]
     fn data_allowed<B: Bus>(&mut self, bus: &mut B, address: u32, need: u8, user: bool) -> bool {
         if self.cp15.permits(address, need, user) && !self.data_refused {
             return true;
@@ -78,6 +79,7 @@ impl Arm946es {
 
     /// Whether an instruction fetch may go ahead; a refused one spends a
     /// cycle.
+    #[inline(always)]
     fn fetch_allowed<B: Bus>(&self, bus: &mut B, address: u32, user: bool) -> bool {
         if self.cp15.permits(address, EXECUTE, user) {
             return true;
@@ -87,6 +89,7 @@ impl Arm946es {
     }
 
     /// The TCM block a data read at `address` comes from.
+    #[inline(always)]
     fn read_block(&self, address: u32) -> Option<&Block> {
         if self.cp15.itcm().readable(address) {
             Some(&self.itcm)
@@ -98,6 +101,7 @@ impl Arm946es {
     }
 
     /// The TCM block a data write at `address` goes to.
+    #[inline(always)]
     fn write_block(&mut self, address: u32) -> Option<&mut Block> {
         if self.cp15.itcm().contains(address) {
             Some(&mut self.itcm)
@@ -180,6 +184,7 @@ impl Hooks for Arm946es {
         }
     }
 
+    #[inline(always)]
     fn read_16<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access, user: bool) -> u16 {
         if !self.data_allowed(bus, address, READ, user) {
             0
@@ -193,6 +198,7 @@ impl Hooks for Arm946es {
         }
     }
 
+    #[inline(always)]
     fn read_8<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access, user: bool) -> u8 {
         if !self.data_allowed(bus, address, READ, user) {
             0
@@ -227,6 +233,7 @@ impl Hooks for Arm946es {
         }
     }
 
+    #[inline(always)]
     fn write_16<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -247,6 +254,7 @@ impl Hooks for Arm946es {
         }
     }
 
+    #[inline(always)]
     fn write_8<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -267,22 +275,27 @@ impl Hooks for Arm946es {
         }
     }
 
+    #[inline(always)]
     fn data_refused(&mut self) -> bool {
         std::mem::take(&mut self.data_refused)
     }
 
+    #[inline(always)]
     fn vector_base(&self) -> u32 {
         self.cp15.vector_base()
     }
 
+    #[inline(always)]
     fn loads_interwork(&self) -> bool {
         self.cp15.loads_interwork()
     }
 
+    #[inline(always)]
     fn halted(&self) -> bool {
         self.halted
     }
 
+    #[inline(always)]
     fn wake(&mut self) {
         self.halted = false;
     }

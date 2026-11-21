@@ -12,6 +12,7 @@ pub(crate) enum Shift {
 }
 
 impl Shift {
+    #[inline(always)]
     pub(crate) const fn from_bits(bits: u32) -> Self {
         match bits & 3 {
             0 => Self::Lsl,
@@ -75,7 +76,16 @@ pub(crate) fn shift_register(shift: Shift, value: u32, amount: u32, carry: bool)
     }
 }
 
+/// `a + b` with (result, carry, overflow).
+#[inline(always)]
+pub(crate) fn add(a: u32, b: u32) -> (u32, bool, bool) {
+    let (result, carry) = a.overflowing_add(b);
+    let overflow = (!(a ^ b) & (a ^ result)) >> 31 != 0;
+    (result, carry, overflow)
+}
+
 /// `a + b + carry_in` with (result, carry, overflow).
+#[inline(always)]
 pub(crate) fn add_with_carry(a: u32, b: u32, carry_in: bool) -> (u32, bool, bool) {
     let wide = u64::from(a) + u64::from(b) + u64::from(carry_in);
     let result = wide as u32;
@@ -84,11 +94,15 @@ pub(crate) fn add_with_carry(a: u32, b: u32, carry_in: bool) -> (u32, bool, bool
 }
 
 /// `a - b`, as ARM computes it: `a + !b + 1`. Carry means "no borrow".
+#[inline(always)]
 pub(crate) fn subtract(a: u32, b: u32) -> (u32, bool, bool) {
-    add_with_carry(a, !b, true)
+    let (result, borrow) = a.overflowing_sub(b);
+    let overflow = ((a ^ b) & (a ^ result)) >> 31 != 0;
+    (result, !borrow, overflow)
 }
 
 /// `a - b - !carry_in`.
+#[inline(always)]
 pub(crate) fn subtract_with_carry(a: u32, b: u32, carry_in: bool) -> (u32, bool, bool) {
     add_with_carry(a, !b, carry_in)
 }
