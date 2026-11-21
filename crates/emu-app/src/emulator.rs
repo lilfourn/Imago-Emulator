@@ -252,14 +252,15 @@ impl RomFile {
 /// seconds from 1970-01-01 00:00, with the time-zone offset already added,
 /// since the emulated clocks have no time zone of their own.
 fn local_clock_seconds() -> i64 {
-    chrono::Local::now().naive_local().and_utc().timestamp()
+    let now = jiff::Zoned::now();
+    now.timestamp().as_second() + i64::from(now.offset().seconds())
 }
 
 /// The local date and time now, for naming screenshots and recordings as
 /// macOS names its own: `2026-10-07 at 18.58.12`.
 fn capture_stamp() -> String {
-    chrono::Local::now()
-        .format("%Y-%m-%d at %H.%M.%S")
+    jiff::Zoned::now()
+        .strftime("%Y-%m-%d at %H.%M.%S")
         .to_string()
 }
 

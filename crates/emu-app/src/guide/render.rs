@@ -1279,10 +1279,10 @@ fn searching_label(sites: &[String]) -> String {
 fn started(seconds: u64) -> String {
     i64::try_from(seconds)
         .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
         .map(|time| {
-            time.with_timezone(&chrono::Local)
-                .format("%-d %b, %H:%M")
+            time.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%-d %b, %H:%M")
                 .to_string()
         })
         .unwrap_or_default()
