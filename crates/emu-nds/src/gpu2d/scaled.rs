@@ -30,6 +30,13 @@ pub(crate) fn enlarge_line(line: &[u32; WIDTH], scale: usize, out: &mut [u32]) {
 /// Fills one row `256 * scale` pixels wide with `line`'s pixels, each
 /// repeated `scale` times.
 fn enlarge_row(line: &[u32; WIDTH], scale: usize, out: &mut [u32]) {
+    if scale == 2 {
+        for (pair, &pixel) in out.chunks_exact_mut(2).zip(line) {
+            pair[0] = pixel;
+            pair[1] = pixel;
+        }
+        return;
+    }
     for (block, &pixel) in out.chunks_exact_mut(scale).zip(line) {
         block.fill(pixel);
     }
@@ -81,6 +88,11 @@ impl Engine2d {
 }
 
 impl LineCopy {
+    /// Whether this line showed 3D.
+    pub(crate) fn showed_3d(&self) -> bool {
+        self.showed_3d
+    }
+
     /// Draws the line `scale` times larger into `out`: `scale` rows of
     /// `256 * scale` pixels. If it showed 3D, `three_d(n)` gives the
     /// larger 3D frame's row for row `n` of `out`, as wide; without one,

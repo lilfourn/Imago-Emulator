@@ -96,22 +96,24 @@ pub(crate) fn fog_density(depth: u32, config: &RenderConfig) -> u32 {
     if density >= 127 { 128 } else { density }
 }
 
+/// Blends fog into a single packed 6-bit-colour/5-bit-alpha pixel at `depth`.
+pub(crate) fn fog_pixel(pixel: u32, depth: u32, config: &RenderConfig) -> u32 {
+    let fog_rgb = color::rgb6(config.fog_color);
+    let fog_alpha = (config.fog_color >> 16) & 0x1F;
+    let density = fog_density(depth, config);
+    let mix = |fog: u32, value: u32| ((fog * density + value * (128 - density)) >> 7) as u8;
+    let rgb = color::unpack(pixel);
+    let rgb = if config.fog_alpha_only {
+        rgb
+    } else {
+        std::array::from_fn(|i| mix(u32::from(fog_rgb[i]), u32::from(rgb[i])))
+    };
+    color::pack(rgb, mix(fog_alpha, u32::from(color::alpha(pixel))))
+}
+
 /// Blends fog into every pixel whose fog flag is set, and into the pixels
 /// beneath anti-aliased edges, which those edges are blended with later.
 pub(crate) fn apply_fog(buffers: &mut Buffers, config: &RenderConfig) {
-    let fog_rgb = color::rgb6(config.fog_color);
-    let fog_alpha = (config.fog_color >> 16) & 0x1F;
-    let add_fog = |pixel: &mut u32, depth: u32| {
-        let density = fog_density(depth, config);
-        let mix = |fog: u32, value: u32| ((fog * density + value * (128 - density)) >> 7) as u8;
-        let rgb = color::unpack(*pixel);
-        let rgb = if config.fog_alpha_only {
-            rgb
-        } else {
-            std::array::from_fn(|i| mix(u32::from(fog_rgb[i]), u32::from(rgb[i])))
-        };
-        *pixel = color::pack(rgb, mix(fog_alpha, u32::from(color::alpha(*pixel))));
-    };
     let Buffers {
         color: pixels,
         depth,
@@ -123,11 +125,11 @@ pub(crate) fn apply_fog(buffers: &mut Buffers, config: &RenderConfig) {
     for (index, pixel) in top.iter_mut().enumerate() {
         let attr = attrs[index];
         if attr.fog {
-            add_fog(pixel, depth[index]);
+            *pixel = fog_pixel(*pixel, depth[index], config);
         }
         let below = index + *layer;
         if attr.coverage() < 31 && attrs[below].fog {
-            add_fog(&mut beneath[index], depth[below]);
+            beneath[index] = fog_pixel(beneath[index], depth[below], config);
         }
     }
 }

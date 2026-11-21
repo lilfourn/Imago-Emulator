@@ -129,11 +129,19 @@ pub(crate) struct Renderer {
     /// they draw it.
     scene: Arc<Scene>,
     /// The native frame, in [`NATIVE_BANDS`] bands; none before the first
-    /// frame.
+    /// non-empty frame.
     native: Vec<Band>,
     /// The larger frame, for the screen only; none at the native
-    /// resolution.
+    /// resolution or before the first non-empty frame.
     larger: Vec<Band>,
+    /// When the last frame had no polygons and no rear-plane bitmap, every
+    /// pixel holds this single colour, avoiding worker wakeups and buffer
+    /// clears.
+    uniform: Option<u32>,
+    /// One native row filled with [`Self::uniform`].
+    uniform_native: [u32; WIDTH],
+    /// One scaled row filled with [`Self::uniform`] when `scale > 1`.
+    uniform_larger: Vec<u32>,
     /// How many times larger than the native frame the larger one is.
     scale: usize,
     workers: Workers,
@@ -151,6 +159,9 @@ impl Default for Renderer {
             scene: Arc::default(),
             native: Vec::new(),
             larger: Vec::new(),
+            uniform: None,
+            uniform_native: [0; WIDTH],
+            uniform_larger: Vec::new(),
             scale: 1,
             workers: Workers::default(),
             sender,
@@ -169,11 +180,15 @@ impl Renderer {
         if scale != self.scale {
             self.finish();
             self.scale = scale;
-            self.larger = if scale == 1 {
-                Vec::new()
-            } else {
-                bands(scale, BANDS)
-            };
+            self.larger.clear();
+            if let Some(pixel) = self.uniform {
+                if scale > 1 {
+                    self.uniform_larger.resize(WIDTH * scale, pixel);
+                    self.uniform_larger.fill(pixel);
+                } else {
+                    self.uniform_larger.clear();
+                }
+            }
         }
     }
 
@@ -182,6 +197,7 @@ impl Renderer {
     pub(crate) fn split(&mut self, scale: usize, count: usize) {
         self.finish();
         self.scale = scale;
+        self.uniform = None;
         self.larger = bands(scale, count);
     }
 
@@ -189,6 +205,7 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) fn split_native(&mut self, count: usize) {
         self.finish();
+        self.uniform = None;
         self.native = bands(1, count);
     }
 
@@ -197,8 +214,27 @@ impl Renderer {
     /// [`Renderer::line`] and [`Renderer::take_scaled_frame`] wait for it.
     pub(crate) fn render(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) {
         self.finish();
+        if list.polygons.is_empty() && !config.rear_bitmap {
+            let pixel = uniform_clear_pixel(config);
+            let scaled_len = if self.scale > 1 {
+                WIDTH * self.scale
+            } else {
+                0
+            };
+            if self.uniform != Some(pixel) || self.uniform_larger.len() != scaled_len {
+                self.uniform_native.fill(pixel);
+                self.uniform_larger.resize(scaled_len, pixel);
+                self.uniform_larger.fill(pixel);
+                self.uniform = Some(pixel);
+            }
+            return;
+        }
+        self.uniform = None;
         if self.native.is_empty() {
             self.native = bands(1, NATIVE_BANDS);
+        }
+        if self.scale > 1 && self.larger.is_empty() {
+            self.larger = bands(self.scale, BANDS);
         }
         // The workers have let go of the scene, so it is reused, not
         // copied.
@@ -227,6 +263,13 @@ impl Renderer {
     /// drawing.
     pub(crate) fn line(&mut self, y: usize) -> &[u32; WIDTH] {
         static BLANK: [u32; WIDTH] = [0; WIDTH];
+        if self.uniform.is_some() {
+            return if y < HEIGHT {
+                &self.uniform_native
+            } else {
+                &BLANK
+            };
+        }
         let Some(index) = self.native.iter().position(|band| band.owned.contains(&y)) else {
             return &BLANK;
         };
@@ -241,10 +284,13 @@ impl Renderer {
     /// The last larger frame drawn, waiting for it if it is still drawing.
     #[cfg(test)]
     pub(crate) fn scaled_frame(&mut self) -> ScaledFrame<'_> {
+        if self.uniform.is_some() {
+            return ScaledFrame(ScaledInner::Uniform(&self.uniform_larger));
+        }
         while self.larger.iter().any(|band| band.buffers.is_none()) {
             self.receive();
         }
-        ScaledFrame(&self.larger)
+        ScaledFrame(ScaledInner::Bands(&self.larger))
     }
 
     /// Takes the last larger frame drawn out of the renderer, waiting for
@@ -252,15 +298,21 @@ impl Renderer {
     /// it. Until [`Renderer::put_scaled_frame`] puts it back the renderer
     /// has none, and must not be asked to draw.
     pub(crate) fn take_scaled_frame(&mut self) -> LentFrame {
+        if self.uniform.is_some() {
+            return LentFrame(LentInner::Uniform(std::mem::take(&mut self.uniform_larger)));
+        }
         while self.larger.iter().any(|band| band.buffers.is_none()) {
             self.receive();
         }
-        LentFrame(std::mem::take(&mut self.larger))
+        LentFrame(LentInner::Bands(std::mem::take(&mut self.larger)))
     }
 
     /// Puts back the frame [`Renderer::take_scaled_frame`] took.
     pub(crate) fn put_scaled_frame(&mut self, frame: LentFrame) {
-        self.larger = frame.0;
+        match frame.0 {
+            LentInner::Bands(bands) => self.larger = bands,
+            LentInner::Uniform(row) => self.uniform_larger = row,
+        }
     }
 
     /// Runs `jobs` on the renderer's threads ([`Workers::run`]), for work
@@ -319,25 +371,66 @@ fn draw_job(
 
 /// A larger frame out of the renderer for a while
 /// ([`Renderer::take_scaled_frame`]), for jobs to read.
-#[derive(Debug, Default)]
-pub(crate) struct LentFrame(Vec<Band>);
+#[derive(Debug)]
+pub(crate) struct LentFrame(LentInner);
+
+#[derive(Debug)]
+enum LentInner {
+    Bands(Vec<Band>),
+    Uniform(Vec<u32>),
+}
+
+impl Default for LentFrame {
+    fn default() -> Self {
+        Self(LentInner::Bands(Vec::new()))
+    }
+}
 
 impl LentFrame {
     /// Its rows.
     pub(crate) fn rows(&self) -> ScaledFrame<'_> {
-        ScaledFrame(&self.0)
+        match &self.0 {
+            LentInner::Bands(bands) => ScaledFrame(ScaledInner::Bands(bands)),
+            LentInner::Uniform(row) => ScaledFrame(ScaledInner::Uniform(row)),
+        }
     }
 }
 
 /// The rows of a larger frame, which several threads can read at once.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ScaledFrame<'a>(&'a [Band]);
+pub(crate) struct ScaledFrame<'a>(ScaledInner<'a>);
+
+#[derive(Debug, Clone, Copy)]
+enum ScaledInner<'a> {
+    Bands(&'a [Band]),
+    Uniform(&'a [u32]),
+}
 
 impl<'a> ScaledFrame<'a> {
     /// Row `row`, `256 * scale` pixels; `None` without a larger frame.
     pub(crate) fn row(self, row: usize) -> Option<&'a [u32]> {
-        let band = self.0.iter().find(|band| band.owned.contains(&row))?;
-        band_row(band, row)
+        match self.0 {
+            ScaledInner::Bands(bands) => {
+                let band = bands.iter().find(|band| band.owned.contains(&row))?;
+                band_row(band, row)
+            }
+            ScaledInner::Uniform(pixels) => {
+                let scale = pixels.len() / WIDTH;
+                (scale > 1 && row < HEIGHT * scale).then_some(pixels)
+            }
+        }
+    }
+}
+
+/// The single pixel value of a uniform rear-plane frame (no polygons and no
+/// rear-plane bitmap), including fog if the rear plane enables it.
+fn uniform_clear_pixel(config: &RenderConfig) -> u32 {
+    let alpha = ((config.clear_color >> 16) & 0x1F) as u8;
+    let pixel = color::pack(color::rgb6(config.clear_color), alpha);
+    if config.fog && config.clear_color & 0x8000 != 0 {
+        post::fog_pixel(pixel, config.clear_depth, config)
+    } else {
+        pixel
     }
 }
 
