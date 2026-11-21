@@ -94,6 +94,7 @@ impl Apu {
     /// Advances `cycles` real-time clock cycles (one CPU M-cycle: 4, or 2
     /// in CGB double speed). `frame_sequencer` is true when the DIV bit that
     /// clocks it at 512 Hz fell.
+    #[inline(always)]
     pub(crate) fn tick(&mut self, cycles: u8, frame_sequencer: bool) {
         if frame_sequencer {
             self.clock_frame_sequencer();
@@ -106,6 +107,7 @@ impl Apu {
     }
 
     /// One frame-sequencer step, for a DIV write that makes its bit fall.
+    #[inline(never)]
     pub(crate) fn clock_frame_sequencer(&mut self) {
         self.psg.clock_frame_sequencer();
         self.mixed = None;
@@ -113,6 +115,7 @@ impl Apu {
 
     /// The channels' output after NR51 panning and NR50 volume, left and
     /// right; silence with the sound circuit off.
+    #[inline(never)]
     fn mix_channels(&self) -> [i32; 2] {
         if self.psg.powered() {
             self.psg.mixed()
@@ -121,6 +124,7 @@ impl Apu {
         }
     }
 
+    #[inline(always)]
     fn mix(&mut self, cycles: u32) {
         let [left, right] = match self.mixed {
             Some(mixed) => mixed,
@@ -132,9 +136,13 @@ impl Apu {
         self.accumulated_cycles += 1;
 
         self.sample_clock += cycles * SAMPLE_RATE;
-        if self.sample_clock < CLOCK_HZ {
-            return;
+        if self.sample_clock >= CLOCK_HZ {
+            self.emit_sample();
         }
+    }
+
+    #[inline(never)]
+    fn emit_sample(&mut self) {
         self.sample_clock -= CLOCK_HZ;
         // Full scale is 4 channels x 15 x volume 8.
         let scale = 1.0 / (480.0 * self.accumulated_cycles as f32);

@@ -55,6 +55,7 @@ enum Mode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "SavedPpu")]
 pub(crate) struct Ppu {
     model: Model,
     /// Two 8 KiB banks; bank 1 exists only on CGB.
@@ -118,12 +119,104 @@ pub(crate) struct Ppu {
     /// Mode 0 began on a visible line since the last call; drives HBlank
     /// DMA.
     hblank_started: bool,
+    /// Cached next dot at which [`Ppu::advance_dot`] changes mode or line
+    /// (0 when LCD is off). Derived, not saved.
+    #[serde(skip)]
+    next_event: u16,
+}
+
+#[derive(Deserialize)]
+struct SavedPpu {
+    model: Model,
+    #[serde(with = "payload::Exact::<0x4000>")]
+    vram: Box<[u8]>,
+    #[serde(with = "payload::Below::<2>")]
+    vram_bank: u8,
+    #[serde(with = "payload::Exact::<0xA0>")]
+    oam: Box<[u8]>,
+    lcdc: u8,
+    stat_select: u8,
+    scy: u8,
+    scx: u8,
+    #[serde(with = "payload::Below::<{ LINES_PER_FRAME as u64 }>")]
+    ly: u8,
+    lyc: u8,
+    bgp: u8,
+    obp0: u8,
+    obp1: u8,
+    wy: u8,
+    wx: u8,
+    #[serde(with = "payload::Exact::<64>")]
+    bg_palettes: Box<[u8]>,
+    #[serde(with = "payload::Exact::<64>")]
+    obj_palettes: Box<[u8]>,
+    bg_palette_select: u8,
+    obj_palette_select: u8,
+    priority_by_x: bool,
+    mode: Mode,
+    reported_mode: Mode,
+    lyc_match: bool,
+    first_line: bool,
+    #[serde(with = "payload::Below::<{ DOTS_PER_LINE as u64 }>")]
+    dot: u16,
+    #[serde(with = "payload::Below::<{ DOTS_PER_LINE as u64 }>")]
+    drawing_dots: u16,
+    window_in_frame: bool,
+    #[serde(with = "payload::Below::<{ HEIGHT as u64 + 1 }>")]
+    window_line: u8,
+    stat_line: bool,
+    #[serde(with = "payload::ExactList::<{ WIDTH * HEIGHT }>")]
+    pixels: Box<[u32]>,
+    frame_ready: bool,
+    hblank_started: bool,
+}
+
+impl From<SavedPpu> for Ppu {
+    fn from(s: SavedPpu) -> Self {
+        let mut ppu = Self {
+            model: s.model,
+            vram: s.vram,
+            vram_bank: s.vram_bank,
+            oam: s.oam,
+            lcdc: s.lcdc,
+            stat_select: s.stat_select,
+            scy: s.scy,
+            scx: s.scx,
+            ly: s.ly,
+            lyc: s.lyc,
+            bgp: s.bgp,
+            obp0: s.obp0,
+            obp1: s.obp1,
+            wy: s.wy,
+            wx: s.wx,
+            bg_palettes: s.bg_palettes,
+            obj_palettes: s.obj_palettes,
+            bg_palette_select: s.bg_palette_select,
+            obj_palette_select: s.obj_palette_select,
+            priority_by_x: s.priority_by_x,
+            mode: s.mode,
+            reported_mode: s.reported_mode,
+            lyc_match: s.lyc_match,
+            first_line: s.first_line,
+            dot: s.dot,
+            drawing_dots: s.drawing_dots,
+            window_in_frame: s.window_in_frame,
+            window_line: s.window_line,
+            stat_line: s.stat_line,
+            pixels: s.pixels,
+            frame_ready: s.frame_ready,
+            hblank_started: s.hblank_started,
+            next_event: 0,
+        };
+        ppu.refresh_next_event();
+        ppu
+    }
 }
 
 impl Ppu {
     /// The state the boot ROM leaves: LCD on, BGP = 0xFC.
     pub(crate) fn after_boot(model: Model) -> Self {
-        Self {
+        let mut ppu = Self {
             model,
             vram: vec![0; 0x4000].into_boxed_slice(),
             vram_bank: 0,
@@ -156,17 +249,22 @@ impl Ppu {
             pixels: vec![WHITE; WIDTH * HEIGHT].into_boxed_slice(),
             frame_ready: false,
             hblank_started: false,
-        }
+            next_event: 0,
+        };
+        ppu.refresh_next_event();
+        ppu
     }
 
     /// The state at power-on, for a boot ROM to start from: LCD off.
     pub(crate) fn power_on(model: Model) -> Self {
-        Self {
+        let mut ppu = Self {
             lcdc: 0,
             mode: Mode::HBlank,
             reported_mode: Mode::HBlank,
             ..Self::after_boot(model)
-        }
+        };
+        ppu.refresh_next_event();
+        ppu
     }
 
     fn cgb(&self) -> bool {
@@ -219,16 +317,27 @@ impl Ppu {
     }
 
     /// Advances `dots` dots: four per M-cycle, or two in CGB double speed.
+    #[inline(always)]
     pub(crate) fn tick(&mut self, dots: u8, interrupt_flag: &mut u8) {
-        if !self.lcd_enabled() {
-            return;
-        }
-        let dots = u16::from(dots);
-        if self.dot + dots < self.next_event_dot() {
+        let next = self.dot + u16::from(dots);
+        if self.dot != 0 && next < self.next_event {
             // Most M-cycles change nothing but the dot counter. Away from a
             // line's first dot, that leaves the STAT line as it was: its
             // inputs only change at mode and line changes and register
             // writes, which update it themselves.
+            self.dot = next;
+            self.reported_mode = self.mode;
+            return;
+        }
+        self.tick_slow(u16::from(dots), interrupt_flag);
+    }
+
+    #[inline(never)]
+    fn tick_slow(&mut self, dots: u16, interrupt_flag: &mut u8) {
+        if !self.lcd_enabled() {
+            return;
+        }
+        if self.dot + dots < self.next_event {
             let line_start = self.dot == 0;
             self.dot += dots;
             self.reported_mode = self.mode;
@@ -239,8 +348,17 @@ impl Ppu {
             for _ in 0..dots {
                 self.advance_dot(interrupt_flag);
             }
+            self.refresh_next_event();
             self.update_stat_line(interrupt_flag);
         }
+    }
+
+    fn refresh_next_event(&mut self) {
+        self.next_event = if self.lcd_enabled() {
+            self.next_event_dot()
+        } else {
+            0
+        };
     }
 
     /// The next dot at which [`Ppu::advance_dot`] changes the mode or line.
@@ -354,7 +472,8 @@ impl Ppu {
             // already waited for; bit 32 + n: window tile n. Objects are
             // fetched left to right, whatever their order in OAM.
             let mut waited: u64 = 0;
-            let mut sprites = self.line_sprites();
+            let (mut sprites, count) = self.line_sprites();
+            let sprites = &mut sprites[..count];
             sprites.sort_by_key(|sprite| sprite.x);
             for sprite in sprites {
                 // Objects off the right edge are never fetched.
@@ -396,29 +515,34 @@ impl Ppu {
     }
 
     /// Up to ten objects overlapping the current line, in OAM order.
-    fn line_sprites(&self) -> Vec<Sprite> {
+    fn line_sprites(&self) -> ([Sprite; 10], usize) {
         let height = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
         let line = i16::from(self.ly) + 16;
-        self.oam
-            .chunks_exact(4)
-            .enumerate()
-            .map(|(index, entry)| Sprite {
-                y: entry[0],
-                x: entry[1],
-                tile: entry[2],
-                attributes: entry[3],
-                index,
-            })
-            .filter(|sprite| {
-                let top = i16::from(sprite.y);
-                line >= top && line < top + height
-            })
-            .take(10)
-            .collect()
+        let mut sprites = [Sprite::default(); 10];
+        let mut count = 0;
+        for (index, entry) in self.oam.chunks_exact(4).enumerate() {
+            let y = entry[0];
+            let top = i16::from(y);
+            if line >= top && line < top + height {
+                sprites[count] = Sprite {
+                    y,
+                    x: entry[1],
+                    tile: entry[2],
+                    attributes: entry[3],
+                    index,
+                };
+                count += 1;
+                if count == 10 {
+                    break;
+                }
+            }
+        }
+        (sprites, count)
     }
 
     /// Colour index 0–3 of pixel (`column`, `row`) in the tile at VRAM
     /// offset `tile_address`.
+    #[cfg(test)]
     fn tile_pixel(&self, tile_address: usize, row: usize, column: usize) -> u8 {
         let low = self.vram[tile_address + row * 2];
         let high = self.vram[tile_address + row * 2 + 1];
@@ -427,6 +551,7 @@ impl Ppu {
     }
 
     /// VRAM offset of background/window tile `index`, honouring LCDC bit 4.
+    #[cfg(test)]
     fn bg_tile_address(&self, index: u8) -> usize {
         if self.lcdc & 0x10 != 0 {
             usize::from(index) * 16
@@ -439,50 +564,76 @@ impl Ppu {
     /// map position (`x`, `y`) and going right, wrapping around the map's
     /// 256-pixel width.
     fn draw_map(&self, map: usize, x: usize, y: usize, pixels: &mut [BgPixel]) {
-        // The tile row last decoded and its map column: neighbouring
-        // pixels mostly share one.
-        let (mut row, mut row_column) = ([BgPixel::default(); 8], usize::MAX);
-        for (offset, pixel) in pixels.iter_mut().enumerate() {
-            let x = (x + offset) & 0xFF;
-            if x / 8 != row_column {
-                row_column = x / 8;
-                row = self.tile_row(map, row_column, y);
-            }
-            *pixel = row[x % 8];
-        }
-    }
-
-    /// The eight pixels of line `y` (in map pixels) of the tile in map
-    /// column `column` of the tile map at VRAM offset `map`, left to right
-    /// after flipping.
-    fn tile_row(&self, map: usize, column: usize, y: usize) -> [BgPixel; 8] {
-        let entry = map + (y / 8) * 32 + column;
-        let index = self.vram[entry];
-        // Attributes live at the same offset in bank 1.
-        let attributes = if self.cgb() {
-            self.vram[0x2000 + entry]
-        } else {
-            0
-        };
-        let bank = if attributes & 0x08 != 0 { 0x2000 } else { 0 };
-        let row = if attributes & 0x40 != 0 {
-            7 - y % 8
-        } else {
-            y % 8
-        };
-        let tile_address = bank + self.bg_tile_address(index);
-        std::array::from_fn(|pixel| {
-            let column = if attributes & 0x20 != 0 {
-                7 - pixel
+        let map_row = map + (y / 8) * 32;
+        let tile_y = y & 7;
+        let cgb = self.cgb();
+        let unsigned_tiles = self.lcdc & 0x10 != 0;
+        let mut written = 0;
+        let mut map_x = x & 0xFF;
+        while written < pixels.len() {
+            let col = map_x >> 3;
+            let fine = map_x & 7;
+            let count = (8 - fine).min(pixels.len() - written);
+            let entry = map_row + col;
+            let index = self.vram[entry];
+            // Attributes live at the same offset in bank 1.
+            let attributes = if cgb { self.vram[0x2000 + entry] } else { 0 };
+            let bank = if attributes & 0x08 != 0 { 0x2000 } else { 0 };
+            let row = if attributes & 0x40 != 0 {
+                7 - tile_y
             } else {
-                pixel
+                tile_y
             };
-            BgPixel {
-                color: self.tile_pixel(tile_address, row, column),
-                palette: attributes & 7,
-                priority: attributes & 0x80 != 0,
+            let tile_base = if unsigned_tiles {
+                usize::from(index) * 16
+            } else {
+                (0x1000 + i32::from(index as i8) * 16) as usize
+            };
+            let row_addr = bank + tile_base + row * 2;
+            let low = self.vram[row_addr];
+            let high = self.vram[row_addr + 1];
+            let palette = attributes & 7;
+            let priority = attributes & 0x80 != 0;
+            let dst = &mut pixels[written..written + count];
+            if (low | high) == 0 {
+                dst.fill(BgPixel {
+                    color: 0,
+                    palette,
+                    priority,
+                });
+            } else if attributes & 0x20 == 0 {
+                if fine == 0 && count == 8 {
+                    for (i, out) in dst.iter_mut().enumerate() {
+                        let bit = 7 - i;
+                        *out = BgPixel {
+                            color: ((high >> bit) & 1) << 1 | ((low >> bit) & 1),
+                            palette,
+                            priority,
+                        };
+                    }
+                } else {
+                    for (i, out) in dst.iter_mut().enumerate() {
+                        let bit = 7 - (fine + i);
+                        *out = BgPixel {
+                            color: ((high >> bit) & 1) << 1 | ((low >> bit) & 1),
+                            palette,
+                            priority,
+                        };
+                    }
+                }
+            } else {
+                for (i, out) in dst.iter_mut().enumerate() {
+                    let bit = fine + i;
+                    *out = BgPixel {
+                        color: ((high >> bit) & 1) << 1 | ((low >> bit) & 1),
+                        palette,
+                        priority,
+                    };
+                }
             }
-        })
+            written += count;
+            map_x = (map_x + count) & 0xFF;
+        }
     }
 
     fn render_line(&mut self) {
@@ -515,39 +666,51 @@ impl Ppu {
             }
         }
 
-        // Each palette's colours, worked out once for the line: by palette
-        // (always 0 outside CGB mode) and colour index.
-        let colors: [u32; 32] = std::array::from_fn(|index| {
-            let (palette, color) = ((index / 4) as u8, (index % 4) as u8);
-            if self.cgb() {
-                cgb_color(&self.bg_palettes, palette, color)
-            } else {
-                self.dmg_color(0, palette_shade(self.bgp, color))
+        let row_start = ly * WIDTH;
+        if self.cgb() {
+            let colors: [u32; 32] = std::array::from_fn(|index| {
+                cgb_color(&self.bg_palettes, (index / 4) as u8, (index % 4) as u8)
+            });
+            for (out, pixel) in self.pixels[row_start..row_start + WIDTH]
+                .iter_mut()
+                .zip(&background)
+            {
+                *out = colors[usize::from(pixel.palette) * 4 + usize::from(pixel.color)];
             }
-        });
-        let mut row = [WHITE; WIDTH];
-        for (out, pixel) in row.iter_mut().zip(&background) {
-            *out = colors[usize::from(pixel.palette) * 4 + usize::from(pixel.color)];
+        } else {
+            let colors: [u32; 4] = std::array::from_fn(|color| {
+                self.dmg_color(0, palette_shade(self.bgp, color as u8))
+            });
+            for (out, pixel) in self.pixels[row_start..row_start + WIDTH]
+                .iter_mut()
+                .zip(&background)
+            {
+                *out = colors[usize::from(pixel.color)];
+            }
         }
         if self.lcdc & 0x02 != 0 {
-            self.draw_sprites(&background, &mut row);
+            self.draw_sprites(&background, row_start);
         }
-        self.pixels[ly * WIDTH..(ly + 1) * WIDTH].copy_from_slice(&row);
     }
 
-    fn draw_sprites(&self, background: &[BgPixel; WIDTH], row: &mut [u32; WIDTH]) {
+    fn draw_sprites(&mut self, background: &[BgPixel; WIDTH], row_start: usize) {
         let tall = self.lcdc & 0x04 != 0;
         let height = if tall { 16 } else { 8 };
-        let mut sprites = self.line_sprites();
+        let (mut sprites, count) = self.line_sprites();
+        if count == 0 {
+            return;
+        }
+        let sprites = &mut sprites[..count];
         if self.priority_by_x {
             // DMG priority: smaller X wins, then lower OAM index.
             sprites.sort_by_key(|sprite| (sprite.x, sprite.index));
         }
+        let cgb = self.cgb();
         // CGB with LCDC bit 0 clear: objects always draw over the background.
-        let background_can_win = !self.cgb() || self.lcdc & 0x01 != 0;
+        let background_can_win = !cgb || self.lcdc & 0x01 != 0;
 
         let mut claimed = [false; WIDTH];
-        for sprite in sprites {
+        for sprite in sprites.iter() {
             let mut line = usize::from(self.ly) + 16 - usize::from(sprite.y);
             if sprite.attributes & 0x40 != 0 {
                 line = height - 1 - line;
@@ -557,12 +720,19 @@ impl Ppu {
             } else {
                 sprite.tile
             };
-            let bank = if self.cgb() && sprite.attributes & 0x08 != 0 {
+            let bank = if cgb && sprite.attributes & 0x08 != 0 {
                 0x2000
             } else {
                 0
             };
-            let tile_address = bank + usize::from(tile) * 16;
+            let row_addr = bank + usize::from(tile) * 16 + line * 2;
+            let low = self.vram[row_addr];
+            let high = self.vram[row_addr + 1];
+            if (low | high) == 0 {
+                continue;
+            }
+            let hflip = sprite.attributes & 0x20 != 0;
+            let sprite_behind = sprite.attributes & 0x80 != 0;
             for column in 0..8 {
                 let Some(x) = (usize::from(sprite.x) + column).checked_sub(8) else {
                     continue;
@@ -570,12 +740,8 @@ impl Ppu {
                 if x >= WIDTH || claimed[x] {
                     continue;
                 }
-                let pixel = if sprite.attributes & 0x20 != 0 {
-                    7 - column
-                } else {
-                    column
-                };
-                let color = self.tile_pixel(tile_address, line, pixel);
+                let bit = if hflip { column } else { 7 - column };
+                let color = ((high >> bit) & 1) << 1 | ((low >> bit) & 1);
                 if color == 0 {
                     continue;
                 }
@@ -584,11 +750,11 @@ impl Ppu {
                 claimed[x] = true;
                 let behind = background_can_win
                     && background[x].color != 0
-                    && (sprite.attributes & 0x80 != 0 || background[x].priority);
+                    && (sprite_behind || background[x].priority);
                 if behind {
                     continue;
                 }
-                row[x] = if self.cgb() {
+                self.pixels[row_start + x] = if cgb {
                     cgb_color(&self.obj_palettes, sprite.attributes & 7, color)
                 } else if sprite.attributes & 0x10 != 0 {
                     self.dmg_color(2, palette_shade(self.obp1, color))
@@ -635,7 +801,11 @@ impl Ppu {
     /// Whether a CPU read of `address` finds the PPU using that memory, so
     /// reads 0xFF: VRAM while drawing, OAM from the start of a line's OAM
     /// scan until STAT reports HBlank.
+    #[inline(always)]
     pub(crate) fn blocks_read(&self, address: u16) -> bool {
+        if address < 0x8000 {
+            return false;
+        }
         match address {
             0x8000..=0x9FFF => self.mode == Mode::Drawing || self.reported_mode == Mode::Drawing,
             0xFE00..=0xFEFF => {
@@ -649,7 +819,11 @@ impl Ppu {
     /// Whether a CPU write to `address` is dropped because the PPU is
     /// using that memory. Writes go through a dot later than reads stop
     /// and stop a dot later, so OAM takes writes in the dot drawing starts.
+    #[inline(always)]
     pub(crate) fn blocks_write(&self, address: u16) -> bool {
+        if address < 0x8000 {
+            return false;
+        }
         match address {
             0x8000..=0x9FFF => self.reported_mode == Mode::Drawing,
             0xFE00..=0xFEFF => match self.reported_mode {
@@ -718,6 +892,7 @@ impl Ppu {
                     self.first_line = false;
                     self.pixels.fill(WHITE);
                     self.frame_ready = true;
+                    self.refresh_next_event();
                 } else if !was_on && self.lcd_enabled() {
                     self.ly = 0;
                     self.dot = LCD_ON_DOT;
@@ -726,6 +901,7 @@ impl Ppu {
                     self.first_line = true;
                     self.window_line = 0;
                     self.window_in_frame = self.wy == 0;
+                    self.refresh_next_event();
                 }
             }
             0xFF41 => {
@@ -777,7 +953,7 @@ struct BgPixel {
     priority: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Sprite {
     y: u8,
     x: u8,

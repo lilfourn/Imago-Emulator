@@ -117,7 +117,33 @@ pub(crate) trait EngineMemory {
     fn obj_ext_palette(&self, index: u32) -> u16;
 }
 
+/// Starting index of each region in [`Vram::fast`].
+const REGION_PAGE_BASE: [usize; 12] = [0, 82, 146, 178, 194, 210, 242, 306, 318, 322, 326, 327];
+/// Total 8 KiB pages across all 12 VRAM regions.
+const TOTAL_PAGES: usize = 328;
+
+const PAGE_EMPTY: u8 = 0xFE;
+const PAGE_MULTI: u8 = 0xFF;
+
+/// Fast single-table lookup for one 8 KiB VRAM page.
+#[derive(Debug, Clone, Copy)]
+struct FastPage {
+    /// `0..9` when exactly one bank covers the page, [`PAGE_EMPTY`] when
+    /// none does, or [`PAGE_MULTI`] when multiple banks overlap.
+    bank: u8,
+    /// Mapped start offset of `bank` in its region when `bank < 9`.
+    start: u32,
+}
+
+impl FastPage {
+    const EMPTY: Self = Self {
+        bank: PAGE_EMPTY,
+        start: 0,
+    };
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "SavedVram")]
 pub(crate) struct Vram {
     #[serde(with = "payload::bytes::array")]
     banks: [Box<[u8]>; 9],
@@ -127,6 +153,33 @@ pub(crate) struct Vram {
     mapped: [Option<(Region, u32)>; 9],
     /// Per region, per page: the banks covering it (bit n for bank n).
     pages: Vec<Vec<u16>>,
+    /// Flat per-page fast lookup derived from `pages` and `mapped`.
+    #[serde(skip)]
+    fast: Box<[FastPage; TOTAL_PAGES]>,
+}
+
+/// Wire representation of [`Vram`], matching the existing save-state format.
+#[derive(Deserialize)]
+struct SavedVram {
+    #[serde(with = "payload::bytes::array")]
+    banks: [Box<[u8]>; 9],
+    control: [u8; 9],
+    mapped: [Option<(Region, u32)>; 9],
+    pages: Vec<Vec<u16>>,
+}
+
+impl From<SavedVram> for Vram {
+    fn from(saved: SavedVram) -> Self {
+        let mut vram = Self {
+            banks: saved.banks,
+            control: saved.control,
+            mapped: saved.mapped,
+            pages: saved.pages,
+            fast: Box::new([FastPage::EMPTY; TOTAL_PAGES]),
+        };
+        vram.rebuild_fast();
+        vram
+    }
 }
 
 impl Default for Vram {
@@ -136,6 +189,7 @@ impl Default for Vram {
             control: [0; 9],
             mapped: [None; 9],
             pages: Vec::new(),
+            fast: Box::new([FastPage::EMPTY; TOTAL_PAGES]),
         };
         vram.rebuild();
         vram
@@ -178,6 +232,7 @@ fn mapping(bank: usize, control: u8) -> Option<(Region, u32)> {
 }
 
 /// `offset` wrapped to `region`'s size; most sizes are powers of two.
+#[inline(always)]
 fn wrap(region: Region, offset: u32) -> u32 {
     let size = region.size();
     if size.is_power_of_two() {
@@ -246,12 +301,51 @@ impl Vram {
                 pages[page as usize] |= 1 << bank;
             }
         }
+        self.rebuild_fast();
+    }
+
+    fn rebuild_fast(&mut self) {
+        self.fast.fill(FastPage::EMPTY);
+        for (region_idx, &region) in REGIONS.iter().enumerate() {
+            let Some(region_pages) = self.pages.get(region_idx) else {
+                continue;
+            };
+            let base = REGION_PAGE_BASE[region_idx];
+            let count = region.size().div_ceil(PAGE) as usize;
+            for (page_idx, &mask) in region_pages.iter().take(count).enumerate() {
+                self.fast[base + page_idx] = if mask == 0 {
+                    FastPage::EMPTY
+                } else if mask.is_power_of_two() {
+                    let bank = mask.trailing_zeros() as usize;
+                    if let Some((_, start)) = self.mapped.get(bank).and_then(|&entry| entry) {
+                        FastPage {
+                            bank: bank as u8,
+                            start,
+                        }
+                    } else {
+                        FastPage::EMPTY
+                    }
+                } else {
+                    FastPage {
+                        bank: PAGE_MULTI,
+                        start: 0,
+                    }
+                };
+            }
+        }
     }
 
     /// The byte at `offset` in `region` (wrapped to its size), ORed over
     /// every bank mapped there.
     pub(crate) fn read_8(&self, region: Region, offset: u32) -> u8 {
         let offset = wrap(region, offset);
+        let page = self.fast[REGION_PAGE_BASE[region.index()] + (offset / PAGE) as usize];
+        if page.bank < 9 {
+            return self.banks[page.bank as usize][(offset - page.start) as usize];
+        }
+        if page.bank == PAGE_EMPTY {
+            return 0;
+        }
         let mut mask = self.pages[region.index()][(offset / PAGE) as usize];
         let mut value = 0;
         while mask != 0 {
@@ -267,18 +361,16 @@ impl Vram {
     /// The halfword at `offset` (aligned down) in `region`. Renderers call
     /// this per pixel, so the common case of one bank per page reads it
     /// directly.
+    #[inline]
     pub(crate) fn read_16(&self, region: Region, offset: u32) -> u16 {
         let offset = wrap(region, offset & !1);
-        let mask = self.pages[region.index()][(offset / PAGE) as usize];
-        if mask.is_power_of_two() {
-            let bank = mask.trailing_zeros() as usize;
-            if let Some((_, start)) = self.mapped[bank] {
-                let index = (offset - start) as usize;
-                let bytes = &self.banks[bank][index..index + 2];
-                return u16::from_le_bytes([bytes[0], bytes[1]]);
-            }
+        let page = self.fast[REGION_PAGE_BASE[region.index()] + (offset / PAGE) as usize];
+        if page.bank < 9 {
+            let index = (offset - page.start) as usize;
+            let bytes = &self.banks[page.bank as usize][index..index + 2];
+            return u16::from_le_bytes([bytes[0], bytes[1]]);
         }
-        if mask == 0 {
+        if page.bank == PAGE_EMPTY {
             return 0;
         }
         u16::from_le_bytes([self.read_8(region, offset), self.read_8(region, offset + 1)])
@@ -287,18 +379,19 @@ impl Vram {
     /// The `N` bytes at `offset` (aligned down to `N`, a power of two no
     /// larger than a page) in `region`, ORed over every bank mapped there:
     /// a tile row or a row of map entries in one lookup.
+    #[inline]
     pub(crate) fn read_bytes<const N: usize>(&self, region: Region, offset: u32) -> [u8; N] {
         const { assert!(N.is_power_of_two() && N <= PAGE as usize) };
         let offset = wrap(region, offset & !(N as u32 - 1));
-        let mask = self.pages[region.index()][(offset / PAGE) as usize];
+        let page = self.fast[REGION_PAGE_BASE[region.index()] + (offset / PAGE) as usize];
         let mut bytes = [0; N];
-        if mask.is_power_of_two() {
-            let bank = mask.trailing_zeros() as usize;
-            if let Some((_, start)) = self.mapped[bank] {
-                let index = (offset - start) as usize;
-                bytes.copy_from_slice(&self.banks[bank][index..index + N]);
-                return bytes;
-            }
+        if page.bank < 9 {
+            let index = (offset - page.start) as usize;
+            bytes.copy_from_slice(&self.banks[page.bank as usize][index..index + N]);
+            return bytes;
+        }
+        if page.bank == PAGE_EMPTY {
+            return bytes;
         }
         for (byte, value) in (offset..).zip(bytes.iter_mut()) {
             *value = self.read_8(region, byte);
@@ -310,14 +403,15 @@ impl Vram {
     /// within one 8 KiB page. Pages one bank covers copy in one go.
     pub(crate) fn copy_page(&self, region: Region, offset: u32, out: &mut [u8]) {
         let offset = wrap(region, offset);
-        let mask = self.pages[region.index()][(offset / PAGE) as usize];
-        if mask.is_power_of_two() {
-            let bank = mask.trailing_zeros() as usize;
-            if let Some((_, start)) = self.mapped[bank] {
-                let index = (offset - start) as usize;
-                out.copy_from_slice(&self.banks[bank][index..index + out.len()]);
-                return;
-            }
+        let page = self.fast[REGION_PAGE_BASE[region.index()] + (offset / PAGE) as usize];
+        if page.bank < 9 {
+            let index = (offset - page.start) as usize;
+            out.copy_from_slice(&self.banks[page.bank as usize][index..index + out.len()]);
+            return;
+        }
+        if page.bank == PAGE_EMPTY {
+            out.fill(0);
+            return;
         }
         for (byte, value) in (offset..).zip(out.iter_mut()) {
             *value = self.read_8(region, byte);

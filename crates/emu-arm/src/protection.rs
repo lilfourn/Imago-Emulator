@@ -25,13 +25,21 @@ const PAGES: usize = 1 << (32 - PAGE_SHIFT);
 /// Each page's permissions for privileged and User mode, from the
 /// protection regions (c6) and their permissions (c5).
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Map(Box<[u8; PAGES]>);
+pub(crate) struct Map {
+    pages: Box<[u8; PAGES]>,
+    /// Permission bits allowed on every 4 KiB page (bitwise AND over `pages`),
+    /// so full-access protection layouts skip the 1 MiB page-table lookup.
+    all_allowed: u8,
+}
 
 impl Default for Map {
     /// A map that allows nothing, as with no region enabled.
     fn default() -> Self {
         let pages = vec![0; PAGES].into_boxed_slice();
-        Self(pages.try_into().expect("PAGES bytes"))
+        Self {
+            pages: pages.try_into().expect("PAGES bytes"),
+            all_allowed: 0,
+        }
     }
 }
 
@@ -39,23 +47,31 @@ impl Map {
     /// Recompiles the map from the eight region registers and the
     /// extended data and instruction permissions (4 bits per region).
     pub(crate) fn rebuild(&mut self, regions: &[u32; 8], data: u32, code: u32) {
-        self.0.fill(0);
+        self.pages.fill(0);
         // Later regions overwrite earlier ones: the higher number wins.
         for (index, &region) in (0u32..).zip(regions) {
             if let Some(pages) = pages(region) {
                 let field = |permissions: u32| (permissions >> (index * 4)) & 0xF;
-                self.0[pages].fill(page_permissions(field(data), field(code)));
+                self.pages[pages].fill(page_permissions(field(data), field(code)));
             }
         }
+        let mut all = 0xFF;
+        for &entry in self.pages.iter() {
+            all &= entry;
+            if all == 0 {
+                break;
+            }
+        }
+        self.all_allowed = all;
     }
 
     /// Whether an access of kind `need` ([`READ`], [`WRITE`] or
     /// [`EXECUTE`]) at `address` is allowed, with User mode's permissions
     /// if `user` is set and privileged ones otherwise.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn allows(&self, address: u32, need: u8, user: bool) -> bool {
         let need = if user { need << USER_SHIFT } else { need };
-        self.0[(address >> PAGE_SHIFT) as usize] & need != 0
+        (self.all_allowed & need) != 0 || (self.pages[(address >> PAGE_SHIFT) as usize] & need) != 0
     }
 }
 

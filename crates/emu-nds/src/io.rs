@@ -193,6 +193,7 @@ impl Hardware {
     }
 
     /// Reads one of the registers both CPUs have at the same offset.
+    #[inline]
     fn read_common_16(&self, side: Side, offset: u32) -> Option<u16> {
         Some(match offset {
             0x004 => self.dispstat(side),
@@ -323,7 +324,8 @@ impl Hardware {
         }
     }
 
-    fn arm9_page_16(&self, address: u32) -> u16 {
+    #[inline]
+    pub(crate) fn arm9_page_16(&self, address: u32) -> u16 {
         let offset = address & IO_PAGE;
         if let Some(value) = self.read_common_16(Side::Arm9, offset) {
             return value;
@@ -358,7 +360,8 @@ impl Hardware {
         }
     }
 
-    fn arm7_page_16(&self, address: u32) -> u16 {
+    #[inline]
+    pub(crate) fn arm7_page_16(&self, address: u32) -> u16 {
         let offset = address & IO_PAGE;
         if let Some(value) = self.read_common_16(Side::Arm7, offset) {
             return value;

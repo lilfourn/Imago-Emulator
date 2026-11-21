@@ -31,19 +31,27 @@ pub struct Rewind {
     deltas: VecDeque<Delta>,
     delta_bytes: usize,
     budget_bytes: usize,
+    /// Scratch buffer holding only the segments that changed, kept between pushes.
+    delta_buf: Vec<u8>,
     /// Room for compressing one delta, kept between pushes.
     compressed: Vec<u8>,
     /// A buffer the next [`Rewind::pop`] rebuilds the state before it in.
     spare: Option<Vec<u8>>,
 }
 
-/// One older state, as its XOR with the state after it, compressed.
+/// One older state, as the XOR of its changed segments with the state after it,
+/// compressed.
 #[derive(Debug)]
 struct Delta {
     /// The older state's length.
     len: usize,
     /// Where its segments went in the state after it.
     shifts: Box<[Shift]>,
+    /// Bit `segment` is set when that `SEGMENT`-byte stretch differed from
+    /// where it moved in the newer state and was written into `compressed`.
+    dirty: Box<[u64]>,
+    /// Uncompressed byte length of the dirty segments stored in `compressed`.
+    dirty_len: usize,
     compressed: Box<[u8]>,
 }
 
@@ -61,11 +69,17 @@ const SEGMENT: usize = 4096;
 /// Bytes from the start of a segment that are looked for in the next
 /// state.
 const ANCHOR: usize = 32;
-/// How far a segment is looked for from where the one before it went.
+/// Narrow local search radius: catches varint shifts (almost always a few
+/// bytes) without scanning 128 KiB on every changed framebuffer segment.
+const NARROW_REACH: usize = 256;
+/// How far a wide search looks when a variable-length buffer moves later
+/// sections by kilobytes.
 const REACH: usize = 64 * 1024;
-/// The most segments looked for per delta, so states that differ
-/// everywhere cost no more than a few hundred microseconds to line up.
-const SEARCHES: usize = 64;
+/// Most narrow searches per delta.
+const NARROW_SEARCHES: usize = 256;
+/// Most failed wide searches per delta, spaced exponentially across changed
+/// regions so animated frames do not scan megabytes fruitlessly.
+const WIDE_MISSES: usize = 8;
 
 impl Rewind {
     /// An empty history that keeps at most `budget_bytes` of deltas.
@@ -75,6 +89,7 @@ impl Rewind {
             deltas: VecDeque::new(),
             delta_bytes: 0,
             budget_bytes,
+            delta_buf: Vec::new(),
             compressed: Vec::new(),
             spare: None,
         }
@@ -84,22 +99,22 @@ impl Rewind {
     /// longer needs, whose contents are garbage, to serialize a later
     /// state into.
     pub fn push(&mut self, state: Vec<u8>) -> Option<Vec<u8>> {
-        let Some(mut previous) = self.newest.take() else {
+        let Some(previous) = self.newest.take() else {
             self.newest = Some(state);
             return None;
         };
-        // `previous` becomes its XOR with the new state: the delta.
         let shifts = line_up(&previous, &state);
-        xor_shifted(&mut previous, &state, &shifts);
+        self.delta_buf.clear();
+        let dirty = collect_dirty_xor(&previous, &state, &shifts, &mut self.delta_buf);
         self.newest = Some(state);
-        let delta = self.compress(&previous, shifts);
-        self.delta_bytes += delta.compressed.len();
+        let delta = self.compress(previous.len(), shifts, dirty);
+        self.delta_bytes += delta.byte_size();
         self.deltas.push_back(delta);
         while self.delta_bytes > self.budget_bytes {
             let Some(oldest) = self.deltas.pop_front() else {
                 break;
             };
-            self.delta_bytes -= oldest.compressed.len();
+            self.delta_bytes -= oldest.byte_size();
         }
         Some(previous)
     }
@@ -108,13 +123,30 @@ impl Rewind {
     pub fn pop(&mut self) -> Option<Vec<u8>> {
         let newest = self.newest.take()?;
         if let Some(delta) = self.deltas.pop_back() {
-            self.delta_bytes -= delta.compressed.len();
+            self.delta_bytes -= delta.byte_size();
             let mut older = self.spare.take().unwrap_or_default();
             older.clear();
             older.resize(delta.len, 0);
-            // Our own compressed data always decompresses.
-            if lz4_flex::block::decompress_into(&delta.compressed, &mut older).is_ok() {
-                xor_shifted(&mut older, &newest, &delta.shifts);
+            let ok = if delta.dirty_len == 0 {
+                self.delta_buf.clear();
+                true
+            } else {
+                self.delta_buf.resize(delta.dirty_len, 0);
+                // Our own compressed data always decompresses.
+                lz4_flex::block::decompress_into(
+                    &delta.compressed,
+                    &mut self.delta_buf[..delta.dirty_len],
+                )
+                .is_ok()
+            };
+            if ok {
+                apply_dirty_xor(
+                    &mut older,
+                    &newest,
+                    &delta.shifts,
+                    &delta.dirty,
+                    &self.delta_buf[..delta.dirty_len],
+                );
                 self.newest = Some(older);
             }
         }
@@ -134,17 +166,33 @@ impl Rewind {
         self.delta_bytes = 0;
     }
 
-    /// `delta`, XORed at `shifts`, compressed.
-    fn compress(&mut self, delta: &[u8], shifts: Vec<Shift>) -> Delta {
-        self.compressed
-            .resize(lz4_flex::block::get_maximum_output_size(delta.len()), 0);
-        let written = lz4_flex::block::compress_into(delta, &mut self.compressed)
-            .expect("the buffer has room for the largest output");
+    /// Compresses the dirty segment XORs in `self.delta_buf`.
+    fn compress(&mut self, len: usize, shifts: Vec<Shift>, dirty: Vec<u64>) -> Delta {
+        let dirty_len = self.delta_buf.len();
+        let compressed = if dirty_len == 0 {
+            Box::default()
+        } else {
+            let needed = lz4_flex::block::get_maximum_output_size(dirty_len);
+            if self.compressed.len() < needed {
+                self.compressed.resize(needed, 0);
+            }
+            let written = lz4_flex::block::compress_into(&self.delta_buf, &mut self.compressed)
+                .expect("the buffer has room for the largest output");
+            self.compressed[..written].into()
+        };
         Delta {
-            len: delta.len(),
+            len,
             shifts: shifts.into(),
-            compressed: self.compressed[..written].into(),
+            dirty: dirty.into(),
+            dirty_len,
+            compressed,
         }
+    }
+}
+
+impl Delta {
+    fn byte_size(&self) -> usize {
+        self.compressed.len() + self.dirty.len() * std::mem::size_of::<u64>()
     }
 }
 
@@ -155,29 +203,65 @@ impl Rewind {
 /// since stepping back XORs at the same shifts.
 fn line_up(older: &[u8], newer: &[u8]) -> Vec<Shift> {
     let mut shifts = Vec::new();
-    let mut by = 0;
-    let mut searches = SEARCHES;
+    let mut by = 0isize;
+    let mut narrow_left = NARROW_SEARCHES;
+    let mut wide_misses_left = WIDE_MISSES;
+    let mut consecutive_wide_misses = 0u32;
+    let mut skip_wide = 0usize;
     for (segment, start) in (0..older.len()).step_by(SEGMENT).enumerate() {
         let anchor = &older[start..older.len().min(start + ANCHOR)];
         let expected = start.checked_add_signed(by);
         let there = expected.and_then(|at| newer.get(at..at + anchor.len()));
-        // A run of one byte value would match anywhere.
-        let plain = anchor.iter().all(|&byte| byte == anchor[0]);
-        if there == Some(anchor) || plain || searches == 0 {
+        if there == Some(anchor) {
+            consecutive_wide_misses = 0;
+            skip_wide = 0;
             continue;
         }
-        searches -= 1;
+        // A run of one byte value would match anywhere.
+        if anchor.iter().all(|&byte| byte == anchor[0]) {
+            continue;
+        }
         let near = expected.unwrap_or(0);
-        let low = near.saturating_sub(REACH);
-        let high = newer.len().min(near.saturating_add(REACH + anchor.len()));
-        let Some(found) = newer
-            .get(low..high)
-            .and_then(|window| memchr::memmem::find(window, anchor))
-        else {
+        // Check a small window first: varint shifts are almost always a few bytes.
+        let mut found_at = None;
+        if narrow_left > 0 {
+            narrow_left -= 1;
+            let low = near.saturating_sub(NARROW_REACH);
+            let high = newer
+                .len()
+                .min(near.saturating_add(NARROW_REACH + anchor.len()));
+            if let Some(found) = newer
+                .get(low..high)
+                .and_then(|window| memchr::memmem::find(window, anchor))
+            {
+                found_at = Some(low + found);
+            }
+        }
+        if found_at.is_none() && wide_misses_left > 0 {
+            if skip_wide > 0 {
+                skip_wide -= 1;
+            } else {
+                let low = near.saturating_sub(REACH);
+                let high = newer.len().min(near.saturating_add(REACH + anchor.len()));
+                if let Some(found) = newer
+                    .get(low..high)
+                    .and_then(|window| memchr::memmem::find(window, anchor))
+                {
+                    found_at = Some(low + found);
+                } else {
+                    wide_misses_left -= 1;
+                    consecutive_wide_misses += 1;
+                    skip_wide = (1usize << consecutive_wide_misses.min(5)) - 1;
+                }
+            }
+        }
+        let Some(at) = found_at else {
             continue;
         };
+        consecutive_wide_misses = 0;
+        skip_wide = 0;
         // Both are below isize::MAX, as they index slices.
-        let moved = (low + found) as isize - start as isize;
+        let moved = at as isize - start as isize;
         if moved != by {
             by = moved;
             shifts.push(Shift { from: segment, by });
@@ -186,18 +270,75 @@ fn line_up(older: &[u8], newer: &[u8]) -> Vec<Shift> {
     shifts
 }
 
-/// XORs into each segment of `bytes` the bytes of `other` it moved to, as
-/// `shifts` says. Applying the same `other` and `shifts` twice gives back
-/// `bytes`.
-fn xor_shifted(bytes: &mut [u8], other: &[u8], shifts: &[Shift]) {
+/// Appends the XOR of every changed segment of `older` with its shifted
+/// position in `newer` into `out`, skipping segments whose bytes are
+/// identical. Returns the bitset of changed segments.
+fn collect_dirty_xor(older: &[u8], newer: &[u8], shifts: &[Shift], out: &mut Vec<u8>) -> Vec<u64> {
+    let segment_count = older.len().div_ceil(SEGMENT);
+    let mut dirty = vec![0u64; segment_count.div_ceil(64)];
     let mut shifts = shifts.iter().peekable();
-    let mut by = 0;
-    for (segment, chunk) in bytes.chunks_mut(SEGMENT).enumerate() {
+    let mut by = 0isize;
+    for (segment, chunk) in older.chunks(SEGMENT).enumerate() {
         if let Some(shift) = shifts.next_if(|shift| shift.from == segment) {
             by = shift.by;
         }
         let start = segment * SEGMENT;
-        // Bytes at the segment's start that moved to before `other`'s.
+        let skip = if by < 0 {
+            by.unsigned_abs().saturating_sub(start)
+        } else {
+            0
+        };
+        let other = (start + skip)
+            .checked_add_signed(by)
+            .and_then(|from| newer.get(from..));
+        if skip == 0
+            && let Some(other) = other
+            && other.len() >= chunk.len()
+            && chunk == &other[..chunk.len()]
+        {
+            continue;
+        }
+        dirty[segment / 64] |= 1u64 << (segment % 64);
+        let base = out.len();
+        out.extend_from_slice(chunk);
+        if let Some(other) = other
+            && let Some(dst) = out.get_mut(base + skip..)
+        {
+            xor_into(dst, other);
+        }
+    }
+    dirty
+}
+
+/// Rebuilds `older` from `newer`, `shifts`, the `dirty` segment bitset,
+/// and the concatenated dirty segment XORs in `dirty_data`.
+fn apply_dirty_xor(
+    older: &mut [u8],
+    newer: &[u8],
+    shifts: &[Shift],
+    dirty: &[u64],
+    dirty_data: &[u8],
+) {
+    let mut shifts = shifts.iter().peekable();
+    let mut by = 0isize;
+    let mut cursor = 0usize;
+    for (segment, chunk) in older.chunks_mut(SEGMENT).enumerate() {
+        if let Some(shift) = shifts.next_if(|shift| shift.from == segment) {
+            by = shift.by;
+        }
+        let start = segment * SEGMENT;
+        let is_dirty = (dirty[segment / 64] >> (segment % 64)) & 1 != 0;
+        if !is_dirty {
+            if let Some(from) = start.checked_add_signed(by)
+                && let Some(src) = newer.get(from..from + chunk.len())
+            {
+                chunk.copy_from_slice(src);
+            }
+            continue;
+        }
+        let end = cursor + chunk.len();
+        chunk.copy_from_slice(&dirty_data[cursor..end]);
+        cursor = end;
         let skip = if by < 0 {
             by.unsigned_abs().saturating_sub(start)
         } else {
@@ -206,8 +347,8 @@ fn xor_shifted(bytes: &mut [u8], other: &[u8], shifts: &[Shift]) {
         let Some(from) = (start + skip).checked_add_signed(by) else {
             continue;
         };
-        if let (Some(chunk), Some(other)) = (chunk.get_mut(skip..), other.get(from..)) {
-            xor_into(chunk, other);
+        if let (Some(dst), Some(other)) = (chunk.get_mut(skip..), newer.get(from..)) {
+            xor_into(dst, other);
         }
     }
 }
@@ -216,9 +357,10 @@ fn xor_shifted(bytes: &mut [u8], other: &[u8], shifts: &[Shift]) {
 /// inverse, applying the same `other` twice gives back `bytes` even when
 /// the lengths differ.
 ///
-/// Zipping two slices lets the compiler XOR many bytes per instruction.
+/// Slicing both to their common length lets the compiler vectorize cleanly.
 fn xor_into(bytes: &mut [u8], other: &[u8]) {
-    for (byte, other) in bytes.iter_mut().zip(other) {
+    let len = bytes.len().min(other.len());
+    for (byte, other) in bytes[..len].iter_mut().zip(&other[..len]) {
         *byte ^= other;
     }
 }

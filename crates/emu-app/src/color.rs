@@ -39,7 +39,7 @@ const GBA: Model = Model {
 /// A lookup table from every 15-bit console colour to its corrected
 /// 0xFFRRGGBB pixel.
 pub struct Correction {
-    table: Box<[u32]>,
+    table: Box<[u32; 0x8000]>,
 }
 
 impl Correction {
@@ -55,7 +55,7 @@ impl Correction {
     }
 
     fn new(model: &Model) -> Self {
-        let table = (0..0x8000u32)
+        let table: Box<[u32; 0x8000]> = (0..0x8000u32)
             .map(|color| {
                 let linear = [0, 5, 10]
                     .map(|shift| ((color >> shift) & 31) as f32 / 31.0)
@@ -70,29 +70,38 @@ impl Correction {
                 });
                 0xFF00_0000 | red << 16 | green << 8 | blue
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+            .try_into()
+            .expect("0x8000 entries");
         Self { table }
     }
 
     /// The corrected colour of `pixel` (0xFFRRGGBB). Cores widen a 15-bit
     /// palette colour's channels to eight bits as `x << 3 | x >> 2`; any
     /// other pixel (the DMG's greys) passes through unchanged.
+    #[inline]
     pub fn pixel(&self, pixel: u32) -> u32 {
-        let [red, green, blue] = [16, 8, 0].map(|shift| (pixel >> shift) & 0xFF);
-        let widened = |channel: u32| channel == (channel >> 3) << 3 | channel >> 5;
-        if !(widened(red) && widened(green) && widened(blue)) {
+        // An 8-bit channel `c` equals `(c >> 3) << 3 | (c >> 5)` iff its low
+        // 3 bits match its high 3 bits: check all three channels at once.
+        if (pixel & 0x0007_0707) != ((pixel >> 5) & 0x0007_0707) {
             return pixel;
         }
-        self.table[(red >> 3 | (green >> 3) << 5 | (blue >> 3) << 10) as usize]
+        let red = (pixel >> 19) & 0x1F;
+        let green = (pixel >> 11) & 0x1F;
+        let blue = (pixel >> 3) & 0x1F;
+        self.table[(red | (green << 5) | (blue << 10)) as usize]
     }
 
-    /// A corrected copy of `frame`.
-    pub fn frame(&self, frame: &Frame) -> Frame {
-        let mut out = Frame::new(frame.size());
-        for (corrected, pixel) in out.pixels_mut().iter_mut().zip(frame.pixels()) {
-            *corrected = self.pixel(*pixel);
+    /// Writes a corrected copy of `frame` into `out`, reusing its allocation
+    /// when sizes match.
+    pub fn frame_into(&self, frame: &Frame, out: &mut Frame) {
+        if out.size() != frame.size() {
+            *out = Frame::new(frame.size());
         }
-        out
+        for (corrected, &pixel) in out.pixels_mut().iter_mut().zip(frame.pixels()) {
+            *corrected = self.pixel(pixel);
+        }
     }
 }
 
@@ -141,5 +150,19 @@ mod tests {
     #[test]
     fn the_ds_needs_none() {
         assert!(Correction::for_system(System::Nds).is_none());
+    }
+
+    #[test]
+    fn non_widened_channels_pass_through_unchanged() {
+        let correction = Correction::for_system(System::Gba).expect("GBA has a model");
+        // Only one channel is not a widened 5-bit value.
+        for pixel in [
+            rgb(0xFF, 0xFF, 0x01),
+            rgb(0xFF, 0x01, 0xFF),
+            rgb(0x01, 0xFF, 0xFF),
+            rgb(0x80, 0x84, 0x84),
+        ] {
+            assert_eq!(correction.pixel(pixel), pixel, "{pixel:#010x}");
+        }
     }
 }

@@ -38,12 +38,36 @@ use std::collections::BinaryHeap;
 use serde::{Deserialize, Serialize};
 
 /// A priority queue of events keyed by the cycle they are due.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(bound(serialize = "E: Serialize", deserialize = "E: Deserialize<'de>"))]
+#[derive(Debug, Clone, Serialize)]
+#[serde(bound(serialize = "E: Serialize"))]
 pub struct Scheduler<E> {
     now: u64,
     next_seq: u64,
     queue: BinaryHeap<Entry<E>>,
+    /// Cached earliest pending event time (`u64::MAX` when empty), so
+    /// [`Scheduler::has_due`] avoids touching the heap buffer on every access.
+    #[serde(skip)]
+    next_time: u64,
+}
+
+impl<'de, E: Deserialize<'de>> Deserialize<'de> for Scheduler<E> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(bound(deserialize = "E: Deserialize<'de>"))]
+        struct Raw<E> {
+            now: u64,
+            next_seq: u64,
+            queue: BinaryHeap<Entry<E>>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let next_time = raw.queue.peek().map_or(u64::MAX, |entry| entry.time);
+        Ok(Self {
+            now: raw.now,
+            next_seq: raw.next_seq,
+            queue: raw.queue,
+            next_time,
+        })
+    }
 }
 
 /// An event that has come due, and the cycle it was scheduled for.
@@ -65,6 +89,7 @@ impl<E> Scheduler<E> {
             now: 0,
             next_seq: 0,
             queue: BinaryHeap::new(),
+            next_time: u64::MAX,
         }
     }
 
@@ -90,37 +115,50 @@ impl<E> Scheduler<E> {
     }
 
     /// The current cycle.
+    #[inline(always)]
     #[must_use]
     pub const fn now(&self) -> u64 {
         self.now
     }
 
     /// Moves time forward by `cycles`.
+    #[inline(always)]
     pub const fn advance(&mut self, cycles: u64) {
         self.now += cycles;
     }
 
     /// Schedules `event` for cycle `time`. A time in the past comes due on
     /// the next [`Scheduler::pop_due`].
+    #[inline]
     pub fn schedule_at(&mut self, time: u64, event: E) {
         let seq = self.next_seq;
         self.next_seq += 1;
+        if time < self.next_time {
+            self.next_time = time;
+        }
         self.queue.push(Entry { time, seq, event });
     }
 
     /// Schedules `event` for `delay` cycles from now.
+    #[inline]
     pub fn schedule_in(&mut self, delay: u64, event: E) {
         self.schedule_at(self.now + delay, event);
     }
 
     /// The cycle of the earliest pending event.
+    #[inline(always)]
     #[must_use]
     pub fn next_time(&self) -> Option<u64> {
-        self.queue.peek().map(|entry| entry.time)
+        if self.queue.is_empty() {
+            None
+        } else {
+            Some(self.next_time)
+        }
     }
 
     /// Cycles from now until the earliest pending event, or zero if it is
     /// already due.
+    #[inline]
     #[must_use]
     pub fn cycles_until_next(&self) -> Option<u64> {
         self.next_time().map(|time| time.saturating_sub(self.now))
@@ -128,17 +166,21 @@ impl<E> Scheduler<E> {
 
     /// Whether an event is due at or before now: whether
     /// [`Scheduler::pop_due`] would return one.
+    #[inline(always)]
     #[must_use]
     pub fn has_due(&self) -> bool {
-        self.next_time().is_some_and(|time| time <= self.now)
+        self.next_time <= self.now && (self.next_time < u64::MAX || !self.queue.is_empty())
     }
 
     /// Removes and returns the earliest event due at or before now.
+    #[inline]
     pub fn pop_due(&mut self) -> Option<Due<E>> {
-        if self.next_time()? > self.now {
+        if !self.has_due() {
             return None;
         }
-        self.queue.pop().map(|entry| Due {
+        let entry = self.queue.pop()?;
+        self.next_time = self.queue.peek().map_or(u64::MAX, |next| next.time);
+        Some(Due {
             time: entry.time,
             event: entry.event,
         })
@@ -147,6 +189,7 @@ impl<E> Scheduler<E> {
     /// Removes every pending event for which `matches` returns true.
     pub fn cancel(&mut self, mut matches: impl FnMut(&E) -> bool) {
         self.queue.retain(|entry| !matches(&entry.event));
+        self.next_time = self.queue.peek().map_or(u64::MAX, |next| next.time);
     }
 
     /// Pending events in the order they will come due, for save states.

@@ -243,6 +243,11 @@ struct Session {
     bindings: Vec<Bindings>,
     /// The system's colour correction, if it has one.
     correction: Option<Correction>,
+    /// Reusable colour-corrected copies of each screen, shared by the screen
+    /// upscaler and ambient backdrop so each changed screen is corrected once.
+    corrected_frames: Vec<Frame>,
+    /// The `screen_sequences` value last written into each `corrected_frames` slot.
+    corrected_sequences: Vec<Option<u64>>,
     /// Whether the emulation thread is recording a movie.
     recording: bool,
     /// Per placement: the image drawn there and what it shows. An image
@@ -261,6 +266,11 @@ struct Session {
     keeping: Keeping,
     /// The ambient backdrop, while it is shown.
     ambient: Option<Glow>,
+    /// Reusable working buffers for [`ambient::picture_into`].
+    ambient_scratch: ambient::Scratch,
+    /// Reusable 8-bit ambient frame compared against `Glow::shown_frame`
+    /// before re-uploading a GPUI image.
+    ambient_frame: Frame,
     /// The display whose refresh the emulation thread was last told of,
     /// once it has been told.
     display: Option<window_chrome::DisplayKey>,
@@ -2625,10 +2635,41 @@ impl Render for EmulatorView {
                     // stop, as when paused, it draws the rest itself.
                     let wait = session.info.frame_rate.frame_duration() * 2;
                     if session.taken_at.is_some_and(|at| at.elapsed() < wait) {
-                        session.fade_wake = Some(cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(wait).await;
-                            this.update(cx, |_, cx| cx.notify()).ok();
-                        }));
+                        if session.fade_wake.is_none() {
+                            session.fade_wake = Some(cx.spawn(async move |this, cx| {
+                                let mut sleep = wait;
+                                loop {
+                                    cx.background_executor().timer(sleep).await;
+                                    let next = this
+                                        .update(cx, |view, cx| {
+                                            let session = view.game.session_mut()?;
+                                            if session
+                                                .ambient
+                                                .as_ref()
+                                                .is_none_or(|glow| glow.fade.settled())
+                                            {
+                                                session.fade_wake = None;
+                                                return None;
+                                            }
+                                            if let Some(at) = session.taken_at {
+                                                let elapsed = at.elapsed();
+                                                if elapsed < wait {
+                                                    return Some(wait - elapsed);
+                                                }
+                                            }
+                                            session.fade_wake = None;
+                                            cx.notify();
+                                            None
+                                        })
+                                        .ok()
+                                        .flatten();
+                                    match next {
+                                        Some(remaining) => sleep = remaining,
+                                        None => break,
+                                    }
+                                }
+                            }));
+                        }
                     } else {
                         window.request_animation_frame();
                     }

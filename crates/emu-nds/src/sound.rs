@@ -464,6 +464,58 @@ impl Sound {
         out.append(&mut self.samples);
     }
 
+    /// Whether no channel and no capture unit is running.
+    #[inline]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.channels.iter().all(|channel| !channel.running())
+            && self.captures.iter().all(|capture| !capture.running())
+    }
+
+    /// Pushes one silent output sample when [`Sound::is_idle`].
+    #[inline]
+    pub(crate) fn push_silence(&mut self) {
+        if self.samples.len() >= SAMPLE_RATE as usize {
+            self.samples.clear();
+        }
+        self.samples.push([0, 0]);
+    }
+
+    /// Whether any running channel or capture could read or write outside
+    /// the ARM7's plain RAM/VRAM/BIOS regions (`0x00..0x03`, `0x05..0x07`).
+    pub(crate) fn needs_full_bus(&self) -> bool {
+        let range_safe = |start: u32, len: u64| {
+            let end = u64::from(start) + len;
+            end <= 0x0400_0000 || (start >= 0x0500_0000 && end <= 0x0800_0000)
+        };
+        for channel in &self.channels {
+            if !channel.running() || channel.format() == Format::Psg {
+                continue;
+            }
+            let start = channel.source & 0x07FF_FFFC;
+            let len = (u64::from(channel.loop_start) + u64::from(channel.length)).max(1) * 4 + 4;
+            let pos_bytes = match channel.format() {
+                Format::Pcm8 => u64::from(channel.position) + 1,
+                Format::Pcm16 => u64::from(channel.position) * 2 + 2,
+                Format::Adpcm => u64::from(channel.position) / 2 + 4,
+                Format::Psg => 0,
+            };
+            if !range_safe(start, len.max(pos_bytes)) {
+                return true;
+            }
+        }
+        for capture in &self.captures {
+            if !capture.running() {
+                continue;
+            }
+            let start = capture.destination & 0x07FF_FFFC;
+            let len = (u64::from(capture.length.max(1)) * 4).max(u64::from(capture.position) + 2);
+            if !range_safe(start, len) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Advances one output-sample period: the channels move on, reading
     /// `memory`, the mixer mixes one stereo sample, and running captures
     /// record into `memory`.

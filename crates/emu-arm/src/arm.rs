@@ -54,6 +54,7 @@ pub(crate) enum Kind {
 static DECODE: [[Kind; 4096]; 2] = [table(false), table(true)];
 
 /// An instruction's index in [`DECODE`]'s tables: bits 27–20 then 7–4.
+#[inline(always)]
 fn table_index(instruction: u32) -> usize {
     (((instruction >> 16) & 0xFF0) | ((instruction >> 4) & 0xF)) as usize
 }
@@ -123,6 +124,7 @@ fn listed(list: u32) -> impl Iterator<Item = usize> {
 }
 
 impl<M: Model> Processor<M> {
+    #[inline(always)]
     pub(crate) fn execute_arm<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         match DECODE[usize::from(M::V5TE)][table_index(instruction)] {
             Kind::BranchExchange => self.branch_exchange(bus, instruction),
@@ -158,7 +160,7 @@ impl<M: Model> Processor<M> {
             self.r[14] = self.r[15].wrapping_sub(4);
         }
         self.r[15] = self.r[15].wrapping_add(offset);
-        self.reload_pipeline(bus);
+        self.reload_pipeline_arm(bus);
     }
 
     fn branch_exchange<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
@@ -206,29 +208,25 @@ impl<M: Model> Processor<M> {
 
         let logical = |cpu: &mut Self, result: u32| {
             if set_flags {
-                cpu.set_nz(result);
-                cpu.set_flag(psr::C, shifter_carry);
+                cpu.set_nzc(result, shifter_carry);
             }
             result
         };
         let arithmetic = |cpu: &mut Self, (result, carry, overflow): (u32, bool, bool)| {
             if set_flags {
-                cpu.set_nz(result);
-                cpu.set_flag(psr::C, carry);
-                cpu.set_flag(psr::V, overflow);
+                cpu.set_nzcv(result, carry, overflow);
             }
             result
         };
-        let c = self.carry();
         let result = match opcode {
             0x0 => Some(logical(self, op1 & op2)),
             0x1 => Some(logical(self, op1 ^ op2)),
             0x2 => Some(arithmetic(self, alu::subtract(op1, op2))),
             0x3 => Some(arithmetic(self, alu::subtract(op2, op1))),
-            0x4 => Some(arithmetic(self, alu::add_with_carry(op1, op2, false))),
-            0x5 => Some(arithmetic(self, alu::add_with_carry(op1, op2, c))),
-            0x6 => Some(arithmetic(self, alu::subtract_with_carry(op1, op2, c))),
-            0x7 => Some(arithmetic(self, alu::subtract_with_carry(op2, op1, c))),
+            0x4 => Some(arithmetic(self, alu::add(op1, op2))),
+            0x5 => Some(arithmetic(self, alu::add_with_carry(op1, op2, carry))),
+            0x6 => Some(arithmetic(self, alu::subtract_with_carry(op1, op2, carry))),
+            0x7 => Some(arithmetic(self, alu::subtract_with_carry(op2, op1, carry))),
             0x8 => {
                 logical(self, op1 & op2);
                 None
@@ -242,7 +240,7 @@ impl<M: Model> Processor<M> {
                 None
             }
             0xB => {
-                arithmetic(self, alu::add_with_carry(op1, op2, false));
+                arithmetic(self, alu::add(op1, op2));
                 None
             }
             0xC => Some(logical(self, op1 | op2)),
@@ -255,10 +253,14 @@ impl<M: Model> Processor<M> {
             // Writing the PC with S set returns from an exception.
             if set_flags {
                 self.restore_cpsr();
-            }
-            if let Some(result) = result {
+                if let Some(result) = result {
+                    self.r[15] = result;
+                    self.reload_pipeline(bus);
+                    return;
+                }
+            } else if let Some(result) = result {
                 self.r[15] = result;
-                self.reload_pipeline(bus);
+                self.reload_pipeline_arm(bus);
                 return;
             }
         }
@@ -267,12 +269,13 @@ impl<M: Model> Processor<M> {
         }
         if register_shift {
             // The internal cycle broke the sequence of fetches.
-            self.advance_after_data();
+            self.advance_arm_after_data();
         } else {
-            self.advance();
+            self.advance_arm();
         }
     }
 
+    #[inline(never)]
     fn move_from_psr(&mut self, instruction: u32) {
         let rd = ((instruction >> 12) & 0xF) as usize;
         let value = if instruction & (1 << 22) != 0 {
@@ -281,9 +284,10 @@ impl<M: Model> Processor<M> {
             self.cpsr
         };
         self.r[rd] = value;
-        self.advance();
+        self.advance_arm();
     }
 
+    #[inline(never)]
     fn move_to_psr(&mut self, instruction: u32) {
         let operand = if instruction & (1 << 25) != 0 {
             let rotate = ((instruction >> 8) & 0xF) * 2;
@@ -313,19 +317,20 @@ impl<M: Model> Processor<M> {
             // Mode bit 4 always reads as 1 on ARMv4.
             let control = if mask & 0xFF != 0 { 0x10 } else { 0 };
             // Advance as an ARM instruction even if this sets the T bit.
-            self.advance();
+            self.advance_arm();
             self.set_cpsr((self.cpsr & !mask) | (operand & mask) | control);
             return;
         }
-        self.advance();
+        self.advance_arm();
     }
 
+    #[inline(never)]
     fn multiply<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let rd = ((instruction >> 16) & 0xF) as usize;
         let rn = ((instruction >> 12) & 0xF) as usize;
         let accumulate = instruction & (1 << 21) != 0;
         // Operands are read after the PC has moved on: R15 reads 12 ahead.
-        self.advance_after_data();
+        self.advance_arm_after_data();
         let rs = self.r[((instruction >> 8) & 0xF) as usize];
         let rm = self.r[(instruction & 0xF) as usize];
         let accumulator = self.r[rn];
@@ -344,16 +349,17 @@ impl<M: Model> Processor<M> {
         }
         self.r[rd] = result;
         if rd == 15 {
-            self.reload_pipeline(bus);
+            self.reload_pipeline_arm(bus);
         }
     }
 
+    #[inline(never)]
     fn multiply_long<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let rd_high = ((instruction >> 16) & 0xF) as usize;
         let rd_low = ((instruction >> 12) & 0xF) as usize;
         let signed = instruction & (1 << 22) != 0;
         let accumulate = instruction & (1 << 21) != 0;
-        self.advance_after_data();
+        self.advance_arm_after_data();
         let rs = self.r[((instruction >> 8) & 0xF) as usize];
         let rm = self.r[(instruction & 0xF) as usize];
         let accumulator = u64::from(self.r[rd_high]) << 32 | u64::from(self.r[rd_low]);
@@ -383,15 +389,16 @@ impl<M: Model> Processor<M> {
         self.r[rd_low] = result as u32;
         self.r[rd_high] = (result >> 32) as u32;
         if rd_low == 15 || rd_high == 15 {
-            self.reload_pipeline(bus);
+            self.reload_pipeline_arm(bus);
         }
     }
 
+    #[inline(never)]
     fn swap<B: Bus>(&mut self, bus: &mut B, instruction: u32) {
         let rn = ((instruction >> 16) & 0xF) as usize;
         let rd = ((instruction >> 12) & 0xF) as usize;
         let rm = (instruction & 0xF) as usize;
-        self.advance_after_data();
+        self.advance_arm_after_data();
         let address = self.r[rn];
         let source = self.r[rm];
         let loaded = if instruction & (1 << 22) != 0 {
@@ -409,7 +416,7 @@ impl<M: Model> Processor<M> {
         bus.idle();
         self.r[rd] = loaded;
         if rd == 15 {
-            self.reload_pipeline(bus);
+            self.reload_pipeline_arm(bus);
         }
     }
 
@@ -448,7 +455,7 @@ impl<M: Model> Processor<M> {
         let access = Access::NONSEQUENTIAL;
 
         // The PC moves on before the data access: STR R15 stores +12.
-        self.advance_after_data();
+        self.advance_arm_after_data();
         if load {
             let value = if byte {
                 u32::from(self.model.read_8(bus, address, access, user))
@@ -467,8 +474,10 @@ impl<M: Model> Processor<M> {
             if rd == 15 {
                 if self.loads_interwork() {
                     self.set_state_from_pc();
+                    self.reload_pipeline(bus);
+                } else {
+                    self.reload_pipeline_arm(bus);
                 }
-                self.reload_pipeline(bus);
             }
         } else {
             let value = self.r[rd];
@@ -489,10 +498,11 @@ impl<M: Model> Processor<M> {
     /// Writes a transfer's updated base address. Writing back to R15 (an
     /// unpredictable encoding) jumps, as the ARM7TDMI does, to the address
     /// plus 4.
+    #[inline]
     pub(crate) fn write_back<B: Bus>(&mut self, bus: &mut B, rn: usize, address: u32) {
         if rn == 15 {
             self.r[15] = address.wrapping_add(4);
-            self.reload_pipeline(bus);
+            self.reload_pipeline_arm(bus);
         } else {
             self.r[rn] = address;
         }
@@ -521,7 +531,7 @@ impl<M: Model> Processor<M> {
         };
         let address = if pre { offset_address } else { base };
 
-        self.advance_after_data();
+        self.advance_arm_after_data();
         if load {
             let value = match kind {
                 2 => self.read_byte_signed(bus, address),
@@ -537,7 +547,7 @@ impl<M: Model> Processor<M> {
             }
             self.r[rd] = value;
             if rd == 15 {
-                self.reload_pipeline(bus);
+                self.reload_pipeline_arm(bus);
             }
         } else {
             // ARMv4 has only STRH; the signed forms store a halfword too.
@@ -560,7 +570,7 @@ impl<M: Model> Processor<M> {
         let load = instruction & (1 << 20) != 0;
         let rn = ((instruction >> 16) & 0xF) as usize;
         let list = instruction & 0xFFFF;
-        self.transfer_multiple(bus, rn, list, pre, add, user_bank, writeback, load);
+        self.transfer_multiple::<B, false>(bus, rn, list, pre, add, user_bank, writeback, load);
     }
 
     /// LDM/STM, shared with Thumb's PUSH, POP, LDMIA and STMIA.
@@ -575,7 +585,7 @@ impl<M: Model> Processor<M> {
     /// registers loaded before it keep their values, but R15 is not loaded
     /// and the base gets its old value back, even if it was loaded.
     #[allow(clippy::too_many_arguments)] // Mirrors the instruction's fields.
-    pub(crate) fn transfer_multiple<B: Bus>(
+    pub(crate) fn transfer_multiple<B: Bus, const THUMB: bool>(
         &mut self,
         bus: &mut B,
         rn: usize,
@@ -607,13 +617,18 @@ impl<M: Model> Processor<M> {
         // S without a PC load means "the User bank".
         let pc_load = load && list & (1 << 15) != 0;
         let mode = self.mode();
-        let switch_bank = user_bank && !pc_load && mode != Mode::User && mode != Mode::System;
+        let switch_bank =
+            !THUMB && user_bank && !pc_load && mode != Mode::User && mode != Mode::System;
         if switch_bank {
             self.store_bank(mode);
             self.load_bank(Mode::User);
         }
 
-        self.advance_after_data();
+        if THUMB {
+            self.advance_thumb_after_data();
+        } else {
+            self.advance_arm_after_data();
+        }
         // ARMv4 writes the base back after the first access, ARMv5 after
         // the last.
         let early_writeback = writeback && !M::V5TE;
@@ -656,7 +671,7 @@ impl<M: Model> Processor<M> {
         let late_writeback = M::V5TE && writeback && {
             let base_loaded = load && list & (1 << rn) != 0;
             let base_last_of_several = list >> rn == 1 && list != 1 << rn;
-            !(base_loaded && (self.thumb() || base_last_of_several))
+            !(base_loaded && (THUMB || base_last_of_several))
         };
 
         if switch_bank {
@@ -676,13 +691,17 @@ impl<M: Model> Processor<M> {
             self.r[rn] = final_base;
         }
         if writeback && rn == 15 && !pc_load {
-            self.reload_pipeline(bus);
+            if THUMB {
+                self.reload_pipeline_thumb(bus);
+            } else {
+                self.reload_pipeline_arm(bus);
+            }
             return;
         }
         if load {
             bus.idle();
             if pc_load {
-                if user_bank {
+                if !THUMB && user_bank {
                     self.restore_cpsr();
                 } else if self.loads_interwork() {
                     self.set_state_from_pc();
@@ -697,6 +716,7 @@ impl<M: Model> Processor<M> {
     }
 
     /// A word load from any address: misaligned loads rotate the word.
+    #[inline(always)]
     pub(crate) fn read_word_rotated<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -709,6 +729,7 @@ impl<M: Model> Processor<M> {
 
     /// LDRH: from an odd address the ARM7TDMI rotates the halfword; ARMv5
     /// ignores bit 0.
+    #[inline(always)]
     pub(crate) fn read_half<B: Bus>(&mut self, bus: &mut B, address: u32, access: Access) -> u32 {
         let half = u32::from(self.read_16(bus, address, access));
         if M::V5TE {
@@ -719,12 +740,14 @@ impl<M: Model> Processor<M> {
     }
 
     /// LDRSB.
+    #[inline(always)]
     pub(crate) fn read_byte_signed<B: Bus>(&mut self, bus: &mut B, address: u32) -> u32 {
         i32::from(self.read_8(bus, address, Access::NONSEQUENTIAL) as i8) as u32
     }
 
     /// LDRSH: from an odd address the ARM7TDMI sign-extends the high byte
     /// of the halfword instead; ARMv5 ignores bit 0.
+    #[inline(always)]
     pub(crate) fn read_half_signed<B: Bus>(&mut self, bus: &mut B, address: u32) -> u32 {
         let half = self.read_16(bus, address, Access::NONSEQUENTIAL);
         if address & 1 != 0 && !M::V5TE {

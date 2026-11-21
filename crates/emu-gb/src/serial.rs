@@ -103,17 +103,23 @@ impl Serial {
         self.sent.push(byte);
     }
 
+    #[inline(always)]
     pub(crate) fn tick(&mut self, interrupt_flag: &mut u8) {
         if self.remaining == 0 {
             return;
         }
         self.remaining -= 1;
         if self.remaining == 0 {
-            self.data = std::mem::replace(&mut self.incoming, 0xFF);
-            self.outgoing = None;
-            self.control &= 0x7F;
-            *interrupt_flag |= interrupts::SERIAL;
+            self.finish_transfer(interrupt_flag);
         }
+    }
+
+    #[inline(never)]
+    fn finish_transfer(&mut self, interrupt_flag: &mut u8) {
+        self.data = std::mem::replace(&mut self.incoming, 0xFF);
+        self.outgoing = None;
+        self.control &= 0x7F;
+        *interrupt_flag |= interrupts::SERIAL;
     }
 
     pub(crate) fn read(&self, address: u16) -> u8 {

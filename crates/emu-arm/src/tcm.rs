@@ -50,11 +50,13 @@ impl Window {
 
     /// Whether the block is enabled at `address` (for writes, and for
     /// instruction fetches, which load mode does not affect).
+    #[inline(always)]
     pub(crate) fn contains(self, address: u32) -> bool {
         address & self.mask == self.base
     }
 
     /// Whether data reads at `address` come from the block.
+    #[inline(always)]
     pub(crate) fn readable(self, address: u32) -> bool {
         address & self.mask == self.read_base
     }
@@ -76,6 +78,7 @@ impl Block {
         &self.0
     }
 
+    #[inline(always)]
     fn index(&self, address: u32) -> usize {
         address as usize & (self.0.len() - 1)
     }
@@ -84,38 +87,38 @@ impl Block {
     // inlined, and multi-byte reads take their bytes as one slice: one
     // bounds check and one load.
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_32(&self, address: u32) -> u32 {
         let i = self.index(address & !3);
         let bytes = &self.0[i..i + 4];
         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_16(&self, address: u32) -> u16 {
         let i = self.index(address & !1);
         let bytes = &self.0[i..i + 2];
         u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_8(&self, address: u32) -> u8 {
         self.0[self.index(address)]
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn write_32(&mut self, address: u32, value: u32) {
         let i = self.index(address & !3);
         self.0[i..i + 4].copy_from_slice(&value.to_le_bytes());
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn write_16(&mut self, address: u32, value: u16) {
         let i = self.index(address & !1);
         self.0[i..i + 2].copy_from_slice(&value.to_le_bytes());
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn write_8(&mut self, address: u32, value: u8) {
         let i = self.index(address);
         self.0[i] = value;

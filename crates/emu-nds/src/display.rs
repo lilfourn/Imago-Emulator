@@ -245,6 +245,28 @@ impl Hardware {
     /// of their own for it. Waits for them all.
     fn finish_scaled_screens(&mut self) {
         let scaled = &mut self.scaled;
+        let any_3d = scaled
+            .lines
+            .iter()
+            .zip(&scaled.fresh)
+            .any(|(copy, &fresh)| fresh && copy.showed_3d());
+        if !any_3d {
+            // Pure-2D frames only repeat each native pixel; enlarging directly
+            // avoids waking the 3D worker pool every VBlank.
+            let scale = scaled.scale;
+            let stride = WIDTH * scale * scale;
+            for (index, band) in scaled.a.iter_mut().enumerate() {
+                let first = index * SCALED_LINES_PER_BAND;
+                let lines = scaled.lines.iter().zip(&scaled.fresh).skip(first);
+                for ((copy, fresh), out) in lines.zip(band.chunks_mut(stride)) {
+                    if *fresh {
+                        copy.draw(scale, |_| None, out);
+                    }
+                }
+            }
+            scaled.fresh.fill(false);
+            return;
+        }
         // What the bands read moves into the source the jobs share, and
         // each band into its job; everything is back before this returns.
         let source = Arc::new(BandSource {

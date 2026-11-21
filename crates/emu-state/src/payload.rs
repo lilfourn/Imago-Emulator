@@ -44,26 +44,442 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Panics if `value` cannot be serialized, which a machine's plain data
 /// always can.
 pub fn append<T: Serialize + ?Sized>(value: &T, out: &mut Vec<u8>) {
-    postcard::serialize_with_flavor(value, Append(out)).expect("machine state always serializes");
+    value
+        .serialize(&mut PostcardVec(out))
+        .expect("machine state always serializes");
 }
 
-/// A postcard output that appends to a `Vec` it borrows.
-struct Append<'a>(&'a mut Vec<u8>);
+/// Direct `Vec<u8>` serializer producing byte-for-byte identical output to
+/// `postcard`, with unrolled varint encoders so large pixel buffers serialize
+/// without per-byte capacity checks or loops.
+struct PostcardVec<'a>(&'a mut Vec<u8>);
 
-impl postcard::ser_flavors::Flavor for Append<'_> {
-    type Output = ();
+#[inline(always)]
+fn push_varint_u16(out: &mut Vec<u8>, v: u16) {
+    if v < 0x80 {
+        out.push(v as u8);
+    } else if v < (1 << 14) {
+        out.extend_from_slice(&[(v as u8) | 0x80, (v >> 7) as u8]);
+    } else {
+        out.extend_from_slice(&[(v as u8) | 0x80, ((v >> 7) as u8) | 0x80, (v >> 14) as u8]);
+    }
+}
 
-    fn try_push(&mut self, data: u8) -> postcard::Result<()> {
-        self.0.push(data);
+#[inline(always)]
+fn push_varint_u32(out: &mut Vec<u8>, v: u32) {
+    if v >= (1 << 28) {
+        // Every opaque 0xFFRRGGBB pixel hits this 5-byte path with no loop.
+        out.extend_from_slice(&[
+            (v as u8) | 0x80,
+            ((v >> 7) as u8) | 0x80,
+            ((v >> 14) as u8) | 0x80,
+            ((v >> 21) as u8) | 0x80,
+            (v >> 28) as u8,
+        ]);
+    } else if v < 0x80 {
+        out.push(v as u8);
+    } else if v < (1 << 14) {
+        out.extend_from_slice(&[(v as u8) | 0x80, (v >> 7) as u8]);
+    } else if v < (1 << 21) {
+        out.extend_from_slice(&[(v as u8) | 0x80, ((v >> 7) as u8) | 0x80, (v >> 14) as u8]);
+    } else {
+        out.extend_from_slice(&[
+            (v as u8) | 0x80,
+            ((v >> 7) as u8) | 0x80,
+            ((v >> 14) as u8) | 0x80,
+            (v >> 21) as u8,
+        ]);
+    }
+}
+
+#[inline(always)]
+fn push_varint_u64(out: &mut Vec<u8>, mut v: u64) {
+    if v < 0x80 {
+        out.push(v as u8);
+        return;
+    }
+    let mut buf = [0u8; 10];
+    let mut i = 0;
+    loop {
+        if v < 0x80 {
+            buf[i] = v as u8;
+            out.extend_from_slice(&buf[..=i]);
+            return;
+        }
+        buf[i] = (v as u8) | 0x80;
+        v >>= 7;
+        i += 1;
+    }
+}
+
+#[inline]
+fn push_varint_u128(out: &mut Vec<u8>, mut v: u128) {
+    if v < 0x80 {
+        out.push(v as u8);
+        return;
+    }
+    let mut buf = [0u8; 19];
+    let mut i = 0;
+    loop {
+        if v < 0x80 {
+            buf[i] = v as u8;
+            out.extend_from_slice(&buf[..=i]);
+            return;
+        }
+        buf[i] = (v as u8) | 0x80;
+        v >>= 7;
+        i += 1;
+    }
+}
+
+impl Serializer for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeTupleStruct = Self;
+    type SerializeTupleVariant = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = Self;
+
+    #[inline(always)]
+    fn is_human_readable(&self) -> bool {
+        false
+    }
+
+    #[inline(always)]
+    fn serialize_bool(self, v: bool) -> postcard::Result<()> {
+        self.0.push(u8::from(v));
         Ok(())
     }
 
-    fn try_extend(&mut self, data: &[u8]) -> postcard::Result<()> {
-        self.0.extend_from_slice(data);
+    #[inline(always)]
+    fn serialize_i8(self, v: i8) -> postcard::Result<()> {
+        self.0.push(v.to_le_bytes()[0]);
         Ok(())
     }
 
-    fn finalize(self) -> postcard::Result<()> {
+    #[inline(always)]
+    fn serialize_i16(self, v: i16) -> postcard::Result<()> {
+        push_varint_u16(self.0, ((v << 1) ^ (v >> 15)) as u16);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_i32(self, v: i32) -> postcard::Result<()> {
+        push_varint_u32(self.0, ((v << 1) ^ (v >> 31)) as u32);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_i64(self, v: i64) -> postcard::Result<()> {
+        push_varint_u64(self.0, ((v << 1) ^ (v >> 63)) as u64);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_i128(self, v: i128) -> postcard::Result<()> {
+        push_varint_u128(self.0, ((v << 1) ^ (v >> 127)) as u128);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_u8(self, v: u8) -> postcard::Result<()> {
+        self.0.push(v);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_u16(self, v: u16) -> postcard::Result<()> {
+        push_varint_u16(self.0, v);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_u32(self, v: u32) -> postcard::Result<()> {
+        push_varint_u32(self.0, v);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_u64(self, v: u64) -> postcard::Result<()> {
+        push_varint_u64(self.0, v);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_u128(self, v: u128) -> postcard::Result<()> {
+        push_varint_u128(self.0, v);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_f32(self, v: f32) -> postcard::Result<()> {
+        self.0.extend_from_slice(&v.to_bits().to_le_bytes());
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_f64(self, v: f64) -> postcard::Result<()> {
+        self.0.extend_from_slice(&v.to_bits().to_le_bytes());
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_char(self, v: char) -> postcard::Result<()> {
+        let mut buf = [0u8; 4];
+        self.serialize_str(v.encode_utf8(&mut buf))
+    }
+
+    #[inline(always)]
+    fn serialize_str(self, v: &str) -> postcard::Result<()> {
+        self.serialize_bytes(v.as_bytes())
+    }
+
+    #[inline(always)]
+    fn serialize_bytes(self, v: &[u8]) -> postcard::Result<()> {
+        push_varint_u64(self.0, v.len() as u64);
+        self.0.extend_from_slice(v);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_none(self) -> postcard::Result<()> {
+        self.0.push(0);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> postcard::Result<()> {
+        self.0.push(1);
+        value.serialize(self)
+    }
+
+    #[inline(always)]
+    fn serialize_unit(self) -> postcard::Result<()> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_unit_struct(self, _name: &'static str) -> postcard::Result<()> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+    ) -> postcard::Result<()> {
+        push_varint_u32(self.0, variant_index);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> postcard::Result<()> {
+        value.serialize(self)
+    }
+
+    #[inline(always)]
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+        value: &T,
+    ) -> postcard::Result<()> {
+        push_varint_u32(self.0, variant_index);
+        value.serialize(self)
+    }
+
+    #[inline(always)]
+    fn serialize_seq(self, len: Option<usize>) -> postcard::Result<Self::SerializeSeq> {
+        let len = len.ok_or(postcard::Error::SerializeSeqLengthUnknown)?;
+        push_varint_u64(self.0, len as u64);
+        self.0.reserve(len);
+        Ok(self)
+    }
+
+    #[inline(always)]
+    fn serialize_tuple(self, _len: usize) -> postcard::Result<Self::SerializeTuple> {
+        Ok(self)
+    }
+
+    #[inline(always)]
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> postcard::Result<Self::SerializeTupleStruct> {
+        Ok(self)
+    }
+
+    #[inline(always)]
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> postcard::Result<Self::SerializeTupleVariant> {
+        push_varint_u32(self.0, variant_index);
+        Ok(self)
+    }
+
+    #[inline(always)]
+    fn serialize_map(self, len: Option<usize>) -> postcard::Result<Self::SerializeMap> {
+        let len = len.ok_or(postcard::Error::SerializeSeqLengthUnknown)?;
+        push_varint_u64(self.0, len as u64);
+        Ok(self)
+    }
+
+    #[inline(always)]
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> postcard::Result<Self::SerializeStruct> {
+        Ok(self)
+    }
+
+    #[inline(always)]
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> postcard::Result<Self::SerializeStructVariant> {
+        push_varint_u32(self.0, variant_index);
+        Ok(self)
+    }
+
+    fn collect_str<T: ?Sized + fmt::Display>(self, value: &T) -> postcard::Result<()> {
+        self.serialize_str(&value.to_string())
+    }
+}
+
+impl serde::ser::SerializeSeq for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    #[inline(always)]
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> postcard::Result<()> {
+        value.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn end(self) -> postcard::Result<()> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTuple for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    #[inline(always)]
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> postcard::Result<()> {
+        value.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn end(self) -> postcard::Result<()> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleStruct for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    #[inline(always)]
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> postcard::Result<()> {
+        value.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn end(self) -> postcard::Result<()> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleVariant for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    #[inline(always)]
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> postcard::Result<()> {
+        value.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn end(self) -> postcard::Result<()> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeMap for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    #[inline(always)]
+    fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> postcard::Result<()> {
+        key.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> postcard::Result<()> {
+        value.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn end(self) -> postcard::Result<()> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStruct for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    #[inline(always)]
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> postcard::Result<()> {
+        value.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn end(self) -> postcard::Result<()> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStructVariant for &mut PostcardVec<'_> {
+    type Ok = ();
+    type Error = postcard::Error;
+
+    #[inline(always)]
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> postcard::Result<()> {
+        value.serialize(&mut **self)
+    }
+
+    #[inline(always)]
+    fn end(self) -> postcard::Result<()> {
         Ok(())
     }
 }
@@ -538,6 +954,72 @@ mod tests {
         let own = postcard::to_stdvec(&checked).expect("serializes");
         assert_eq!(out[..2], [0xAA, 0xBB]);
         assert_eq!(out[2..], own[..]);
+    }
+
+    #[test]
+    fn appending_matches_postcard_across_types_and_boundaries() {
+        #[derive(Serialize)]
+        enum Kind {
+            Unit,
+            Newtype(i32),
+            Tuple(u16, f32),
+            Struct {
+                flag: bool,
+                ch: char,
+                label: &'static str,
+            },
+        }
+        #[derive(Serialize)]
+        struct All {
+            i8s: [i8; 3],
+            i16s: [i16; 5],
+            i32s: [i32; 7],
+            i64s: [i64; 5],
+            i128s: [i128; 4],
+            u16s: [u16; 5],
+            u32s: [u32; 8],
+            u64s: [u64; 5],
+            u128s: [u128; 4],
+            floats: (f32, f64),
+            opts: (Option<u32>, Option<u32>),
+            kinds: [Kind; 4],
+        }
+        let sample = All {
+            i8s: [i8::MIN, 0, i8::MAX],
+            i16s: [i16::MIN, -64, 0, 64, i16::MAX],
+            i32s: [i32::MIN, -8192, -1, 0, 1, 8192, i32::MAX],
+            i64s: [i64::MIN, -1, 0, 1 << 35, i64::MAX],
+            i128s: [i128::MIN, -1, 0, i128::MAX],
+            u16s: [0, 0x7F, 0x80, 0x3FFF, u16::MAX],
+            u32s: [
+                0,
+                0x7F,
+                0x80,
+                0x3FFF,
+                0x4000,
+                0x1F_FFFF,
+                0x0FFF_FFFF,
+                0xFF12_3456,
+            ],
+            u64s: [0, 0x7F, 0x80, 1 << 40, u64::MAX],
+            u128s: [0, 0x7F, 1 << 70, u128::MAX],
+            floats: (1.5, -3.25),
+            opts: (None, Some(0xFFAB_CDEF)),
+            kinds: [
+                Kind::Unit,
+                Kind::Newtype(-42),
+                Kind::Tuple(1024, 2.5),
+                Kind::Struct {
+                    flag: true,
+                    ch: 'é',
+                    label: "ok",
+                },
+            ],
+        };
+        let mut out = Vec::new();
+        append(&sample, &mut out);
+        let own = postcard::to_stdvec(&sample).expect("serializes");
+        assert_eq!(out, own);
     }
 
     #[test]

@@ -53,11 +53,13 @@ impl Timer {
 
     /// The internal 16-bit counter; DIV is its high byte. The APU's frame
     /// sequencer is clocked from it.
+    #[inline(always)]
     pub(crate) const fn counter(&self) -> u16 {
         self.counter
     }
 
     /// Advances one M-cycle.
+    #[inline(always)]
     pub(crate) fn tick(&mut self, interrupt_flag: &mut u8) {
         self.reloading = std::mem::take(&mut self.reloaded_by_write);
         if self.overflowed {
@@ -68,8 +70,12 @@ impl Timer {
         }
         let old = self.counter;
         self.counter = self.counter.wrapping_add(4);
-        if self.signal(old) && !self.signal(self.counter) {
-            self.increment();
+        if self.tac & 4 != 0 {
+            const MASKS: [u16; 4] = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
+            let mask = MASKS[usize::from(self.tac & 3)];
+            if (old & mask) != 0 && (self.counter & mask) == 0 {
+                self.increment();
+            }
         }
     }
 

@@ -72,6 +72,9 @@ pub(crate) struct Machine {
 /// it stops after one: [`Plain`] for running games, or a debugger's
 /// checks (`debug.rs`).
 pub(crate) trait Stepper {
+    /// True when the stepper runs plain `cpu.step(bus)` and never stops,
+    /// letting [`Machine::run_slice_with`] stay in a tight inner loop.
+    const PLAIN: bool = false;
     /// Runs one ARM9 instruction on `bus`.
     fn arm9(&mut self, cpu: &mut Arm9, bus: &mut Arm9Bus<'_>);
     /// Runs one ARM7 instruction on `bus`.
@@ -86,6 +89,8 @@ pub(crate) trait Stepper {
 pub(crate) struct Plain;
 
 impl Stepper for Plain {
+    const PLAIN: bool = true;
+
     #[inline]
     fn arm9(&mut self, cpu: &mut Arm9, bus: &mut Arm9Bus<'_>) {
         cpu.step(bus);
@@ -223,18 +228,49 @@ impl Machine {
         // first instruction of the slice must check.
         self.hw.arm9.checked = false;
         self.hw.arm7.checked = false;
-        while self.hw.arm9.cycles < target * 2 {
-            let ran = self.step_arm9(target * 2, stepper);
-            if stepper.stop(Side::Arm9, ran, self.arm9.next_instruction()) {
-                self.slice_target = Some(target);
-                return stopped;
+        let arm9_target = target * 2;
+        if S::PLAIN {
+            while self.hw.arm9.cycles < arm9_target {
+                if self.hw.arm9.checked && !self.arm9.halted() && self.arm9.reg(15) < ARM9_BIOS {
+                    let hw = &mut self.hw;
+                    while hw.arm9.cycles < arm9_target
+                        && hw.arm9.checked
+                        && !self.arm9.halted()
+                        && self.arm9.reg(15) < ARM9_BIOS
+                    {
+                        self.arm9.step(&mut Arm9Bus(hw));
+                    }
+                } else {
+                    self.step_arm9(arm9_target, stepper);
+                }
             }
-        }
-        while self.hw.arm7.cycles < target {
-            let ran = self.step_arm7(target, stepper);
-            if stepper.stop(Side::Arm7, ran, self.arm7.next_instruction()) {
-                self.slice_target = Some(target);
-                return stopped;
+            while self.hw.arm7.cycles < target {
+                if self.hw.arm7.checked && self.arm7.reg(15) >= ARM7_BIOS_END {
+                    let hw = &mut self.hw;
+                    while hw.arm7.cycles < target
+                        && hw.arm7.checked
+                        && self.arm7.reg(15) >= ARM7_BIOS_END
+                    {
+                        self.arm7.step(&mut Arm7Bus(hw));
+                    }
+                } else {
+                    self.step_arm7(target, stepper);
+                }
+            }
+        } else {
+            while self.hw.arm9.cycles < arm9_target {
+                let ran = self.step_arm9(arm9_target, stepper);
+                if stepper.stop(Side::Arm9, ran, self.arm9.next_instruction()) {
+                    self.slice_target = Some(target);
+                    return stopped;
+                }
+            }
+            while self.hw.arm7.cycles < target {
+                let ran = self.step_arm7(target, stepper);
+                if stepper.stop(Side::Arm7, ran, self.arm7.next_instruction()) {
+                    self.slice_target = Some(target);
+                    return stopped;
+                }
             }
         }
         self.hw.scheduler.advance(target - now);
@@ -323,6 +359,7 @@ impl Machine {
     /// One ARM9 instruction (run by `stepper`), emulated BIOS call, DMA
     /// run or stretch of halt, up to `target` in ARM9 cycles. Returns
     /// whether it was an instruction or a BIOS call.
+    #[inline(never)]
     fn step_arm9<S: Stepper>(&mut self, target: u64, stepper: &mut S) -> bool {
         let hw = &mut self.hw;
         // While `checked` holds, the checks below would find what they did
@@ -413,6 +450,7 @@ impl Machine {
     /// One ARM7 instruction (run by `stepper`), emulated BIOS call, DMA
     /// run or stretch of halt, up to `target` in bus cycles. Returns
     /// whether it was an instruction or a BIOS call.
+    #[inline(never)]
     fn step_arm7<S: Stepper>(&mut self, target: u64, stepper: &mut S) -> bool {
         let hw = &mut self.hw;
         // As on the ARM9.

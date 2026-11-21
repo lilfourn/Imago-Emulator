@@ -91,6 +91,7 @@ impl Prefetch {
     }
 
     /// Looks up a code fetch of `address`.
+    #[inline]
     pub(crate) fn look_up(&self, address: u32) -> Lookup {
         if !self.active {
             Lookup::Miss
@@ -107,6 +108,7 @@ impl Prefetch {
     /// the one that was in flight; anything buffered before that is
     /// dropped. A unit that stopped because the buffer was full starts
     /// reading again if `enabled`.
+    #[inline]
     pub(crate) fn take(&mut self, address: u32, enabled: bool) {
         // Dividing by the width, a power of two, by shifting saves a
         // division on every prefetched fetch.
@@ -122,6 +124,7 @@ impl Prefetch {
 
     /// Starts streaming the opcodes after `address`, just fetched, each
     /// `width` bytes and taking `duty` cycles.
+    #[inline]
     pub(crate) fn start(&mut self, address: u32, width: u32, duty: u32) {
         *self = Self {
             active: true,
@@ -138,10 +141,14 @@ impl Prefetch {
     /// the access waits a cycle for the unit's read to finish: it does when
     /// the CPU runs from the cartridge and a halfword read is in its last
     /// cycle.
+    #[inline]
     pub(crate) fn stop(&mut self, code_in_cartridge: bool) -> bool {
+        if !self.active {
+            return false;
+        }
         let half_read_ending = self.fetching
             && (self.countdown == 1 || (self.width == 4 && self.countdown == self.duty / 2 + 1));
-        let penalty = self.active && code_in_cartridge && half_read_ending;
+        let penalty = code_in_cartridge && half_read_ending;
         self.active = false;
         penalty
     }

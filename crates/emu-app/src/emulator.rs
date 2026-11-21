@@ -819,6 +819,9 @@ struct Latest {
     frames: Mutex<(u64, Vec<Frame>)>,
     /// What the script drew after that frame, to show over the screens.
     overlay: Mutex<Arc<[Draw]>>,
+    /// Whether `overlay` currently holds any draws, so the UI avoids locking
+    /// `overlay` every frame when no script is drawing.
+    has_overlay: AtomicBool,
     /// What the debugger window shows, as of that frame, while it is open.
     debug: Mutex<Option<Arc<Snapshot>>>,
     unseen: AtomicBool,
@@ -835,6 +838,7 @@ struct Latest {
 pub struct Emulator {
     commands: Option<Sender<Command>>,
     latest: Arc<Latest>,
+    empty_overlay: Arc<[Draw]>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -877,6 +881,8 @@ impl Emulator {
             recorder: None,
             script: None,
             overlay: Arc::default(),
+            overlay_published: false,
+            debug_published: false,
             mid_frame: false,
             paused: false,
             speed: Speed::NORMAL,
@@ -905,6 +911,7 @@ impl Emulator {
         Ok(Self {
             commands: Some(commands),
             latest,
+            empty_overlay: Arc::default(),
             thread: Some(thread),
         })
     }
@@ -943,6 +950,9 @@ impl Emulator {
 
     /// What the script drew after the latest frame, in screen pixels.
     pub fn overlay(&self) -> Arc<[Draw]> {
+        if !self.latest.has_overlay.load(Ordering::Acquire) {
+            return Arc::clone(&self.empty_overlay);
+        }
         Arc::clone(
             &self
                 .latest
@@ -998,6 +1008,10 @@ struct Runner {
     script: Option<Running>,
     /// What the script drew after the last frame.
     overlay: Arc<[Draw]>,
+    /// Whether `latest.overlay` currently holds a non-empty draw list.
+    overlay_published: bool,
+    /// Whether `latest.debug` currently holds `Some(...)`.
+    debug_published: bool,
     /// A debugger stopped the frame under way part-way.
     mid_frame: bool,
     paused: bool,
@@ -1596,6 +1610,13 @@ impl Runner {
         inputs: &[Input],
         audio: &mut Vec<emu_core::StereoSample>,
     ) -> RunOutcome {
+        if self.script.is_none() && self.debug.stops.is_empty() && self.debug.pending.is_none() {
+            self.loaded.core.run_frame(inputs, audio);
+            return RunOutcome {
+                frame_done: true,
+                stop: None,
+            };
+        }
         let mut stops = self.debug.stops.clone();
         if let Some(pending) = self.debug.pending {
             pending.add_to(&mut stops);
@@ -1729,24 +1750,34 @@ impl Runner {
             self.lock.published(*sequence, Instant::now());
             std::mem::swap(frames, &mut self.unpublished);
         }
-        *self
-            .latest
-            .overlay
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Arc::clone(&self.overlay);
-        let state = self.run_state();
-        let snapshot = match (self.debug.view, self.loaded.core.debugger()) {
-            (Some(view), Some(debugger)) => {
-                Some(Arc::new(debugger::snapshot(debugger, &view, state)))
-            }
-            _ => None,
-        };
-        let debugging = snapshot.is_some();
-        *self
-            .latest
-            .debug
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = snapshot;
+        let has_overlay = !self.overlay.is_empty();
+        if has_overlay || self.overlay_published {
+            *self
+                .latest
+                .overlay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Arc::clone(&self.overlay);
+            self.latest
+                .has_overlay
+                .store(has_overlay, Ordering::Release);
+            self.overlay_published = has_overlay;
+        }
+        let debugging = self.debug.view.is_some() && self.loaded.core.debugger().is_some();
+        if debugging || self.debug_published {
+            let state = self.run_state();
+            let snapshot = match (self.debug.view, self.loaded.core.debugger()) {
+                (Some(view), Some(debugger)) => {
+                    Some(Arc::new(debugger::snapshot(debugger, &view, state)))
+                }
+                _ => None,
+            };
+            *self
+                .latest
+                .debug
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = snapshot;
+            self.debug_published = debugging;
+        }
         if !self.latest.unseen.swap(true, Ordering::AcqRel) {
             self.events.try_send(Event::Frame).ok();
         }
