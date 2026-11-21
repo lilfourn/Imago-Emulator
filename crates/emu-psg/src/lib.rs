@@ -123,6 +123,7 @@ impl Envelope {
     }
 
     /// The DAC is on whenever NRx2's top five bits are not all zero.
+    #[inline(always)]
     fn dac_on(&self) -> bool {
         self.initial != 0 || self.increase
     }
@@ -199,6 +200,7 @@ impl Pulse {
         steps > 0
     }
 
+    #[inline(always)]
     fn output(&self) -> u8 {
         if self.enabled {
             DUTY_PATTERNS[usize::from(self.duty)][usize::from(self.duty_step)]
@@ -320,6 +322,7 @@ impl Wave {
     }
 
     /// The current sample after volume. On the GBA, NR32 bit 7 forces 75%.
+    #[inline(always)]
     fn output(&self, variant: Variant, nr32: u8) -> u8 {
         if !self.enabled {
             return 0;
@@ -377,6 +380,7 @@ impl Noise {
         shifts > 0
     }
 
+    #[inline(always)]
     fn output(&self) -> u8 {
         if self.enabled && self.lfsr & 1 == 0 {
             self.envelope.volume
@@ -458,18 +462,21 @@ impl Psg {
 
     /// Whether the master power (NR52 bit 7) is on.
     #[must_use]
+    #[inline(always)]
     pub fn powered(&self) -> bool {
         self.powered
     }
 
     /// NR50: master volume per side.
     #[must_use]
+    #[inline(always)]
     pub fn master_volume(&self) -> u8 {
         self.registers[0x14]
     }
 
     /// NR51: which channels go to which side.
     #[must_use]
+    #[inline(always)]
     pub fn panning(&self) -> u8 {
         self.registers[0x15]
     }
@@ -482,6 +489,7 @@ impl Psg {
 
     /// Each channel's DAC output, -15 to 15, or 0 with its DAC off.
     #[must_use]
+    #[inline]
     pub fn outputs(&self) -> [i32; 4] {
         let dac = |digital: u8, on: bool| if on { i32::from(digital) * 2 - 15 } else { 0 };
         [
@@ -498,26 +506,29 @@ impl Psg {
     /// The four outputs mixed for each side, left then right: the sum of
     /// the channels NR51 sends to that side, times its NR50 volume plus 1.
     #[must_use]
+    #[inline]
     pub fn mixed(&self) -> [i32; 2] {
-        let channels = self.outputs();
+        let [c0, c1, c2, c3] = self.outputs();
         let panning = self.panning();
         let volume = self.master_volume();
-        let side = |shift: u8, master: u8| -> i32 {
-            let sum: i32 = channels
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| panning & (1 << (index + usize::from(shift))) != 0)
-                .map(|(_, value)| *value)
-                .sum();
-            sum * (i32::from(master & 7) + 1)
-        };
-        [side(4, volume >> 4), side(0, volume)]
+        let left = (if panning & 0x10 != 0 { c0 } else { 0 }
+            + if panning & 0x20 != 0 { c1 } else { 0 }
+            + if panning & 0x40 != 0 { c2 } else { 0 }
+            + if panning & 0x80 != 0 { c3 } else { 0 })
+            * (i32::from((volume >> 4) & 7) + 1);
+        let right = (if panning & 0x01 != 0 { c0 } else { 0 }
+            + if panning & 0x02 != 0 { c1 } else { 0 }
+            + if panning & 0x04 != 0 { c2 } else { 0 }
+            + if panning & 0x08 != 0 { c3 } else { 0 })
+            * (i32::from(volume & 7) + 1);
+        [left, right]
     }
 
     /// Advances `cycles` cycles of the 4.19 MHz sound clock. Returns
     /// whether [`Psg::outputs`] may have changed: whether a channel's
     /// timer ran out and moved it on to its next step, sample or noise
     /// bit.
+    #[inline(always)]
     pub fn tick(&mut self, cycles: u32) -> bool {
         if !self.powered {
             return false;
@@ -541,6 +552,7 @@ impl Psg {
 
     /// Whether `cycles` can pass without any running channel's timer
     /// running out.
+    #[inline(always)]
     fn quiet_for(&self, cycles: u32) -> bool {
         cycles < self.pulse1.timer
             && cycles < self.pulse2.timer
@@ -549,6 +561,7 @@ impl Psg {
     }
 
     /// [`Psg::tick`] for each channel in turn.
+    #[inline(never)]
     fn tick_channels(&mut self, cycles: u32) -> bool {
         let bank = self.wave_bank_played();
         let two_banks = self.variant == Variant::Agb && self.registers[0x0A] & 0x20 != 0;

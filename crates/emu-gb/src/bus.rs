@@ -172,6 +172,7 @@ impl Bus {
 
     /// Advances every component by one CPU M-cycle, then runs an HBlank
     /// DMA block if one is due.
+    #[inline(always)]
     fn step_components(&mut self) {
         self.advance();
         if self.ppu.take_hblank_started()
@@ -182,6 +183,7 @@ impl Bus {
         }
     }
 
+    #[inline(always)]
     fn advance(&mut self) {
         let real_cycles = if self.double_speed { 2 } else { 4 };
         self.cycles += u64::from(real_cycles);
@@ -198,6 +200,7 @@ impl Bus {
     /// Whether the DIV bit that clocks the APU's 512 Hz frame sequencer fell
     /// since the counter was `before`: bit 4 of DIV, or bit 5 in double
     /// speed, where DIV runs twice as fast.
+    #[inline(always)]
     fn div_bit_fell(&self, before: u16) -> bool {
         let bit = if self.double_speed { 0x2000 } else { 0x1000 };
         before & bit != 0 && self.timer.counter() & bit == 0
@@ -205,6 +208,7 @@ impl Bus {
 
     /// Copies one HDMA block to VRAM. The CPU is halted for the copy: 8
     /// M-cycles, or 16 in double speed.
+    #[inline(never)]
     fn copy_block(&mut self, block: Block) {
         for offset in 0..16 {
             let value = self.peek(block.source.wrapping_add(offset));
@@ -216,7 +220,16 @@ impl Bus {
         }
     }
 
+    #[inline(always)]
     fn step_dma(&mut self) {
+        if self.dma.active.is_none() && self.dma.requested.is_none() && self.dma.copying.is_none() {
+            return;
+        }
+        self.step_dma_active();
+    }
+
+    #[inline(never)]
+    fn step_dma_active(&mut self) {
         self.dma.copying = None;
         if let Some(source) = self.dma.active {
             // Sources above 0xDFFF read the WRAM echo, not OAM or I/O.
@@ -243,6 +256,7 @@ impl Bus {
     /// read returns. OAM reads 0xFF; the bus the transfer reads from (VRAM,
     /// or the external bus for ROM, cartridge RAM and WRAM) returns the byte
     /// in flight. I/O and HRAM stay reachable (Pan Docs, "OAM DMA Transfer").
+    #[inline(always)]
     fn dma_conflict(&self, address: u16) -> Option<u8> {
         let in_flight = self.dma.copying?;
         let vram = (0x8000..0xA000).contains(&address);
@@ -255,6 +269,7 @@ impl Bus {
     }
 
     /// Index into `wram` for an address in 0xC000–0xFDFF.
+    #[inline(always)]
     fn wram_index(&self, address: u16) -> usize {
         let offset = usize::from((address - 0xC000) & 0x1FFF);
         if offset < 0x1000 {
@@ -266,7 +281,22 @@ impl Bus {
 
     /// Reads without side effects or timing: for DMA, debuggers and
     /// tracing.
+    #[inline]
     pub(crate) fn peek(&self, address: u16) -> u8 {
+        if address < 0x8000 && !self.boot_rom_mapped {
+            return self.cartridge.read_rom(address);
+        }
+        if (0xC000..=0xFDFF).contains(&address) {
+            return self.wram[self.wram_index(address)];
+        }
+        if (0xFF80..=0xFFFE).contains(&address) {
+            return self.hram[usize::from(address - 0xFF80)];
+        }
+        self.peek_slow(address)
+    }
+
+    #[inline(never)]
+    fn peek_slow(&self, address: u16) -> u8 {
         let cgb = self.cgb();
         match address {
             0x0000..=0x00FF if self.boot_rom_mapped => self.boot_rom_byte(address),
@@ -406,6 +436,7 @@ impl Bus {
 }
 
 impl cpu::Bus for Bus {
+    #[inline]
     fn read(&mut self, address: u16) -> u8 {
         self.step_components();
         if let Some(value) = self.dma_conflict(address) {
@@ -417,6 +448,7 @@ impl cpu::Bus for Bus {
         }
     }
 
+    #[inline]
     fn write(&mut self, address: u16, value: u8) {
         self.step_components();
         if self.dma_conflict(address).is_none() && !self.ppu.blocks_write(address) {
@@ -424,6 +456,7 @@ impl cpu::Bus for Bus {
         }
     }
 
+    #[inline]
     fn tick(&mut self) {
         self.step_components();
     }

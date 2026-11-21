@@ -19,6 +19,11 @@ pub(crate) struct Cartridge {
     /// bank. Like the ROM, never saved in states.
     #[serde(skip)]
     rom_patches: Box<[RomPatch]>,
+    /// Precomputed byte offset into `rom` for 0x0000–0x3FFF and 0x4000–0x7FFF.
+    #[serde(skip)]
+    rom_bank0_base: usize,
+    #[serde(skip)]
+    rom_bank1_base: usize,
     /// As long as the header says; see [`Cartridge::in_range`] for a
     /// save state's.
     #[serde(with = "payload::bytes")]
@@ -140,11 +145,14 @@ impl Cartridge {
         let mut cartridge = Self {
             rom: padded.into_boxed_slice(),
             rom_patches: Box::default(),
+            rom_bank0_base: 0,
+            rom_bank1_base: 0,
             ram: vec![0; ram_size].into_boxed_slice(),
             mbc,
             has_battery,
             generation: 0,
         };
+        cartridge.update_rom_bases();
         if let Some(backup) = backup {
             cartridge.load_backup(backup, start_time);
         }
@@ -181,6 +189,7 @@ impl Cartridge {
                 ram_bank,
             } => (*ram_enabled, *rom_bank, *ram_bank) = (false, 1, 0),
         }
+        self.update_rom_bases();
     }
 
     /// Whether this cartridge, read from a save state, has the RAM its
@@ -195,6 +204,7 @@ impl Cartridge {
     pub(crate) fn take_rom_from(&mut self, other: &mut Self) {
         self.rom = std::mem::take(&mut other.rom);
         self.rom_patches = std::mem::take(&mut other.rom_patches);
+        self.update_rom_bases();
     }
 
     /// Replaces the ROM patches. Patches outside 0x0000–0x7FFF are
@@ -242,55 +252,54 @@ impl Cartridge {
     }
 
     /// Advances the MBC3 clock by `cycles` real-time clock cycles.
+    #[inline(always)]
     pub(crate) fn tick(&mut self, cycles: u32) {
         if let Mbc::Mbc3 { rtc: Some(rtc), .. } = &mut self.mbc {
             rtc.tick(cycles);
         }
     }
 
-    fn rom_byte(&self, bank: usize, address: u16) -> u8 {
+    fn update_rom_bases(&mut self) {
         let banks = self.rom.len() / 0x4000;
-        self.rom[(bank % banks) * 0x4000 + usize::from(address & 0x3FFF)]
-    }
-
-    pub(crate) fn read_rom(&self, address: u16) -> u8 {
-        let bank = match (&self.mbc, address < 0x4000) {
-            (Mbc::RomOnly, low) => usize::from(!low),
-            (
-                Mbc::Mbc1 {
-                    bank_high,
-                    advanced_mode,
-                    multicart,
-                    ..
-                },
-                true,
-            ) => {
-                if *advanced_mode {
-                    usize::from(*bank_high) << mbc1_high_shift(*multicart)
-                } else {
-                    0
-                }
-            }
-            (
-                Mbc::Mbc1 {
-                    bank_low,
-                    bank_high,
-                    multicart,
-                    ..
-                },
-                false,
-            ) => {
+        if banks == 0 {
+            self.rom_bank0_base = 0;
+            self.rom_bank1_base = 0;
+            return;
+        }
+        let (bank0, bank1) = match &self.mbc {
+            Mbc::RomOnly => (0, 1),
+            Mbc::Mbc1 {
+                bank_low,
+                bank_high,
+                advanced_mode,
+                multicart,
+                ..
+            } => {
                 let shift = mbc1_high_shift(*multicart);
                 let low_mask = (1 << shift) - 1;
-                usize::from(*bank_high) << shift | usize::from(*bank_low) & low_mask
+                let b0 = if *advanced_mode {
+                    usize::from(*bank_high) << shift
+                } else {
+                    0
+                };
+                let b1 = usize::from(*bank_high) << shift | usize::from(*bank_low) & low_mask;
+                (b0, b1)
             }
-            (Mbc::Mbc2 { rom_bank, .. } | Mbc::Mbc3 { rom_bank, .. }, false) => {
-                usize::from(*rom_bank)
-            }
-            (Mbc::Mbc5 { rom_bank, .. }, false) => usize::from(*rom_bank),
-            (Mbc::Mbc2 { .. } | Mbc::Mbc3 { .. } | Mbc::Mbc5 { .. }, true) => 0,
+            Mbc::Mbc2 { rom_bank, .. } | Mbc::Mbc3 { rom_bank, .. } => (0, usize::from(*rom_bank)),
+            Mbc::Mbc5 { rom_bank, .. } => (0, usize::from(*rom_bank)),
         };
-        let byte = self.rom_byte(bank, address);
+        self.rom_bank0_base = (bank0 % banks) * 0x4000;
+        self.rom_bank1_base = (bank1 % banks) * 0x4000;
+    }
+
+    #[inline(always)]
+    pub(crate) fn read_rom(&self, address: u16) -> u8 {
+        let base = if address < 0x4000 {
+            self.rom_bank0_base
+        } else {
+            self.rom_bank1_base
+        };
+        let byte = self.rom[base + usize::from(address & 0x3FFF)];
         if self.rom_patches.is_empty() {
             byte
         } else {
@@ -306,7 +315,7 @@ impl Cartridge {
             0x7F
         };
         match &mut self.mbc {
-            Mbc::RomOnly => {}
+            Mbc::RomOnly => return,
             Mbc::Mbc1 {
                 ram_enabled,
                 bank_low,
@@ -314,7 +323,10 @@ impl Cartridge {
                 advanced_mode,
                 ..
             } => match address {
-                0x0000..=0x1FFF => *ram_enabled = value & 0x0F == 0x0A,
+                0x0000..=0x1FFF => {
+                    *ram_enabled = value & 0x0F == 0x0A;
+                    return;
+                }
                 0x2000..=0x3FFF => *bank_low = (value & 0x1F).max(1),
                 0x4000..=0x5FFF => *bank_high = value & 0x03,
                 _ => *advanced_mode = value & 1 != 0,
@@ -327,9 +339,12 @@ impl Cartridge {
                 if address < 0x4000 {
                     if address & 0x0100 == 0 {
                         *ram_enabled = value & 0x0F == 0x0A;
+                        return;
                     } else {
                         *rom_bank = (value & 0x0F).max(1);
                     }
+                } else {
+                    return;
                 }
             }
             Mbc::Mbc3 {
@@ -338,15 +353,22 @@ impl Cartridge {
                 select,
                 rtc,
             } => match address {
-                0x0000..=0x1FFF => *ram_enabled = value & 0x0F == 0x0A,
+                0x0000..=0x1FFF => {
+                    *ram_enabled = value & 0x0F == 0x0A;
+                    return;
+                }
                 // ROMs over 2 MiB need the MBC30, whose bank register has all
                 // 8 bits (Japanese Pokémon Crystal).
                 0x2000..=0x3FFF => *rom_bank = (value & rom_bank_mask).max(1),
-                0x4000..=0x5FFF => *select = value,
+                0x4000..=0x5FFF => {
+                    *select = value;
+                    return;
+                }
                 _ => {
                     if let Some(rtc) = rtc {
                         rtc.write_latch(value);
                     }
+                    return;
                 }
             },
             Mbc::Mbc5 {
@@ -354,13 +376,20 @@ impl Cartridge {
                 rom_bank,
                 ram_bank,
             } => match address {
-                0x0000..=0x1FFF => *ram_enabled = value & 0x0F == 0x0A,
+                0x0000..=0x1FFF => {
+                    *ram_enabled = value & 0x0F == 0x0A;
+                    return;
+                }
                 0x2000..=0x2FFF => *rom_bank = (*rom_bank & 0x100) | u16::from(value),
                 0x3000..=0x3FFF => *rom_bank = (*rom_bank & 0xFF) | u16::from(value & 1) << 8,
-                0x4000..=0x5FFF => *ram_bank = value & 0x0F,
-                _ => {}
+                0x4000..=0x5FFF => {
+                    *ram_bank = value & 0x0F;
+                    return;
+                }
+                _ => return,
             },
         }
+        self.update_rom_bases();
     }
 
     /// Whether the game has enabled RAM (always, without a controller).
