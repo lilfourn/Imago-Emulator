@@ -690,6 +690,42 @@ mod tests {
     }
 
     #[test]
+    fn a_copied_line_says_whether_it_changed() {
+        let mut engine = Engine2d::new(Engine::A);
+        let vram = vram();
+        engine.write_palette(0, BLUE);
+        set_dispcnt(&mut engine, GRAPHICS | 1 << 3 | 1 << 8);
+        let mut line_3d = [0x3F | 31 << 18; WIDTH];
+        let mut copy = LineCopy::default();
+        let mut copied = |engine: &mut Engine2d, line_3d: &[u32; WIDTH]| {
+            let native = render_with_3d(engine, &vram, 0, Some(line_3d));
+            engine.copy_line(&native, &mut copy)
+        };
+        assert!(copied(&mut engine, &line_3d), "the first copy");
+        assert!(!copied(&mut engine, &line_3d), "the same line again");
+        // The 3D layer's own pixels are one of the line's layers.
+        line_3d[9] = 0;
+        assert!(copied(&mut engine, &line_3d), "another pixel");
+        assert!(!copied(&mut engine, &line_3d));
+        // Registers the larger line is composed with, which leave this
+        // line's own pixels alone: BG0HOFS over a layer of one colour, and
+        // an effect with no layer to work on.
+        line_3d[9] = line_3d[0];
+        assert!(copied(&mut engine, &line_3d));
+        engine.write_register(0x10, 1);
+        assert!(copied(&mut engine, &line_3d), "scrolled");
+        assert!(!copied(&mut engine, &line_3d));
+        engine.write_register(0x54, 3);
+        assert!(copied(&mut engine, &line_3d), "BLDY");
+        assert!(!copied(&mut engine, &line_3d));
+        // Without 3D only the line's pixels count.
+        set_dispcnt(&mut engine, GRAPHICS);
+        assert!(copied(&mut engine, &line_3d), "no 3D layer");
+        engine.write_register(0x54, 5);
+        assert!(!copied(&mut engine, &line_3d), "nothing it is drawn from");
+    }
+
+    #[test]
     fn a_line_drawn_larger_keeps_windows_and_scrolling() {
         let mut engine = Engine2d::new(Engine::A);
         let vram = vram();

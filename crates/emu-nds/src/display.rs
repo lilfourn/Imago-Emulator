@@ -7,7 +7,8 @@
 //! With upscaled 3D (NDS-9), the screens are also drawn larger into
 //! [`ScaledScreens`], for display only: engine B's lines as they are
 //! drawn, engine A's all at once at VBlank, in bands on the 3D renderer's
-//! threads, from copies taken as they were drawn.
+//! threads, from copies taken as they were drawn. A line whose copy and
+//! 3D frame are those it was last drawn larger from is left as it is.
 
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
@@ -59,6 +60,10 @@ pub(crate) struct ScaledScreens {
     lines: Vec<LineCopy>,
     /// Which of `lines` were drawn since the last VBlank.
     fresh: Vec<bool>,
+    /// Per line, the 3D frame ([`gpu3d::Gpu3d::frame_count`]) its larger
+    /// rows in `a` were drawn around, while the line stays as it was
+    /// then; `None` once it changes, and until it is first drawn larger.
+    drawn_around: Vec<Option<u64>>,
 }
 
 /// What every band of engine A's larger screen is drawn from, shared by
@@ -107,6 +112,7 @@ impl Default for ScaledScreens {
             b: Box::default(),
             lines: Vec::new(),
             fresh: Vec::new(),
+            drawn_around: Vec::new(),
         }
     }
 }
@@ -145,6 +151,7 @@ impl ScaledScreens {
             b: enlarge(b, 0, lines),
             lines: vec![LineCopy::default(); lines],
             fresh: vec![false; lines],
+            drawn_around: vec![None; lines],
         }
     }
 
@@ -234,8 +241,12 @@ impl Hardware {
         let size = WIDTH * scaled.scale * scaled.scale;
         let b = &self.screen_b.as_chunks().0[line];
         gpu2d::enlarge_line(b, scaled.scale, &mut scaled.b[line * size..][..size]);
-        self.engine_a
+        let changed = self
+            .engine_a
             .copy_line(&self.screen_a.as_chunks().0[line], &mut scaled.lines[line]);
+        if changed {
+            scaled.drawn_around[line] = None;
+        }
         scaled.fresh[line] = true;
     }
 
@@ -245,6 +256,20 @@ impl Hardware {
     /// of their own for it. Waits for them all.
     fn finish_scaled_screens(&mut self) {
         let scaled = &mut self.scaled;
+        // A line that is as it was when last drawn larger, around the 3D
+        // frame it would be drawn around now, is drawn already. Most are:
+        // a game that draws 30 frames a second repeats every other frame,
+        // and a still scene nearly all of them.
+        let frame = self.gpu3d.frame_count();
+        let lines = scaled.lines.iter().zip(&mut scaled.fresh);
+        for ((copy, fresh), around) in lines.zip(&mut scaled.drawn_around) {
+            let drawn = around.is_some_and(|count| count == frame || !copy.showed_3d());
+            if *fresh && !drawn {
+                *around = Some(frame);
+            } else {
+                *fresh = false;
+            }
+        }
         let any_3d = scaled
             .lines
             .iter()

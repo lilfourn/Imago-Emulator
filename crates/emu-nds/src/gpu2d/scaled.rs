@@ -72,18 +72,30 @@ impl Default for LineCopy {
 
 impl Engine2d {
     /// Copies the last line [`Engine2d::render_line`] drew, `native`, into
-    /// `copy`, with its layers and registers if it showed 3D.
-    pub(crate) fn copy_line(&self, native: &[u32; WIDTH], copy: &mut LineCopy) {
+    /// `copy`, with its layers and registers if it showed 3D. Returns
+    /// whether that changed anything [`LineCopy::draw`] reads: a copy left
+    /// as it was draws as it did, around the same 3D frame.
+    pub(crate) fn copy_line(&self, native: &[u32; WIDTH], copy: &mut LineCopy) -> bool {
+        let layers = self.layers.as_deref().filter(|_| self.showed_3d);
+        let mut changed = copy.native != *native || copy.showed_3d != layers.is_some();
         copy.native = *native;
-        copy.showed_3d = false;
-        let Some(layers) = self.layers.as_deref().filter(|_| self.showed_3d) else {
-            return;
+        copy.showed_3d = layers.is_some();
+        let Some(layers) = layers else {
+            return changed;
         };
-        copy.showed_3d = true;
-        copy.layers.clone_from(layers);
-        copy.composer = self.composer(layers);
-        copy.master_bright = self.registers.master_bright;
-        copy.scroll = self.registers.hofs[0];
+        if copy.layers != *layers {
+            copy.layers.clone_from(layers);
+            changed = true;
+        }
+        let composer = self.composer(layers);
+        let (master_bright, scroll) = (self.registers.master_bright, self.registers.hofs[0]);
+        changed |= copy.composer != composer
+            || copy.master_bright != master_bright
+            || copy.scroll != scroll;
+        copy.composer = composer;
+        copy.master_bright = master_bright;
+        copy.scroll = scroll;
+        changed
     }
 }
 

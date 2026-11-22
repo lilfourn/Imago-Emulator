@@ -209,6 +209,13 @@ impl Gpu3d {
         self.renderer.render(&self.rendering, &config, vram);
     }
 
+    /// A count that goes up whenever [`Gpu3d::render_frame`] leaves a
+    /// frame other than the one before. A game drawing 30 frames a second
+    /// leaves each for two, and a still scene for longer.
+    pub(crate) fn frame_count(&self) -> u64 {
+        self.renderer.frame_count()
+    }
+
     /// Row `y` (0–191) of the last frame drawn, waiting for the frame if
     /// it is still drawing.
     pub(crate) fn line(&mut self, y: u16) -> &[u32; 256] {
@@ -418,6 +425,74 @@ mod tests {
         assert_eq!(pixel(&mut gpu, 80, 50), opaque([0, 63, 0]));
         assert_eq!(pixel(&mut gpu, 112, 50), opaque([0, 0, 63]));
         assert_eq!(pixel(&mut gpu, 176, 150), opaque([63, 0, 0]));
+    }
+
+    #[test]
+    fn a_frame_is_drawn_again_only_when_it_changes() {
+        let mut gpu = Gpu3d::new();
+        gpu.set_render_scale(2);
+        let mut vram = Vram::default();
+        vram.set_control(0, 0x80 | 3); // A: texture slot 0.
+        vram.set_control(4, 0x80 | 3); // E: texture palettes.
+        // 8×8 texels of colour 1, red.
+        for offset in 0..16 {
+            vram.write_8(Region::Texture, offset, 0b0101_0101);
+        }
+        vram.write_16(Region::TexturePalette, 2, 0x001F);
+        // The left half of the screen, textured, over a blue rear plane.
+        let textured = |gpu: &mut Gpu3d| {
+            send(gpu, POLYGON_ATTR, &[SOLID]);
+            send(gpu, TEXIMAGE_PARAM, &[2 << 26]);
+            send(gpu, COLOR, &[0x7FFF]);
+            quad(gpu, [-ONE, -ONE, 0, ONE], 0);
+        };
+        configure(&mut gpu, 1, 0x7C00 | 31 << 16);
+        textured(&mut gpu);
+        finish(&mut gpu, &vram);
+        let drawn = gpu.frame_count();
+        let frame = scaled_frame(&mut gpu, 2);
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([63, 0, 0]));
+        // The same polygons, registers and texels: the frame it holds.
+        gpu.render_frame(&vram);
+        gpu.render_frame(&vram);
+        assert_eq!(gpu.frame_count(), drawn);
+        assert_eq!(scaled_frame(&mut gpu, 2), frame);
+        // The same polygons sent again are the same frame too.
+        textured(&mut gpu);
+        finish(&mut gpu, &vram);
+        assert_eq!(gpu.frame_count(), drawn);
+        // A texel changes: green.
+        vram.write_16(Region::TexturePalette, 2, 0x03E0);
+        gpu.render_frame(&vram);
+        assert_eq!(gpu.frame_count(), drawn + 1);
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([0, 63, 0]));
+        assert_ne!(scaled_frame(&mut gpu, 2), frame);
+        // The bank leaves texture memory: every texel is colour 0, black.
+        vram.set_control(0, 0);
+        gpu.render_frame(&vram);
+        assert_eq!(gpu.frame_count(), drawn + 2);
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([0, 0, 0]));
+        // A rendering register changes: no texturing, the vertex colour.
+        gpu.write_register(0x060, 0);
+        gpu.render_frame(&vram);
+        assert_eq!(gpu.frame_count(), drawn + 3);
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([63, 63, 63]));
+        let untextured = scaled_frame(&mut gpu, 2);
+        // No polygons: the rear plane alone, once.
+        finish(&mut gpu, &vram);
+        gpu.render_frame(&vram);
+        assert_eq!(gpu.frame_count(), drawn + 4);
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([0, 0, 63]));
+        // The polygons from before it are shown again without drawing.
+        textured(&mut gpu);
+        finish(&mut gpu, &vram);
+        assert_eq!(gpu.frame_count(), drawn + 5);
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([63, 63, 63]));
+        assert_eq!(scaled_frame(&mut gpu, 2), untextured);
+        // Another scale needs its own larger frame.
+        gpu.set_render_scale(3);
+        gpu.render_frame(&vram);
+        assert_eq!(scaled_frame(&mut gpu, 3).len(), 256 * 3 * 192 * 3);
     }
 
     #[test]

@@ -28,7 +28,7 @@ const EFFECTS: u8 = 1 << 5;
 const ALL: u8 = 0x3F;
 
 /// One line of every layer, ready to compose.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Layers {
     /// Each drawn background's line. The others keep an older line, which
     /// is never read.
@@ -100,7 +100,7 @@ fn rgb666(pixel: u32) -> u32 {
 }
 
 /// BLDCNT, BLDALPHA and BLDY, decoded once per line.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Effects {
     bldcnt: u32,
     eva: u32,
@@ -175,7 +175,7 @@ impl Effects {
 
 /// What composing a line's pixels needs from the registers: the effects,
 /// the backdrop, and the drawn backgrounds in front-to-back order.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Composer {
     effects: Effects,
     backdrop: u32,

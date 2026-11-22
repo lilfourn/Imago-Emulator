@@ -98,9 +98,14 @@ pub(crate) fn fog_density(depth: u32, config: &RenderConfig) -> u32 {
 
 /// Blends fog into a single packed 6-bit-colour/5-bit-alpha pixel at `depth`.
 pub(crate) fn fog_pixel(pixel: u32, depth: u32, config: &RenderConfig) -> u32 {
+    let density = fog_density(depth, config);
+    if density == 0 {
+        // Nearer than the fog begins, as most of a scene is: the pixel
+        // as it is.
+        return pixel;
+    }
     let fog_rgb = color::rgb6(config.fog_color);
     let fog_alpha = (config.fog_color >> 16) & 0x1F;
-    let density = fog_density(depth, config);
     let mix = |fog: u32, value: u32| ((fog * density + value * (128 - density)) >> 7) as u8;
     let rgb = color::unpack(pixel);
     let rgb = if config.fog_alpha_only {
