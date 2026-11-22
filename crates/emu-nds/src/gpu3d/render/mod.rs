@@ -30,6 +30,13 @@
 //! for when its first line is needed, the first about 50 lines later, and
 //! the larger frame when the screens are finished at the next VBlank. Each
 //! comes out the same as if it were drawn at once.
+//!
+//! The hardware draws its polygon list again every frame, changed or not.
+//! A game that swaps buffers 30 times a second has it draw each list
+//! twice, and a still scene the same one for as long as it is still, so a
+//! frame with the polygons, registers and texels of the one before is not
+//! drawn: the bands hold it already. Walking in Pokémon Platinum's
+//! overworld that is 57 frames in 100, and standing still about 85.
 
 mod pixel;
 mod post;
@@ -150,6 +157,11 @@ pub(crate) struct Renderer {
     receiver: Receiver<Drawn>,
     /// Bands out with the workers.
     drawing: usize,
+    /// Whether the bands hold [`Self::scene`], drawn or being drawn: a
+    /// frame of the same scene then needs no drawing.
+    current: bool,
+    /// Goes up whenever the frame changes: [`Renderer::frame_count`].
+    frames: u64,
 }
 
 impl Default for Renderer {
@@ -167,6 +179,8 @@ impl Default for Renderer {
             sender,
             receiver,
             drawing: 0,
+            current: false,
+            frames: 0,
         }
     }
 }
@@ -181,6 +195,8 @@ impl Renderer {
             self.finish();
             self.scale = scale;
             self.larger.clear();
+            self.current = false;
+            self.frames += 1;
             if let Some(pixel) = self.uniform {
                 if scale > 1 {
                     self.uniform_larger.resize(WIDTH * scale, pixel);
@@ -198,6 +214,8 @@ impl Renderer {
         self.finish();
         self.scale = scale;
         self.uniform = None;
+        self.current = false;
+        self.frames += 1;
         self.larger = bands(scale, count);
     }
 
@@ -206,6 +224,8 @@ impl Renderer {
     pub(crate) fn split_native(&mut self, count: usize) {
         self.finish();
         self.uniform = None;
+        self.current = false;
+        self.frames += 1;
         self.native = bands(1, count);
     }
 
@@ -226,19 +246,30 @@ impl Renderer {
                 self.uniform_larger.resize(scaled_len, pixel);
                 self.uniform_larger.fill(pixel);
                 self.uniform = Some(pixel);
+                self.frames += 1;
             }
             return;
         }
-        self.uniform = None;
+        let was_uniform = self.uniform.take().is_some();
         if self.native.is_empty() {
             self.native = bands(1, NATIVE_BANDS);
+            self.current = false;
         }
         if self.scale > 1 && self.larger.is_empty() {
             self.larger = bands(self.scale, BANDS);
+            self.current = false;
         }
         // The workers have let go of the scene, so it is reused, not
         // copied.
-        Arc::make_mut(&mut self.scene).load(list, config, vram);
+        let same = Arc::make_mut(&mut self.scene).load(list, config, vram);
+        if same && self.current {
+            // A game that draws 30 frames a second shows each of them
+            // twice: the bands already hold this one.
+            self.frames += u64::from(was_uniform);
+            return;
+        }
+        self.current = true;
+        self.frames += 1;
         // Native bands first: their lines are needed first.
         let mut jobs = Vec::with_capacity(self.native.len() + self.larger.len());
         for (resolution, bands) in [
@@ -257,6 +288,13 @@ impl Renderer {
         }
         self.drawing = jobs.len();
         self.workers.run(jobs);
+    }
+
+    /// A count that goes up whenever [`Renderer::render`] leaves a frame
+    /// other than the one before: while it stays, every row of the frame,
+    /// native and larger, is as it was.
+    pub(crate) fn frame_count(&self) -> u64 {
+        self.frames
     }
 
     /// Row `y` of the last frame drawn, waiting for it if it is still
@@ -340,6 +378,8 @@ impl Renderer {
         };
         bands[drawn.index].buffers = Some(drawn.buffers);
         if let Some(panic) = drawn.panic {
+            // The band is only partly drawn.
+            self.current = false;
             std::panic::resume_unwind(panic);
         }
     }
@@ -444,13 +484,25 @@ fn band_row(band: &Band, row: usize) -> Option<&[u32]> {
 
 impl Scene {
     /// Copies everything a frame of `list` reads, with the rendering
-    /// registers in `config`, and sorts its polygons.
-    fn load(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) {
-        self.list.copy_from(list);
-        self.config.clone_from(config);
-        self.toon = config.toon.map(|entry| color::rgb6(u32::from(entry)));
+    /// registers in `config`, and sorts its polygons. Returns whether the
+    /// scene is the one it already held: the same polygons, registers and
+    /// texels, which draw the same frame.
+    fn load(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) -> bool {
+        let same_list = self.list == *list;
+        if !same_list {
+            self.list.copy_from(list);
+        }
+        let same_config = self.config == *config;
+        if !same_config {
+            self.config.clone_from(config);
+            self.toon = config.toon.map(|entry| color::rgb6(u32::from(entry)));
+        }
         self.load_textures(vram);
+        if same_list && same_config && !self.memory.changed() {
+            return true;
+        }
         self.sort();
+        false
     }
 
     /// Copies every texture the frame reads from VRAM: the rear-plane
@@ -578,7 +630,6 @@ fn clear(buffers: &mut Buffers, scene: &Scene) {
 fn draw(buffers: &mut Buffers, polygon: &Polygon, scene: &Scene, shadow_drawn: &mut bool) {
     let (list, config) = (&scene.list, &scene.config);
     let attr = polygon.attr;
-    let shader = Shader::new(polygon, config, &scene.toon);
     let kind = match (attr.mode(), attr.id()) {
         (Mode::Shadow, 0) => {
             // A new shadow volume starts with a clean stencil.
@@ -594,6 +645,11 @@ fn draw(buffers: &mut Buffers, polygon: &Polygon, scene: &Scene, shadow_drawn: &
         _ => Kind::Normal,
     };
     let area = buffers.area;
+    let vertices = list.vertices_of(polygon);
+    if !raster::reaches(vertices, area) {
+        return;
+    }
+    let shader = Shader::new(polygon, config, &scene.toon);
     let mut target = PolygonTarget {
         buffers,
         memory: &scene.memory,
@@ -611,7 +667,6 @@ fn draw(buffers: &mut Buffers, polygon: &Polygon, scene: &Scene, shadow_drawn: &
         blending: config.blending,
         antialiasing: config.antialiasing,
     };
-    let vertices = list.vertices_of(polygon);
     if polygon.line || attr.alpha() == 0 {
         raster::outline(vertices, list.w_buffer, area, &mut target);
     } else if config.antialiasing && kind == Kind::Normal && !polygon.translucent {

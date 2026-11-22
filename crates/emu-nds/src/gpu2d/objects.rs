@@ -30,7 +30,7 @@ pub(super) enum ObjBlend {
 }
 
 /// The front-most sprite at one pixel.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct ObjPixel {
     /// Layer pixel, 0 where no sprite is drawn.
     pub(super) color: u32,

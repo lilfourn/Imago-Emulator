@@ -445,6 +445,18 @@ composes those lines again around the larger 3D frame, a few lines to a
 thread; everything else is enlarged. The app draws the larger frames like
 any others and pre-scales them less.
 
+Neither is done for a frame that repeats the one before. The renderer
+keeps the polygon list, rendering registers and texture pages it last
+drew from, and a frame with the same ones is not drawn again
+(`Renderer::render`): a game that swaps buffers 30 times a second, as the
+Pokémon games do, has each list drawn twice, and a still scene for as
+long as it is still. Engine A's larger lines are likewise composed again
+only where the line's copy changed or the 3D frame did
+(`Hardware::finish_scaled_screens`). The pictures are the same either way,
+so `emu-headless --digest` before and after is the check for a change
+here. Walking in Pokémon Platinum's overworld at 2× this halved the CPU
+time of a frame, and standing still cut it by three quarters.
+
 GPUI cannot rotate images either, so rotated layouts turn each screen on
 the CPU too (`video::turn`). The touch mapping in `layout.rs` uses the same
 pixel mapping, so a touch lands on the pixel drawn under it.

@@ -163,6 +163,20 @@ fn prepare(
     vertices.len().min(MAX_POLYGON_VERTICES)
 }
 
+/// Whether a polygon of `vertices` can have pixels in `area`: whether its
+/// rows, with the `scale` rows from each point down that an outline is
+/// drawn across, reach the area's. A band of a frame skips the polygons
+/// that lie wholly in other bands, most of them, before working out
+/// anything about them.
+pub(crate) fn reaches(vertices: &[ScreenVertex], area: Area) -> bool {
+    let scale = area.scale as i32;
+    let rows = vertices.iter().map(|vertex| vertex.position(scale).1);
+    let (Some(top), Some(bottom)) = (rows.clone().min(), rows.max()) else {
+        return false;
+    };
+    top < area.bottom() as i32 && bottom + scale > area.top as i32
+}
+
 /// The perspective-correct weight of `b` (16 fractional bits) at
 /// `num / den` of the way from `a` to `b` on screen.
 fn weight_of_b(num: i64, den: i64, a_weight: i64, b_weight: i64) -> i64 {
@@ -671,6 +685,32 @@ mod tests {
             joined.extend(band.list());
         }
         assert_eq!(joined, whole.list());
+    }
+
+    #[test]
+    fn bands_know_which_polygons_reach_them() {
+        let quad = [vertex(3, 2), vertex(1, 40), vertex(70, 33), vertex(60, 5)];
+        let dot = [vertex(9, 9); 3];
+        // Every band of the doubled grid that the quad or the dot draws
+        // in is one they reach.
+        for top in (0..2 * HEIGHT).step_by(3) {
+            let area = doubled(top, 3);
+            for polygon in [&quad[..], &dot[..]] {
+                let mut band = Cells::new(area);
+                fill_antialiased(polygon, false, area, &mut band);
+                outline(polygon, false, area, &mut band);
+                assert!(
+                    band.list().is_empty() || reaches(polygon, area),
+                    "rows from {top}"
+                );
+            }
+        }
+        // The quad's rows are 4 to 79, and an outline's last point is
+        // drawn two rows down; the dot's are 18 and 19.
+        assert!(!reaches(&quad, doubled(0, 4)) && reaches(&quad, doubled(0, 5)));
+        assert!(reaches(&quad, doubled(81, 3)) && !reaches(&quad, doubled(82, 3)));
+        assert!(!reaches(&dot, doubled(20, 3)) && !reaches(&dot, doubled(15, 3)));
+        assert!(!reaches(&[], doubled(0, 2 * HEIGHT)));
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub(crate) struct TextureMemory {
     /// One bit per page copied since [`TextureMemory::invalidate`].
     texture_pages: u64,
     palette_pages: u64,
+    /// Whether a page copied since [`TextureMemory::invalidate`] differed
+    /// from the copy it replaced.
+    changed: bool,
 }
 
 impl Default for TextureMemory {
@@ -30,40 +33,62 @@ impl Default for TextureMemory {
             palette: vec![0; PALETTE_SIZE as usize].into_boxed_slice(),
             texture_pages: 0,
             palette_pages: 0,
+            changed: false,
         }
     }
 }
 
 /// Copies the pages of `region` covering `len` bytes from `start`
-/// (wrapping) that are not copied yet.
-fn load(vram: &Vram, region: Region, buffer: &mut [u8], pages: &mut u64, start: u32, len: u32) {
+/// (wrapping) that are not copied yet. Returns whether any of them differed
+/// from the copy it replaced.
+fn load(
+    vram: &Vram,
+    region: Region,
+    buffer: &mut [u8],
+    pages: &mut u64,
+    start: u32,
+    len: u32,
+) -> bool {
     let size = buffer.len() as u32;
     let page_count = size / PAGE;
     let first = (start % size) / PAGE;
     let count = len.min(size).div_ceil(PAGE) + 1;
+    let mut changed = false;
     for page in (first..first + count).map(|page| page % page_count) {
         if *pages & (1 << page) != 0 {
             continue;
         }
         *pages |= 1 << page;
         let base = page * PAGE;
-        vram.copy_page(
-            region,
-            base,
-            &mut buffer[base as usize..(base + PAGE) as usize],
-        );
+        let mut fresh = [0; PAGE as usize];
+        vram.copy_page(region, base, &mut fresh);
+        let copy = &mut buffer[base as usize..(base + PAGE) as usize];
+        if *copy != fresh {
+            copy.copy_from_slice(&fresh);
+            changed = true;
+        }
     }
+    changed
 }
 
 impl TextureMemory {
-    /// Forgets the copies, so the next frame sees VRAM afresh.
+    /// Forgets which pages are copied, so the next frame sees VRAM afresh.
+    /// The copies stay, for the next frame's to be compared with.
     pub(crate) fn invalidate(&mut self) {
         self.texture_pages = 0;
         self.palette_pages = 0;
+        self.changed = false;
+    }
+
+    /// Whether a page copied since [`TextureMemory::invalidate`] differed
+    /// from the copy before it: whether the texels a frame reads may have
+    /// changed since the frame before.
+    pub(crate) fn changed(&self) -> bool {
+        self.changed
     }
 
     pub(crate) fn load_texture(&mut self, vram: &Vram, start: u32, len: u32) {
-        load(
+        self.changed |= load(
             vram,
             Region::Texture,
             &mut self.texture,
@@ -74,7 +99,7 @@ impl TextureMemory {
     }
 
     pub(crate) fn load_palette(&mut self, vram: &Vram, start: u32, len: u32) {
-        load(
+        self.changed |= load(
             vram,
             Region::TexturePalette,
             &mut self.palette,
