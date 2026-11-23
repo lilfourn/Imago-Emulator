@@ -291,6 +291,6 @@ mod tests {
         assert_eq!(prescale_factor(256, 512.0, 2.0), 4);
         assert_eq!(prescale_factor(256, 700.0, 1.0), 2);
         assert_eq!(prescale_factor(256, 100.0, 1.0), 1);
-        assert_eq!(prescale_factor(160, 4000.0, 2.0), MAX_FACTOR);
+        assert_eq!(prescale_factor(160, 4000.0, 2.0), 6);
     }
 }

@@ -93,7 +93,7 @@ fn a_linked_frame_takes_one_frame_on_both_consoles() {
     let start = linked.players.each_ref().map(|nds| nds.cycles());
     linked.run_frame(&[], &mut Vec::new());
     for (nds, start) in linked.players.iter().zip(start) {
-        assert_eq!(nds.cycles() - start, FRAME_CYCLES);
+        assert_eq!(nds.cycles() - start, 560_190, "263 lines of 2130 cycles");
     }
     assert_eq!(linked.screens().len(), 4);
     assert_eq!(linked.info().player_for_screen(3), 1);

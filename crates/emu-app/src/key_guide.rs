@@ -275,8 +275,6 @@ mod tests {
         let [first, second] = labels(&gba);
         assert_eq!(first.len(), 3, "no X or Y on a GBA");
         assert_eq!(second[..2], [row("L", "Q"), row("R", "E")]);
-        let ds = columns(System::Nds, &Bindings::default());
-        assert_eq!(ds[1].len(), 4, "no ZL or ZR on a DS");
     }
 
     #[test]

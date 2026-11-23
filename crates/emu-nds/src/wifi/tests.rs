@@ -141,12 +141,12 @@ fn ram(wifi: &mut Wifi, address: u16, now: u64) -> u16 {
 #[test]
 fn registers_start_as_gbatek_lists_and_mask_their_writes() {
     let mut wifi = powered();
-    assert_eq!(read(&mut wifi, W_ID, 0), ID_DS_LITE);
+    assert_eq!(read(&mut wifi, W_ID, 0), 0xC340, "a DS Lite's");
     assert_eq!(read(&mut wifi, W_RXBUF_BEGIN, 0), 0x4000);
     assert_eq!(read(&mut wifi, W_TXREQ_READ, 0), 0x0010);
     assert_eq!(read(&mut wifi, W_RF_CNT, 0), 0x0114, "from firmware[041h]");
     write(&mut wifi, W_ID, 0x1234, 0);
-    assert_eq!(read(&mut wifi, W_ID, 0), ID_DS_LITE, "read-only");
+    assert_eq!(read(&mut wifi, W_ID, 0), 0xC340, "read-only");
     write(&mut wifi, W_AID_LOW, 0xFFFF, 0);
     write(&mut wifi, W_AID_FULL, 0xFFFF, 0);
     write(&mut wifi, W_RXBUF_WR_ADDR, 0xFFFF, 0);
@@ -353,7 +353,7 @@ fn a_frame_sent_from_loc1_arrives_in_the_other_consoles_ring() {
         0x8018,
         "data frame from our BSS"
     );
-    assert_eq!(ram(&mut pair[1], ring + 6, now), u16::from(RATE_2_MBIT));
+    assert_eq!(ram(&mut pair[1], ring + 6, now), 0x14, "2 Mbit/s");
     assert_eq!(ram(&mut pair[1], ring + 8, now), 28);
     assert_eq!(ram(&mut pair[1], ring + 12 + 24, now), 0x1234);
     assert_eq!(ram(&mut pair[1], ring + 12 + 26, now), 0x5678);

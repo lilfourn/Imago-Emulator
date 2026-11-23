@@ -245,14 +245,10 @@ mod tests {
             buffers.color[index + buffers.layer] = beneath;
         }
         antialias(&mut buffers);
-        assert_eq!(
-            buffers.color[0],
-            color::pack([31, 0, 31], 31),
-            "half and half"
-        );
+        assert_eq!(buffers.color[0], 31 | 31 << 12 | 31 << 18, "half and half");
         assert_eq!(
             buffers.color[1],
-            color::pack([63, 0, 0], 7),
+            63 | 7 << 18,
             "a quarter, over a transparent pixel"
         );
         assert_eq!(buffers.color[2], RED, "whole");

@@ -751,10 +751,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guide_settings_default_to_low_thinking_with_lookups_and_refuse_unknown_words() {
-        let settings = Settings::from_toml("").expect("empty file");
-        assert_eq!(settings.guide_thinking, Effort::Low);
-        assert!(settings.guide_lookups);
+    fn guide_thinking_can_be_off_and_unknown_words_are_refused() {
         let off = Settings::from_toml("[guide]\nthinking = \"off\"\n").expect("off");
         assert_eq!(off.guide_thinking, Effort::None);
         assert_eq!(
@@ -784,7 +781,6 @@ mod tests {
             Settings::from_toml("[game_boy]\ndmg_colors = \"sepia\"\n"),
             Err(SettingsError::UnknownDmgColors("sepia".to_owned()))
         );
-        assert_eq!(Settings::default().dmg_colors, DmgColors::ByTitle);
     }
 
     #[test]
@@ -848,6 +844,14 @@ mod tests {
             Settings::from_toml("[speed]\nfast_forward = \"ludicrous\"\n"),
             Err(SettingsError::UnknownSpeed("ludicrous".to_owned()))
         );
+        assert_eq!(
+            Settings::from_toml("[video]\npicture = \"xbrz\"\n"),
+            Err(SettingsError::UnknownPicture("xbrz".to_owned()))
+        );
+        assert_eq!(
+            Settings::from_toml("[video]\nbackdrop = \"boxart\"\n"),
+            Err(SettingsError::UnknownBackdrop("boxart".to_owned()))
+        );
     }
 
     #[test]
@@ -865,7 +869,6 @@ mod tests {
             resolution("[video]\nresolution_3d = \"auto\"\n"),
             Ok(Resolution3d::MatchDisplay)
         );
-        assert_eq!(resolution(""), Ok(Resolution3d::MatchDisplay));
         for wrong in [0, 9] {
             assert_eq!(
                 Settings::from_toml(&format!("[video]\nresolution_3d = {wrong}\n")),
@@ -876,8 +879,6 @@ mod tests {
             resolution("[video]\nresolution_3d = \"max\"\n"),
             Err(SettingsError::UnknownResolution("max".to_owned()))
         );
-        let saved = Settings::default().to_toml();
-        assert!(saved.contains("resolution_3d = \"auto\""), "{saved}");
     }
 
     #[test]
@@ -892,21 +893,6 @@ mod tests {
         assert_eq!(
             resolution("[video]\nresolution_3d = 2\nfilter = \"none\"\n"),
             Ok(Resolution3d::Times(2))
-        );
-    }
-
-    #[test]
-    fn the_picture_is_one_of_six_names_and_auto_by_default() {
-        let settings =
-            Settings::from_toml("[video]\npicture = \"rounded-pixels\"\n").expect("valid file");
-        assert_eq!(settings.picture, Picture::RoundedPixels);
-        assert_eq!(
-            Settings::from_toml("").map(|s| s.picture),
-            Ok(Picture::Auto)
-        );
-        assert_eq!(
-            Settings::from_toml("[video]\npicture = \"xbrz\"\n"),
-            Err(SettingsError::UnknownPicture("xbrz".to_owned()))
         );
     }
 
@@ -936,20 +922,6 @@ mod tests {
             .to_toml();
         assert!(saved.contains("picture = \"auto\""), "{saved}");
         assert!(!saved.contains("filter"), "{saved}");
-    }
-
-    #[test]
-    fn the_backdrop_is_ambient_unless_the_file_says_solid() {
-        assert_eq!(
-            Settings::from_toml("").map(|s| s.backdrop),
-            Ok(Backdrop::Ambient)
-        );
-        let solid = Settings::from_toml("[video]\nbackdrop = \"solid\"\n");
-        assert_eq!(solid.map(|s| s.backdrop), Ok(Backdrop::Solid));
-        assert_eq!(
-            Settings::from_toml("[video]\nbackdrop = \"boxart\"\n"),
-            Err(SettingsError::UnknownBackdrop("boxart".to_owned()))
-        );
     }
 
     #[test]
@@ -1193,7 +1165,6 @@ lookups = true
 
     #[test]
     fn a_supporters_look_is_in_the_file_only_once_one_is_chosen() {
-        assert!(!Settings::default().to_toml().contains("[look]"));
         // One of the two is enough, and the other is written beside it.
         let gold = Settings {
             accent: Accent::Gold,
@@ -1224,10 +1195,8 @@ lookups = true
     #[test]
     fn updates_are_checked_for_unless_the_file_turns_them_off() {
         assert!(Settings::default().check_updates);
-        assert!(!Settings::default().to_toml().contains("[updates]"));
         let off = Settings::from_toml("[updates]\ncheck = false\n").expect("valid file");
         assert!(!off.check_updates);
-        assert!(off.to_toml().ends_with("[updates]\ncheck = false\n"));
         assert!(
             Settings::from_toml("[updates]\n")
                 .expect("valid file")

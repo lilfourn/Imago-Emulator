@@ -35,9 +35,6 @@ pub(super) const HEADER: usize = 12;
 const IEEE_HEADER: usize = 24;
 /// The TX header's rate byte for 2 Mbit/s; anything else is 1 Mbit/s.
 pub(super) const RATE_2_MBIT: u8 = 0x14;
-/// The rate byte for 1 Mbit/s.
-#[cfg(test)]
-pub(super) const RATE_1_MBIT: u8 = 0x0A;
 
 /// A frame one console sent, on its way to the others.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,7 +367,8 @@ mod tests {
     fn transmissions_know_their_length_and_rate() {
         let ack = Transmission {
             start: 0,
-            bytes: mp_ack(RATE_1_MBIT, HOST, HOST, 0, 0),
+            // Rate byte 0Ah: 1 Mbit/s.
+            bytes: mp_ack(0x0A, HOST, HOST, 0, 0),
             reply_slot: 0,
         };
         assert_eq!(ack.length(), 32);

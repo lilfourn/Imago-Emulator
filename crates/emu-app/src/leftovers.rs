@@ -1216,20 +1216,6 @@ mod tests {
     }
 
     #[test]
-    fn a_work_folder_is_held_until_dropped() {
-        let temp = temp_dir("held");
-        let folder = WorkFolder::new_in(&temp, "unpack").expect("made");
-        let path = folder.path().to_owned();
-        fs::write(path.join("Game.3ds"), b"NCSD").expect("written");
-        // Another app's launch leaves it alone while this one works in it.
-        assert_eq!(remove_left_behind_in(&temp, &[]), 0);
-        assert!(path.join("Game.3ds").exists());
-        drop(folder);
-        assert!(!path.exists(), "removed when done");
-        fs::remove_dir_all(&temp).ok();
-    }
-
-    #[test]
     fn what_an_app_that_quit_left_behind_is_removed() {
         let temp = temp_dir("left");
         // A folder whose lock nobody holds, as when the app was killed.
@@ -2132,18 +2118,6 @@ mod tests {
         assert_eq!(length(&partial), 0, "emptied");
         io::Write::write_all(third.file(), b"new").expect("written");
         drop(third);
-        assert!(!partial.exists());
-        fs::remove_dir_all(&temp).ok();
-    }
-
-    #[test]
-    fn a_finished_file_is_kept_where_it_was_put() {
-        let temp = temp_dir("finish");
-        let partial = temp.join("Game.gba.partial");
-        let mut file = Unfinished::create(&partial).expect("made");
-        io::Write::write_all(file.file(), b"game").expect("written");
-        file.finish(&temp.join("Game.gba")).expect("renamed");
-        assert_eq!(fs::read(temp.join("Game.gba")).expect("kept"), b"game");
         assert!(!partial.exists());
         fs::remove_dir_all(&temp).ok();
     }

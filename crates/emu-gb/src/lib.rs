@@ -611,7 +611,8 @@ mod tests {
         gb.run_frame(&[Input::default()], &mut Vec::new());
         let first = gb.cycles();
         gb.run_frame(&[Input::default()], &mut Vec::new());
-        assert_eq!(gb.cycles() - first, CYCLES_PER_FRAME);
+        // 154 lines of 456 dots.
+        assert_eq!(gb.cycles() - first, 70_224);
     }
 
     #[test]
@@ -622,7 +623,7 @@ mod tests {
         gb.screens[0].pixels_mut().fill(0);
         gb.run_frame(&[Input::default()], &mut Vec::new());
         // A JR takes 12 cycles, so the frame ends within 12 of its time.
-        assert!((CYCLES_PER_FRAME..CYCLES_PER_FRAME + 12).contains(&gb.cycles()));
+        assert!((70_224..70_224 + 12).contains(&gb.cycles()));
         assert!(
             gb.screens()[0]
                 .pixels()

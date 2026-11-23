@@ -202,10 +202,11 @@ mod tests {
     #[test]
     fn produces_48_khz_output() {
         let mut apu = Apu::after_boot(Model::Dmg);
-        run_cycles(&mut apu, CLOCK_HZ / 4);
+        // Half a second of the 4.19 MHz clock, in M-cycles.
+        run_cycles(&mut apu, 4_194_304 / 4 / 2);
         let mut samples = Vec::new();
         apu.drain_samples(&mut samples);
-        assert_eq!(samples.len(), SAMPLE_RATE as usize);
+        assert_eq!(samples.len(), 24_000);
     }
 
     #[test]

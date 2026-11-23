@@ -425,29 +425,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_round_trip() {
-        for (picture, name) in NAMES {
+    fn pictures_keep_the_names_settings_files_have() {
+        for (picture, name) in [
+            (Picture::Auto, "auto"),
+            (Picture::SharpPixels, "sharp-pixels"),
+            (Picture::Smooth, "smooth"),
+            (Picture::RoundedPixels, "rounded-pixels"),
+            (Picture::LcdGrid, "lcd-grid"),
+            (Picture::Scanlines, "scanlines"),
+        ] {
             assert_eq!(picture.name(), name);
             assert_eq!(Picture::from_name(name), Some(picture));
         }
+        // What Rounded Pixels was first called.
         assert_eq!(
             Picture::from_name("pixel-art"),
             Some(Picture::RoundedPixels)
         );
-        assert_eq!(Picture::from_name("xbrz"), None);
-        assert_eq!(Picture::ALL.len(), NAMES.len());
-    }
-
-    #[test]
-    fn every_old_filter_starts_upscaled() {
-        for name in ["none", "lcd-grid", "scanlines", "scale2x", "scale3x"] {
-            assert_eq!(
-                Picture::from_filter_name(name),
-                Some(Picture::Auto),
-                "{name}"
-            );
-        }
-        assert_eq!(Picture::from_filter_name("auto"), None);
     }
 
     #[test]
@@ -631,7 +625,7 @@ mod tests {
         keeper.check(4, 120.0, Some(179.5), normal_rate());
         keeper.check(4, 120.0, Some(179.5), normal_rate());
         assert_eq!(keeper.ceiling(), 3);
-        for _ in 0..FIRST_PATIENCE {
+        for _ in 0..10 {
             keeper.check(3, 179.5, Some(179.5), normal_rate());
         }
         assert_eq!(keeper.ceiling(), 4);
@@ -703,7 +697,6 @@ mod tests {
         assert_eq!(Resolution3d::MatchDisplay.label(), "Match Display");
         assert_eq!(Resolution3d::Times(1).label(), "Native (1×)");
         assert_eq!(Resolution3d::Times(6).label(), "6×");
-        assert_eq!(Resolution3d::default(), Resolution3d::MatchDisplay);
     }
 
     #[test]

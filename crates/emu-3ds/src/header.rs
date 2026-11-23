@@ -458,7 +458,7 @@ pub(crate) mod tests {
 
     /// An icon with each of `names` as the short title in its language.
     pub(crate) fn smdh(names: &[(usize, &str)]) -> Vec<u8> {
-        let mut icon = vec![0; SMDH_SIZE];
+        let mut icon = vec![0; 0x36C0];
         put(&mut icon, 0, b"SMDH");
         for &(language, name) in names {
             let text: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
@@ -472,23 +472,19 @@ pub(crate) mod tests {
     /// names [`EXTDATA_ID`] and whose ExeFS holds a code file and then
     /// `icon`.
     pub(crate) fn ncch(no_crypto: bool, icon: &[u8]) -> Vec<u8> {
-        let mut image = vec![0; HEADER_SIZE];
+        let mut image = vec![0; 0x200];
         put(&mut image, 0x100, b"NCCH");
         put(&mut image, 0x118, &TITLE_ID.to_le_bytes());
         put(&mut image, 0x150, PRODUCT_CODE.as_bytes());
-        put(&mut image, 0x18F, &[if no_crypto { NO_CRYPTO } else { 0 }]);
+        put(&mut image, 0x18F, &[if no_crypto { 0x04 } else { 0 }]);
         // The extended header, its storage info naming the extdata.
-        put(&mut image, 0x180, &(EXHEADER_SIZE as u32).to_le_bytes());
-        put(&mut image, HEADER_SIZE, b"TestGame");
-        put(
-            &mut image,
-            HEADER_SIZE + STORAGE_INFO,
-            &EXTDATA_ID.to_le_bytes(),
-        );
+        put(&mut image, 0x180, &0x400_u32.to_le_bytes());
+        put(&mut image, 0x200, b"TestGame");
+        put(&mut image, 0x200 + 0x230, &EXTDATA_ID.to_le_bytes());
         // The ExeFS, after it: its header, a small code file, then the icon.
-        let exefs = HEADER_SIZE + EXHEADER_SIZE;
+        let exefs = 0x200 + 0x400;
         let icon_offset = 0x200;
-        let exefs_size = HEADER_SIZE + icon_offset + icon.len();
+        let exefs_size = 0x200 + icon_offset + icon.len();
         put(&mut image, 0x1A0, &((exefs / 0x200) as u32).to_le_bytes());
         put(
             &mut image,
@@ -501,8 +497,8 @@ pub(crate) mod tests {
         put(&mut image, exefs + 16, b"icon\0\0\0\0");
         put(&mut image, exefs + 24, &(icon_offset as u32).to_le_bytes());
         put(&mut image, exefs + 28, &(icon.len() as u32).to_le_bytes());
-        put(&mut image, exefs + HEADER_SIZE, &[0xAA; 0x10]);
-        put(&mut image, exefs + HEADER_SIZE + icon_offset, icon);
+        put(&mut image, exefs + 0x200, &[0xAA; 0x10]);
+        put(&mut image, exefs + 0x200 + icon_offset, icon);
         image.resize(image.len().next_multiple_of(0x200), 0);
         let units = (image.len() / 0x200) as u32;
         put(&mut image, 0x104, &units.to_le_bytes());
@@ -545,7 +541,7 @@ pub(crate) mod tests {
     #[test]
     fn a_cartridge_image_gives_its_ids_and_english_title() {
         let dir = temp_dir("cartridge");
-        let icon = smdh(&[(0, "テストゲーム"), (ENGLISH, "Test Game")]);
+        let icon = smdh(&[(0, "テストゲーム"), (1, "Test Game")]);
         let path = write(&dir, "game.3ds", &ncsd(&ncch(true, &icon)));
         let header = read(&path).expect("read");
         assert_eq!(
@@ -565,7 +561,7 @@ pub(crate) mod tests {
     #[test]
     fn an_encrypted_cartridge_has_ids_but_no_title() {
         let dir = temp_dir("encrypted");
-        let icon = smdh(&[(ENGLISH, "Test Game")]);
+        let icon = smdh(&[(1, "Test Game")]);
         let path = write(&dir, "game.cci", &ncsd(&ncch(false, &icon)));
         let header = read(&path).expect("read");
         assert_eq!(header.format, Format::Cartridge);
@@ -580,7 +576,7 @@ pub(crate) mod tests {
     #[test]
     fn an_installable_title_is_read_from_its_executable() {
         let dir = temp_dir("installable");
-        let executable = ncch(true, &smdh(&[(ENGLISH, "Test Game")]));
+        let executable = ncch(true, &smdh(&[(1, "Test Game")]));
         let path = write(&dir, "game.CIA", &cia(&[(0, PLAIN, Some(&executable))]));
         assert_eq!(
             read(&path).expect("read"),
@@ -602,7 +598,7 @@ pub(crate) mod tests {
     #[test]
     fn an_encrypted_title_has_its_id_but_nothing_more() {
         let dir = temp_dir("installable-encrypted");
-        let executable = ncch(true, &smdh(&[(ENGLISH, "Test Game")]));
+        let executable = ncch(true, &smdh(&[(1, "Test Game")]));
         let path = write(&dir, "game.cia", &cia(&[(0, 1, Some(&executable))]));
         assert_eq!(
             read(&path).expect("read"),
@@ -628,31 +624,31 @@ pub(crate) mod tests {
 
     #[test]
     fn the_extdata_id_comes_from_the_extended_header() {
-        let mut exheader = vec![0; EXHEADER_SIZE];
+        let mut exheader = vec![0; 0x400];
         assert_eq!(extdata_id(&exheader), None, "zero: no extdata");
-        put(&mut exheader, STORAGE_INFO, &0x55D_u64.to_le_bytes());
+        put(&mut exheader, 0x230, &0x55D_u64.to_le_bytes());
         assert_eq!(extdata_id(&exheader), Some(0x55D));
-        assert_eq!(extdata_id(&exheader[..STORAGE_INFO + 8]), None, "cut short");
+        assert_eq!(extdata_id(&exheader[..0x230 + 8]), None, "cut short");
         assert_eq!(extdata_id(&[]), None);
     }
 
     #[test]
     fn extended_save_data_access_takes_the_first_save_id_listed() {
-        let mut exheader = vec![0; EXHEADER_SIZE];
-        put(&mut exheader, STORAGE_INFO + 0x1F, &[EXTENDED_SAVE_ACCESS]);
+        let mut exheader = vec![0; 0x400];
+        put(&mut exheader, 0x230 + 0x1F, &[0x02]);
         assert_eq!(extdata_id(&exheader), None, "none listed");
         // Three 20-bit IDs in each field, from the top: the field at 0x10
         // comes first.
         let packed = |ids: [u64; 3]| (ids[0] << 40) | (ids[1] << 20) | ids[2];
         put(
             &mut exheader,
-            STORAGE_INFO,
+            0x230,
             &packed([0x111, 0x222, 0x333]).to_le_bytes(),
         );
         assert_eq!(extdata_id(&exheader), Some(0x111));
         put(
             &mut exheader,
-            STORAGE_INFO + 0x10,
+            0x230 + 0x10,
             &packed([0, 0x444, 0]).to_le_bytes(),
         );
         assert_eq!(extdata_id(&exheader), Some(0x444));
@@ -661,7 +657,7 @@ pub(crate) mod tests {
     #[test]
     fn an_executable_without_an_extended_header_has_no_extdata() {
         let dir = temp_dir("no-exheader");
-        let mut executable = ncch(true, &smdh(&[(ENGLISH, "Test Game")]));
+        let mut executable = ncch(true, &smdh(&[(1, "Test Game")]));
         put(&mut executable, 0x180, &0_u32.to_le_bytes());
         let path = write(&dir, "game.cxi", &executable);
         let header = read(&path).expect("read");
@@ -673,7 +669,7 @@ pub(crate) mod tests {
     #[test]
     fn a_bare_ncch_is_an_executable() {
         let dir = temp_dir("executable");
-        let icon = smdh(&[(ENGLISH, "Test Game")]);
+        let icon = smdh(&[(1, "Test Game")]);
         // The content decides, whatever the extension says.
         let path = write(&dir, "game.3ds", &ncch(true, &icon));
         let header = read(&path).expect("read");
@@ -687,7 +683,7 @@ pub(crate) mod tests {
     #[test]
     fn the_first_title_stands_in_for_a_missing_english_one() {
         let dir = temp_dir("languages");
-        let icon = smdh(&[(ENGLISH, "  "), (3, "Jeu\nde test"), (5, "Spiel")]);
+        let icon = smdh(&[(1, "  "), (3, "Jeu\nde test"), (5, "Spiel")]);
         let path = write(&dir, "game.cxi", &ncch(true, &icon));
         assert_eq!(
             read(&path).expect("read").title.as_deref(),
@@ -701,8 +697,8 @@ pub(crate) mod tests {
     #[test]
     fn homebrew_takes_its_title_from_an_extended_header() {
         let dir = temp_dir("homebrew");
-        let icon = smdh(&[(ENGLISH, "Homebrew\nApp")]);
-        let path = write(&dir, "app.3dsx", &threedsx(EXTENDED_3DSX_HEADER, &icon));
+        let icon = smdh(&[(1, "Homebrew\nApp")]);
+        let path = write(&dir, "app.3dsx", &threedsx(0x2C, &icon));
         assert_eq!(
             read(&path).expect("read"),
             Header {
@@ -755,15 +751,11 @@ pub(crate) mod tests {
     #[test]
     fn files_cut_short_do_not_panic() {
         let dir = temp_dir("cut-short");
-        let icon = smdh(&[(ENGLISH, "Test Game")]);
+        let icon = smdh(&[(1, "Test Game")]);
         let images = [
             ("game.3ds", Format::Cartridge, ncsd(&ncch(true, &icon))),
             ("game.cxi", Format::Executable, ncch(true, &icon)),
-            (
-                "app.3dsx",
-                Format::Homebrew,
-                threedsx(EXTENDED_3DSX_HEADER, &icon),
-            ),
+            ("app.3dsx", Format::Homebrew, threedsx(0x2C, &icon)),
             (
                 "game.cia",
                 Format::Installable,
@@ -787,13 +779,13 @@ pub(crate) mod tests {
     #[test]
     fn absurd_offsets_and_sizes_are_survived() {
         let dir = temp_dir("absurd");
-        let mut homebrew = threedsx(EXTENDED_3DSX_HEADER, &[]);
+        let mut homebrew = threedsx(0x2C, &[]);
         put(&mut homebrew, 0x20, &u32::MAX.to_le_bytes());
         put(&mut homebrew, 0x24, &u32::MAX.to_le_bytes());
         let path = write(&dir, "app.3dsx", &homebrew);
         assert_eq!(read(&path).expect("read").title, None);
 
-        let mut cartridge = ncsd(&ncch(true, &smdh(&[(ENGLISH, "Test Game")])));
+        let mut cartridge = ncsd(&ncch(true, &smdh(&[(1, "Test Game")])));
         put(&mut cartridge, 0x120, &u32::MAX.to_le_bytes());
         let path = write(&dir, "game.3ds", &cartridge);
         assert_eq!(
@@ -801,7 +793,7 @@ pub(crate) mod tests {
             io::ErrorKind::InvalidData
         );
 
-        let mut executable = ncch(true, &smdh(&[(ENGLISH, "Test Game")]));
+        let mut executable = ncch(true, &smdh(&[(1, "Test Game")]));
         put(&mut executable, 0x1A0, &u32::MAX.to_le_bytes());
         let path = write(&dir, "game.cxi", &executable);
         assert_eq!(read(&path).expect("read").title, None);

@@ -540,26 +540,6 @@ impl Ppu {
         (sprites, count)
     }
 
-    /// Colour index 0–3 of pixel (`column`, `row`) in the tile at VRAM
-    /// offset `tile_address`.
-    #[cfg(test)]
-    fn tile_pixel(&self, tile_address: usize, row: usize, column: usize) -> u8 {
-        let low = self.vram[tile_address + row * 2];
-        let high = self.vram[tile_address + row * 2 + 1];
-        let bit = 7 - column;
-        ((high >> bit) & 1) << 1 | ((low >> bit) & 1)
-    }
-
-    /// VRAM offset of background/window tile `index`, honouring LCDC bit 4.
-    #[cfg(test)]
-    fn bg_tile_address(&self, index: u8) -> usize {
-        if self.lcdc & 0x10 != 0 {
-            usize::from(index) * 16
-        } else {
-            (0x1000 + i32::from(index as i8) * 16) as usize
-        }
-    }
-
     /// Fills `pixels` from the tile map at VRAM offset `map`, starting at
     /// map position (`x`, `y`) and going right, wrapping around the map's
     /// 256-pixel width.
@@ -1098,7 +1078,7 @@ mod tests {
                 if every.lcd_enabled() {
                     every.update_stat_line(&mut every_flags);
                 }
-                let state = |ppu: &Ppu| (ppu.stat_line, ppu.lyc_match, ppu.mode, ppu.dot, ppu.ly);
+                let state = |ppu: &Ppu| (ppu.read_register(0xFF41), ppu.read_register(0xFF44));
                 assert_eq!(flags, every_flags, "{model:?} step {step}");
                 assert_eq!(state(&ppu), state(&every), "{model:?} step {step}");
             }
@@ -1183,8 +1163,19 @@ mod tests {
         } else {
             x % 8
         };
+        // LCDC bit 4 picks unsigned tile numbers from 0x8000 or signed ones
+        // around 0x9000.
+        let index = ppu.vram[entry];
+        let tile = if ppu.lcdc & 0x10 != 0 {
+            usize::from(index) * 16
+        } else {
+            (0x1000 + i32::from(index as i8) * 16) as usize
+        };
+        let address = bank + tile + row * 2;
+        let bit = 7 - column;
+        let (low, high) = (ppu.vram[address], ppu.vram[address + 1]);
         BgPixel {
-            color: ppu.tile_pixel(bank + ppu.bg_tile_address(ppu.vram[entry]), row, column),
+            color: ((high >> bit) & 1) << 1 | ((low >> bit) & 1),
             palette: attributes & 7,
             priority: attributes & 0x80 != 0,
         }

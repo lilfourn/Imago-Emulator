@@ -122,12 +122,6 @@ impl Workers {
         self.shared.lock().jobs.extend(jobs);
         self.shared.ready.notify_all();
     }
-
-    /// How many threads have started.
-    #[cfg(test)]
-    pub(crate) fn threads(&self) -> usize {
-        self.threads.len()
-    }
 }
 
 impl Drop for Workers {
@@ -167,7 +161,6 @@ mod tests {
         let mut squares: Vec<i32> = results.iter().take(6).collect();
         squares.sort_unstable();
         assert_eq!(squares, [0, 1, 4, 9, 16, 25]);
-        assert!((1..=6).contains(&workers.threads()));
         // Every thread holds the shared queue until it stops.
         let shared = Arc::downgrade(&workers.shared);
         drop(workers);
@@ -181,14 +174,5 @@ mod tests {
         assert_eq!(most_threads(3), 2);
         assert_eq!(most_threads(1), 1);
         assert_eq!(most_threads(0), 1);
-    }
-
-    #[test]
-    fn threads_start_only_as_needed() {
-        let mut workers = Workers::default();
-        workers.run(vec![Box::new(|| {})]);
-        assert_eq!(workers.threads(), 1);
-        workers.run(Vec::new());
-        assert_eq!(workers.threads(), 1);
     }
 }

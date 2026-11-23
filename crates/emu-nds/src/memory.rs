@@ -655,9 +655,12 @@ mod tests {
         assert_eq!(hw.arm9_read_32(0x0300_0000), 7);
         hw.arm7_write_32(0x0380_0004, 9);
         assert_eq!(hw.arm7_read_32(0x0300_0004), 9);
-        hw.wramcnt = 1; // ARM9 gets the second half
+        hw.wramcnt = 1; // ARM9 gets the second half, the ARM7 the first
         hw.arm9_write_8(0x0300_0000, 0xAA);
-        assert_eq!(hw.shared_wram[0x4000], 0xAA);
+        assert_eq!(hw.arm7_read_32(0x0300_0000), 7);
+        hw.wramcnt = 2; // and the other way round
+        assert_eq!(hw.arm7_read_8(0x0300_0000), 0xAA);
+        assert_eq!(hw.arm9_read_32(0x0300_0000), 7);
     }
 
     #[test]

@@ -1814,12 +1814,9 @@ mod tests {
     fn selecting_past_the_anchor_turns_the_selection_round() {
         let mut b = buffer("abcdef", 3);
         b.select_to(5);
-        assert_eq!(
-            (b.selected.clone(), b.reversed, b.caret()),
-            (3..5, false, 5)
-        );
+        assert_eq!((b.selected.clone(), b.caret()), (3..5, 5));
         b.select_to(1);
-        assert_eq!((b.selected.clone(), b.reversed, b.caret()), (1..3, true, 1));
+        assert_eq!((b.selected.clone(), b.caret()), (1..3, 1));
         b.select_to(3);
         assert!(b.selected.is_empty());
         b.select_all();
@@ -1914,7 +1911,6 @@ mod tests {
         let mut b = buffer("", 0);
         assert!(b.insert("one\r\ntwo\rthree\nfour\t!"));
         assert_eq!(b.text, "one\ntwo\nthree\nfour\t!");
-        assert_eq!(normalize("plain"), Cow::Borrowed("plain"));
     }
 
     #[test]

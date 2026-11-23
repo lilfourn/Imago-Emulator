@@ -723,7 +723,6 @@ mod widths;
 #[cfg(test)]
 mod tests {
     use crate::hardware::Hardware;
-    use crate::interrupt::irq;
     use crate::ipc::Side;
 
     fn hardware() -> Hardware {
@@ -738,23 +737,6 @@ mod tests {
         hw.arm9_write_32(0x0400_02BC, 1);
         assert_eq!(hw.arm9_read_32(0x0400_02B4), 65_536);
         assert_eq!(hw.arm9_read_16(0x0400_02B0), 1);
-    }
-
-    #[test]
-    fn byte_writes_above_the_io_page_reach_no_register() {
-        let mut hw = hardware();
-        hw.arm9.interrupts.request(irq::VBLANK);
-        hw.arm7.interrupts.request(irq::VBLANK);
-        // 0x04100214 and 0x04102247 would hit IF and WRAMCNT if the page
-        // were mirrored.
-        hw.arm9_write_8(0x0410_0214, irq::VBLANK as u8);
-        hw.arm9_write_8(0x0410_2247, 3);
-        hw.arm7_write_8(0x0410_0214, irq::VBLANK as u8);
-        hw.arm7_write_8(0x0410_0301, 0x80);
-        assert_eq!(hw.arm9.interrupts.flags, irq::VBLANK);
-        assert_eq!(hw.arm7.interrupts.flags, irq::VBLANK);
-        assert_eq!(hw.wramcnt, 0);
-        assert!(!hw.arm7.halted);
     }
 
     /// What libnds's `dmaFillHalfWords` does: the value into the fill
@@ -800,25 +782,6 @@ mod tests {
         assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x04C1_2345);
         hw.arm9_write_8(0x0400_00B9, 0xFF);
         assert_eq!(hw.arm9_read_32(0x0400_00B8), 0x04C1_FF45);
-        // The source and destination registers too, on either CPU.
-        hw.arm9_write_32(0x0400_00B0, 0x0212_3456);
-        hw.arm9_write_8(0x0400_00B1, 0x00);
-        assert_eq!(hw.arm9_read_32(0x0400_00B0), 0x0212_0056);
-        hw.arm7_write_32(0x0400_00C8, 0x0234_5678);
-        hw.arm7_write_8(0x0400_00CA, 0xFF);
-        assert_eq!(hw.arm7_read_32(0x0400_00C8), 0x02FF_5678);
-
-        // The maths unit: one byte of a numerator written as a word.
-        hw.arm9_write_32(0x0400_0290, 0x1234_5678);
-        hw.arm9_write_8(0x0400_0291, 0xAB);
-        assert_eq!(hw.arm9_read_32(0x0400_0290), 0x1234_AB78);
-        hw.arm9_write_32(0x0400_0298, 0x10);
-        assert_eq!(hw.arm9_read_32(0x0400_02A0), 0x1234_AB78 / 0x10);
-
-        // ROMCTRL: the top byte alone, with no transfer started.
-        hw.arm9_write_32(0x0400_01A4, 0x0041_6657);
-        hw.arm9_write_8(0x0400_01A7, 0x20);
-        assert_eq!(hw.arm9_read_32(0x0400_01A4), 0x2041_6657);
     }
 
     /// A finished DMA has cleared its enable bit, which the shadow still

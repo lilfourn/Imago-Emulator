@@ -387,7 +387,7 @@ mod tests {
     fn synthesised_user_settings_have_valid_crcs() {
         let firmware = Firmware::new(None);
         let memory = firmware.flash.memory();
-        assert_eq!(memory.len(), IMAGE_SIZE);
+        assert_eq!(memory.len(), 0x4_0000, "256 KiB");
         assert_eq!(read_u16(memory, 0x20) as usize * 8, 0x3_FE00);
         for start in [0x3_FE00, 0x3_FF00] {
             let area = &memory[start..start + AREA_SIZE];
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(read_u16(&settings, 0), 5);
         assert_eq!(read_u16(&settings, 0x1A), 6);
         assert_eq!(&settings[0x06..0x0A], &[b'P', 0, b'l', 0]);
-        assert_eq!(read_u16(&settings, 0x64) & 7, LANGUAGE_ENGLISH);
+        assert_eq!(read_u16(&settings, 0x64) & 7, 1, "English");
     }
 
     #[test]

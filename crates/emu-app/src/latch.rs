@@ -198,22 +198,18 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_inside_one_frame_touches_for_touch_frames() {
+    fn a_tap_inside_one_frame_touches_for_three_frames() {
         let mut latch = Latch::default();
         latch.set(touch(POINT));
         latch.set(Input::default());
         let seen = run(&mut latch, 5);
         let touched = seen.iter().take_while(|input| input.touch == Some(POINT));
-        assert_eq!(touched.count(), usize::from(TOUCH_FRAMES));
-        assert!(
-            seen[usize::from(TOUCH_FRAMES)..]
-                .iter()
-                .all(|i| i.touch.is_none())
-        );
+        assert_eq!(touched.count(), 3);
+        assert!(seen[3..].iter().all(|i| i.touch.is_none()));
     }
 
     #[test]
-    fn a_quick_key_tap_is_held_for_button_frames() {
+    fn a_quick_key_tap_is_held_for_two_frames() {
         let mut latch = Latch::default();
         latch.set(buttons(&[Button::A]));
         latch.set(Input::default());
@@ -221,7 +217,7 @@ mod tests {
         let held = seen
             .iter()
             .filter(|input| input.buttons.contains(Button::A));
-        assert_eq!(held.count(), usize::from(BUTTON_FRAMES));
+        assert_eq!(held.count(), 2);
         assert_eq!(seen.last().map(|input| input.buttons), Some(Buttons::NONE));
     }
 
@@ -248,7 +244,7 @@ mod tests {
             .iter()
             .filter(|input| input.touch.is_some())
             .count();
-        assert_eq!(touched, usize::from(TOUCH_FRAMES) - 1);
+        assert_eq!(touched, 2);
     }
 
     #[test]
@@ -271,7 +267,7 @@ mod tests {
         let mut latch = Latch::default();
         latch.set(buttons(&[Button::A]));
         latch.set(Input::default());
-        run(&mut latch, usize::from(BUTTON_FRAMES));
+        run(&mut latch, 2);
         assert!(latch.input().buttons.is_empty());
         latch.set(buttons(&[Button::A]));
         latch.set(Input::default());
@@ -279,7 +275,7 @@ mod tests {
             .iter()
             .filter(|input| input.buttons.contains(Button::A))
             .count();
-        assert_eq!(held, usize::from(BUTTON_FRAMES));
+        assert_eq!(held, 2);
     }
 
     #[test]
@@ -290,7 +286,7 @@ mod tests {
         latch.set(touch(moved));
         assert_eq!(latch.input().touch, Some(moved));
         latch.set(Input::default());
-        let seen = run(&mut latch, usize::from(TOUCH_FRAMES));
+        let seen = run(&mut latch, 3);
         assert!(seen.iter().all(|input| input.touch == Some(moved)));
         assert_eq!(latch.input().touch, None);
     }
@@ -309,7 +305,7 @@ mod tests {
         let seen = run(&mut latch, 5);
         assert!(seen.iter().all(|input| input.buttons == left.buttons));
         let touched = seen.iter().filter(|input| input.touch.is_some()).count();
-        assert_eq!(touched, usize::from(TOUCH_FRAMES));
+        assert_eq!(touched, 3);
         latch.set(Input::default());
         assert_eq!(latch.input(), Input::default());
     }
@@ -331,7 +327,7 @@ mod tests {
             .iter()
             .filter(|i| i.buttons.contains(Button::A))
             .count();
-        assert_eq!(held, usize::from(BUTTON_FRAMES));
+        assert_eq!(held, 2);
         latch.set(Input::default());
         assert_eq!(latch.input().touch, None);
     }
@@ -367,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quick_direction_tap_is_held_for_direction_frames() {
+    fn a_quick_direction_tap_is_held_for_one_frame() {
         let mut latch = Latch::default();
         latch.set(buttons(&[Button::Up]));
         latch.set(Input::default());
@@ -375,7 +371,7 @@ mod tests {
             .iter()
             .filter(|input| input.buttons.contains(Button::Up))
             .count();
-        assert_eq!(held, usize::from(DIRECTION_FRAMES));
+        assert_eq!(held, 1);
     }
 
     #[test]
@@ -389,7 +385,7 @@ mod tests {
         let seen = run(&mut latch, 3);
         assert!(seen.iter().all(|input| !input.buttons.contains(Button::Up)));
         let down = seen.iter().filter(|i| i.buttons.contains(Button::Down));
-        assert_eq!(down.count(), usize::from(DIRECTION_FRAMES));
+        assert_eq!(down.count(), 1);
     }
 
     #[test]

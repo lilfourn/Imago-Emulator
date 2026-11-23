@@ -1198,7 +1198,10 @@ mod tests {
     fn the_picture_splits_into_the_two_screens() {
         let mut bytes = Vec::new();
         let (top, bottom) = split(&picture(1), &mut bytes);
-        assert_eq!((top, bottom), (crate::SCREENS[0], crate::SCREENS[1]));
+        assert_eq!(
+            (top, bottom),
+            (ScreenSize::new(400, 240), ScreenSize::new(320, 240))
+        );
         assert_eq!(bytes.len(), (400 * 240 + 320 * 240) * 4);
         assert_eq!(pixel(&bytes, 0), 0xFF00_0000);
         assert_eq!(pixel(&bytes, 400 * 240 - 1), 0xFF00_0000 | 239 << 12 | 399);
@@ -1225,7 +1228,10 @@ mod tests {
         odd.resize(256, 384);
         let mut bytes = Vec::new();
         let (top, bottom) = split(&odd, &mut bytes);
-        assert_eq!((top, bottom), (crate::SCREENS[0], crate::SCREENS[1]));
+        assert_eq!(
+            (top, bottom),
+            (ScreenSize::new(400, 240), ScreenSize::new(320, 240))
+        );
         assert!(bytes.iter().all(|byte| *byte == 0));
     }
 

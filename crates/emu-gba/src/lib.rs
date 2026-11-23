@@ -541,10 +541,8 @@ mod tests {
         let first = gba.cycles();
         gba.run_frame(&[], &mut Vec::new());
         let length = gba.cycles() - first;
-        assert!(
-            (CYCLES_PER_FRAME - 8..=CYCLES_PER_FRAME + 8).contains(&length),
-            "{length}"
-        );
+        // 228 lines of 1,232 cycles.
+        assert!((280_896 - 8..=280_896 + 8).contains(&length), "{length}");
     }
 
     #[test]

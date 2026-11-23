@@ -452,9 +452,10 @@ mod tests {
         pid: u32,
         folder: &str,
     ) -> Vec<u8> {
-        let mut bytes = MAGIC.to_vec();
+        let mut bytes = b"DSEM".to_vec();
         let size = u16::try_from(folder.len()).expect("a short folder");
-        for word in [VERSION, width, height, frame_rate] {
+        // The link's version, 3, then the screen and the frame rate.
+        for word in [3, width, height, frame_rate] {
             bytes.extend(word.to_le_bytes());
         }
         bytes.extend(pid.to_le_bytes());
@@ -488,7 +489,8 @@ mod tests {
         link.step(0x0801, RESET).expect("answer");
         let mut answer = [0; 4];
         bridge.read_exact(&mut answer).expect("answer read");
-        assert_eq!(answer, [STEP, RESET, 0x01, 0x08]);
+        // STEP (0) with its RESET flag (1), then the buttons.
+        assert_eq!(answer, [0, 1, 0x01, 0x08]);
         drop(bridge);
         assert_eq!(
             link.frame(&mut pixels).map_err(|error| error.kind()),
@@ -503,7 +505,8 @@ mod tests {
         let mut answer = |bytes: &[u8]| bridge.write_all(bytes).expect("answer");
         answer(&[3, 0, 0, 0, b'a', b'b', b'c']);
         let why = b"in battle";
-        let mut refusal = NO_STATE.to_le_bytes().to_vec();
+        // The size 0xFFFFFFFF: no state, and why.
+        let mut refusal = vec![0xFF; 4];
         refusal.extend((why.len() as u32).to_le_bytes());
         refusal.extend(why);
         answer(&refusal);
@@ -512,8 +515,9 @@ mod tests {
         link.load(b"xyz").expect("loaded");
         let mut asked = [0; 4 + 4 + 4 + 4 + 3];
         bridge.read_exact(&mut asked).expect("messages");
-        assert_eq!(asked[..8], [SAVE, 0, 0, 0, SAVE, 0, 0, 0]);
-        assert_eq!(asked[8..], [LOAD, 0, 0, 0, 3, 0, 0, 0, b'x', b'y', b'z']);
+        // SAVE (1) twice, then LOAD (2) with the state's size and bytes.
+        assert_eq!(asked[..8], [1, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(asked[8..], [2, 0, 0, 0, 3, 0, 0, 0, b'x', b'y', b'z']);
     }
 
     #[test]

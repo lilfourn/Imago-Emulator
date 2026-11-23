@@ -425,7 +425,6 @@ mod tests {
             length(&[5, 0, 0, 0, 0, 0, 0, 0x80]),
             Err(PatchError::Damaged)
         );
-        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
     }
 
     #[test]

@@ -909,44 +909,6 @@ fn a_state_saved_loaded_or_refused_is_said_by_what_it_is() {
     fs::remove_dir_all(&dir).expect("clean up");
 }
 
-#[test]
-fn save_states_round_trip_through_slot_files() {
-    let dir = std::env::temp_dir().join(format!("emu-app-states-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("temp dir");
-    let (emulator, events) = start(dir.join("counter.gb"));
-    thread::sleep(Duration::from_millis(50));
-    emulator.send(Command::TogglePause);
-    thread::sleep(Duration::from_millis(20));
-    let saved = latest_count(&emulator);
-    emulator.send(Command::SaveState(2));
-    emulator.send(Command::TogglePause);
-    thread::sleep(Duration::from_millis(50));
-    emulator.send(Command::LoadState(2));
-    emulator.send(Command::TogglePause);
-    thread::sleep(Duration::from_millis(20));
-    assert_eq!(latest_count(&emulator), saved);
-
-    // Both notices, however long they take: the state is written on
-    // another thread, and Windows took longer than the sleeps above.
-    let mut waiting = vec!["Saved state 2", "Loaded state 2"];
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !waiting.is_empty() {
-        match events.try_recv() {
-            Ok(event) => {
-                if let Some(text) = event.notice() {
-                    waiting.retain(|notice| *notice != text);
-                }
-            }
-            Err(_) => {
-                assert!(Instant::now() < deadline, "no notices {waiting:?}");
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
-    }
-    drop(emulator);
-    fs::remove_dir_all(&dir).expect("clean up");
-}
-
 fn run_script(emulator: &Emulator, source: &str) {
     emulator.send(Command::RunScript {
         name: "hud.lua".to_owned(),

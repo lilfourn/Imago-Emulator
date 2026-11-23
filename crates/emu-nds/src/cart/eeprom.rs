@@ -197,6 +197,10 @@ impl Eeprom {
 mod tests {
     use super::*;
 
+    /// What a chip shifts out while it takes an instruction: nothing drives
+    /// the line, which reads high.
+    const IDLE: u8 = 0xFF;
+
     fn command(eeprom: &mut Eeprom, bytes: &[u8]) -> Vec<u8> {
         let out = bytes.iter().map(|&byte| eeprom.transfer(byte)).collect();
         eeprom.release();

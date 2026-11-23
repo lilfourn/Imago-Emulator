@@ -948,16 +948,6 @@ mod tests {
 
     #[test]
     fn appending_writes_what_postcard_writes_after_what_was_there() {
-        let checked = checked(&plain());
-        let mut out = vec![0xAA, 0xBB];
-        append(&checked, &mut out);
-        let own = postcard::to_stdvec(&checked).expect("serializes");
-        assert_eq!(out[..2], [0xAA, 0xBB]);
-        assert_eq!(out[2..], own[..]);
-    }
-
-    #[test]
-    fn appending_matches_postcard_across_types_and_boundaries() {
         #[derive(Serialize)]
         enum Kind {
             Unit,
@@ -983,6 +973,8 @@ mod tests {
             floats: (f32, f64),
             opts: (Option<u32>, Option<u32>),
             kinds: [Kind; 4],
+            // Byte strings and lists through the helpers.
+            helpers: Checked,
         }
         let sample = All {
             i8s: [i8::MIN, 0, i8::MAX],
@@ -1015,11 +1007,13 @@ mod tests {
                     label: "ok",
                 },
             ],
+            helpers: checked(&plain()),
         };
-        let mut out = Vec::new();
+        let mut out = vec![0xAA, 0xBB];
         append(&sample, &mut out);
         let own = postcard::to_stdvec(&sample).expect("serializes");
-        assert_eq!(out, own);
+        assert_eq!(out[..2], [0xAA, 0xBB]);
+        assert_eq!(out[2..], own[..]);
     }
 
     #[test]

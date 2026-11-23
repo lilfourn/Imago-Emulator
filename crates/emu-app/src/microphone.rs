@@ -1,13 +1,13 @@
 //! The computer's microphone, for DS games that listen (NDS-10).
 //!
 //! Off until the user turns it on (Emulation > Use Microphone). [`open`]
-//! captures from the default input device. Like [`crate::audio`], it
-//! returns two halves: [`Microphone`] owns the device stream and stays on
-//! the UI thread; [`Loudness`] goes to the emulation thread. The device
-//! callback keeps the loudest sample it hears, and the emulation thread
-//! takes that once a frame as the frame's `Input::microphone`. Only the
-//! loudness crosses: the core turns it into noise, so nothing said reaches
-//! the game, and recorded input stays one byte a frame.
+//! captures from the default input device, and returns two halves:
+//! [`Microphone`] owns the device stream, and [`Loudness`] is shared with
+//! its callback, which keeps the loudest sample it hears. The window takes
+//! that once a frame and sends it to the game as the active player's
+//! `Input::microphone`. Only the loudness crosses: the core turns it into
+//! noise, so nothing said reaches the game, and recorded input stays one
+//! byte a frame.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -38,15 +38,6 @@ impl Loudness {
         self.0.swap(0, Ordering::Relaxed)
     }
 }
-
-impl PartialEq for Loudness {
-    /// The same microphone.
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for Loudness {}
 
 /// The loudest of `samples` as 0 to 255, where 255 is full scale.
 fn level(samples: &[f32]) -> u8 {
@@ -166,7 +157,5 @@ mod tests {
         loudness.hear(&[0.25]);
         assert_eq!(loudness.take(), 128, "the loudest since the last look");
         assert_eq!(loudness.take(), 0);
-        assert_eq!(loudness.clone(), loudness);
-        assert_ne!(Loudness::default(), loudness);
     }
 }

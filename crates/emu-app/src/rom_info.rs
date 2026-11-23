@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(info.platform, Platform::Gba);
         assert_eq!(info.serial.as_deref(), Some("BZME"));
         assert_eq!(info.header_title.as_deref(), Some("ZELDA MINISH"));
-        assert_eq!(info.crc32, crc32fast::hash(&rom));
+        assert_eq!(info.crc32, 0x625D_D382);
         assert_eq!(info.banner_title, None);
     }
 
@@ -363,10 +363,17 @@ mod tests {
     }
 
     #[test]
-    fn platforms_round_trip_through_their_tags() {
-        for (platform, _) in TAGS {
-            assert_eq!(Platform::from_tag(platform.tag()), Some(platform));
+    fn platforms_keep_the_tags_library_files_have() {
+        for (platform, tag) in [
+            (Platform::Gb, "gb"),
+            (Platform::Gbc, "gbc"),
+            (Platform::Gba, "gba"),
+            (Platform::Nds, "nds"),
+            (Platform::RpgMaker, "rpgmaker"),
+            (Platform::N3ds, "3ds"),
+        ] {
+            assert_eq!(platform.tag(), tag);
+            assert_eq!(Platform::from_tag(tag), Some(platform));
         }
-        assert_eq!(Platform::from_tag("snes"), None);
     }
 }

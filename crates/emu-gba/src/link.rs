@@ -404,10 +404,7 @@ mod tests {
         linked.run_frame(&[], &mut Vec::new());
         for (gba, start) in linked.players.iter().zip(start) {
             let length = gba.cycles() - start;
-            assert!(
-                (CYCLES_PER_FRAME..CYCLES_PER_FRAME + 64).contains(&length),
-                "{length}"
-            );
+            assert!((280_896..280_896 + 64).contains(&length), "{length}");
         }
     }
 

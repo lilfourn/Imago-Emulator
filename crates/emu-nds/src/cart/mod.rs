@@ -375,11 +375,7 @@ mod tests {
     fn reports_the_chip_id() {
         let mut cart = Cart::new(rom(), None);
         let (bytes, _) = receive(&mut cart, [0xB8, 0, 0, 0, 0, 0, 0, 0], START | BLOCK_4);
-        assert_eq!(
-            u32::from_le_bytes(bytes.try_into().unwrap()),
-            cart.chip_id()
-        );
-        assert_eq!(cart.chip_id(), 0x0000_00C2);
+        assert_eq!(u32::from_le_bytes(bytes.try_into().unwrap()), 0x0000_00C2);
     }
 
     #[test]

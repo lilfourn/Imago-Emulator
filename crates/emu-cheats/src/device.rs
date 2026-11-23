@@ -133,9 +133,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tags_round_trip_and_ignore_case() {
-        for device in Device::ALL {
-            assert_eq!(Device::from_tag(device.tag()), Some(device));
+    fn tags_name_devices_in_any_case() {
+        for (tag, device) in [
+            ("raw", Device::Raw),
+            ("gs", Device::GameShark),
+            ("gg", Device::GameGenie),
+            ("cb", Device::CodeBreaker),
+            ("gsa", Device::GameSharkAdvance),
+            ("gsa-raw", Device::GameSharkAdvanceRaw),
+            ("par3", Device::ProActionReplay),
+            ("par3-raw", Device::ProActionReplayRaw),
+            ("ards", Device::ActionReplayDs),
+        ] {
+            assert_eq!(Device::from_tag(tag), Some(device), "{tag}");
+            assert_eq!(device.tag(), tag);
         }
         assert_eq!(Device::from_tag("ARDS"), Some(Device::ActionReplayDs));
         assert_eq!(Device::from_tag("xyz"), None);

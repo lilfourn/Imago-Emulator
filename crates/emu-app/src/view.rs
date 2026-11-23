@@ -3470,8 +3470,8 @@ mod tests {
         assert!(width.is_some_and(|width| (guide::MIN_WIDTH..=guide::MAX_WIDTH).contains(&width)));
         // A narrow window: the screens move over for a column.
         let (stage, width) = guide_stage(true, &layout, &DS, 1, (800.0, 860.0));
-        assert_eq!(width, Some(guide::COLUMN_WIDTH));
-        assert_eq!(stage, (800.0 - guide::COLUMN_WIDTH, 860.0));
+        assert_eq!(width, Some(360.0));
+        assert_eq!(stage, (440.0, 860.0));
     }
 
     #[test]

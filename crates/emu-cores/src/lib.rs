@@ -192,10 +192,9 @@ mod tests {
     }
 
     #[test]
-    fn created_cores_report_their_own_info() {
-        let mut rom = vec![0; 0xC0];
-        rom[0xB2] = 0x96;
-        let core = create(System::Gba, &Media::new(&rom)).expect("valid gba header");
-        assert_eq!(core.info(), info(System::Gba));
+    fn each_system_s_info_is_its_own_core_s() {
+        for system in System::ALL {
+            assert_eq!(info(system).system, system);
+        }
     }
 }

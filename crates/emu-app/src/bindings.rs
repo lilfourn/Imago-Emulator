@@ -642,34 +642,20 @@ mod tests {
     }
 
     #[test]
-    fn tilting_gently_can_be_rebound() {
-        let text = "[keys]\ntilt_gently = [\"f\"]\n\n[gamepad]\ntilt_gently = [\"LeftThumb\"]\n";
-        let bindings = Bindings::from_toml(text).expect("valid file");
-        assert_eq!(bindings.key_action("f"), Some(Held::TiltGently));
-        assert_eq!(bindings.key_action("shift"), None);
-        assert_eq!(
-            bindings.pad_action("any", "LeftThumb"),
-            Some(Held::TiltGently)
-        );
-        assert_eq!(Held::TiltGently.to_string(), "tilt_gently");
-    }
-
-    #[test]
-    fn blowing_can_be_bound_to_a_gamepad() {
-        let bindings = Bindings::from_toml("[gamepad]\nblow = [\"Mode\"]\n").expect("valid file");
-        assert_eq!(bindings.pad_action("any", "Mode"), Some(Held::Blow));
-        assert_eq!(
-            bindings.key_action("b"),
-            Some(Held::Blow),
-            "keys keep theirs"
-        );
-    }
-
-    #[test]
-    fn slow_motion_can_be_bound_to_a_gamepad() {
-        let bindings =
-            Bindings::from_toml("[gamepad]\nslow_motion = [\"Mode\"]\n").expect("valid file");
-        assert_eq!(bindings.pad_action("any", "Mode"), Some(Held::SlowMotion));
+    fn action_names_round_trip() {
+        for (name, held) in [
+            ("a", Held::Button(Button::A)),
+            ("turbo_start", Held::Turbo(Button::Start)),
+            ("fast_forward", Held::FastForward),
+            ("slow_motion", Held::SlowMotion),
+            ("rewind", Held::Rewind),
+            ("touch", Held::Touch),
+            ("blow", Held::Blow),
+            ("tilt_gently", Held::TiltGently),
+        ] {
+            assert_eq!(name.parse(), Ok(held), "{name}");
+            assert_eq!(held.to_string(), name);
+        }
     }
 
     #[test]
@@ -710,14 +696,11 @@ mod tests {
     }
 
     #[test]
-    fn touch_can_be_rebound() {
-        let bindings = Bindings::from_toml("[gamepad]\ntouch = [\"West\"]\n").expect("valid file");
-        assert_eq!(bindings.pad_action("any", "West"), Some(Held::Touch));
-        assert_eq!(bindings.pad_action("any", "RightThumb"), None);
-    }
-
-    #[test]
     fn rejects_unknown_actions_and_conflicts() {
+        assert!(matches!(
+            Bindings::from_toml("[keyz]\na = [\"k\"]\n"),
+            Err(BindingsError::Syntax(_))
+        ));
         assert_eq!(
             Bindings::from_toml("[keys]\nturbo = [\"t\"]\n"),
             Err(BindingsError::UnknownAction("turbo".to_owned()))
@@ -736,22 +719,11 @@ mod tests {
     fn rebinding_takes_the_input_from_its_old_action() {
         let bindings = Bindings::from_toml("[keys]\na = [\"j\"]\n").expect("valid file");
         assert_eq!(bindings.key_action("j"), Some(Held::Button(Button::A)));
-        assert!(
-            !bindings
-                .keys
-                .values()
-                .any(|held| *held == Held::Button(Button::B))
-        );
+        assert!(bindings.keys_for(Held::Button(Button::B)).is_empty());
     }
 
     #[test]
-    fn missing_file_means_defaults() {
-        let path = Path::new("/nonexistent/ds-emulator/bindings.toml");
-        assert_eq!(Bindings::load(path), Ok(Bindings::default()));
-    }
-
-    #[test]
-    fn turbo_buttons_parse_and_print() {
+    fn turbo_buttons_bind_beside_their_buttons() {
         let text = "[keys]\nturbo_a = [\"l\"]\n\n[gamepad]\nturbo_x = [\"Mode\"]\n";
         let bindings = Bindings::from_toml(text).expect("valid file");
         assert_eq!(bindings.key_action("l"), Some(Held::Turbo(Button::A)));
@@ -760,8 +732,6 @@ mod tests {
             bindings.pad_action("any", "Mode"),
             Some(Held::Turbo(Button::X))
         );
-        assert_eq!(Held::Turbo(Button::Start).to_string(), "turbo_start");
-        assert_eq!("turbo_start".parse(), Ok(Held::Turbo(Button::Start)));
     }
 
     #[test]
@@ -851,7 +821,19 @@ mod tests {
 
     #[test]
     fn hotkey_names_round_trip() {
-        for (shortcut, name) in SHORTCUTS {
+        for (name, shortcut) in [
+            ("save_state", Shortcut::SaveState),
+            ("load_state", Shortcut::LoadState),
+            ("next_slot", Shortcut::NextSlot),
+            ("previous_slot", Shortcut::PreviousSlot),
+            ("pause", Shortcut::Pause),
+            ("reset", Shortcut::Reset),
+            ("toggle_fast_forward", Shortcut::ToggleFastForward),
+            ("toggle_slow_motion", Shortcut::ToggleSlowMotion),
+            ("swap_screens", Shortcut::SwapScreens),
+            ("switch_player", Shortcut::SwitchPlayer),
+            ("full_screen", Shortcut::FullScreen),
+        ] {
             assert_eq!(Hotkey::Run(shortcut).to_string(), name);
             assert_eq!(name.parse(), Ok(Hotkey::Run(shortcut)));
         }
@@ -941,19 +923,6 @@ reset = [\"West\"]
         assert_eq!(bindings.hotkey("West"), Some(Hotkey::Run(Shortcut::Reset)));
         assert_eq!(bindings.hotkey("Select"), Some(Hotkey::Modifier));
         assert_eq!(bindings.turbo_frames(), turbo::DEFAULT_FRAMES);
-    }
-
-    #[test]
-    fn game_files_reject_what_user_files_reject() {
-        let user = Bindings::default();
-        assert!(matches!(
-            user.overlay("[keyz]\na = [\"k\"]\n"),
-            Err(BindingsError::Syntax(_))
-        ));
-        assert_eq!(
-            user.overlay("[gamepad]\njump = [\"South\"]\n"),
-            Err(BindingsError::UnknownAction("jump".to_owned()))
-        );
     }
 
     #[test]

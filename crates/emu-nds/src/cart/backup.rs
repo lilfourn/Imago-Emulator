@@ -456,6 +456,10 @@ impl Backup {
 mod tests {
     use super::*;
 
+    /// What a chip shifts out while it takes an instruction: nothing drives
+    /// the line, which reads high.
+    const IDLE: u8 = 0xFF;
+
     fn rom_with_code(code: &[u8; 4]) -> Vec<u8> {
         let mut rom = vec![0; 0x200];
         rom[0x0C..0x10].copy_from_slice(code);
@@ -521,7 +525,7 @@ mod tests {
         command(&mut backup, &[0x0A, 0x00, 0x01, 0x00, 1, 2, 3, 4]);
         assert!(matches!(backup.chip, Chip::Flash(_)));
         assert!(backup.take_changed());
-        assert_eq!(backup.data().len(), FLASH_SIZE);
+        assert_eq!(backup.data().len(), 512 * KIB);
         assert_eq!(backup.data()[0x100..0x104], [1, 2, 3, 4]);
     }
 
@@ -702,7 +706,7 @@ mod tests {
     fn flash_round_trips_behind_the_infrared_controller() {
         let mut backup = Backup::new(&rom_with_code(b"IRAO"), None);
         assert!(backup.infrared.is_some());
-        assert_eq!(command(&mut backup, &[IR_VERSION, 0]), [0, IR_CHIP_VERSION]);
+        assert_eq!(command(&mut backup, &[IR_VERSION, 0]), [0, 0xAA]);
         command(&mut backup, &[IR_SAVE, 0x06]);
         command(&mut backup, &[IR_SAVE, 0x02, 0x00, 0x01, 0x00, 0x5A, 0xA5]);
         assert_eq!(

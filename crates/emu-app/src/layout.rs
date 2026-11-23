@@ -284,18 +284,12 @@ pub fn fit(size: (f32, f32), area: (f32, f32)) -> (f32, f32) {
 }
 
 impl Layout {
-    /// Places `screens` in a `viewport` of logical pixels, turned, scaled
-    /// uniformly to fit and centred.
-    #[cfg(test)]
-    pub fn place(&self, screens: &[ScreenSize], viewport: (f32, f32)) -> Vec<Placement> {
-        self.place_consoles(screens, 1, viewport)
-    }
-
     /// Places the screens of `consoles` consoles, which divide `screens`
-    /// evenly in order, as [`Layout::place`] does: each console's screens
-    /// arranged by this layout, and the consoles side by side, first on
-    /// the left, [`CONSOLE_GAP`] apart. Two linked DSes show each DS
-    /// stacked (by default) next to the other.
+    /// evenly in order, in a `viewport` of logical pixels, turned, scaled
+    /// uniformly to fit and centred: each console's screens arranged by
+    /// this layout, and the consoles side by side, first on the left,
+    /// [`CONSOLE_GAP`] apart. Two linked DSes show each DS stacked (by
+    /// default) next to the other.
     pub fn place_consoles(
         &self,
         screens: &[ScreenSize],
@@ -476,7 +470,7 @@ mod tests {
 
     fn rects(layout: Layout, screens: &[ScreenSize], viewport: (f32, f32)) -> Vec<(usize, Rect)> {
         layout
-            .place(screens, viewport)
+            .place_consoles(screens, 1, viewport)
             .into_iter()
             .map(|placement| (placement.screen, placement.rect))
             .collect()
@@ -608,20 +602,19 @@ mod tests {
     #[test]
     fn linked_consoles_sit_side_by_side_each_stacked() {
         let screens = [DS[0]; 4];
-        let width = 2.0 * 256.0 + CONSOLE_GAP;
+        // Two DSes 256 wide, 16 apart.
         let placed: Vec<(usize, Rect)> = Layout::default()
-            .place_consoles(&screens, 2, (width, 384.0))
+            .place_consoles(&screens, 2, (528.0, 384.0))
             .into_iter()
             .map(|placement| (placement.screen, placement.rect))
             .collect();
-        let right = 256.0 + CONSOLE_GAP;
         assert_eq!(
             placed,
             [
                 (0, rect(0.0, 0.0, 256.0, 192.0)),
                 (1, rect(0.0, 192.0, 256.0, 192.0)),
-                (2, rect(right, 0.0, 256.0, 192.0)),
-                (3, rect(right, 192.0, 256.0, 192.0)),
+                (2, rect(272.0, 0.0, 256.0, 192.0)),
+                (3, rect(272.0, 192.0, 256.0, 192.0)),
             ]
         );
     }
@@ -683,8 +676,10 @@ mod tests {
             ..Layout::default()
         };
         let placed = rects(layout, &DS, (384.0, 768.0));
-        let (width, height) = extent(&placed);
-        assert_eq!((width, height), (384.0, 768.0));
+        let corner = |(x, y): (f32, f32), (_, rect): &(usize, Rect)| {
+            (x.max(rect.x + rect.width), y.max(rect.y + rect.height))
+        };
+        assert_eq!(placed.iter().fold((0.0, 0.0), corner), (384.0, 768.0));
     }
 
     #[test]
@@ -694,14 +689,17 @@ mod tests {
     }
 
     #[test]
-    fn rotations_compose() {
-        for rotation in Rotation::ALL {
-            assert_eq!(rotation.clockwise().anticlockwise(), rotation);
-            assert_eq!(Rotation::from_degrees(rotation.degrees()), Some(rotation));
-        }
-        assert_eq!(Rotation::Anticlockwise.clockwise(), Rotation::Upright);
-        assert_eq!(Rotation::Upright.anticlockwise(), Rotation::Anticlockwise);
-        assert_eq!(Rotation::from_degrees(45), None);
+    fn rotations_turn_a_quarter_at_a_time() {
+        use Rotation::{Anticlockwise, Clockwise, Upright, UpsideDown};
+        let all = [Upright, Clockwise, UpsideDown, Anticlockwise];
+        assert_eq!(
+            all.map(Rotation::clockwise),
+            [Clockwise, UpsideDown, Anticlockwise, Upright]
+        );
+        assert_eq!(
+            all.map(Rotation::anticlockwise),
+            [Anticlockwise, Upright, Clockwise, UpsideDown]
+        );
     }
 
     #[test]
@@ -724,7 +722,7 @@ mod tests {
     fn a_3ds_touch_lands_on_its_narrower_bottom_screen() {
         // Stacked, the 320-wide bottom screen is centred under the 400-wide
         // top one, with a margin each side that is not the touch screen.
-        let placed = Layout::default().place(&emu_3ds::SCREENS, (540.0, 648.0));
+        let placed = Layout::default().place_consoles(&emu_3ds::SCREENS, 1, (540.0, 648.0));
         assert_eq!(placed[0].rect, rect(0.0, 0.0, 540.0, 324.0));
         assert_eq!(placed[1].rect, rect(54.0, 324.0, 432.0, 324.0));
         let (bottom, size) = (placed[1], emu_3ds::SCREENS[1]);
@@ -771,26 +769,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pixel_at_finds_the_top_left_pixel_where_each_rotation_draws_it() {
-        let size = DS[1];
-        let corners = [
-            (Rotation::Upright, (0.1, 0.1)),
-            (Rotation::Clockwise, (191.9, 0.1)),
-            (Rotation::UpsideDown, (255.9, 191.9)),
-            (Rotation::Anticlockwise, (0.1, 255.9)),
-        ];
-        for (rotation, corner) in corners {
-            let shown = rotation.turn_size(size);
-            let rect = rect(0.0, 0.0, f32::from(shown.width), f32::from(shown.height));
-            assert_eq!(
-                placement(rect, rotation).pixel_at(size, corner),
-                Some(TouchPoint { x: 0, y: 0 }),
-                "{rotation:?}"
-            );
-        }
-    }
-
     /// Every combination of layout settings, with and without the hinge
     /// gap.
     fn every_layout() -> Vec<Layout> {
@@ -835,7 +813,7 @@ mod tests {
         let size = DS[1];
         let samples = |length: u16| (0..length).step_by(5).chain([length - 1]);
         for layout in every_layout() {
-            let placed = layout.place(&DS, (997.0, 613.0));
+            let placed = layout.place_consoles(&DS, 1, (997.0, 613.0));
             for placement in placed.iter().filter(|placement| placement.screen == 1) {
                 for x in samples(size.width) {
                     for y in samples(size.height) {

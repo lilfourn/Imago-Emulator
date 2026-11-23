@@ -178,6 +178,6 @@ mod tests {
         assert_eq!(rom.reply(&header, 0x15C), image[0x15C]);
         assert_eq!(rom.reply(&header, 0x1001), image[1]);
         assert_eq!(rom.reply(&command(&[0x9F]), 0), 0xFF);
-        assert_eq!(rom.reply(&command(&[RAW_CHIP_ID]), 4), MANUFACTURER);
+        assert_eq!(rom.reply(&command(&[RAW_CHIP_ID]), 4), 0xC2, "Macronix");
     }
 }

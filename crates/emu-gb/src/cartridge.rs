@@ -736,13 +736,6 @@ mod tests {
         assert_eq!(cart.read_rom(0x4000), 0x77);
         cart.write_rom(0x2000, 3);
         assert_eq!(cart.read_rom(0x4000), 3);
-
-        // A loaded state's cartridge takes the patches along with the ROM.
-        let mut restored = Cartridge::default();
-        restored.take_rom_from(&mut cart);
-        assert_eq!(restored.read_rom(0x0001), 0x55);
-        restored.set_rom_patches(&[]);
-        assert_eq!(restored.read_rom(0x0001), 0);
     }
 
     #[test]

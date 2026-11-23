@@ -302,9 +302,17 @@ mod tests {
     /// DISPCNT display mode 1: graphics.
     const GRAPHICS: u32 = 1 << 16;
 
-    /// `0xFFRRGGBB` for a BGR555 colour shown without effects.
+    /// `0xFFRRGGBB` for one of the tests' BGR555 colours, or black, shown
+    /// without effects.
     fn argb(bgr555: u16) -> u32 {
-        color::to_argb(color::widen(bgr555))
+        match bgr555 {
+            0 => 0xFF00_0000,
+            RED => 0xFFFF_0000,
+            GREEN => 0xFF00_FF00,
+            BLUE => 0xFF00_00FF,
+            WHITE => 0xFFFF_FFFF,
+            _ => panic!("no pixel listed for {bgr555:#06X}"),
+        }
     }
 
     /// VRAM with bank A as engine A's BG memory, B as its OBJ memory, C in
@@ -638,12 +646,12 @@ mod tests {
         let row = render_with_3d(&mut engine, &vram, 0, Some(&line_3d));
         // 63 * 16 / 32 = 31 of 63 of each.
         assert_eq!(row[0], 0xFF7D_007D);
-        assert_eq!(row[1], color::to_argb(0x3F));
+        assert_eq!(row[1], argb(RED));
         assert_eq!(row[2], argb(BLUE));
         // Without a 2nd target the 3D pixel shows as is.
         engine.write_register(0x50, 0);
         let row = render_with_3d(&mut engine, &vram, 0, Some(&line_3d));
-        assert_eq!(row[0], color::to_argb(0x3F));
+        assert_eq!(row[0], argb(RED));
     }
 
     /// `engine`'s last line, drawn as `native`, drawn again `scale` times
@@ -742,10 +750,10 @@ mod tests {
         green[2] = 0x3F << 12 | 31 << 18;
         let out = draw_larger(&engine, &native, 2, &[green.clone(), green]);
         assert_eq!(out[15], argb(BLUE), "inside the window");
-        assert_eq!(out[16], color::to_argb(0x3F << 6), "outside, the larger 3D");
-        assert_eq!(out[16 + 512], color::to_argb(0x3F << 6));
+        assert_eq!(out[16], argb(GREEN), "outside, the larger 3D");
+        assert_eq!(out[16 + 512], argb(GREEN));
         // Scrolled by two cells: the end of the row is past the 3D frame.
-        assert_eq!(out[509], color::to_argb(0x3F << 6));
+        assert_eq!(out[509], argb(GREEN));
         assert_eq!(out[510], argb(BLUE));
     }
 

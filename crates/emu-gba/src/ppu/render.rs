@@ -112,13 +112,6 @@ impl Ppu {
         (size(0), size(4), size(8), size(12))
     }
 
-    #[cfg(test)]
-    fn text_layer(&self, index: usize, line: usize) -> Layer {
-        let mut layer = [TRANSPARENT; WIDTH];
-        self.text_layer_into(index, line, &mut layer);
-        layer
-    }
-
     fn text_layer_into(&self, index: usize, line: usize, layer: &mut Layer) {
         let control = self.reg(0x08 + index * 2);
         let scroll_x = usize::from(self.reg(0x10 + index * 4) & 0x1FF);
@@ -801,7 +794,7 @@ mod tests {
     }
 
     /// Text background `index`'s pixel at `screen_x` of `line`, looked up
-    /// on its own: what [`Ppu::text_layer`] does a tile row at a time.
+    /// on its own: what [`Ppu::text_layer_into`] does a tile row at a time.
     fn text_pixel(ppu: &Ppu, index: usize, line: usize, screen_x: usize) -> Option<u16> {
         let control = ppu.reg(0x08 + index * 2);
         let scroll_x = usize::from(ppu.reg(0x10 + index * 4) & 0x1FF);
@@ -868,7 +861,8 @@ mod tests {
             ppu.write_register(0x12, next(&mut seed) as u16);
             ppu.write_register(0x4C, next(&mut seed) as u16);
             for line in 0..HEIGHT {
-                let layer = ppu.text_layer(0, line);
+                let mut layer = [TRANSPARENT; WIDTH];
+                ppu.text_layer_into(0, line, &mut layer);
                 for (x, pixel) in layer.iter().enumerate() {
                     let got = (*pixel != TRANSPARENT).then_some(*pixel);
                     let expected = text_pixel(&ppu, 0, line, x).map(|c| c & COLOR_MASK);
