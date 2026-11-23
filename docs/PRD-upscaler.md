@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Phase 1 and most of phase 2 built (2026-11-04); Sharp Pixels made the default after the owner saw OmniScale (6.2); UP-12 and phases 3–4 to do |
+| Status | Phase 1 and most of phase 2 built (2026-11-04); Sharp Pixels made the default after the owner saw OmniScale (6.2); UP-12 built 2026-11-23; phases 3–4 to do |
 | Date | 2026-11-04 |
 | Owner | Luke Fournier |
 | Research | [research/upscaling.md](research/upscaling.md) |
@@ -368,7 +368,7 @@ is wanted, **P2** comes later. Phases are in section 9.
 |---|---|---|
 | UP-10 | Match Display for DS and 3DS 3D: the smallest whole factor at least the largest target's device pixels per console pixel, within the system's cap. Recomputed only when targets change, never during play. ✅ capped at 2× for the DS and 4× for the 3DS (UQ-4); rounds up unless a quarter or less above a whole number; old files' 1× becomes Match Display. | P0 · 2 |
 | UP-11 | DS menus and the settings window offer 1–8× (the core's range). ✅ Match Display, 1×, 2×, 3×, 4×, 6×, 8×. | P0 · 2 |
-| UP-12 | The DS's larger 3D is drawn only for frames the window will show. The 3D the game reads and the frame CRCs stay the same. | P1 · 2 |
+| UP-12 | The DS's larger 3D is drawn only for frames the window will show. The 3D the game reads and the frame CRCs stay the same. ✅ 2026-11-23: at fast-forward the emulation thread shows the frames the display has refreshes for and tells the core of the rest (`Core::set_frames_shown`), which draws neither larger 3D nor larger screens for them. | P1 · 2 |
 | UP-13 | DS 2D beside upscaled 3D gets Pixel Art: per screen when no 3D showed, and per pixel through a 3D mask (6.4). ✅ found from the frame on the GPU, not a core mask (6.4); both screens in one GPU submit, 1.6 ms a frame in Platinum at 4×. | P1 · 2 |
 | UP-14 | 3DS texture filter option (6.5), off by default, with the `xBRZ freescale` value sent for xBRZ. ✅ off with Auto after all (ScaleForce blurred Omega Ruby's pixel-art AreaNav map), ScaleForce with Smooth, MMPX with Rounded Pixels. | P1 · 2 |
 | UP-15 | 3DS frames through shared memory, and the 3DS cap raised to at least 8× while holding full speed at that scale. | P1 · 3 |
@@ -434,8 +434,8 @@ Acceptance tests:
    upload at the largest targets and set UP-S5's budget.
 2. **3D that follows the display.** UP-10 to UP-14: Match Display, the
    DS's 1–8× in menus, larger 3D only for shown frames, DS 2D beside 3D,
-   the 3DS texture filter. ✅ UP-10, UP-11, UP-13 and UP-14 (2026-11-04).
-   Left: UP-12.
+   the 3DS texture filter. ✅ UP-10, UP-11, UP-13 and UP-14 (2026-11-04),
+   UP-12 (2026-11-23).
 3. **Bigger and cheaper.** UP-15 and UP-16: 3DS shared memory and a
    higher cap; zero-copy drawing if phase 1's measurements call for it.
 4. **Later.** UP-17 to UP-22.

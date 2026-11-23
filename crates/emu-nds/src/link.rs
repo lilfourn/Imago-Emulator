@@ -129,6 +129,10 @@ impl Linked {
             start,
             mut done,
         } = self.resume.take().unwrap_or_else(|| {
+            // A frame is looked at, or not, from its start.
+            for nds in &mut self.players {
+                nds.machine.hw.show(nds.shown);
+            }
             let start = self.players[0].machine.now();
             Resume {
                 target: start,
@@ -189,10 +193,15 @@ impl Linked {
                 }
             } else {
                 nds.machine.hw.sound.drain_samples(sound);
-                nds.present();
+                if nds.shown {
+                    nds.present();
+                }
             }
         }
-        self.present();
+        // Both consoles are looked at or neither is.
+        if self.players[0].shown {
+            self.present();
+        }
         let [first, second] = &sounds;
         pair::mix(first, second, Uneven::AgainstSilence, audio);
     }
@@ -226,6 +235,12 @@ impl Core for Linked {
             nds.set_render_scale(scale);
         }
         self.present();
+    }
+
+    fn set_frames_shown(&mut self, shown: bool) {
+        for nds in &mut self.players {
+            nds.set_frames_shown(shown);
+        }
     }
 
     fn reset(&mut self) {

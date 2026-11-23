@@ -12,7 +12,8 @@
 //!   resolution sent to the core changes.
 //! - emulation: `run <frame> <buttons> <µs>` for each frame run, numbered
 //!   as it is published, with the buttons it ran with and how long it
-//!   took; `busy <µs>` for all the work of one turn of the loop; `late
+//!   took, or `hid` with the same for a frame fast-forward ran and did
+//!   not show, numbered as the last one published; `busy <µs>` for all the work of one turn of the loop; `late
 //!   <µs>` for how long after its deadline the thread woke; `margin <µs>`
 //!   for how long before the window takes a frame a frame of the usual
 //!   length is meant to be ready (`refresh.rs`); `fill <‰>` for how full

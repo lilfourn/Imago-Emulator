@@ -9,8 +9,9 @@
 //! the result for engine A's BG0: per pixel, 6-bit red, green and blue in
 //! bits 0–17 and a 5-bit alpha in bits 18–22 (0 where there is no 3D
 //! pixel). With [`Gpu3d::set_render_scale`], it also draws each frame
-//! larger for the screen ([`Gpu3d::take_scaled_frame`]); the game only
-//! ever sees the native frame.
+//! larger for the screen ([`Gpu3d::take_scaled_frame`]), unless nobody
+//! looks at it ([`Gpu3d::show`]); the game only ever sees the native
+//! frame.
 //!
 //! Commands execute instantly, so the FIFO only fills while a swap waits
 //! for VBlank, and the test and matrix busy flags never read as busy.
@@ -227,6 +228,19 @@ impl Gpu3d {
     /// `scale` is clamped to 1–[`MAX_SCALE`].
     pub(crate) fn set_render_scale(&mut self, scale: usize) {
         self.renderer.set_scale(scale);
+    }
+
+    /// Says whether the frames drawn from now on are looked at. While
+    /// they are not, [`Gpu3d::render_frame`] draws the native frame
+    /// alone: the larger one keeps an earlier frame's picture.
+    pub(crate) fn show(&mut self, shown: bool) {
+        self.renderer.show(shown);
+    }
+
+    /// Whether frames are looked at just now, and so have larger frames
+    /// of their own.
+    pub(crate) fn shown(&self) -> bool {
+        self.renderer.shown()
     }
 
     /// Whether this engine, read from a save state, holds polygon lists
@@ -495,6 +509,44 @@ mod tests {
         gpu.set_render_scale(3);
         gpu.render_frame(&vram);
         assert_eq!(scaled_frame(&mut gpu, 3).len(), 256 * 3 * 192 * 3);
+    }
+
+    #[test]
+    fn a_frame_nobody_looks_at_is_not_drawn_larger() {
+        let vram = Vram::default();
+        let start = |color: u32| {
+            let mut gpu = Gpu3d::new();
+            gpu.set_render_scale(2);
+            configure(&mut gpu, 0, 0x7C00 | 31 << 16);
+            send(&mut gpu, POLYGON_ATTR, &[SOLID]);
+            send(&mut gpu, COLOR, &[color]);
+            quad(&mut gpu, [-ONE, -ONE, 0, ONE], 0);
+            finish(&mut gpu, &vram);
+            gpu
+        };
+        let mut gpu = start(0x001F);
+        let red = scaled_frame(&mut gpu, 2);
+        let drawn = gpu.frame_count();
+        // A green frame nobody looks at: the game's own frame is drawn,
+        // and the larger one keeps the red.
+        gpu.show(false);
+        send(&mut gpu, COLOR, &[0x03E0]);
+        quad(&mut gpu, [-ONE, -ONE, 0, ONE], 0);
+        finish(&mut gpu, &vram);
+        assert!(!gpu.shown());
+        assert_eq!(gpu.frame_count(), drawn + 1);
+        assert_eq!(pixel(&mut gpu, 64, 96), opaque([0, 63, 0]));
+        assert!(scaled_frame(&mut gpu, 2) == red);
+        // The same frame, looked at: its larger frame is drawn now, as
+        // one looked at from the start is.
+        gpu.show(true);
+        gpu.render_frame(&vram);
+        assert!(gpu.shown());
+        assert_eq!(gpu.frame_count(), drawn + 1);
+        assert!(scaled_frame(&mut gpu, 2) == scaled_frame(&mut start(0x03E0), 2));
+        // And only the once.
+        gpu.render_frame(&vram);
+        assert_eq!(gpu.frame_count(), drawn + 1);
     }
 
     #[test]

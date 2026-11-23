@@ -68,6 +68,7 @@ pub trait Core: Send {
     fn screens(&self) -> &[Frame];                     // DS: [top, bottom]
     fn set_render_scale(&mut self, scale: u32);        // DS: 3D at N× resolution, display only
     fn set_texture_upscaling(&mut self, upscaling: TextureUpscaling); // 3DS: textures, display only
+    fn set_frames_shown(&mut self, shown: bool);       // false: fast-forward frames nobody sees
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
@@ -130,6 +131,19 @@ pub trait Core: Send {
   a DS core's frames are n times wider and taller, 3D drawn at that
   resolution. Touch points and layouts stay in `CoreInfo::screens` pixels,
   and emulation, audio and state bytes are the same at every scale.
+- **Frames nobody looks at** are configuration as well. Fast-forward runs
+  more frames than the display has refreshes for, and the emulation
+  thread tells the core which ones before each (`set_frames_shown`): one
+  in three for the DS at 3× on a 120 Hz display, where three frames fill
+  two refreshes (`refresh::Lock::shown_every`), and those are the only
+  frames it publishes. A core may leave out what only the picture needs
+  for the rest, and `screens` then keep the last frame shown. The DS core
+  leaves out its larger 3D frame and larger screens, the costliest work
+  it has, and still draws the native frame, which display capture reads
+  and states save. Emulation, audio and state bytes are the same either
+  way, and the frames shown come out as if every frame were. Every frame
+  is shown at normal speed, while a recording or a script runs, and
+  while the debugger is in use.
 
 ## Debugging
 
@@ -321,7 +335,9 @@ pub trait Debugger {
   rewind thread for each state and waits for it.
 - Screenshots and recordings take the core's own frames on the emulation
   thread, never the coalesced latest frame the view draws, which can skip
-  frames. A screenshot copies the screens between frames and leaves the
+  frames. A recording has every frame shown; a screenshot at fast-forward
+  is of the last frame that was, the one on the screen. A screenshot
+  copies the screens between frames and leaves the
   PNG encoding and writing to a short-lived thread. A recording
   (`recorder.rs`) hands every frame that runs to its own thread, with
   the sound the frame made, which the audio sink resamples and may drop

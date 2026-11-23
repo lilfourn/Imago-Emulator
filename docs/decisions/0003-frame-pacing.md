@@ -97,3 +97,34 @@ Update, 2026-11-04: two changes for games whose frames take uneven times.
   short went from 0.8–2 to 0.5–0.8 a second; in Omega Ruby's opening, from
   3.4–4.1 to 2.2–2.8 a second with vertices shaded on the GPU. The trace
   logs the margin as `margin <µs>`.
+
+Update, 2026-11-23: fast-forward shows only the frames the display has
+refreshes for, and the rest are run without a picture.
+- **Which frames.** While the display has a refresh for every frame, all
+  are shown, as before: the DS at 2× on a 120 Hz display, or at 3× on a
+  240 Hz one. Past that, one frame in N is shown, N being the fewest
+  frames that together last a whole number of refreshes
+  (`Lock::shown_every`): one DS frame in three at 3× and 120 Hz, each for
+  two refreshes, and one in two at 4×. Showing two in three, as many as
+  the display could take, would hold them for one refresh and two in
+  turn. N stops where the frames shown would come further apart than the
+  system's own; a display nothing fits (144 Hz at 3×) gets as many as it
+  has refreshes for. Flat out, one frame is shown each refresh. The
+  frames shown are what `Lock` keeps in step with the refreshes, so 3×
+  is now locked too, where it ran on the system's clock before.
+- **What the rest skip.** The emulation thread tells the core before each
+  frame (`Core::set_frames_shown`) and publishes only the frames shown.
+  The DS core then draws neither its larger 3D frame nor its larger
+  screens (PRD-upscaler UP-12); the native frame, which display capture
+  reads and states save, is drawn all the same. A recording, a script
+  and the debugger get every frame.
+- **Measured** on Pokémon HeartGold, indoors with 3D on screen, from a
+  checkpoint, 3D at 2×, one frame in three shown (`emu-headless
+  --show-every 3`): the core retired 15% fewer instructions (162 to
+  138 billion in 1,500 frames; 24% fewer at 4×), with the same sound,
+  the same state and the same shown frames to the bit. It is not two
+  thirds of the larger 3D's cost, as the game draws a new 3D scene only
+  every second frame, and one scene in three is now skipped where none
+  was. In the app at 3× the trace showed 180 frames run and 60 shown a
+  second, 16.7 ms apart. Its CPU with the window in view was not
+  measured: the bench ran behind other windows, which draw nothing.

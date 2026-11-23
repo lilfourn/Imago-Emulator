@@ -37,6 +37,11 @@
 //! frame with the polygons, registers and texels of the one before is not
 //! drawn: the bands hold it already. Walking in Pokémon Platinum's
 //! overworld that is 57 frames in 100, and standing still about 85.
+//!
+//! Fast-forward runs frames nobody looks at ([`Renderer::show`]). Their
+//! native frame is drawn all the same, as the game may read it, and their
+//! larger frame is not: it keeps an earlier frame's picture until the
+//! next frame that is looked at.
 
 mod pixel;
 mod post;
@@ -157,9 +162,14 @@ pub(crate) struct Renderer {
     receiver: Receiver<Drawn>,
     /// Bands out with the workers.
     drawing: usize,
-    /// Whether the bands hold [`Self::scene`], drawn or being drawn: a
-    /// frame of the same scene then needs no drawing.
+    /// Whether the native bands hold [`Self::scene`], drawn or being
+    /// drawn: a frame of the same scene then needs no drawing.
     current: bool,
+    /// The same for the larger bands, which miss the scenes of frames
+    /// nobody looked at.
+    larger_current: bool,
+    /// Whether the frame under way is looked at ([`Renderer::show`]).
+    shown: bool,
     /// Goes up whenever the frame changes: [`Renderer::frame_count`].
     frames: u64,
 }
@@ -180,6 +190,8 @@ impl Default for Renderer {
             receiver,
             drawing: 0,
             current: false,
+            larger_current: false,
+            shown: true,
             frames: 0,
         }
     }
@@ -196,6 +208,7 @@ impl Renderer {
             self.scale = scale;
             self.larger.clear();
             self.current = false;
+            self.larger_current = false;
             self.frames += 1;
             if let Some(pixel) = self.uniform {
                 if scale > 1 {
@@ -215,6 +228,7 @@ impl Renderer {
         self.scale = scale;
         self.uniform = None;
         self.current = false;
+        self.larger_current = false;
         self.frames += 1;
         self.larger = bands(scale, count);
     }
@@ -227,6 +241,19 @@ impl Renderer {
         self.current = false;
         self.frames += 1;
         self.native = bands(1, count);
+    }
+
+    /// Says whether the frames drawn from now on are looked at. While
+    /// they are not, [`Renderer::render`] leaves the larger frame as it
+    /// is, an earlier frame's picture.
+    pub(crate) fn show(&mut self, shown: bool) {
+        self.shown = shown;
+    }
+
+    /// Whether frames are looked at just now: the larger frame is only
+    /// then the last frame's own.
+    pub(crate) fn shown(&self) -> bool {
+        self.shown
     }
 
     /// Draws `list` with the rendering registers in `config`, reading
@@ -257,25 +284,34 @@ impl Renderer {
         }
         if self.scale > 1 && self.larger.is_empty() {
             self.larger = bands(self.scale, BANDS);
-            self.current = false;
+            self.larger_current = false;
         }
         // The workers have let go of the scene, so it is reused, not
         // copied.
         let same = Arc::make_mut(&mut self.scene).load(list, config, vram);
-        if same && self.current {
-            // A game that draws 30 frames a second shows each of them
-            // twice: the bands already hold this one.
-            self.frames += u64::from(was_uniform);
-            return;
+        if !same {
+            self.current = false;
+            self.larger_current = false;
         }
+        // A game that draws 30 frames a second shows each of them twice:
+        // the bands already hold this one. The larger ones may not, after
+        // frames nobody looked at; they are drawn here without the count
+        // going up, as the lines drawn around them last were around an
+        // earlier frame's.
+        let native = !self.current;
+        let larger = self.shown && self.scale > 1 && !self.larger_current;
+        self.frames += u64::from(native || was_uniform);
         self.current = true;
-        self.frames += 1;
+        self.larger_current |= larger;
         // Native bands first: their lines are needed first.
         let mut jobs = Vec::with_capacity(self.native.len() + self.larger.len());
-        for (resolution, bands) in [
-            (Resolution::Native, &mut self.native),
-            (Resolution::Larger, &mut self.larger),
+        for (resolution, bands, draw) in [
+            (Resolution::Native, &mut self.native, native),
+            (Resolution::Larger, &mut self.larger, larger),
         ] {
+            if !draw {
+                continue;
+            }
             for (index, band) in bands.iter_mut().enumerate() {
                 let buffers = band.buffers.take().expect("every band is back");
                 jobs.push(draw_job(
@@ -287,7 +323,9 @@ impl Renderer {
             }
         }
         self.drawing = jobs.len();
-        self.workers.run(jobs);
+        if !jobs.is_empty() {
+            self.workers.run(jobs);
+        }
     }
 
     /// A count that goes up whenever [`Renderer::render`] leaves a frame
@@ -380,6 +418,7 @@ impl Renderer {
         if let Some(panic) = drawn.panic {
             // The band is only partly drawn.
             self.current = false;
+            self.larger_current = false;
             std::panic::resume_unwind(panic);
         }
     }

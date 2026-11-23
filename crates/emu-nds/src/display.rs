@@ -9,6 +9,9 @@
 //! drawn, engine A's all at once at VBlank, in bands on the 3D renderer's
 //! threads, from copies taken as they were drawn. A line whose copy and
 //! 3D frame are those it was last drawn larger from is left as it is.
+//! So is every line of a frame nobody looks at ([`Hardware::show`]), as
+//! fast-forward runs: the larger screens then keep the last frame that
+//! was looked at.
 
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
@@ -229,7 +232,7 @@ impl Hardware {
             None,
             &mut self.screen_b.as_chunks_mut().0[index],
         );
-        if self.scaled.scale > 1 {
+        if self.scaled.scale > 1 && self.gpu3d.shown() {
             self.draw_scaled_line(index);
         }
     }
@@ -353,6 +356,16 @@ impl Hardware {
         self.scaled = ScaledScreens::enlarged(scale, &self.screen_a, &self.screen_b);
     }
 
+    /// Says whether the frames drawn from now on are looked at. The
+    /// larger screens and the larger 3D frame are not drawn for the
+    /// rest, and keep the last frame that was; the native screens, which
+    /// display capture reads and states save, are drawn all the same.
+    /// Say it as a frame starts, before its 3D is drawn (line 214) and
+    /// its lines are: a frame that changes part-way comes out part old.
+    pub(crate) fn show(&mut self, shown: bool) {
+        self.gpu3d.show(shown);
+    }
+
     /// Takes over the display setup of `other`, the hardware this replaces
     /// on a reset or state load: the 3D renderer with its buffers, and the
     /// larger screens, which show this hardware's screens enlarged until
@@ -399,7 +412,7 @@ impl Hardware {
         }
         match self.vcount {
             VISIBLE_LINES => {
-                if self.scaled.scale > 1 {
+                if self.scaled.scale > 1 && self.gpu3d.shown() {
                     self.finish_scaled_screens();
                 }
                 self.request_display_interrupt(1 << 3, irq::VBLANK);
@@ -479,6 +492,87 @@ mod tests {
         hw.arm9_write_16(0x0400_000E, 0x4885);
         hw.draw_line(0);
         assert_eq!(hw.screen_a[0], 0xFFFF_0000, "{:08X}", hw.screen_a[0]);
+    }
+
+    /// A console drawing 3D on engine A's BG0 at twice the size, showing
+    /// a blue rear plane until a quad is sent.
+    fn drawing_3d() -> Hardware {
+        let mut hw = Hardware::new(vec![0; 0x1000].into(), vec![0; 0x4000].into());
+        hw.powcnt1 = 0x820F;
+        hw.set_render_scale(2);
+        // Graphics display, BG0 on and showing 3D.
+        hw.arm9_write_32(0x0400_0000, 1 << 16 | 1 << 8 | 1 << 3);
+        // An opaque blue rear plane, as far away as can be.
+        hw.arm9_write_32(0x0400_0350, 0x7C00 | 31 << 16);
+        hw.arm9_write_16(0x0400_0354, 0x7FFF);
+        hw.start_display();
+        // To the first VBlank, where frames start and end.
+        run_events(&mut hw, LINE_CYCLES * u64::from(VISIBLE_LINES));
+        hw
+    }
+
+    /// Sends a solid quad of `color` over the screen's left half and
+    /// swaps buffers, then runs a frame, from VBlank to VBlank: the swap
+    /// happens at its end, and the frame after draws and shows the quad.
+    fn send_quad_and_run(hw: &mut Hardware, color: u32) {
+        hw.arm9_write_32(0x0400_04A4, 31 << 16 | 0xC0); // POLYGON_ATTR
+        hw.arm9_write_32(0x0400_0480, color); // COLOR
+        hw.arm9_write_32(0x0400_0500, 1); // BEGIN_VTXS: quads
+        for (x, y) in [(0xF000, 0x1000), (0xF000, 0xF000), (0, 0xF000), (0, 0x1000)] {
+            hw.arm9_write_32(0x0400_048C, x | y << 16); // VTX_16
+            hw.arm9_write_32(0x0400_048C, 0);
+        }
+        hw.arm9_write_32(0x0400_0540, 0); // SWAP_BUFFERS
+        run_frame(hw);
+    }
+
+    fn run_frame(hw: &mut Hardware) {
+        let end = hw.scheduler.now() + FRAME_CYCLES;
+        run_events(hw, end);
+    }
+
+    fn larger_a(hw: &Hardware) -> Vec<u32> {
+        let mut out = vec![0; 512 * 384];
+        hw.scaled.copy_a(&mut out);
+        out
+    }
+
+    #[test]
+    fn a_frame_nobody_looks_at_leaves_the_larger_screens_alone() {
+        const RED: u32 = 0x001F;
+        const GREEN: u32 = 0x03E0;
+        let mut seen = drawing_3d();
+        let mut unseen = drawing_3d();
+        for hw in [&mut seen, &mut unseen] {
+            send_quad_and_run(hw, RED);
+            run_frame(hw);
+        }
+        let red = larger_a(&unseen);
+        assert_eq!(red[192 * 512 + 128], 0xFFFF_0000);
+        assert!(red == larger_a(&seen));
+
+        // A green quad, in a frame only one console's player looks at.
+        unseen.show(false);
+        for hw in [&mut seen, &mut unseen] {
+            send_quad_and_run(hw, GREEN);
+            run_frame(hw);
+        }
+        let green = larger_a(&seen);
+        assert_eq!(green[192 * 512 + 128], 0xFF00_FF00);
+        // The game's own frame is drawn all the same, for capture and
+        // states; the larger screen keeps the frame looked at last.
+        assert!(unseen.screen_a == seen.screen_a);
+        assert!(larger_a(&unseen) == red);
+
+        // Looked at again, the same frame comes out as if every frame
+        // had been: around its larger 3D, drawn only now.
+        unseen.show(true);
+        for hw in [&mut seen, &mut unseen] {
+            run_frame(hw);
+            run_frame(hw);
+        }
+        assert!(larger_a(&unseen) == green);
+        assert!(larger_a(&seen) == green);
     }
 
     #[test]

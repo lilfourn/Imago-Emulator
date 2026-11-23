@@ -889,6 +889,9 @@ impl Emulator {
             rewinding: false,
             rewind,
             lock,
+            unshown: 0,
+            shown_at: None,
+            showing: true,
             recorded_at: None,
             events,
             latest: Arc::clone(&latest),
@@ -1021,6 +1024,14 @@ struct Runner {
     rewind: RewindThread,
     /// Keeps frames at normal speed in step with the display.
     lock: Lock,
+    /// Frames run since one was shown: fast-forward runs more than the
+    /// display has refreshes for, and shows only those it has.
+    unshown: u32,
+    /// When the last frame shown started.
+    shown_at: Option<Instant>,
+    /// Whether the core was last told its frames are looked at
+    /// ([`Core::set_frames_shown`]).
+    showing: bool,
     /// When rewind last recorded a frame, if it has since the history was
     /// last cleared.
     recorded_at: Option<Instant>,
@@ -1162,6 +1173,14 @@ impl Runner {
                     });
                 }
                 let ran = Instant::now();
+                // A frame a debugger stopped part-way stays as it began.
+                if !self.mid_frame {
+                    let shown = self.shows(ran, frame_duration);
+                    if shown != self.showing {
+                        self.loaded.core.set_frames_shown(shown);
+                        self.showing = shown;
+                    }
+                }
                 self.lock.started(ran);
                 let outcome = self.run_frame(&inputs, &mut audio);
                 let run_time = ran.elapsed();
@@ -1198,13 +1217,16 @@ impl Runner {
                 // Last, once the frame is played and recorded: a state the
                 // script loads replaces it.
                 self.script_frame(&inputs);
-                self.publish();
+                if self.showing {
+                    self.publish();
+                }
                 self.latest.frames_shown.fetch_add(1, Ordering::Relaxed);
                 if trace::on() {
                     let frame = self.latest.frames.lock().map_or(0, |latest| latest.0);
                     let buttons = inputs.first().map_or(0, |input| input.buttons.bits());
                     let run_time = trace::micros(run_time);
-                    trace::event("run", &[frame, u64::from(buttons), run_time]);
+                    let kind = if self.showing { "run" } else { "hid" };
+                    trace::event(kind, &[frame, u64::from(buttons), run_time]);
                 }
                 self.record_for_rewind(frame_duration);
             }
@@ -1240,14 +1262,52 @@ impl Runner {
             }
             let now = Instant::now();
             trace::event("busy", &[trace::micros(now - turn)]);
-            let step = speed
-                .frame_step(frame_duration)
-                .map(|frame| self.lock.step(now, frame));
+            let step = speed.frame_step(frame_duration).map(|frame| {
+                let every = if self.hides_frames() {
+                    self.lock.shown_every(frame)
+                } else {
+                    1
+                };
+                self.lock.step(now, frame, every)
+            });
             deadline = speed::next_deadline(deadline, now, step);
             speed::sleep_until(deadline);
             trace::event("late", &[trace::micros(deadline.elapsed())]);
         }
         self.shut_down();
+    }
+
+    /// Whether only some of the frames run need a picture: fast-forward's,
+    /// which outrun the display, unless a recording, a script or the
+    /// debugger takes every frame's.
+    fn hides_frames(&self) -> bool {
+        self.speed.is_fast()
+            && !self.rewinding
+            && self.recorder.is_none()
+            && self.script.is_none()
+            && self.debug.view.is_none()
+            && self.debug.stops.is_empty()
+            && self.debug.pending.is_none()
+    }
+
+    /// Whether the frame starting at `now` is shown: every frame, or of
+    /// fast-forward's those the display has refreshes for
+    /// ([`Lock::shown_every`]), and flat out one for each refresh.
+    fn shows(&mut self, now: Instant, frame_duration: Duration) -> bool {
+        let shown = !self.hides_frames()
+            || match self.speed.frame_step(frame_duration) {
+                Some(frame) => self.unshown + 1 >= self.lock.shown_every(frame),
+                None => self.shown_at.is_none_or(|at| {
+                    now.saturating_duration_since(at) >= self.lock.refresh_or_native()
+                }),
+            };
+        if shown {
+            self.unshown = 0;
+            self.shown_at = Some(now);
+        } else {
+            self.unshown += 1;
+        }
+        shown
     }
 
     /// Finishes any recording and writes the battery saves, waiting for

@@ -17,6 +17,11 @@
 //! plays as much faster as the frames run ([`Lock::speed`]), which the
 //! audio's rate control could not absorb on its own.
 //!
+//! Fast-forward can run more frames than the display has refreshes for:
+//! three DS frames to two refreshes at 3× and 120 Hz. Only some are then
+//! shown ([`Lock::shown_every`]), evenly spaced where they can be, and
+//! the rest need no picture; the frames shown are what is locked.
+//!
 //! The margin follows how much the game's frames vary. A frame that takes
 //! longer than usual is ready later, and one that takes less is ready
 //! sooner; each still shows at its own refresh while it is ready between
@@ -278,16 +283,51 @@ impl Lock {
         (off <= TOLERANCE).then_some(locked)
     }
 
+    /// How many frames, asked to last `frame` each, go by for each one
+    /// shown: one, while the display has a refresh for every frame. Past
+    /// that it is the fewest that together last a whole number of
+    /// refreshes, so that the frames shown are evenly spaced, as long as
+    /// those come no further apart than the system's own frames; and
+    /// failing that, the fewest that last a refresh. A display not known
+    /// counts as showing the system's own frames.
+    pub fn shown_every(&self, frame: Duration) -> u32 {
+        let refresh = self.refresh.unwrap_or(self.native).as_secs_f64();
+        let (frame, native) = (frame.as_secs_f64(), self.native.as_secs_f64());
+        if frame <= 0.0 {
+            return 1;
+        }
+        // Whole numbers of at least one, within u32 as `frame` is a
+        // frame's length and `refresh` a display's.
+        let least = (refresh * (1.0 - TOLERANCE) / frame).ceil().max(1.0) as u32;
+        let most = (native * (1.0 + TOLERANCE) / frame) as u32;
+        if least == 1 {
+            return 1;
+        }
+        (least..=most)
+            .find(|&every| {
+                let refreshes = f64::from(every) * frame / refresh;
+                (refreshes / refreshes.round() - 1.0).abs() <= TOLERANCE
+            })
+            .unwrap_or(least)
+    }
+
+    /// How long a display not known is taken to show each frame for, or
+    /// the display's refresh interval.
+    pub fn refresh_or_native(&self) -> Duration {
+        self.refresh.unwrap_or(self.native)
+    }
+
     /// How long after one frame's start the next starts, at `now`, for
-    /// frames asked to last `frame`: locked to the refreshes and nudged
-    /// while they can be, and otherwise `frame`.
-    pub fn step(&mut self, now: Instant, frame: Duration) -> Duration {
-        let Some(locked) = self.locked(now, frame) else {
+    /// frames asked to last `frame` of which one in `every` is shown
+    /// ([`Lock::shown_every`]): the frames shown locked to the refreshes
+    /// and nudged while they can be, and otherwise `frame`.
+    pub fn step(&mut self, now: Instant, frame: Duration, every: u32) -> Duration {
+        let Some(locked) = self.locked(now, frame * every) else {
             self.nudge = 0.0;
             return frame;
         };
         let nudge = std::mem::take(&mut self.nudge);
-        Duration::from_secs_f64((locked.as_secs_f64() + nudge).max(0.0))
+        Duration::from_secs_f64((locked.as_secs_f64() / f64::from(every) + nudge).max(0.0))
     }
 
     /// How many times faster than the system's own clock frames run at
@@ -340,7 +380,7 @@ mod tests {
     fn frames_last_whole_refreshes_when_one_is_close() {
         let now = Instant::now();
         let drawn = now + MARGIN;
-        let step = |native, refresh, frame| drawing(native, refresh, now).step(drawn, frame);
+        let step = |native, refresh, frame| drawing(native, refresh, now).step(drawn, frame, 1);
         assert_eq!(step(DS, HZ_120, DS), HZ_120 * 2);
         assert_eq!(step(GBA, HZ_120, GBA), HZ_120 * 2);
         assert_eq!(step(RPG_MAKER, HZ_120, RPG_MAKER), HZ_120 * 3);
@@ -360,13 +400,63 @@ mod tests {
     }
 
     #[test]
+    fn fast_forward_shows_the_frames_the_display_has_refreshes_for() {
+        let every = |native, refresh: Option<Duration>, frame| {
+            let mut lock = Lock::new(native);
+            lock.set_refresh(refresh);
+            lock.shown_every(frame)
+        };
+        let hz = |hz: f64| Some(Duration::from_secs_f64(1.0 / hz));
+        // A refresh for every frame: all are shown, evenly or not.
+        assert_eq!(every(DS, hz(120.0), DS), 1);
+        assert_eq!(every(DS, hz(120.0), DS / 2), 1);
+        assert_eq!(every(DS, hz(240.0), DS / 3), 1);
+        assert_eq!(every(RPG_MAKER, hz(120.0), RPG_MAKER / 3), 1);
+        // Three frames to two refreshes: two would be shown unevenly, so
+        // one in three is, for two refreshes each.
+        assert_eq!(every(DS, hz(120.0), DS / 3), 3);
+        assert_eq!(every(GBA, hz(120.0), GBA / 3), 3);
+        assert_eq!(every(DS, hz(120.0), DS / 4), 2);
+        assert_eq!(every(DS, hz(60.0), DS / 2), 2);
+        assert_eq!(every(DS, hz(60.0), DS / 3), 3);
+        // Nothing fits 144 Hz evenly without showing fewer frames than
+        // the DS itself does: as many as the display has refreshes for.
+        assert_eq!(every(DS, hz(144.0), DS / 3), 2);
+        // A display slower than the system shows no more than it can.
+        assert_eq!(every(DS, hz(30.0), DS / 2), 4);
+        // A display not known shows the system's own frames.
+        assert_eq!(every(DS, None, DS / 3), 3);
+        assert_eq!(every(DS, None, DS), 1);
+    }
+
+    #[test]
+    fn the_frames_shown_are_what_is_locked() {
+        let now = Instant::now();
+        let drawn = now + MARGIN;
+        // At 3x one DS frame in three is shown, for two refreshes: three
+        // frames are run in that time.
+        let step = drawing(DS, HZ_120, now).step(drawn, DS / 3, 3);
+        let off = step.as_secs_f64() / (HZ_120 * 2 / 3).as_secs_f64() - 1.0;
+        assert!(off.abs() < 1e-6, "{step:?}");
+        // The whole nudge moves the next start, however many frames
+        // share the refreshes.
+        let mut lock = drawing(DS, HZ_120, now);
+        lock.started(now);
+        lock.published(2, now);
+        lock.drawn(2, now + MARGIN + millis(1.0));
+        let nudged = lock.step(now + millis(4.0), DS / 3, 3).as_secs_f64();
+        let nudge = nudged - (HZ_120 * 2 / 3).as_secs_f64();
+        assert!((nudge - 0.0003).abs() < 1e-6, "{nudge}");
+    }
+
+    #[test]
     fn frames_keep_their_own_clock_while_the_window_draws_none() {
         let now = Instant::now();
         let mut unknown = Lock::new(DS);
-        assert_eq!(unknown.step(now, DS), DS);
+        assert_eq!(unknown.step(now, DS, 1), DS);
         let mut lock = drawing(DS, HZ_120, now);
         let later = now + DRAWN_RECENTLY * 2;
-        assert_eq!(lock.step(later, DS), DS);
+        assert_eq!(lock.step(later, DS, 1), DS);
         assert_eq!(lock.speed(later), 1.0);
     }
 
@@ -378,7 +468,7 @@ mod tests {
             lock.set_refresh(Some(HZ_120));
             lock.published(7, now);
             lock.drawn(7, now + waited);
-            lock.step(now + waited, DS)
+            lock.step(now + waited, DS, 1)
         };
         assert_eq!(step(MARGIN), HZ_120 * 2, "on time");
         assert!(step(Duration::from_millis(5)) > HZ_120 * 2, "early: later");
@@ -400,7 +490,7 @@ mod tests {
         // Frame 1 again, drawn 5 ms later than first: counted, it would
         // nudge the next start.
         lock.drawn(1, now + Duration::from_millis(7));
-        assert_eq!(lock.step(now, DS), HZ_120 * 2);
+        assert_eq!(lock.step(now, DS, 1), HZ_120 * 2);
     }
 
     #[test]
@@ -455,7 +545,7 @@ mod tests {
         lock.published(1000, now + millis(7.0));
         lock.drawn(1000, now + millis(6.0) + HZ_120);
         assert_eq!(lock.margin_used(), MARGIN);
-        let step = lock.step(now + millis(8.0), DS).as_secs_f64();
+        let step = lock.step(now + millis(8.0), DS, 1).as_secs_f64();
         assert!(
             (step - (HZ_120 * 2).as_secs_f64()).abs() < 0.000_1,
             "{step}"

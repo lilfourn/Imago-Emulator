@@ -68,6 +68,14 @@ impl Speed {
         }
     }
 
+    /// Whether this runs frames faster than the system does.
+    pub fn is_fast(self) -> bool {
+        match self {
+            Self::Unlimited => true,
+            Self::Times(rate) => rate.get() > 1.0,
+        }
+    }
+
     /// How far apart frame deadlines are at this speed, for frames
     /// `frame` long at normal speed; `None` if unlimited.
     pub fn frame_step(self, frame: Duration) -> Option<Duration> {
@@ -176,6 +184,14 @@ mod tests {
         assert_eq!(times(4.0).frame_step(FRAME), Some(FRAME / 4));
         assert_eq!(times(0.5).frame_step(FRAME), Some(FRAME * 2));
         assert_eq!(Speed::Unlimited.frame_step(FRAME), None);
+    }
+
+    #[test]
+    fn only_speeds_past_normal_are_fast() {
+        assert!(Speed::Unlimited.is_fast());
+        assert!(times(1.5).is_fast());
+        assert!(!Speed::NORMAL.is_fast());
+        assert!(!times(0.5).is_fast());
     }
 
     #[test]

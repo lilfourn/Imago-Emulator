@@ -74,6 +74,11 @@ pub struct Nds {
     machine: Machine,
     screens: [Frame; 2],
     bios: Bios,
+    /// Whether the frames to come are looked at
+    /// ([`Core::set_frames_shown`]); the machine hears as each starts.
+    shown: bool,
+    /// A stepper stopped the frame under way part-way.
+    mid_frame: bool,
 }
 
 /// The BIOS a session has: the emulated one, always, and the user's dumps
@@ -186,6 +191,8 @@ impl Nds {
         Ok(Self {
             machine: Machine::boot(hw, bios.emulated()),
             screens: [Frame::new(SCREEN), Frame::new(SCREEN)],
+            shown: true,
+            mid_frame: false,
             bios,
         })
     }
@@ -358,8 +365,11 @@ impl Nds {
         }
         machine.hw.take_display_from(&mut self.machine.hw);
         self.machine = machine;
-        // The rendered 3D image is not saved.
+        self.mid_frame = false;
+        // The rendered 3D image is not saved. It is drawn as for a frame
+        // looked at, which the state's is, here and now.
         let hw = &mut self.machine.hw;
+        hw.show(true);
         hw.gpu3d.render_frame(&hw.vram);
         self.present();
     }
@@ -388,12 +398,17 @@ impl Nds {
             }
             return true;
         }
+        // A frame is looked at, or not, from its start.
+        if !std::mem::take(&mut self.mid_frame) {
+            self.machine.hw.show(self.shown);
+        }
         let start = self.machine.now();
         // A frame ends at VBlank, or after a frame's time if that never
         // comes.
         while self.machine.now() - start < FRAME_CYCLES {
             let progress = self.machine.run_slice_with(stepper, start + FRAME_CYCLES);
             if progress.stopped {
+                self.mid_frame = true;
                 return false;
             }
             if progress.frame_done {
@@ -403,7 +418,9 @@ impl Nds {
         // A lone console's frames reach nobody.
         self.machine.hw.wifi.take_transmissions();
         self.machine.hw.sound.drain_samples(audio);
-        self.present();
+        if self.shown {
+            self.present();
+        }
         true
     }
 }
@@ -433,6 +450,13 @@ impl Core for Nds {
         self.present();
     }
 
+    /// Frames nobody looks at leave the frames as they are, and at a
+    /// larger scale their 3D and screens are not drawn larger. Display
+    /// capture and states still get the native frame.
+    fn set_frames_shown(&mut self, shown: bool) {
+        self.shown = shown;
+    }
+
     fn reset(&mut self) {
         // The cartridges (with their saves), firmware and clock carry over.
         // The BIOS is the session's, whatever a loaded state ran with.
@@ -449,6 +473,7 @@ impl Core for Nds {
         hw.gba_slot.restart_cycles(now);
         hw.take_display_from(old);
         self.machine = Machine::boot(hw, self.bios.emulated());
+        self.mid_frame = false;
     }
 
     fn save_state(&self, out: &mut Vec<u8>) {
@@ -1125,6 +1150,42 @@ mod tests {
         assert_eq!(larger.screens()[0].size(), ScreenSize::new(256, 192));
         larger.set_render_scale(100);
         assert_eq!(larger.screens()[0].size(), ScreenSize::new(2048, 1536));
+    }
+
+    #[test]
+    fn frames_nobody_looks_at_change_the_screens_only() {
+        let rom = white_screen_rom();
+        for scale in [1, 2] {
+            let mut seen = Nds::new(&Media::new(&rom)).expect("valid header");
+            let mut unseen = Nds::new(&Media::new(&rom)).expect("valid header");
+            seen.set_render_scale(scale);
+            unseen.set_render_scale(scale);
+            let before = unseen.screens()[0].clone();
+            // The program paints the screen white in frames only one
+            // console's player looks at: the other's frames stay as they
+            // were, and its sound and state are the same.
+            unseen.set_frames_shown(false);
+            let (mut seen_audio, mut unseen_audio) = (Vec::new(), Vec::new());
+            for _ in 0..3 {
+                seen.run_frame(&[], &mut seen_audio);
+                unseen.run_frame(&[], &mut unseen_audio);
+            }
+            assert_eq!(seen.screens()[0].pixels()[0], 0xFFFF_FFFF);
+            assert!(unseen.screens()[0] == before, "scale {scale}");
+            assert!(seen_audio == unseen_audio, "scale {scale}");
+            let state = |nds: &Nds| {
+                let mut state = Vec::new();
+                nds.save_state(&mut state);
+                state
+            };
+            assert!(state(&seen) == state(&unseen), "scale {scale}");
+            // Looked at again, its next frame is the one the other has.
+            unseen.set_frames_shown(true);
+            seen.run_frame(&[], &mut Vec::new());
+            unseen.run_frame(&[], &mut Vec::new());
+            assert!(seen.screens() == unseen.screens(), "scale {scale}");
+            assert!(state(&seen) == state(&unseen), "scale {scale}");
+        }
     }
 
     #[test]
