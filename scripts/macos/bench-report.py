@@ -9,7 +9,8 @@ startup is left out. Times are in milliseconds:
   from that frame's start; then its parts: the wait for that frame to
   start, the frame, and from the frame to the window. The display shows
   it at its next refresh after that.
-- frames: frames run and drawn a second, redraws a second, frames run but
+- frames: frames run, shown (fast-forward runs more than it shows: `hid`
+  in the trace) and drawn a second, redraws a second, frames shown but
   never drawn, stalls (a covered window draws nothing until a key wakes it;
   those gaps are left out of the rest), and how evenly frames come: the
   spread of the gaps between
@@ -69,7 +70,9 @@ def main():
     def of(kind):
         return [e for e in events if e[1] == kind]
 
+    # Frames shown, and every frame run: fast-forward's unshown ones too.
     runs, takes, drawn = of("run"), of("take"), of("drawn")
+    ran = sorted(runs + of("hid"))
     drawn_at = {e[2][0]: e[0] for e in drawn}
     gaps = [b[0] - a[0] for a, b in zip(runs, runs[1:])]
     period = statistics.median(gaps) if gaps else float("nan")
@@ -113,7 +116,7 @@ def main():
     refresh = 1000 / args.refresh_hz
     expected = refresh * max(1, round(period / refresh))
     uneven = sum(1 for gap in take_gaps if abs(gap - expected) > refresh / 2)
-    run_ms = [r[2][2] / 1000 for r in runs]
+    run_ms = [r[2][2] / 1000 for r in ran]
     busy = [e[2][0] / 1000 for e in of("busy")]
     late = [e[2][0] / 1000 for e in of("late")]
     made = [e[2][1] / 1000 for e in drawn]
@@ -132,7 +135,8 @@ def main():
         "frame_ms_mean": statistics.fmean(frames) if frames else float("nan"),
         "frame_to_window_ms_mean": statistics.fmean(to_window) if to_window else float("nan"),
         "frame_period_ms": period,
-        "fps_run": rate(runs),
+        "fps_run": rate(ran),
+        "fps_shown": rate(runs),
         "fps_drawn": rate(takes),
         "redraws_per_s": len(of("render")) / seconds,
         "frames_never_drawn": skipped,

@@ -64,6 +64,21 @@ pub trait Core: Send {
         let _ = upscaling;
     }
 
+    /// Says whether the frames run from now on are looked at. Fast-forward
+    /// runs more frames than a display shows, and says so of the rest:
+    /// while they are not looked at, a core may leave out what only the
+    /// picture needs, and [`Core::screens`] may keep an earlier frame's.
+    ///
+    /// This is a display setting, as [`Core::set_render_scale`] is:
+    /// emulation, audio and save states are the same either way, and the
+    /// frames that are looked at come out as if every frame were. Frames
+    /// are looked at until this says otherwise. Say it between frames;
+    /// during one a debugger stopped part-way, it waits for the next.
+    /// Cores with nothing to leave out ignore it.
+    fn set_frames_shown(&mut self, shown: bool) {
+        let _ = shown;
+    }
+
     /// Power-cycles the system. The loaded game and its backup memory stay.
     fn reset(&mut self);
 

@@ -4,7 +4,7 @@
 //! ```text
 //! emu-headless [--system gb|gba|nds|3ds] [--frames N] [--start-time SECS] [--dump DIR]
 //!              [--wav FILE] [--script FILE.lua] [--work-dir DIR] [--state FILE]
-//!              [--backup FILE] [--scale N] [--time] [--digest] ROM
+//!              [--backup FILE] [--scale N] [--show-every N] [--time] [--digest] ROM
 //! ```
 //!
 //! `--backup FILE` starts the game with a battery save, such as the
@@ -47,6 +47,10 @@
 //!   checkpoint, after checking it is for this system and ROM and of the
 //!   state version this build's core reads;
 //! - `--scale N` draws the DS's 3D at N times its resolution;
+//! - `--show-every N` runs the frames as fast-forward does: every Nth is
+//!   looked at and the rest are not (`Core::set_frames_shown`). The last
+//!   frame is always looked at, so the screens' lines, like the digest,
+//!   are the same as without it. Not with `--script`;
 //! - `--time` adds a line with how long the frames took to run:
 //!   `elapsed_ms=… ms_per_frame=… fps=…`;
 //! - `--digest` adds a line with the CRC-32s of every sound sample made
@@ -66,8 +70,8 @@ use emu_script::{Output, Script, StateRequest};
 
 const USAGE: &str = "usage: emu-headless [--system gb|gba|nds|3ds] [--frames N] \
                      [--start-time SECS] [--dump DIR] [--wav FILE] [--script FILE.lua] \
-                     [--work-dir DIR] [--state FILE] [--backup FILE] [--scale N] [--time] \
-                     [--digest] ROM";
+                     [--work-dir DIR] [--state FILE] [--backup FILE] [--scale N] \
+                     [--show-every N] [--time] [--digest] ROM";
 
 struct Args {
     rom: PathBuf,
@@ -81,6 +85,7 @@ struct Args {
     state: Option<PathBuf>,
     backup: Option<PathBuf>,
     scale: Option<u32>,
+    show_every: u64,
     time: bool,
     digest: bool,
 }
@@ -118,6 +123,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     let mut state = None;
     let mut backup = None;
     let mut scale = None;
+    let mut show_every = 1;
     let mut time = false;
     let mut digest = false;
     while let Some(arg) = argv.next() {
@@ -135,6 +141,12 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
             "--state" => state = Some(PathBuf::from(value("--state")?)),
             "--backup" => backup = Some(PathBuf::from(value("--backup")?)),
             "--scale" => scale = Some(value("--scale")?.parse().context("--scale")?),
+            "--show-every" => {
+                show_every = value("--show-every")?.parse().context("--show-every")?;
+                if show_every == 0 {
+                    bail!("--show-every counts from 1");
+                }
+            }
             "--time" => time = true,
             "--digest" => digest = true,
             "-h" | "--help" => bail!("help requested"),
@@ -155,6 +167,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
         state,
         backup,
         scale,
+        show_every,
         time,
         digest,
     })
@@ -183,6 +196,10 @@ fn run(args: &Args) -> anyhow::Result<()> {
             let inputs = vec![Input::default(); core.info().players.max(1)];
             for frame in 1..=args.frames {
                 let keep = audio.len();
+                if args.show_every > 1 {
+                    let shown = frame % args.show_every == 0 || frame == args.frames;
+                    core.set_frames_shown(shown);
+                }
                 core.run_frame(&inputs, &mut audio);
                 take_audio(&mut audio, keep, keep_audio, args.digest, &mut audio_crc);
                 still_running(&*core, frame)?;

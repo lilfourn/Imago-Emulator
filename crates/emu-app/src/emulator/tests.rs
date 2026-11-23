@@ -14,6 +14,7 @@ use emu_core::debug::{CpuInfo, Instruction, Register, Stops};
 
 use super::*;
 use crate::latch::{BUTTON_FRAMES, TOUCH_FRAMES};
+use crate::speed::Rate;
 
 const SCREENS: [ScreenSize; 1] = [ScreenSize::new(1, 1)];
 
@@ -456,6 +457,114 @@ fn counts_the_frames_shown() {
     assert_eq!(u64::from(latest_count(&emulator) & 0x00FF_FFFF), shown);
     thread::sleep(Duration::from_millis(20));
     assert_eq!(emulator.frames_shown(), shown);
+}
+
+/// A core that records, frame by frame, whether it was told the frame is
+/// looked at. Its frames last a millisecond.
+struct Watched {
+    shown: bool,
+    seen: Arc<Mutex<Vec<bool>>>,
+    frames: [Frame; 1],
+}
+
+impl Core for Watched {
+    fn info(&self) -> CoreInfo {
+        CoreInfo {
+            system: System::Gba,
+            screens: &SCREENS,
+            touch_screen: None,
+            players: 1,
+            frame_rate: FrameRate::new(1000, 1),
+            audio_sample_rate: 48_000,
+            state_version: 1,
+        }
+    }
+
+    fn run_frame(&mut self, _: &[Input], _: &mut Vec<StereoSample>) {
+        self.seen.lock().expect("unpoisoned").push(self.shown);
+    }
+
+    fn screens(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    fn set_frames_shown(&mut self, shown: bool) {
+        self.shown = shown;
+    }
+
+    fn reset(&mut self) {}
+
+    fn save_state(&self, _: &mut Vec<u8>) {}
+
+    fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn fast_forward_shows_only_the_frames_a_display_has_room_for() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let loaded = Loaded {
+        core: Box::new(Watched {
+            shown: true,
+            seen: Arc::clone(&seen),
+            frames: [Frame::new(SCREENS[0])],
+        }),
+        files: vec![GameFiles::of(&PathBuf::from("/nonexistent/watched.gba"))],
+        rom_paths: vec![PathBuf::from("/nonexistent/watched.gba")],
+        rom_crc32: 0,
+        live_sound: None,
+        own_saves: OwnSaves::None,
+    };
+    let (events, _) = async_channel::unbounded();
+    let emulator = Emulator::start(loaded, events, None).expect("the threads start");
+    // The last `count` frames, once that many more have run.
+    let next = |count: usize| {
+        let target = seen.lock().expect("unpoisoned").len() + count;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let seen = seen.lock().expect("unpoisoned");
+            if seen.len() >= target {
+                return seen[seen.len() - count..].to_vec();
+            }
+            drop(seen);
+            assert!(Instant::now() < deadline, "frames stopped running");
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let published = || {
+        emulator
+            .take_latest(0, &mut Vec::new())
+            .expect("frames were published")
+    };
+    // At its own speed every frame is looked at.
+    assert!(next(20).iter().all(|&shown| shown));
+
+    // Three times as fast, on a display taken to show the game's own
+    // frames, as one not known is: one frame in three.
+    let three_times = Speed::Times(Rate::new(3.0).expect("a rate"));
+    emulator.send(Command::SetSpeed(three_times));
+    next(10);
+    let (before, ran) = (published(), seen.lock().expect("unpoisoned").len());
+    let frames = next(60);
+    assert_eq!(frames.iter().filter(|&&shown| shown).count(), 20);
+    assert!(frames.windows(3).all(|three| three.contains(&true)));
+    // Only those reach the window.
+    let reached = published() - before;
+    let ran = seen.lock().expect("unpoisoned").len() - ran;
+    assert!(reached as usize <= ran / 3 + 1, "{reached} of {ran}");
+
+    // Flat out, about one each millisecond, of frames that take no time.
+    emulator.send(Command::SetSpeed(Speed::Unlimited));
+    next(10);
+    let frames = next(2000);
+    let shown = frames.iter().filter(|&&shown| shown).count();
+    assert!(shown < 1000, "{shown} of 2000 shown");
+
+    // Back at its own speed, every frame again.
+    emulator.send(Command::SetSpeed(Speed::NORMAL));
+    next(10);
+    assert!(next(20).iter().all(|&shown| shown));
 }
 
 #[test]
