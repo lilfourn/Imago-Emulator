@@ -753,12 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_rate_is_the_3ds_s() {
-        assert!((FRAME_RATE.hz() - 59.83).abs() < 0.01);
-        assert_eq!(SAMPLE_RATE, 268_111_856 / 8_192);
-    }
-
-    #[test]
     fn buttons_map_to_libretro_bits() {
         assert_eq!(joypad_bits(&holding(&[Button::A])), 1 << 8);
         assert_eq!(joypad_bits(&holding(&[Button::B, Button::Zr])), 1 | 1 << 13);

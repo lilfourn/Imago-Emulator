@@ -768,8 +768,11 @@ mod tests {
         );
         request.messages[1].images.push(Arc::from(&b"PNG"[..]));
         let body = request.body();
-        assert_eq!(body["model"], MODEL);
-        assert_eq!(body["models"], json!([MODEL, FALLBACK_MODEL]));
+        assert_eq!(body["model"], "openai/gpt-6-luna");
+        assert_eq!(
+            body["models"],
+            json!(["openai/gpt-6-luna", "openai/gpt-5.6-luna"])
+        );
         assert_eq!(body["stream"], true);
         assert_eq!(body["reasoning"]["effort"], "low");
         assert_eq!(body["session_id"], "chat-1");
@@ -799,7 +802,7 @@ mod tests {
         assert_eq!(
             events[0],
             Event::Serving {
-                model: MODEL.to_owned(),
+                model: "openai/gpt-6-luna".to_owned(),
                 provider: "OpenAI".to_owned()
             }
         );

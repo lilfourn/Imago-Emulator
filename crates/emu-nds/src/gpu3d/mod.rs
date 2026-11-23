@@ -346,8 +346,10 @@ mod tests {
         gpu.line(y)[x]
     }
 
-    fn opaque(rgb: [u8; 3]) -> u32 {
-        color::pack(rgb, 31)
+    /// An opaque output pixel: red, green and blue in bits 0–17, alpha 31
+    /// in bits 18–22.
+    fn opaque([red, green, blue]: [u8; 3]) -> u32 {
+        u32::from(red) | u32::from(green) << 6 | u32::from(blue) << 12 | 31 << 18
     }
 
     #[test]

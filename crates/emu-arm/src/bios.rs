@@ -909,8 +909,8 @@ mod tests {
             .iter()
             .filter(|made| matches!(made, Made::Read { bytes: 4, .. }))
             .count();
-        // The header, then the bitstream.
-        assert_eq!(words_read as u32, 1 + 0x100 + HUFFMAN_SLACK_WORDS);
+        // The header, then a word for each byte and 64 more.
+        assert_eq!(words_read, 1 + 0x100 + 64);
         // 320 words hold 40 symbols of 255 bits: ten words written.
         let written = |ram: &Ram, word: usize| ram.bytes[0x2000 + word * 4..][..4].to_vec();
         assert_eq!(written(&ram, 9), [0x5A; 4]);

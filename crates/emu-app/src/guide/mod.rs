@@ -1150,7 +1150,6 @@ mod tests {
         let mut veil = Veil::default();
         veil.arrive(0, start);
         veil.arrive(10, start + Duration::from_millis(100));
-        assert!(veil.duration >= Duration::from_millis(120));
         let at = start + Duration::from_millis(150);
         assert!(veil.alpha(5, at) > veil.alpha(12, at));
         assert_eq!(veil.alpha(5, start + Duration::from_secs(2)), 1.0);

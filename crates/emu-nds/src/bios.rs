@@ -492,8 +492,9 @@ mod tests {
             &call(Side::Arm9, [0, 0x0200_0000, 0xFFFF_FFFF, 0]),
             &mut bus,
         );
-        // The SWI's own number is not read here: `run` is given it.
-        assert_eq!(bus.reads, u64::from(CRC16_LENGTH_MAX / 2));
+        // 32 MiB in halfwords. The SWI's own number is not read here:
+        // `run` is given it.
+        assert_eq!(bus.reads, 0x100_0000);
         let mut bus = Counting::default();
         run(
             0x0E,

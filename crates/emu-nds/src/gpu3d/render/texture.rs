@@ -370,9 +370,10 @@ mod tests {
             &[(0, 0x0000), (2, 0x001F)],
         );
         let sampler = Sampler::new(param(5, 0, 0), 0).expect("textured");
-        // (0 * 5 + 31 * 3) / 8 = 11; (0 * 3 + 31 * 5) / 8 = 19.
-        assert_eq!(sampler.sample(&memory, 0, 0).rgb[0], color::expand(11));
-        assert_eq!(sampler.sample(&memory, 1, 0).rgb[0], color::expand(19));
+        // (0 * 5 + 31 * 3) / 8 = 11 and (0 * 3 + 31 * 5) / 8 = 19, in six
+        // bits 23 and 39.
+        assert_eq!(sampler.sample(&memory, 0, 0).rgb[0], 23);
+        assert_eq!(sampler.sample(&memory, 1, 0).rgb[0], 39);
     }
 
     #[test]

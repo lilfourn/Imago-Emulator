@@ -183,7 +183,7 @@ mod tests {
         for rate in [0.0, -1.0, 0.05, f64::NAN, f64::INFINITY] {
             assert_eq!(Rate::new(rate), None, "{rate}");
         }
-        assert_eq!(Rate::new(MIN_RATE).map(Rate::get), Some(MIN_RATE));
+        assert_eq!(Rate::new(0.1).map(Rate::get), Some(0.1));
         assert_eq!(Rate::new(1000.0).map(Rate::get), Some(1000.0));
     }
 
@@ -205,7 +205,6 @@ mod tests {
         let labels = FAST_FORWARD_CHOICES.map(Speed::label);
         assert_eq!(labels, ["2×", "3×", "4×", "Unlimited"]);
         assert_eq!(times(0.5).label(), "0.5×");
-        assert_eq!(FAST_FORWARD_CHOICES[0], Speeds::default().fast_forward);
     }
 
     #[test]

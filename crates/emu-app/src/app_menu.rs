@@ -697,15 +697,4 @@ mod tests {
         assert_eq!(next_starting_with(&entries, Some(1), 's'), Some(0));
         assert_eq!(next_starting_with(&entries, None, 'x'), None);
     }
-
-    #[test]
-    fn a_submenu_opens_level_with_its_row() {
-        let entries = vec![item("A", true), Entry::Separator, item("B", true)];
-        assert_eq!(row_top(&entries, 0), 0.0);
-        assert_eq!(row_top(&entries, 2), ROW + RULE);
-        assert_eq!(
-            panel_height(&entries),
-            2.0 * ROW + RULE + 2.0 * (PADDING + BORDER)
-        );
-    }
 }

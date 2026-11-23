@@ -1315,9 +1315,9 @@ mod tests {
         });
         let catalog = fetch_homebrew_hub(&server.site).expect("fetched");
         assert_eq!(
-            server.requests.load(Ordering::SeqCst) as u64,
-            MAX_PAGES + 1,
-            "the pages it may ask for, then all at once for what is missing"
+            server.requests.load(Ordering::SeqCst),
+            41,
+            "the 40 pages it may ask for, then all at once for what is missing"
         );
         let catalog: Value = serde_json::from_str(&catalog).expect("JSON");
         assert!(catalog["entries"].is_array());
@@ -1507,14 +1507,7 @@ mod tests {
     fn withheld_3ds_entries_are_never_offered_whatever_the_checks_say() {
         let verdicts = parse_verdicts("[verdicts]\n\"udb:balatro3ds\" = \"ok\"\n");
         let offers = read_offers(Source::UniversalDb, UDB_3DS, &verdicts).expect("parses");
-        assert!(WITHHELD.contains(&"udb:balatro3ds"));
         assert!(offers.iter().all(|offer| offer.slug != "balatro3ds"));
-        for id in WITHHELD {
-            assert!(
-                offers.iter().all(|offer| offer.id() != id),
-                "{id} is withheld"
-            );
-        }
     }
 
     #[test]

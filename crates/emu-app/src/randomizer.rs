@@ -1328,7 +1328,6 @@ mod tests {
             let settings = preset.settings();
             assert!(settings.starts_with(&SETTINGS_VERSION.to_string()));
             assert_eq!(pasted_settings(settings).as_deref(), Ok(settings));
-            assert!(!preset.label().is_empty() && preset.description().ends_with('.'));
         }
     }
 

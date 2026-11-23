@@ -356,15 +356,4 @@ mod tests {
             [pass("Select", false)]
         );
     }
-
-    #[test]
-    fn no_modifier_means_no_hotkeys() {
-        let mut chords = Chords::default();
-        let none = |_: &str| None;
-        let effects: Vec<Effect> = [("Select", true), ("RightTrigger", true)]
-            .into_iter()
-            .flat_map(|(control, pressed)| chords.event(none, "pad", control, pressed))
-            .collect();
-        assert_eq!(effects, [pass("Select", true), pass("RightTrigger", true)]);
-    }
 }

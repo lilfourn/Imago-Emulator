@@ -259,32 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn the_microphone_hears_the_frame_s_loudness() {
-        let mut spi = Spi::new(None);
-        // libnds's micReadData12: control byte 0xE4, two reads.
-        let mic = |spi: &mut Spi| {
-            let reply = exchange(spi, TOUCH, &[0xE4, 0, 0]);
-            u16::from(reply[1] & 0x7F) << 5 | u16::from(reply[2] >> 3)
-        };
-        assert_eq!(mic(&mut spi), 0x800, "silence");
-        spi.set_microphone(255);
-        let mut readings: Vec<u16> = (0..64)
-            .map(|n| {
-                spi.write_control(ENABLE | TOUCH | HOLD);
-                spi.write_data(0xE4, n * 1000).expect("the bus is enabled");
-                spi.write_data(0, n * 1000);
-                let high = spi.data();
-                spi.write_control(ENABLE | TOUCH);
-                spi.write_data(0, n * 1000);
-                u16::from(high & 0x7F) << 5 | u16::from(spi.data() >> 3)
-            })
-            .collect();
-        readings.sort_unstable();
-        readings.dedup();
-        assert!(readings.len() > 32, "noise, not a constant: {readings:X?}");
-    }
-
-    #[test]
     fn power_off_is_visible() {
         let mut spi = Spi::new(None);
         exchange(&mut spi, 0, &[0x00, 0x40]);

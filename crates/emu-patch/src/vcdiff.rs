@@ -591,7 +591,8 @@ mod tests {
         // segment), then a COPY of 6 from address 3, which is its own
         // output, so it repeats "abc".
         let source = b"abc";
-        let mut window = vec![SOURCE_SEGMENT, 3, 0];
+        // VCD_SOURCE: the window copies from 3 bytes of the source, at 0.
+        let mut window = vec![0x01, 3, 0];
         let instructions = [19, 3, 19, 6];
         let addresses = [0, 3];
         let mut delta = vec![9, 0, 0, instructions.len() as u8, addresses.len() as u8];
@@ -599,7 +600,8 @@ mod tests {
         delta.extend_from_slice(&addresses);
         window.push(delta.len() as u8);
         window.extend_from_slice(&delta);
-        let mut patch = MAGIC.to_vec();
+        // The magic, version 0, then a header indicator of 0.
+        let mut patch = vec![0xD6, 0xC3, 0xC4, 0x00];
         patch.push(0);
         patch.extend_from_slice(&window);
         assert_eq!(apply(&patch, source, 1 << 20), Ok(b"abcabcabc".to_vec()));

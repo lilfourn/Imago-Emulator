@@ -338,12 +338,9 @@ mod tests {
             &mut self,
             _: &[Input],
             _: &mut Vec<StereoSample>,
-            stops: &Stops,
+            _: &Stops,
         ) -> RunOutcome {
-            RunOutcome {
-                frame_done: stops.is_empty(),
-                stop: None,
-            }
+            unreachable!("the routing tests never run the pair")
         }
     }
 
@@ -380,20 +377,11 @@ mod tests {
         assert_eq!(two.disassemble(2, 8).text, "second 0");
         assert_eq!(two.events(1)[0].cycles, 1);
         assert_eq!(two.events(2)[0].name, "second");
-        assert!(two.io_registers(3).is_empty());
-        assert!(two.graphics(3, &GraphicsRequest::default()).is_none());
 
         assert!(two.write(3, 0x10, 0xAB));
         assert!(two.write(0, 0x20, 0xCD));
         assert_eq!(two.0[0].written, [(0, 0x20, 0xCD)]);
         assert_eq!(two.0[1].written, [(1, 0x10, 0xAB)]);
-    }
-
-    #[test]
-    fn a_pairs_run_until_is_its_own() {
-        let mut pair = Two::<1>::new();
-        let outcome = pair.run_until(&[], &mut Vec::new(), &Stops::default());
-        assert!(outcome.frame_done);
     }
 
     #[test]

@@ -618,6 +618,17 @@ mod tests {
     const GREEN: u16 = 0x03E0;
     const BLUE: u16 = 0x7C00;
 
+    /// `0xFFRRGGBB` for one of the tests' BGR555 colours, or black.
+    fn shown(bgr555: u16) -> u32 {
+        match bgr555 {
+            0 => 0xFF00_0000,
+            RED => 0xFFFF_0000,
+            GREEN => 0xFF00_FF00,
+            BLUE => 0xFF00_00FF,
+            _ => panic!("no pixel listed for {bgr555:#06X}"),
+        }
+    }
+
     /// VRAMCNT_A; bank n's is n bytes on.
     const VRAMCNT: u32 = 0x0400_0240;
 
@@ -667,19 +678,19 @@ mod tests {
         hw.arm9_write_16(0x0500_0002, RED); // engine A BG colour 1
         let lcdc = tiles_at(&hw, 0x0680_0000);
         assert_eq!(lcdc.image.size(), ScreenSize::new(256, 256));
-        assert_eq!(pixel(&lcdc, 8, 0), bgr555(RED));
-        assert_eq!(pixel(&lcdc, 9, 0), bgr555(0));
+        assert_eq!(pixel(&lcdc, 8, 0), shown(RED));
+        assert_eq!(pixel(&lcdc, 9, 0), shown(0));
         assert!(lcdc.notes[0].starts_with("Tiles at 0x06800000 (LCDC +0x00000)"));
         assert_eq!(lcdc.notes[1], "VRAM there: bank A; unmapped bytes read 0");
         let unmapped = tiles_at(&hw, 0x0600_0000);
-        assert_eq!(pixel(&unmapped, 8, 0), bgr555(0));
+        assert_eq!(pixel(&unmapped, 8, 0), shown(0));
         assert!(unmapped.notes[1].starts_with("VRAM there: no banks"));
 
         hw.arm9_write_8(VRAMCNT, 0x81); // bank A as engine A BG
         let background = tiles_at(&hw, 0x0600_0000);
-        assert_eq!(pixel(&background, 8, 0), bgr555(RED));
+        assert_eq!(pixel(&background, 8, 0), shown(RED));
         assert!(background.notes[0].contains("(engine A BG +0x00000)"));
-        assert_eq!(pixel(&tiles_at(&hw, 0x0680_0000), 8, 0), bgr555(0));
+        assert_eq!(pixel(&tiles_at(&hw, 0x0680_0000), 8, 0), shown(0));
     }
 
     #[test]
@@ -704,14 +715,14 @@ mod tests {
         };
         let engine_b = tiles(1, 0);
         assert_eq!(engine_b.image.size(), ScreenSize::new(256, 128));
-        assert_eq!(pixel(&engine_b, 0, 0), bgr555(GREEN));
+        assert_eq!(pixel(&engine_b, 0, 0), shown(GREEN));
         assert!(engine_b.notes[0].contains("engine B's BG 256-colour palette"));
         assert_eq!(
             engine_b.notes[1],
             "VRAM there: bank C; unmapped bytes read 0"
         );
-        assert_eq!(pixel(&tiles(0, 0), 0, 0), bgr555(RED));
-        assert_eq!(pixel(&tiles(1, 16), 0, 0), bgr555(BLUE));
+        assert_eq!(pixel(&tiles(0, 0), 0, 0), shown(RED));
+        assert_eq!(pixel(&tiles(1, 16), 0, 0), shown(BLUE));
     }
 
     #[test]
@@ -729,9 +740,9 @@ mod tests {
         };
         let engine_b = palettes(1);
         assert_eq!(engine_b.image.size(), ScreenSize::new(264, 128));
-        assert_eq!(pixel(&engine_b, 136 + 8, 0), bgr555(RED));
+        assert_eq!(pixel(&engine_b, 136 + 8, 0), shown(RED));
         assert_eq!(engine_b.notes[0], "Engine B: BG 0x05000400, OBJ 0x05000600");
-        assert_eq!(pixel(&palettes(0), 136 + 8, 0), bgr555(0));
+        assert_eq!(pixel(&palettes(0), 136 + 8, 0), shown(0));
     }
 
     #[test]
@@ -749,7 +760,7 @@ mod tests {
 
         let graphics = draw_request(&hw, request(GraphicsView::Sprites));
         assert_eq!(graphics.image.size(), ScreenSize::new(1024, 512));
-        assert_eq!(pixel(&graphics, 64, 7), bgr555(GREEN), "flipped");
+        assert_eq!(pixel(&graphics, 64, 7), shown(GREEN), "flipped");
         assert_eq!(pixel(&graphics, 64, 0), CHECKER[0]);
         assert_eq!(
             pixel(&graphics, 64 + 8, 0),
@@ -779,7 +790,7 @@ mod tests {
         hw.arm9_write_16(0x0700_000C, 2);
 
         let graphics = draw_request(&hw, request(GraphicsView::Sprites));
-        assert_eq!(pixel(&graphics, 0, 0), bgr555(RED));
+        assert_eq!(pixel(&graphics, 0, 0), shown(RED));
         assert_eq!(pixel(&graphics, 1, 0), CHECKER[0], "transparent");
         assert_eq!(pixel(&graphics, 64, 0), CELL_SHADES[1], "hidden");
         assert_eq!(
@@ -812,8 +823,8 @@ mod tests {
 
         let graphics = map(&hw, 1, 0);
         assert_eq!(graphics.image.size(), ScreenSize::new(256, 256));
-        assert_eq!(pixel(&graphics, 7, 0), bgr555(RED), "flipped");
-        assert_eq!(pixel(&graphics, 0, 0), bgr555(BLUE), "the backdrop");
+        assert_eq!(pixel(&graphics, 7, 0), shown(RED), "flipped");
+        assert_eq!(pixel(&graphics, 0, 0), shown(BLUE), "the backdrop");
         assert!(graphics.notes[0].starts_with(
             "Engine B BG0: text, 256×256, 4bpp, map 0x0620F800, tiles 0x06200000, priority 0, on"
         ));

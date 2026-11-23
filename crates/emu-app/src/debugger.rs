@@ -326,6 +326,20 @@ mod tests {
         fn run_until(&mut self, _: &[Input], _: &mut Vec<StereoSample>, _: &Stops) -> RunOutcome {
             RunOutcome::default()
         }
+        fn io_registers(&self, _: usize) -> Vec<IoRegister> {
+            vec![IoRegister {
+                address: 0x40,
+                name: "FAKEIO",
+                bits: 8,
+                value: 0,
+            }]
+        }
+        fn events(&self, _: usize) -> Vec<ScheduledEvent> {
+            vec![ScheduledEvent {
+                cycles: 1,
+                name: "Tick".to_owned(),
+            }]
+        }
     }
 
     #[test]
@@ -397,7 +411,8 @@ mod tests {
         let snapshot = snapshot(&fake, &view, RunState::Paused);
         assert_eq!(snapshot.memory[0], Some(2));
         assert_eq!(snapshot.memory[8], None, "past the end");
-        assert!(snapshot.graphics.is_none());
+        assert_eq!(snapshot.io.len(), 1);
+        assert!(snapshot.events.is_empty(), "another panel's");
         assert_eq!(snapshot.code[LINES_BEFORE_PC].address, 0x20);
     }
 

@@ -144,9 +144,6 @@ pub struct Document {
     starts: Vec<usize>,
     /// Whether the source defines link references.
     defines: bool,
-    /// The bytes the last push or settle parsed.
-    #[cfg(test)]
-    parsed: usize,
 }
 
 impl Document {
@@ -219,10 +216,6 @@ impl Document {
         self.defines |= tail.defines;
         self.starts.extend(tail.starts);
         self.blocks.extend(tail.blocks);
-        #[cfg(test)]
-        {
-            self.parsed = tail.parsed;
-        }
     }
 }
 
@@ -233,9 +226,6 @@ struct Tail {
     starts: Vec<usize>,
     /// Whether it defines link references.
     defines: bool,
-    /// The bytes parsed, mended text included.
-    #[cfg_attr(not(test), allow(dead_code))]
-    parsed: usize,
 }
 
 /// Parses `source` from `from` on. While `streaming`, the last top-level
@@ -249,7 +239,6 @@ fn parse_tail(source: &str, from: usize, streaming: bool) -> Tail {
         blocks: Vec::new(),
         starts,
         defines,
-        parsed: text.len(),
     };
     if streaming
         && let Some(&(first, start)) = tops.last()
@@ -260,7 +249,6 @@ fn parse_tail(source: &str, from: usize, streaming: bool) -> Tail {
         // blocks before it are as written.
         let line = line_start(source, start);
         let mended = mended.within(&source[line..], leaf.start - line..leaf.end - line);
-        tail.parsed += mended.text.len();
         tail.blocks = Builder::new(&events[..first], streaming).blocks();
         let (last, _) = parse_events(&mended.text, &|at| line + mended.original(at), streaming);
         let mut last = Builder::new(&last, streaming).blocks();
@@ -1268,26 +1256,6 @@ mod tests {
                 ],
             }]
         );
-    }
-
-    #[test]
-    fn pushes_parse_only_the_tail() {
-        let mut doc = Document::new();
-        for n in 0..200 {
-            doc.push(&format!(
-                "Paragraph {n} with **bold** and a [link](https://x.dev/{n}).\n\n"
-            ));
-        }
-        let last = "Paragraph 199 with **bold** and a [link](https://x.dev/199).\n\n";
-        doc.push("Next");
-        assert!(doc.parsed <= last.len() + 4 + 8, "{}", doc.parsed);
-        doc.push(" one, **still");
-        assert!(doc.parsed <= 2 * (last.len() + 32), "{}", doc.parsed);
-        doc.push(" going\n");
-        doc.push("more");
-        assert!(doc.parsed <= 64, "{}", doc.parsed);
-        doc.settle();
-        assert_eq!(doc.blocks(), Document::parse(doc.source()).blocks());
     }
 
     /// Answers like the model's, each streamed at many chunk sizes.

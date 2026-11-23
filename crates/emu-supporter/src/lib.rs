@@ -303,27 +303,24 @@ mod tests {
         [public_key(&SEED)]
     }
 
+    /// A Patron key for Ada Lovelace, numbered 0x0123456789ABCDEF and
+    /// issued on day 20,768, signed by [`SEED`] with Python's
+    /// `cryptography` rather than this crate: the format as keys already
+    /// sent out have it.
+    const ADA: &str = "IMAGO-AQIBI0VniavN7wAAUSBBZGEgTG92ZWxhY2VXvOoKZVbk2QOmGXU03OHyT3rWe8Q5Ij0OKAh1eSI-BrC0kMrbzY8vXlVx3imsJJtrd2xpW71hkByHM-HM5GwP";
+
+    /// `bytes` signed by [`SEED`] after the context every key's signature
+    /// covers, as a key's text.
+    fn signed(mut bytes: Vec<u8>) -> String {
+        let message = [&b"imago-emulator supporter key\0"[..], &bytes].concat();
+        let signature = KeyPair::from_seed(Seed::new(SEED)).sk.sign(message, None);
+        bytes.extend(signature.as_ref());
+        format!("IMAGO-{}", URL_SAFE_NO_PAD.encode(bytes))
+    }
+
     #[test]
     fn a_key_says_who_it_was_issued_to_and_when() {
-        let key = issue(
-            &SEED,
-            Tier::Patron,
-            0x0123_4567_89AB_CDEF,
-            20_768,
-            "Ada Lovelace",
-        )
-        .expect("issued");
-        assert!(key.starts_with(PREFIX), "{key}");
-        assert_eq!(
-            read_with(&trusted(), &key),
-            Ok(Supporter {
-                tier: Tier::Patron,
-                id: 0x0123_4567_89AB_CDEF,
-                issued: 20_768,
-                name: "Ada Lovelace".to_owned(),
-            })
-        );
-        // The same key again is the same text.
+        // The same key, however often it is issued, is the same text.
         assert_eq!(
             issue(
                 &SEED,
@@ -332,7 +329,16 @@ mod tests {
                 20_768,
                 "Ada Lovelace"
             ),
-            Ok(key)
+            Ok(ADA.to_owned())
+        );
+        assert_eq!(
+            read_with(&trusted(), ADA),
+            Ok(Supporter {
+                tier: Tier::Patron,
+                id: 0x0123_4567_89AB_CDEF,
+                issued: 20_768,
+                name: "Ada Lovelace".to_owned(),
+            })
         );
     }
 
@@ -341,7 +347,7 @@ mod tests {
         let plain = issue(&SEED, Tier::Supporter, 1, 2, "").expect("issued");
         assert_eq!(read_with(&trusted(), &plain).expect("read").name, "");
         // The shortest key there is: 14 bytes and a signature.
-        assert_eq!(plain.len(), PREFIX.len() + (78_usize * 4).div_ceil(3));
+        assert_eq!(plain.len(), "IMAGO-".len() + (78_usize * 4).div_ceil(3));
         let named = issue(&SEED, Tier::Supporter, 1, 2, "  ポケット 🎮 ").expect("issued");
         assert_eq!(
             read_with(&trusted(), &named).expect("read").name,
@@ -432,23 +438,19 @@ mod tests {
 
     #[test]
     fn a_signed_key_in_a_format_from_the_future_asks_for_a_newer_app() {
-        let mut bytes = vec![VERSION + 1, 1];
+        let mut bytes = vec![2, 1];
         bytes.extend([0; 12]);
-        let message = [CONTEXT, &bytes].concat();
-        let signature = KeyPair::from_seed(Seed::new(SEED)).sk.sign(message, None);
-        bytes.extend(signature.as_ref());
-        let text = format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
-        assert_eq!(read_with(&trusted(), &text), Err(KeyError::Newer));
+        assert_eq!(read_with(&trusted(), &signed(bytes)), Err(KeyError::Newer));
     }
 
     #[test]
     fn a_signature_for_something_else_is_not_a_key() {
         // The key's bytes signed without the context before them.
-        let mut bytes = vec![VERSION, 1];
+        let mut bytes = vec![1, 1];
         bytes.extend([0; 12]);
         let signature = KeyPair::from_seed(Seed::new(SEED)).sk.sign(&bytes, None);
         bytes.extend(signature.as_ref());
-        let text = format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
+        let text = format!("IMAGO-{}", URL_SAFE_NO_PAD.encode(bytes));
         assert_eq!(read_with(&trusted(), &text), Err(KeyError::Forged));
     }
 
@@ -463,22 +465,25 @@ mod tests {
         assert_eq!(read(&key), Err(KeyError::Forged));
     }
 
-    /// A key's text with its tier byte set to `byte`, signed by [`SEED`].
+    /// A key's text with its tier byte set to `byte`, numbered 0, issued
+    /// on day 0 to no name, signed by [`SEED`].
     fn key_with_tier_byte(byte: u8) -> String {
-        let mut bytes = vec![VERSION, byte];
+        let mut bytes = vec![1, byte];
         bytes.extend([0; 12]);
-        let message = [CONTEXT, &bytes].concat();
-        let signature = KeyPair::from_seed(Seed::new(SEED)).sk.sign(message, None);
-        bytes.extend(signature.as_ref());
-        format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
+        signed(bytes)
     }
 
     #[test]
     fn a_key_says_its_tier_and_each_tier_has_what_the_one_before_has() {
-        for tier in Tier::ALL {
-            let key = issue(&SEED, tier, 7, 20_768, "Tiered").expect("issued");
+        for (byte, tier, name) in [
+            (1, Tier::Supporter, "supporter"),
+            (2, Tier::Patron, "patron"),
+            (3, Tier::Founder, "founder"),
+        ] {
+            let key = key_with_tier_byte(byte);
+            assert_eq!(issue(&SEED, tier, 0, 0, ""), Ok(key.clone()), "{name}");
             assert_eq!(read_with(&trusted(), &key).expect("read").tier, tier);
-            assert_eq!(Tier::from_name(tier.name()), Some(tier));
+            assert_eq!(Tier::from_name(name), Some(tier));
         }
         assert!(Tier::Supporter < Tier::Patron && Tier::Patron < Tier::Founder);
         assert_eq!(Tier::from_name("Founder"), None);
@@ -495,8 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn new_keys_and_numbers_differ() {
-        assert_ne!(new_seed(), new_seed());
+    fn new_key_numbers_differ() {
         assert_ne!(new_id(), new_id());
     }
 

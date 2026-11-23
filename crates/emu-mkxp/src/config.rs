@@ -169,7 +169,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(settings.get("renderer"), None, "mkxp-z's own choice");
         } else {
-            assert_eq!(settings["renderer"], OPENGL);
+            assert_eq!(settings["renderer"], 2, "OpenGL");
         }
         assert_eq!(settings["frameSkip"], true);
         assert_eq!(

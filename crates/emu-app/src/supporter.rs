@@ -371,10 +371,25 @@ mod tests {
     }
 
     #[test]
-    fn icons_are_named_in_the_file_and_each_is_a_picture_of_its_own() {
-        assert_eq!(AppIcon::default(), AppIcon::Classic);
+    fn icons_keep_the_names_settings_files_have() {
+        for (icon, name) in [
+            (AppIcon::Classic, "classic"),
+            (AppIcon::Night, "night"),
+            (AppIcon::Ink, "ink"),
+            (AppIcon::Chalk, "chalk"),
+            (AppIcon::Blueprint, "blueprint"),
+            (AppIcon::Ember, "ember"),
+            (AppIcon::Founder, "founder"),
+        ] {
+            assert_eq!(icon.name(), name);
+            assert_eq!(AppIcon::from_name(name), Some(icon));
+        }
+        assert_eq!(AppIcon::from_name("Night"), None);
+    }
+
+    #[test]
+    fn each_icon_is_a_dock_sized_picture_of_its_own() {
         for (at, icon) in AppIcon::ALL.into_iter().enumerate() {
-            assert_eq!(AppIcon::from_name(icon.name()), Some(icon));
             let png = icon.png();
             assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "{}", icon.label());
             // 1024 pixels a side, as the Dock is given the app's own.
@@ -383,8 +398,6 @@ mod tests {
                 assert_ne!(png, other.png(), "{} and {}", icon.label(), other.label());
             }
         }
-        assert_eq!(AppIcon::from_name("Night"), None);
-        assert_eq!(AppIcon::from_name("gold"), None);
     }
 
     #[test]

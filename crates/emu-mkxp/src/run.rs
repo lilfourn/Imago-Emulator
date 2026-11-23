@@ -139,25 +139,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_is_read_back_as_it_was_written() {
+    fn a_run_is_kept_in_its_run_json() {
         let dir = std::env::temp_dir().join(format!("emu-mkxp-run-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
         let folder = dir.join("My Game (Random 123456)");
         assert_eq!(Run::read(&folder), None, "no folder");
+        let game = dir.join("My Game");
         let run = Run {
-            game: dir.join("My Game"),
+            game: game.clone(),
             preload: vec!["randomizer.rb".to_owned()],
             saves: "My Game (Random 123456)".to_owned(),
         };
         run.write(&folder).expect("written");
+        let file = folder.join("run.json");
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(&file).expect("run.json")).expect("JSON");
+        assert_eq!(
+            written,
+            json!({
+                "game": game.to_str(),
+                "preload": ["randomizer.rb"],
+                "saves": "My Game (Random 123456)",
+            })
+        );
         assert_eq!(Run::read(&folder), Some(run.clone()));
         assert_eq!(run.scripts(&folder), [folder.join("randomizer.rb")]);
         // A file that names no game, or no saves, is no run.
-        fs::write(folder.join(FILE), "{\"saves\": \"x\"}").expect("written");
+        fs::write(&file, "{\"saves\": \"x\"}").expect("written");
         assert_eq!(Run::read(&folder), None);
-        fs::write(folder.join(FILE), "{\"game\": \"/g\", \"saves\": \"\"}").expect("written");
+        fs::write(&file, "{\"game\": \"/g\", \"saves\": \"\"}").expect("written");
         assert_eq!(Run::read(&folder), None);
-        fs::write(folder.join(FILE), "not JSON").expect("written");
+        fs::write(&file, "not JSON").expect("written");
         assert_eq!(Run::read(&folder), None);
         fs::remove_dir_all(&dir).ok();
     }

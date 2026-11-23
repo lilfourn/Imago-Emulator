@@ -839,12 +839,14 @@ mod tests {
         let registers = arm9.registers();
         assert_eq!(registers.cpsr & 0x3F, Mode::System.bits());
         assert_eq!(registers.r[5], 0);
-        assert_eq!(registers.r[13], ARM9_STACKS.2);
+        // GBATEK's stacks in DTCM.
+        assert_eq!(registers.r[13], 0x0080_3EC0);
         assert_eq!(registers.r[14], ARM9_BASE);
-        assert_eq!(registers.svc, [ARM9_STACKS.0, 0]);
-        assert_eq!(registers.irq, [ARM9_STACKS.1, 0]);
+        assert_eq!(registers.svc, [0x0080_3FC0, 0]);
+        assert_eq!(registers.irq, [0x0080_3FA0, 0]);
         assert_eq!(registers.spsr[1], 0, "SPSR_svc");
-        assert_eq!(arm9.cp15().control(), bios::ARM9_RESET_CONTROL);
+        // DTCM on; ITCM, caches and protection off; high vectors.
+        assert_eq!(arm9.cp15().control(), 0x0001_2078);
     }
 
     /// An ARM9 program that waits for VBlank with VBlankIntrWait in a

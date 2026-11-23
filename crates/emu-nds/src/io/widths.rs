@@ -1,13 +1,12 @@
 //! What each I/O register does with a write of each width: a byte, a
 //! halfword and a word. Several registers have rules of their own (IF
 //! clears only the ones written, POSTFLG and HALTCNT are bytes, VRAMCNT
-//! is a byte a bank, the IPC FIFO takes only words), and the raw copy of
-//! what was written, which a save state holds, records some writes and
-//! not others. These tests pin all of it.
+//! is a byte a bank, the IPC FIFO takes only words).
 
 use emu_state::payload;
 use serde::Serialize;
 
+use crate::cart::Cart;
 use crate::hardware::{Event, Hardware};
 use crate::interrupt::irq;
 use crate::ipc::Side;
@@ -54,19 +53,30 @@ fn read_word(hw: &mut Hardware, side: Side, address: u32) -> u32 {
     word
 }
 
-/// The raw copy's word at `offset` in `side`'s page: what a save state
-/// holds there.
-fn raw(hw: &Hardware, side: Side, offset: usize) -> u32 {
-    let page = match side {
-        Side::Arm9 => &hw.io9,
-        Side::Arm7 => &hw.io7,
-    };
-    u32::from_le_bytes([
-        page[offset],
-        page[offset + 1],
-        page[offset + 2],
-        page[offset + 3],
-    ])
+/// The ROM of [`card`]: a different byte at almost every offset.
+fn card_rom() -> Vec<u8> {
+    (0..0x2_0000u32).map(|i| (i * 7 + (i >> 9)) as u8).collect()
+}
+
+/// A game card holding [`card_rom`].
+fn card() -> Cart {
+    Cart::new(card_rom().into_boxed_slice(), None)
+}
+
+/// The word of ROM at `address` on [`card`].
+fn card_word(address: usize) -> u32 {
+    let rom = card_rom();
+    u32::from_le_bytes([0, 1, 2, 3].map(|byte| rom[address + byte]))
+}
+
+/// What a 4-byte ROM transfer started by `side` gives with the command
+/// the card holds.
+fn transfer_word(hw: &mut Hardware, side: Side) -> u32 {
+    // ROMCTRL: start, out of reset, 4 bytes.
+    write(hw, side, 4, 0x0400_01A4, 0xA700_0000);
+    hw.cart.rom_step();
+    hw.scheduler.cancel(|event| *event == Event::CartStep);
+    read(hw, side, 4, 0x0410_0010)
 }
 
 /// A part of the hardware as a save state holds it, for parts whose
@@ -85,20 +95,17 @@ fn interrupt_flags_clear_only_the_ones_written_at_every_width() {
             hw.cpu_mut(side).interrupts.flags = u32::MAX;
             write(&mut hw, side, 1, 0x0400_0214 + byte, 0xA5);
             assert_eq!(hw.cpu(side).interrupts.flags, !(0xA5 << (byte * 8)));
-            assert_eq!(raw(&hw, side, 0x214), 0, "a byte to IF is not kept");
         }
         for half in 0..2 {
             let mut hw = hardware();
             hw.cpu_mut(side).interrupts.flags = u32::MAX;
             write(&mut hw, side, 2, 0x0400_0214 + half * 2, 0x8001);
             assert_eq!(hw.cpu(side).interrupts.flags, !(0x8001 << (half * 16)));
-            assert_eq!(raw(&hw, side, 0x214), 0x8001 << (half * 16));
         }
         let mut hw = hardware();
         hw.cpu_mut(side).interrupts.flags = u32::MAX;
         write(&mut hw, side, 4, 0x0400_0214, 0x0101_0180);
         assert_eq!(hw.cpu(side).interrupts.flags, !0x0101_0180);
-        assert_eq!(raw(&hw, side, 0x214), 0x0101_0180);
         // Zeros clear nothing, and IF reads the same at every width.
         write(&mut hw, side, 4, 0x0400_0214, 0);
         assert_eq!(read_word(&mut hw, side, 0x0400_0214), !0x0101_0180);
@@ -120,7 +127,6 @@ fn interrupt_enables_take_bytes_halfwords_and_words() {
         }
         assert_eq!(hw.cpu(side).interrupts.enable, 0x4433_2211);
         assert_eq!(read_word(&mut hw, side, 0x0400_0210), 0x4433_2211);
-        assert_eq!(raw(&hw, side, 0x210), 0x4433_2211);
     }
 }
 
@@ -142,7 +148,6 @@ fn the_master_enable_is_bit_0_of_its_low_byte() {
         // IME reads as 0 or 1; the halfword beside it is no register and
         // reads back what was written.
         assert_eq!(read_word(&mut hw, side, 0x0400_0208), 0xFFFF_0001);
-        assert_eq!(raw(&hw, side, 0x208), 0xFFFF_FFFF);
     }
 }
 
@@ -151,11 +156,6 @@ fn the_arm9s_postflg_is_two_bits_of_one_byte() {
     let mut hw = hardware();
     hw.arm9_write_8(0x0400_0300, 0xFF);
     assert_eq!(hw.arm9.postflg, 3);
-    assert_eq!(
-        raw(&hw, Side::Arm9, 0x300),
-        0,
-        "a byte to POSTFLG is not kept"
-    );
     hw.arm9_write_8(0x0400_0300, 0);
     assert_eq!(
         hw.arm9.postflg, 1,
@@ -163,14 +163,11 @@ fn the_arm9s_postflg_is_two_bits_of_one_byte() {
     );
     hw.arm9_write_16(0x0400_0300, 0xFF01);
     assert_eq!(hw.arm9.postflg, 1);
-    assert_eq!(raw(&hw, Side::Arm9, 0x300), 0xFF01);
     // The byte above it holds nothing.
     hw.arm9_write_8(0x0400_0301, 0x02);
     assert_eq!(hw.arm9.postflg, 1);
-    assert_eq!(raw(&hw, Side::Arm9, 0x300), 0x0201);
     hw.arm9_write_32(0x0400_0300, 0xFFFF_FFFE);
     assert_eq!(hw.arm9.postflg, 3);
-    assert_eq!(raw(&hw, Side::Arm9, 0x300), 0xFFFF_FFFE);
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_0300), 0xFFFF_0003);
     // Before boot has ended, bit 0 is still to be set.
     let mut booting = hardware();
@@ -190,12 +187,9 @@ fn the_arm7s_postflg_can_only_be_set_and_haltcnt_is_the_byte_above_it() {
         assert!(!hw.arm7.halted, "HALTCNT 0 does not halt");
         write(&mut hw, Side::Arm7, bytes, 0x0400_0300, 0);
         assert_eq!(hw.arm7.postflg, 1, "it cannot be cleared");
-        // Neither byte is ever kept.
-        assert_eq!(raw(&hw, Side::Arm7, 0x300), 0, "{bytes} bytes");
     }
     let mut hw = hardware();
     hw.arm7_write_32(0x0400_0300, 0xABCD_0000);
-    assert_eq!(raw(&hw, Side::Arm7, 0x300), 0xABCD_0000);
     assert_eq!(hw.arm7_read_32(0x0400_0300), 0xABCD_0000);
 
     // HALTCNT: 2 halts and 3 sleeps; 0 and 1 do not.
@@ -238,13 +232,6 @@ fn vramcnt_is_a_byte_a_bank_with_wramcnt_among_them() {
     assert_eq!(hw.wramcnt, 0);
     hw.arm9_write_8(0x0400_0247, 0xFF);
     assert_eq!(hw.wramcnt, 3);
-    assert_eq!(
-        raw(&hw, Side::Arm9, 0x240),
-        0,
-        "bytes to VRAMCNT are not kept"
-    );
-    assert_eq!(raw(&hw, Side::Arm9, 0x244), 0);
-    assert_eq!(raw(&hw, Side::Arm9, 0x248), 0);
 
     // A halfword is two of them.
     let mut hw = hardware();
@@ -253,9 +240,6 @@ fn vramcnt_is_a_byte_a_bank_with_wramcnt_among_them() {
     hw.arm9_write_16(0x0400_0248, 0x8183); // H and I
     assert_eq!(banks(&hw), [0x81, 0x82, 0, 0, 0, 0, 0x84, 0x83, 0x81]);
     assert_eq!(hw.wramcnt, 2);
-    assert_eq!(raw(&hw, Side::Arm9, 0x240), 0x0000_8281);
-    assert_eq!(raw(&hw, Side::Arm9, 0x244), 0x0284_0000);
-    assert_eq!(raw(&hw, Side::Arm9, 0x248), 0x0000_8183);
 
     // A word is four.
     let mut hw = hardware();
@@ -268,7 +252,6 @@ fn vramcnt_is_a_byte_a_bank_with_wramcnt_among_them() {
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_0240), 0x8483_8281);
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_0244), 0x0187_8685);
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_0248), 0xFFFF_8281);
-    assert_eq!(raw(&hw, Side::Arm9, 0x248), 0xFFFF_8281);
 
     // The ARM7 reads which of C and D it has and WRAMCNT, and writes none.
     let mut hw = hardware();
@@ -293,13 +276,11 @@ fn dispstat_keeps_its_enables_and_line_setting_for_each_cpu() {
         write(&mut hw, side, 2, 0x0400_0004, 0xFFFF);
         assert_eq!(hw.cpu(side).dispstat, 0xFFB8);
         assert_eq!(hw.cpu(other).dispstat, 0, "each CPU has its own");
-        assert_eq!(raw(&hw, side, 0x004), 0xFFFF);
         // A byte at a time: the enables below, the line setting above.
         write(&mut hw, side, 1, 0x0400_0004, 0x08);
         assert_eq!(hw.cpu(side).dispstat, 0xFF08);
         write(&mut hw, side, 1, 0x0400_0005, 0x12);
         assert_eq!(hw.cpu(side).dispstat, 0x1208);
-        assert_eq!(raw(&hw, side, 0x004), 0x1208);
         // A word covers VCOUNT, which cannot be written.
         hw.vcount = 100;
         write(&mut hw, side, 4, 0x0400_0004, 0x00C7_34B8);
@@ -333,7 +314,6 @@ fn timers_take_their_reload_and_control_at_every_width() {
         write(&mut hw, side, 1, 0x0400_0106, 0x80);
         assert_eq!(counter(&hw, 1), 0x1234);
         assert_eq!(read(&mut hw, side, 2, 0x0400_0106), 0x0080);
-        assert_eq!(raw(&hw, side, 0x104), 0x0080_1234);
         // Control's high byte holds nothing: the timer runs on.
         write(&mut hw, side, 1, 0x0400_0107, 0xFF);
         assert_eq!(read(&mut hw, side, 2, 0x0400_0106), 0x0080);
@@ -347,7 +327,6 @@ fn timers_take_their_reload_and_control_at_every_width() {
         write(&mut hw, side, 4, 0x0400_0108, 0xFFFF_ABCD);
         assert_eq!(counter(&hw, 2), 0xABCD);
         assert_eq!(read_word(&mut hw, side, 0x0400_0108), 0x00C7_ABCD);
-        assert_eq!(raw(&hw, side, 0x108), 0xFFFF_ABCD);
 
         // Timer 3: halfwords, control then reload: it started from 0.
         write(&mut hw, side, 2, 0x0400_010E, 0x0080);
@@ -386,7 +365,6 @@ fn keycnt_is_checked_against_the_keys_whenever_it_is_written() {
         write(&mut hw, side, 2, 0x0400_0132, 0xC003);
         assert_eq!(hw.cpu(side).interrupts.flags, 0);
         assert_eq!(read_word(&mut hw, side, 0x0400_0130), 0xC003_03FE);
-        assert_eq!(raw(&hw, side, 0x130), 0xC003_0000);
     }
 }
 
@@ -421,7 +399,6 @@ fn ipcsync_shows_the_other_cpu_its_data_and_sends_it_an_interrupt() {
         write(&mut hw, side, 1, 0x0400_0180, 0xFF);
         assert_eq!(hw.cpu(other).interrupts.flags, 0);
         assert_eq!(read(&mut hw, side, 2, 0x0400_0180), 0x0C00);
-        assert_eq!(raw(&hw, side, 0x180), 0xFFFF_0CFF);
         // Without the other's bit 14, bit 13 sends nothing.
         write(&mut hw, other, 2, 0x0400_0180, 0);
         write(&mut hw, side, 2, 0x0400_0180, 0x2000);
@@ -453,7 +430,6 @@ fn the_ipc_fifo_control_enables_flushes_and_acknowledges_by_the_bits_written() {
         write(&mut hw, side, 1, 0x0400_0185, 0x84);
         assert_eq!(read(&mut hw, side, 2, 0x0400_0184), 0x8405);
         assert_eq!(hw.cpu(side).interrupts.flags, irq::IPC_RECEIVE_NOT_EMPTY);
-        assert_eq!(raw(&hw, side, 0x184), 0x840C);
 
         // The error flag: sending to a full FIFO sets it, and writing a
         // one to bit 14 clears it; a zero there leaves it.
@@ -480,18 +456,15 @@ fn the_ipc_fifo_sends_whole_words_and_a_read_of_any_width_takes_one() {
         let mut hw = hardware();
         write(&mut hw, side, 2, 0x0400_0184, 0x8000);
         write(&mut hw, other, 2, 0x0400_0184, 0x8000);
-        // Halfwords and bytes to the send port send nothing; they are
-        // kept, as for any offset with no register.
+        // Halfwords and bytes to the send port send nothing.
         write(&mut hw, side, 2, 0x0400_0188, 0x1234);
         write(&mut hw, side, 2, 0x0400_018A, 0x5678);
         write(&mut hw, side, 1, 0x0400_0188, 0x9A);
         assert_eq!(read(&mut hw, other, 2, 0x0400_0184), 0x8101, "nothing came");
-        assert_eq!(raw(&hw, side, 0x188), 0x5678_129A);
-        // A word sends, and is not kept.
+        // A word sends.
         for word in [0xAABB_CCDD, 0x1122_3344, 0x5566_7788] {
             write(&mut hw, side, 4, 0x0400_0188, word);
         }
-        assert_eq!(raw(&hw, side, 0x188), 0x5678_129A);
         // The receive port, above the page: a word, then a halfword and a
         // byte, each of which takes a whole word out.
         assert_eq!(read(&mut hw, other, 4, 0x0410_0000), 0xAABB_CCDD);
@@ -512,6 +485,7 @@ fn the_game_cards_registers_belong_to_the_cpu_exmemcnt_names() {
     for side in SIDES {
         let other = SIDES[usize::from(side == Side::Arm9)];
         let mut hw = hardware();
+        hw.cart = card();
         hw.exmemcnt = if side == Side::Arm7 { 1 << 11 } else { 0 };
 
         // AUXSPICNT keeps bits 0–1, 6 and 13–15, a byte at a time too.
@@ -521,7 +495,6 @@ fn the_game_cards_registers_belong_to_the_cpu_exmemcnt_names() {
         assert_eq!(read(&mut hw, side, 2, 0x0400_01A0), 0xE001);
         write(&mut hw, side, 1, 0x0400_01A1, 0xA0);
         assert_eq!(read(&mut hw, side, 2, 0x0400_01A0), 0xA001);
-        assert_eq!(raw(&hw, side, 0x1A0) & 0xFFFF, 0xA001);
 
         // AUXSPIDATA: a halfword or its low byte sends a byte to the save
         // chip, and AUXSPICNT is busy until the transfer's event.
@@ -542,25 +515,20 @@ fn the_game_cards_registers_belong_to_the_cpu_exmemcnt_names() {
         write(&mut hw, side, 2, 0x0400_01A2, 0x05);
         assert_eq!(read(&mut hw, side, 2, 0x0400_01A0), 0x8000);
 
-        // The command's eight bytes, at any width. They do not read back.
-        write(&mut hw, side, 4, 0x0400_01A8, 0x4433_2211);
-        write(&mut hw, side, 2, 0x0400_01AC, 0x6655);
+        // The command's eight bytes, at any width: B7h, a ROM read, from
+        // 00012344h once the byte at 1ABh puts in the address's 23h.
+        write(&mut hw, side, 4, 0x0400_01A8, 0xFF01_00B7);
+        write(&mut hw, side, 2, 0x0400_01AC, 0x6644);
         write(&mut hw, side, 1, 0x0400_01AE, 0x77);
         write(&mut hw, side, 1, 0x0400_01AF, 0x88);
-        write(&mut hw, side, 1, 0x0400_01A9, 0xEE);
-        let command = saved(&hw.cart);
-        assert!(
-            command
-                .windows(8)
-                .any(|bytes| bytes == [0x11, 0xEE, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]),
-            "the command bytes as written"
-        );
+        write(&mut hw, side, 1, 0x0400_01AB, 0x23);
+        // They do not read back.
         assert_eq!(read_word(&mut hw, side, 0x0400_01A8), 0);
-        assert_eq!(raw(&hw, side, 0x1A8), 0x4433_EE11);
-        assert_eq!(raw(&hw, side, 0x1AC), 0x8877_6655);
+        assert_eq!(read_word(&mut hw, side, 0x0400_01AC), 0);
+        assert_eq!(transfer_word(&mut hw, side), card_word(0x1_2344));
 
         // The other CPU reads zeros and its writes reach nothing, at any
-        // width; they are kept all the same.
+        // width.
         let before = saved(&hw.cart);
         for bytes in [1, 2, 4] {
             for address in [0x0400_01A0, 0x0400_01A4, 0x0400_01A8, 0x0400_01AC] {
@@ -571,8 +539,6 @@ fn the_game_cards_registers_belong_to_the_cpu_exmemcnt_names() {
         assert_eq!(read_word(&mut hw, other, 0x0400_01A0), 0);
         assert_eq!(read_word(&mut hw, other, 0x0400_01A4), 0);
         assert_eq!(read(&mut hw, other, 4, 0x0410_0010), 0);
-        assert_eq!(raw(&hw, other, 0x1A0), 0xFFFF_FFFF);
-        assert_eq!(raw(&hw, other, 0x1A4), 0xFFFF_FFFF);
     }
 }
 
@@ -586,24 +552,14 @@ fn registers_kept_by_their_device_take_every_width_and_read_back_the_same() {
         (Side::Arm9, 0x0400_0290),
     ];
     for (side, address) in registers {
-        let offset = (address & 0xFFF) as usize;
         let mut hw = hardware();
-        // A word goes to the device alone.
         write(&mut hw, side, 4, address, 0x0123_4567);
         assert_eq!(read_word(&mut hw, side, address), 0x0123_4567);
-        assert_eq!(
-            raw(&hw, side, offset),
-            0,
-            "{address:#X}: a word is not kept"
-        );
-        // A halfword is kept as written.
         write(&mut hw, side, 2, address + 2, 0x0FED);
         assert_eq!(read_word(&mut hw, side, address), 0x0FED_4567);
-        assert_eq!(raw(&hw, side, offset), 0x0FED_0000);
-        // A byte keeps its halfword as the device held it, with the byte.
+        // A byte keeps the rest of the word as the device held it.
         write(&mut hw, side, 1, address + 1, 0xAA);
         assert_eq!(read_word(&mut hw, side, address), 0x0FED_AA67);
-        assert_eq!(raw(&hw, side, offset), 0x0FED_AA67);
         write(&mut hw, side, 2, address, 0x1111);
         assert_eq!(read_word(&mut hw, side, address), 0x0FED_1111);
     }
@@ -614,10 +570,6 @@ fn registers_kept_by_their_device_take_every_width_and_read_back_the_same() {
         hw.arm7_write_32(address, 0x89AB_CDEF);
         hw.arm7_write_8(address + 3, 0x01);
         assert_eq!(read_word(&mut hw, Side::Arm7, address), 0x01AB_CDEF);
-        assert_eq!(
-            raw(&hw, Side::Arm7, (address & 0xFFF) as usize),
-            0x01AB_CDEF
-        );
     }
     assert_eq!(hw.arm9_read_32(0x0400_00E4), 0);
 }
@@ -651,13 +603,10 @@ fn romctrl_takes_every_width_from_the_cards_owner() {
     // Bits 0–12 and 24–30 are settings; bit 31 would start a transfer.
     hw.arm9_write_32(0x0400_01A4, 0x0041_6657);
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_01A4), 0x0041_6657);
-    assert_eq!(raw(&hw, Side::Arm9, 0x1A4), 0, "a word is not kept");
     hw.arm9_write_16(0x0400_01A6, 0x2041);
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_01A4), 0x2041_6657);
-    assert_eq!(raw(&hw, Side::Arm9, 0x1A4), 0x2041_0000);
     hw.arm9_write_8(0x0400_01A4, 0x11);
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_01A4), 0x2041_6611);
-    assert_eq!(raw(&hw, Side::Arm9, 0x1A4), 0x2041_6611);
     // The top byte alone starts a transfer: busy, and its step scheduled.
     hw.arm9_write_8(0x0400_01A7, 0xA0);
     assert_ne!(hw.arm9_read_32(0x0400_01A4) & 0x8000_0000, 0);
@@ -681,8 +630,6 @@ fn the_3d_engines_registers_take_the_bytes_written() {
     assert_eq!(hw.arm9_read_16(0x0400_0060), 0x0000);
     hw.arm9_write_32(0x0400_0060, 0xFFFF_0012);
     assert_eq!(read_word(&mut hw, Side::Arm9, 0x0400_0060), 0x0000_0012);
-    // A halfword is kept, a byte and a word are not.
-    assert_eq!(raw(&hw, Side::Arm9, 0x060), 0x0000_FFFF);
 
     // GXSTAT: bits 30–31, the FIFO interrupt's condition, are its top
     // byte; the other bytes leave them.
@@ -695,7 +642,6 @@ fn the_3d_engines_registers_take_the_bytes_written() {
     assert_eq!(hw.arm9_read_32(0x0400_0600) >> 30, 1);
     hw.arm9_write_16(0x0400_0602, 0x8000);
     assert_eq!(hw.arm9_read_32(0x0400_0600) >> 30, 2);
-    assert_eq!(raw(&hw, Side::Arm9, 0x600), 0x8000_0000);
 
     // The rendering registers are bytes: a word, halfwords and bytes
     // leave the same toon table.
@@ -785,14 +731,10 @@ fn a_2d_engines_registers_are_halfwords_that_take_bytes_and_words() {
         assert_eq!(read_word(&mut hw, Side::Arm9, base), all & 0x00FF_00FF);
         hw.arm9_write_16(base + 2, 0x0001);
         assert_eq!(read_word(&mut hw, Side::Arm9, base), 0x0001_00FF & all);
-        // Every write to these is kept as written.
-        assert_eq!(raw(&hw, Side::Arm9, (base & 0x1FFF) as usize), 0x0001_00FF);
-        // BG0CNT reads back whole; the scroll beside nothing does not.
+        // BG0CNT reads back whole.
         hw.arm9_write_8(base + 0x09, 0xAB);
         hw.arm9_write_8(base + 0x08, 0xCD);
         assert_eq!(hw.arm9_read_16(base + 0x08), 0xABCD);
-        hw.arm9_write_16(base + 0x10, 0x01FF);
-        assert_eq!(hw.arm9_read_16(base + 0x10), 0);
     }
     // The ARM7 has neither engine.
     let mut hw = hardware();
@@ -875,7 +817,6 @@ fn the_arm7s_serial_buses_and_clock_take_bytes_and_halfwords() {
     // A word at SPICNT is the control, then the data.
     hw.arm7_write_32(0x0400_01C0, 0x0000_8001);
     assert_eq!(hw.arm7_read_16(0x0400_01C0), 0x8081);
-    assert_eq!(raw(&hw, Side::Arm7, 0x1C0), 0x0000_8001);
 
     // The clock's pins are the low byte of 0x04000138; all of them
     // outputs, they read back.
@@ -886,7 +827,6 @@ fn the_arm7s_serial_buses_and_clock_take_bytes_and_halfwords() {
     assert_eq!(hw.arm7_read_16(0x0400_0138), 0x0074);
     hw.arm7_write_8(0x0400_0139, 0x12);
     assert_eq!(hw.arm7_read_16(0x0400_0138), 0x1274);
-    assert_eq!(raw(&hw, Side::Arm7, 0x138), 0x1274);
 }
 
 #[test]
@@ -901,8 +841,6 @@ fn sound_registers_take_the_bytes_written_and_no_others() {
     assert_eq!(hw.arm7_read_32(0x0400_0400), 0x7F00_0040);
     hw.arm7_write_8(0x0400_0401, 0x80);
     assert_eq!(hw.arm7_read_32(0x0400_0400), 0x7F00_8040);
-    // A word and a halfword are kept, a byte is not.
-    assert_eq!(raw(&hw, Side::Arm7, 0x400), 0x7FFF_0040);
 
     // SOUNDCNT and SOUNDBIAS.
     hw.arm7_write_16(0x0400_0500, 0xFFFF);
@@ -947,8 +885,9 @@ fn an_offset_with_no_register_reads_back_what_was_written_at_any_width() {
         (Side::Arm7, 0x0400_1000),
     ];
     for (side, address) in offsets {
-        let offset = (address & 0x1FFF) as usize;
+        let other = SIDES[usize::from(side == Side::Arm9)];
         let mut hw = hardware();
+        let others = read(&mut hw, other, 4, address);
         write(&mut hw, side, 4, address, 0x1122_3344);
         assert_eq!(read_word(&mut hw, side, address), 0x1122_3344);
         write(&mut hw, side, 2, address + 2, 0xAABB);
@@ -956,10 +895,8 @@ fn an_offset_with_no_register_reads_back_what_was_written_at_any_width() {
         write(&mut hw, side, 1, address + 1, 0xCC);
         write(&mut hw, side, 1, address + 3, 0xDD);
         assert_eq!(read_word(&mut hw, side, address), 0xDDBB_CC44);
-        assert_eq!(raw(&hw, side, offset), 0xDDBB_CC44);
         // The other CPU's page is its own.
-        let other = SIDES[usize::from(side == Side::Arm9)];
-        assert_eq!(raw(&hw, other, offset), 0);
+        assert_eq!(read(&mut hw, other, 4, address), others);
     }
     // RCNT is one of them; EXTKEYIN beside it cannot be written.
     let mut hw = hardware();
@@ -967,17 +904,25 @@ fn an_offset_with_no_register_reads_back_what_was_written_at_any_width() {
     hw.arm7_write_8(0x0400_0136, 0x00);
     assert_eq!(hw.ext_keys, 0x007F);
     assert_eq!(read_word(&mut hw, Side::Arm7, 0x0400_0134), 0x007F_8000);
-    assert_eq!(raw(&hw, Side::Arm7, 0x134), 0xFF00_8000);
-    // Nothing above the page is kept or read back.
+    // Nothing above the page is kept or read back, and the page is not
+    // mirrored there: DISPCNT, DISPCAPCNT, IF, WRAMCNT and HALTCNT are
+    // untouched.
     let mut hw = hardware();
     for side in SIDES {
-        write(&mut hw, side, 4, 0x0400_2000, 0xFFFF_FFFF);
-        write(&mut hw, side, 2, 0x0401_0064, 0xFFFF);
-        write(&mut hw, side, 1, 0x0410_0064, 0xFF);
+        hw.cpu_mut(side).interrupts.flags = irq::VBLANK;
+        for (bytes, address) in [(4, 0x0400_2000), (2, 0x0401_0064), (1, 0x0410_0064)] {
+            write(&mut hw, side, bytes, address, 0xFFFF_FFFF);
+        }
+        write(&mut hw, side, 1, 0x0410_0214, irq::VBLANK);
+        write(&mut hw, side, 1, 0x0410_2247, 3);
+        write(&mut hw, side, 1, 0x0410_0301, 0x80);
         assert_eq!(read(&mut hw, side, 4, 0x0400_2000), 0);
-        assert_eq!(raw(&hw, side, 0x000), 0);
-        assert_eq!(raw(&hw, side, 0x064), 0);
+        assert_eq!(read(&mut hw, side, 4, 0x0400_0000), 0);
+        assert_eq!(read(&mut hw, side, 4, 0x0400_0064), 0);
+        assert_eq!(hw.cpu(side).interrupts.flags, irq::VBLANK);
     }
+    assert_eq!(hw.wramcnt, 0);
+    assert!(!hw.arm7.halted);
 }
 
 // ----- What a byte written beside a register's other byte leaves alone ----
@@ -1122,22 +1067,19 @@ fn a_byte_written_to_a_register_set_without_a_write_keeps_its_other_byte() {
 #[test]
 fn a_byte_written_to_the_game_card_by_its_new_owner_is_merged_with_the_cards_own() {
     let mut hw = hardware();
+    hw.cart = card();
     // The ARM7's, while the card is the ARM9's.
     hw.arm7_write_16(0x0400_01A0, 0xFFFF);
     hw.arm7_write_32(0x0400_01A8, 0xFFFF_FFFF);
-    // The ARM9's, which the card holds.
+    // The ARM9's, which the card holds: B7h, a ROM read from 00012344h.
     hw.arm9_write_16(0x0400_01A0, 0xA000);
-    hw.arm9_write_32(0x0400_01A8, 0x4433_2211);
-    hw.arm9_write_32(0x0400_01AC, 0x8877_6655);
-    // The card goes to the ARM7, which writes a byte of each.
+    hw.arm9_write_32(0x0400_01A8, 0x2301_00B7);
+    hw.arm9_write_32(0x0400_01AC, 0x0000_0044);
+    // The card goes to the ARM7, which writes a byte of each. The
+    // command byte beside the address's top byte stays B7h.
     hw.arm9_write_16(0x0400_0204, 1 << 11);
     hw.arm7_write_8(0x0400_01A0, 0x01);
     assert_eq!(hw.arm7_read_16(0x0400_01A0), 0xA001);
-    hw.arm7_write_8(0x0400_01A8, 0x99);
-    let card = saved(&hw.cart);
-    assert!(
-        card.windows(8)
-            .any(|bytes| bytes == [0x99, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]),
-        "the command's other bytes are the card's"
-    );
+    hw.arm7_write_8(0x0400_01A9, 0x00);
+    assert_eq!(transfer_word(&mut hw, Side::Arm7), card_word(0x1_2344));
 }

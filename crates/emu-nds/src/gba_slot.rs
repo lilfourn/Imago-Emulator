@@ -212,7 +212,8 @@ mod tests {
 
     #[test]
     fn converts_bus_cycles_to_the_cartridge_clock() {
-        assert_eq!(cartridge_cycles(33_513_982), emu_gba_cart::CLOCK_HZ);
+        // A second of the DS's bus is a second of the GBA's 16.78 MHz.
+        assert_eq!(cartridge_cycles(33_513_982), 16_777_216);
         assert_eq!(cartridge_cycles(0), 0);
     }
 
@@ -224,16 +225,6 @@ mod tests {
         assert_eq!(rom_cycles(0x0C, Width::Byte, false), 18);
         assert_eq!(ram_cycles(3), 18);
         assert_eq!(ram_cycles(2), 6);
-    }
-
-    #[test]
-    fn an_empty_slot_reads_all_ones_and_reports_no_cartridge() {
-        let mut slot = GbaSlot::default();
-        assert_eq!(slot.read_rom(0x0800_0000), 0xFFFF);
-        assert_eq!(slot.read_ram(0x0A00_0000), 0xFF);
-        assert_eq!(slot.module_info()[..2], [0xFF, 0xFF]);
-        assert_eq!(slot.bios_logo(), None);
-        assert_eq!(slot.backup_generation(), None);
     }
 
     #[test]

@@ -1122,7 +1122,7 @@ mod tests {
         larger.run_frame(&[], &mut Vec::new());
         assert_eq!(larger.screens()[0].size(), ScreenSize::new(768, 576));
         larger.set_render_scale(0);
-        assert_eq!(larger.screens()[0].size(), SCREEN);
+        assert_eq!(larger.screens()[0].size(), ScreenSize::new(256, 192));
         larger.set_render_scale(100);
         assert_eq!(larger.screens()[0].size(), ScreenSize::new(2048, 1536));
     }
@@ -1154,7 +1154,8 @@ mod tests {
         nds.run_frame(&[], &mut Vec::new());
         let first = nds.cycles();
         nds.run_frame(&[], &mut Vec::new());
-        assert_eq!(nds.cycles() - first, FRAME_CYCLES);
+        // 263 lines of 2130 bus cycles.
+        assert_eq!(nds.cycles() - first, 560_190);
     }
 
     #[test]
@@ -1217,16 +1218,14 @@ mod tests {
         assert_eq!([ram(0x027F_FC30), ram(0x027F_FC31)], [0, 0], "module ID");
         let codes: Vec<u8> = (0x027F_FC36..0x027F_FC3C).map(ram).collect();
         assert_eq!(codes, b"01TEST");
-        assert_eq!(
-            &nds.machine.hw.arm9_bios[gba_slot::BIOS_LOGO],
-            &gba[0x04..0xA0]
-        );
+        // The BIOS's copy of the logo, at 0xFFFF0020.
+        assert_eq!(&nds.machine.hw.arm9_bios[0x20..0xBC], &gba[0x04..0xA0]);
 
         let empty = Nds::new(&Media::new(&rom)).expect("valid header");
         let ram = |address: u32| empty.peek(0, address).unwrap_or(0);
         assert_eq!([ram(0x027F_FC30), ram(0x027F_FC31)], [0xFF, 0xFF]);
         assert!(
-            empty.machine.hw.arm9_bios[gba_slot::BIOS_LOGO]
+            empty.machine.hw.arm9_bios[0x20..0xBC]
                 .iter()
                 .all(|&byte| byte == 0)
         );

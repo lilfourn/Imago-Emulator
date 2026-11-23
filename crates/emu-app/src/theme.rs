@@ -205,12 +205,17 @@ mod tests {
     }
 
     #[test]
-    fn accents_are_named_in_the_file_and_blue_is_the_default() {
-        assert_eq!(Accent::default(), Accent::Blue);
-        for accent in Accent::ALL {
-            assert_eq!(Accent::from_name(accent.name()), Some(accent));
+    fn accents_keep_the_names_settings_files_have() {
+        for (accent, name) in [
+            (Accent::Blue, "blue"),
+            (Accent::Teal, "teal"),
+            (Accent::Green, "green"),
+            (Accent::Gold, "gold"),
+            (Accent::Violet, "violet"),
+        ] {
+            assert_eq!(accent.name(), name);
+            assert_eq!(Accent::from_name(name), Some(accent));
         }
         assert_eq!(Accent::from_name("Blue"), None);
-        assert_eq!(Accent::from_name("red"), None);
     }
 }

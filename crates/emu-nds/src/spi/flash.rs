@@ -195,6 +195,10 @@ impl Flash {
 pub(crate) mod tests {
     use super::*;
 
+    /// What a chip shifts out while it takes an instruction: nothing drives
+    /// the line, which reads high.
+    const IDLE: u8 = 0xFF;
+
     /// Runs one instruction: selects, shifts `bytes` through and releases.
     /// Returns the bytes shifted out.
     pub(crate) fn command(flash: &mut Flash, bytes: &[u8]) -> Vec<u8> {

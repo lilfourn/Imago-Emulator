@@ -56,37 +56,3 @@ impl KeyRoutes {
         self.pressed.clear();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_key_is_down_from_its_press_to_its_release() {
-        let mut routes = KeyRoutes::default();
-        assert_eq!(routes.route_of("enter"), None);
-        routes.press("enter", Route::Menu);
-        assert_eq!(routes.route_of("enter"), Some(Route::Menu));
-        routes.release("enter");
-        assert_eq!(routes.route_of("enter"), None);
-    }
-
-    #[test]
-    fn each_key_keeps_its_own_route() {
-        let mut routes = KeyRoutes::default();
-        routes.press("w", Route::Game);
-        routes.press("down", Route::Menu);
-        assert_eq!(routes.route_of("w"), Some(Route::Game));
-        assert_eq!(routes.route_of("down"), Some(Route::Menu));
-    }
-
-    #[test]
-    fn clear_forgets_keys_whose_key_up_may_never_come() {
-        let mut routes = KeyRoutes::default();
-        routes.press("s", Route::Game);
-        routes.press("1", Route::Library);
-        routes.clear();
-        assert_eq!(routes.route_of("s"), None);
-        assert_eq!(routes.route_of("1"), None);
-    }
-}

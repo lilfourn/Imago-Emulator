@@ -407,13 +407,15 @@ pub(crate) mod tests {
 
     /// The type of a chunk that is not encrypted.
     pub(crate) const PLAIN: u16 = 0;
+    /// The type of a chunk encrypted with the title key.
+    const ENCRYPTED: u16 = 0x0001;
 
     /// A TMD signed with RSA-2048 and SHA-256, as homebrew's are, listing
     /// `contents`, each an index, a type and a size.
     fn tmd(contents: &[(u16, u16, u64)]) -> Vec<u8> {
         let header = 0x140;
-        let records = header + TMD_HEADER_SIZE + CONTENT_INFO_SIZE;
-        let mut tmd = vec![0; records + CHUNK_RECORD_SIZE * contents.len()];
+        let records = header + 0xC4 + 0x900;
+        let mut tmd = vec![0; records + 0x30 * contents.len()];
         put(&mut tmd, 0, &0x0001_0004_u32.to_be_bytes());
         put(&mut tmd, 4, &[0x5A; 0x100]);
         put(&mut tmd, header, b"Root-CA00000003-CP0000000b");
@@ -424,7 +426,7 @@ pub(crate) mod tests {
             &(contents.len() as u16).to_be_bytes(),
         );
         for (number, &(index, kind, size)) in contents.iter().enumerate() {
-            let record = records + CHUNK_RECORD_SIZE * number;
+            let record = records + 0x30 * number;
             put(&mut tmd, record, &(number as u32).to_be_bytes());
             put(&mut tmd, record + 4, &index.to_be_bytes());
             put(&mut tmd, record + 6, &kind.to_be_bytes());
@@ -447,8 +449,8 @@ pub(crate) mod tests {
             .iter()
             .map(|bytes| bytes.len().next_multiple_of(64))
             .sum();
-        let mut image = vec![0; CIA_HEADER_SIZE];
-        put(&mut image, 0, &(CIA_HEADER_SIZE as u32).to_le_bytes());
+        let mut image = vec![0; 0x2020];
+        put(&mut image, 0, &0x2020_u32.to_le_bytes());
         for (number, section) in sections.iter().enumerate() {
             put(
                 &mut image,
@@ -459,7 +461,7 @@ pub(crate) mod tests {
         put(&mut image, 0x18, &(contents_size as u64).to_le_bytes());
         for &(index, _, bytes) in contents {
             if bytes.is_some() {
-                image[CONTENT_BITMAP + usize::from(index / 8)] |= 0x80 >> (index % 8);
+                image[0x20 + usize::from(index / 8)] |= 0x80 >> (index % 8);
             }
         }
         for part in sections.iter().map(Vec::as_slice).chain(stored) {
@@ -531,11 +533,7 @@ pub(crate) mod tests {
     fn a_title_encrypted_with_its_title_key_is_refused() {
         let dir = temp_dir("cia-title-key");
         let executable = ncch(true, &smdh(&[(1, "Test Game")]));
-        let path = write(
-            &dir,
-            "game.cia",
-            &cia(&[(0, ENCRYPTED_CONTENT, Some(&executable))]),
-        );
+        let path = write(&dir, "game.cia", &cia(&[(0, ENCRYPTED, Some(&executable))]));
         let games = dir.join("Games");
         let error = extract(&path, &games).expect_err("encrypted");
         assert!(matches!(error, CiaError::Encrypted(_)), "{error}");
@@ -642,7 +640,7 @@ pub(crate) mod tests {
             (0x10, &u32::MAX.to_le_bytes()),
             (0x18, &u64::MAX.to_le_bytes()),
             (0x18, &0x200_u64.to_le_bytes()),
-            (CONTENT_BITMAP, &[0]),
+            (0x20, &[0]),
             (tmd, &0xDEAD_BEEF_u32.to_be_bytes()),
             (tmd + 0x140 + 0x9E, &u16::MAX.to_be_bytes()),
             (tmd + 0x140 + 0xC4 + 0x900 + 8, &u64::MAX.to_be_bytes()),

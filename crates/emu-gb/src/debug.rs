@@ -245,10 +245,7 @@ mod tests {
             assert!(runs < 100_000, "the frame never ended");
         }
         let elapsed = gb.cycles() - start;
-        assert!(
-            (crate::CYCLES_PER_FRAME..crate::CYCLES_PER_FRAME + 16).contains(&elapsed),
-            "{elapsed}"
-        );
+        assert!((70_224..70_224 + 16).contains(&elapsed), "{elapsed}");
     }
 
     #[test]

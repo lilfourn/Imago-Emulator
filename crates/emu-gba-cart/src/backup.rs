@@ -419,7 +419,8 @@ mod tests {
     fn flash_reports_its_id_and_programs_bytes() {
         let mut backup = Backup::Flash(Flash::new(0x2_0000));
         command(&mut backup, 0x90);
-        assert_eq!((backup.read(0), backup.read(1)), FLASH_128K_ID);
+        // Macronix 128 KiB, ID 09C2h in GBATEK.
+        assert_eq!((backup.read(0), backup.read(1)), (0xC2, 0x09));
         command(&mut backup, 0xF0);
         command(&mut backup, 0xA0);
         assert!(backup.write(0x1234, 0x42));

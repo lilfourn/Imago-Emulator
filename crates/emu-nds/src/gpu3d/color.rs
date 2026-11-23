@@ -43,7 +43,9 @@ mod tests {
     fn channels_widen_and_pack() {
         assert_eq!(rgb6(0x7FFF), [63; 3]);
         assert_eq!(rgb6(0x0001), [3, 0, 0]);
-        let pixel = pack([1, 2, 3], 31);
+        // Red, green and blue in bits 0–17, alpha in bits 18–22.
+        let pixel = 1 | 2 << 6 | 3 << 12 | 31 << 18;
+        assert_eq!(pack([1, 2, 3], 31), pixel);
         assert_eq!((unpack(pixel), alpha(pixel)), ([1, 2, 3], 31));
     }
 }
