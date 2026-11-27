@@ -5,74 +5,214 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # RustSec publishes advisories whether or not anything here changes:
+  # a weekly run checks Cargo.lock against them and nothing else.
+  schedule:
+    - cron: '23 7 * * 1'
 
 permissions:
   contents: read
 
 concurrency:
   # Every commit on main keeps its run; a pull request keeps only its latest.
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
+# Where the jobs run. Linux runs on the cloud PC's runners
+# (scripts/ci/cloudpc), whose volumes keep each job's target directory
+# and checkout warm, so a run rebuilds only what the change touched. A
+# pull request from a fork runs on GitHub's runners instead: this
+# repository is public, and a fork's code never runs on the cloud PC.
+# Setting the repository variable CLOUDPC_LINUX to `off` (Settings >
+# Secrets and variables > Actions > Variables) sends everything to
+# GitHub's runners, for when the cloud PC is down.
+#
+# The `Check` job at the end passes only when every other job passed or
+# was skipped for a reason `changes` gave. Require it, and only it, in
+# branch protection: splitting or adding jobs then needs no ruleset change.
 jobs:
-  check:
-    name: macOS
-    # macOS minutes cost GitHub's most, and every change is checked on a
-    # Mac before it is pushed, so pull requests skip this job; pushes to
-    # main and manual runs keep it, with the recorded determinism values.
-    if: github.event_name != 'pull_request'
-    runs-on: macos-latest
+  # Which jobs the change needs (scripts/ci/changes.sh). Docs and release
+  # packaging skip the Rust jobs, a change outside site/ skips its tests,
+  # and cargo-deny runs when the dependencies change. Pushes to main run
+  # everything, and detection fails open: if the diff can't be read,
+  # everything runs.
+  changes:
+    name: Changes
+    runs-on: ${{ (vars.CLOUDPC_LINUX != 'off' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["cloudpc","general"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    outputs:
+      cloudpc: ${{ runner.environment == 'self-hosted' }}
+      rust: ${{ steps.detect.outputs.rust }}
+      site: ${{ steps.detect.outputs.site }}
+      advisories: ${{ steps.detect.outputs.advisories }}
+    steps:
+      # Depth 2 brings the base commit: a pull request checks out GitHub's
+      # merge commit, whose first parent is the base branch.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Detect affected jobs
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+          case "$EVENT_NAME" in
+            schedule) printf 'rust=false\nsite=false\nadvisories=true\n' ;;
+            pull_request)
+              if git diff --name-only --no-renames HEAD^1 HEAD >"$RUNNER_TEMP/changed"; then
+                scripts/ci/changes.sh "$RUNNER_TEMP/changed"
+              else
+                echo "Could not diff against the base branch; running everything." >&2
+                scripts/ci/changes.sh --full
+              fi ;;
+            *) scripts/ci/changes.sh --full ;;
+          esac | tee -a "$GITHUB_OUTPUT"
+
+  # Lint, tests and the smoke test each get a runner of their own, so they
+  # run side by side, and on the cloud PC each role keeps its own warm
+  # target directory: clippy's, the tests' and the app's builds share
+  # almost nothing, and one target directory would build them in turn.
+  lint:
+    name: Lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ needs.changes.outputs.cloudpc == 'true' && fromJSON('["cloudpc","lint"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: No Nintendo files
         run: scripts/check-no-nintendo-files.sh
-      # Bundles pinned to a release or commit: the Game Boy suites, jsmolka,
-      # armwrestler (GBA and DS) and rockwrestler. The mGBA suite is left
-      # out: its only download is a "latest" build that moves
-      # (scripts/fetch-mgba-suite.sh), so its test skips here.
-      - name: Fetch test ROMs
-        run: scripts/fetch-test-roms.sh
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: lint
       - name: Format
         run: cargo fmt --all --check
-      - name: Lint
+      - name: Clippy
+        if: success() || failure()
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # cargo-nextest runs every test binary at once; cargo test would run the
+  # crates' binaries one after another. Doctests, which nextest doesn't
+  # run, follow. The frame, sound and save-state digests every OS must
+  # match were recorded on macOS arm64 (scripts/determinism); that check
+  # runs in the background beside the tests, and reports in the last step,
+  # so neither result hides the other.
+  test:
+    name: Test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ needs.changes.outputs.cloudpc == 'true' && fromJSON('["cloudpc","test"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      # The mGBA suite is left out: its only download is a "latest" build
+      # that moves (scripts/fetch-mgba-suite.sh), so its test skips here.
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: test
+          test-roms: 'true'
+          nextest: 'true'
+      - name: Build the tests
+        id: build
+        run: |
+          cargo nextest run --workspace --no-run
+          cargo build -p emu-headless
+      - name: Start the determinism check
+        id: determinism
+        run: |
+          (
+            set +e
+            scripts/determinism/check.sh "${CARGO_TARGET_DIR:-target}/debug/emu-headless"
+            echo "$?" >"$RUNNER_TEMP/determinism-status"
+          ) >"$RUNNER_TEMP/determinism.log" 2>&1 </dev/null &
       - name: Test
-        run: cargo test --workspace
-      # The frame, sound and save-state digests every OS must match were
-      # recorded on macOS arm64; this keeps them true here, so a difference
-      # elsewhere is that OS's. Uses the emu-headless the tests built.
+        run: cargo nextest run --workspace --no-fail-fast
+      - name: Doctests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --workspace --doc
       - name: Determinism
-        if: ${{ !cancelled() }}
-        run: scripts/determinism/check.sh
+        if: ${{ !cancelled() && steps.determinism.outcome == 'success' }}
+        timeout-minutes: 5
+        run: |
+          until test -s "$RUNNER_TEMP/determinism-status"; do sleep 1; done
+          cat "$RUNNER_TEMP/determinism.log"
+          exit "$(cat "$RUNNER_TEMP/determinism-status")"
+
+  # The app started under Xvfb on Ubuntu 24.04, with Mesa's software
+  # Vulkan, and screenshotted (scripts/linux/smoke.sh). It gates on every
+  # check except those listed: closing the window panics in GPUI's X11
+  # client, as the app quits from its window-closed callback (stream 2,
+  # app shell).
+  smoke:
+    name: Smoke
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ needs.changes.outputs.cloudpc == 'true' && fromJSON('["cloudpc","smoke"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: smoke
+          linux-packages: smoke
+          test-roms: 'true'
+      - name: Build the app
+        run: cargo build -p emu-app
+      - name: Smoke test
+        env:
+          SMOKE_KNOWN_FAILURES: game.quit library.quit
+        run: |
+          status=0
+          scripts/linux/smoke.sh --bin "${CARGO_TARGET_DIR:-target}/debug/ds-emulator" "$RUNNER_TEMP/smoke" || status=$?
+          cat "$RUNNER_TEMP/smoke/summary.md" >>"$GITHUB_STEP_SUMMARY" || true
+          exit "$status"
+      - name: Smoke screenshots
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-linux-x86-64
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore
+          retention-days: 14
 
   # RustSec's advisories against Cargo.lock: a known vulnerability in any
   # dependency fails the run, and so does a crate the workspace depends on
   # directly that is no longer maintained (deny.toml says why not the
-  # deeper ones). The action runs cargo-deny in a container of its own,
-  # so it needs an x86-64 Linux runner.
+  # deeper ones).
   advisories:
     name: Advisories
-    runs-on: namespace-profile-default
-    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.advisories == 'true'
+    runs-on: ${{ needs.changes.outputs.cloudpc == 'true' && fromJSON('["cloudpc","general"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 10
     steps:
-      # Without the job's token left in the checkout: the action mounts the
-      # workspace into its container, where it runs a cargo-deny it
-      # downloads as it starts.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: ./.github/actions/setup
         with:
-          command: check advisories
+          cache-key: advisories
+          linux-packages: none
+          cargo-deny: 'true'
+      - run: cargo deny check advisories
 
   # imagoemulator.com's page (site/): its links, credits and Worker.
   site:
     name: Site
-    runs-on: namespace-profile-default
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
+    runs-on: ${{ needs.changes.outputs.cloudpc == 'true' && fromJSON('["cloudpc","general"]') || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -80,146 +220,56 @@ jobs:
           persist-credentials: false
       - run: node --test site/site.test.mjs
 
-  # Linux on Namespace's runners (the account's default profiles), on both
-  # x86-64 and arm64. The x86-64 one also starts the app under Xvfb and
-  # screenshots it (scripts/linux/smoke.sh).
-  linux:
-    name: Linux ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86-64
-            runner: namespace-profile-default
-            smoke: true
-          - arch: arm64
-            runner: namespace-profile-default-arm64
-            smoke: false
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: Linux packages
-        run: scripts/linux/install-build-deps.sh ${{ matrix.smoke && '--smoke' || '' }}
-      - name: No Nintendo files
-        run: scripts/check-no-nintendo-files.sh
-      - name: Fetch test ROMs
-        run: scripts/fetch-test-roms.sh
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      # With Caching turned on in the runner profile, Namespace attaches a
-      # cache volume: the registry and target/ stay on the machine's own
-      # disk, with nothing to download or upload. Without one, GitHub's
-      # cache, also kept when a step fails.
-      - name: Cache volume
-        id: volume
-        run: echo "attached=$([ -n "${NSC_CACHE_PATH:-}" ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
-      - name: Cargo cache (Namespace volume)
-        if: steps.volume.outputs.attached == 'true'
-        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
-        with:
-          cache: rust
-      - name: Cargo cache (GitHub)
-        if: steps.volume.outputs.attached != 'true'
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: ${{ matrix.arch }}
-          cache-on-failure: true
-      - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        if: success() || failure()
-        run: cargo test --workspace --no-fail-fast
-      - name: Determinism
-        if: ${{ !cancelled() }}
-        run: scripts/determinism/check.sh
-      - name: Build the app
-        if: ${{ matrix.smoke && !cancelled() }}
-        run: cargo build -p emu-app
-      # The smoke test that gates runs on Ubuntu 24.04, in the image built
-      # from scripts/linux/Dockerfile, with that release's Mesa; the app
-      # built on the runner runs there as it is. It gates on every check
-      # except those listed: closing the window panics in GPUI's X11
-      # client, as the app quits from its window-closed callback (stream 2,
-      # app shell).
-      - name: Smoke test (Ubuntu 24.04)
-        if: ${{ matrix.smoke && !cancelled() }}
-        run: |
-          docker build --load -q -t ds-emulator-linux:24.04 scripts/linux >/dev/null ||
-            docker build -q -t ds-emulator-linux:24.04 scripts/linux >/dev/null
-          status=0
-          docker run --rm --init -v "$PWD:$PWD" -w "$PWD" \
-            -e SMOKE_KNOWN_FAILURES="game.quit library.quit" \
-            ds-emulator-linux:24.04 sh -c \
-            'scripts/linux/smoke.sh target/smoke; status=$?; chown -R "$0" target/smoke; exit $status' \
-            "$(id -u):$(id -g)" || status=$?
-          cat target/smoke/summary.md >>"$GITHUB_STEP_SUMMARY" || true
-          exit "$status"
-      # The runner's own Ubuntu, 22.04 today, report-only: its Mesa (23.2)
-      # can't show software-Vulkan frames in GPUI's 32-bit window under
-      # Xvfb, so the picture stays black there (fixed in Mesa 24.0.2; the
-      # summary explains it). Hardware drivers aren't affected.
-      - name: Smoke test (the runner's Ubuntu, report-only)
-        if: ${{ matrix.smoke && !cancelled() }}
-        continue-on-error: true
-        env:
-          SMOKE_KNOWN_FAILURES: game.quit library.quit game.frame library.drawn
-        run: scripts/linux/smoke.sh target/smoke-runner
-      - name: Smoke screenshots
-        if: ${{ matrix.smoke && !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: smoke-linux-${{ matrix.arch }}
-          path: |
-            target/smoke
-            target/smoke-runner
-          if-no-files-found: ignore
-          retention-days: 14
-
-  # Windows on GitHub's runners (Namespace's Windows runners need its Team
-  # plan). After the tests, the same debug build starts the app on the
-  # runner's desktop and screenshots it (scripts/windows/smoke.ps1).
-  # The release build, which needs fxc.exe, is windows-release.yml.
+  # Windows on GitHub's runners, free for a public repository. With the
+  # repository variable CLOUDPC_WINDOWS set to `on`, a runner labelled
+  # cloudpc-windows on the cloud PC's Windows side takes it instead.
+  # After the tests, the same debug build starts the app on the runner's
+  # desktop and screenshots it (scripts/windows/smoke.ps1). The release
+  # build, which needs fxc.exe, is windows-release.yml.
   windows:
-    name: Windows x86-64
-    runs-on: windows-latest
-    # Lint and tests take about 55 minutes with nothing cached; the smoke
-    # and determinism steps after them about 10 more.
+    name: Windows
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ (vars.CLOUDPC_WINDOWS == 'on' && needs.changes.outputs.cloudpc == 'true') && fromJSON('["cloudpc-windows"]') || 'windows-latest' }}
     timeout-minutes: 90
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: Fetch test ROMs
-        run: scripts/fetch-test-roms.sh
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          cache-on-failure: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: windows
+          test-roms: 'true'
+          nextest: 'true'
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       # An RPG Maker game end to end in mkxp-z, the hosted Windows build,
       # downloaded into the test's own folders as a player's first game
-      # downloads it (crates/emu-mkxp/tests/mkxp_z.rs). Windows' software
-      # renderer, WARP, stands in for a GPU under ANGLE's Direct3D 11.
-      # Before the whole workspace's tests, which come near the job's time
-      # limit.
+      # downloads it (crates/emu-mkxp/tests/mkxp_z.rs). Without a GPU,
+      # Windows' software renderer, WARP, stands in under ANGLE's
+      # Direct3D 11.
       - name: RPG Maker player
         if: success() || failure()
         env:
           DS_EMULATOR_MKXP_Z: hosted
-        run: cargo test -p emu-mkxp --test mkxp_z -- --nocapture
+        run: cargo nextest run -p emu-mkxp --test mkxp_z --no-capture
       - name: Test
         if: success() || failure()
-        run: cargo test --workspace --no-fail-fast
+        run: cargo nextest run --workspace --no-fail-fast
+      - name: Doctests
+        if: success() || failure()
+        run: cargo test --workspace --doc
       # Report-only until a first Windows run shows what passes; then list
       # what fails in the known-failure variables and make these gate.
       - name: Determinism
         if: ${{ !cancelled() }}
         continue-on-error: true
-        run: scripts/determinism/check.sh
+        run: |
+          cargo build -p emu-headless
+          scripts/determinism/check.sh "${CARGO_TARGET_DIR:-target}/debug/emu-headless.exe"
       - name: Build the app
         if: ${{ !cancelled() }}
         run: cargo build -p emu-app
@@ -227,12 +277,98 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: true
         shell: pwsh
-        run: scripts/windows/smoke.ps1 -Out target/smoke
+        run: |
+          $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
+          scripts/windows/smoke.ps1 -Exe "$target/debug/ds-emulator.exe" -Out "$env:RUNNER_TEMP/smoke"
       - name: Smoke screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: smoke-windows-x86-64
-          path: target/smoke
+          path: ${{ runner.temp }}/smoke
           if-no-files-found: ignore
           retention-days: 14
+
+  # macOS minutes are GitHub's slowest, and every change is checked on a
+  # Mac before it is pushed, so only pushes to main and manual runs have
+  # this job; the determinism digests were recorded on macOS arm64.
+  macos:
+    name: macOS
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: macos
+          test-roms: 'true'
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        if: success() || failure()
+        run: cargo test --workspace --no-fail-fast
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        run: scripts/determinism/check.sh
+
+  # Linux arm64 on GitHub's arm64 runners, free for a public repository
+  # (the cloud PC is x86-64), as a backstop on main like macOS: arm64's
+  # arithmetic is checked on every change by the Mac already.
+  linux-arm64:
+    name: Linux arm64
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: arm64
+          test-roms: 'true'
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        if: success() || failure()
+        run: cargo test --workspace --no-fail-fast
+      - name: Determinism
+        if: ${{ !cancelled() }}
+        run: scripts/determinism/check.sh
+
+  # Branch protection requires this job, by its name `Check`. It fails when
+  # any other job fails, is cancelled, or is skipped without a reason, so
+  # splitting or adding jobs needs no ruleset change: add each new job to
+  # `needs` and, if it may skip, to the gates below. `always()` rather than
+  # `!cancelled()`: a skipped job reports success to branch protection, so a
+  # cancelled run must still produce a failing check.
+  check:
+    name: Check
+    if: always()
+    needs: [changes, lint, test, smoke, advisories, site, windows, macos, linux-arm64]
+    runs-on: ${{ needs.changes.outputs.cloudpc == 'true' && fromJSON('["cloudpc","general"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          # A job may skip only when the gate `changes` gave it is false; the
+          # main-only jobs may skip on other events.
+          echo "$RESULTS" | jq -e --arg event "$EVENT_NAME" '.changes.outputs as $gates
+            | {lint: "rust", test: "rust", smoke: "rust", windows: "rust",
+               advisories: "advisories", site: "site"} as $gate
+            | ["macos", "linux-arm64"] as $main_only
+            | all(to_entries[]; .key as $job
+                | .value.result == "success"
+                  or (.value.result == "skipped"
+                    and (($gate[$job] != null and $gates[$gate[$job]] == "false")
+                      or (($main_only | index($job)) != null
+                        and $event != "push" and $event != "workflow_dispatch"))))' >/dev/null
