@@ -1,0 +1,93 @@
+name: Set up a Rust job
+description: >-
+  What a Rust job in ci.yml needs before its first cargo command. On the
+  cloud PC's runners (scripts/ci/cloudpc) everything is in the image and
+  on its volumes already, so this only links the test ROMs. On GitHub's
+  runners it installs the same things and restores GitHub's cache.
+inputs:
+  cache-key:
+    description: The job's own key for GitHub's cargo cache, so jobs that build different things don't share one
+    required: true
+  linux-packages:
+    description: "'build', 'smoke' (also what scripts/linux/smoke.sh runs the app with) or 'none'"
+    default: build
+  test-roms:
+    description: "'true' to fetch the test ROMs (scripts/fetch-test-roms.sh)"
+    default: "false"
+  nextest:
+    description: "'true' to install cargo-nextest"
+    default: "false"
+  cargo-deny:
+    description: "'true' to install cargo-deny"
+    default: "false"
+runs:
+  using: composite
+  steps:
+    # The ROMs live on a volume there, fetched once per version.
+    - name: Test ROMs (cloud PC)
+      if: inputs.test-roms == 'true' && runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        ln -sfn "$IMAGO_CI_CACHE/test-roms" test-roms
+        scripts/fetch-test-roms.sh
+
+    # GitHub's runners from here on.
+    - name: Linux packages
+      if: runner.environment == 'github-hosted' && runner.os == 'Linux' && inputs.linux-packages != 'none'
+      shell: bash
+      run: scripts/linux/install-build-deps.sh ${{ inputs.linux-packages == 'smoke' && '--smoke' || '' }}
+
+    - name: Rust toolchain
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: rustup show active-toolchain || rustup toolchain install
+
+    - name: Cargo cache
+      if: runner.environment == 'github-hosted'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: ${{ inputs.cache-key }}
+        cache-on-failure: true
+
+    - name: Test ROM cache
+      if: inputs.test-roms == 'true' && runner.environment == 'github-hosted'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: test-roms
+        key: test-roms-${{ hashFiles('scripts/fetch-test-roms.sh') }}
+
+    - name: Test ROMs
+      if: inputs.test-roms == 'true' && runner.environment == 'github-hosted'
+      shell: bash
+      run: scripts/fetch-test-roms.sh
+
+    # The versions and digests the cloud PC's image has (its Dockerfile).
+    - name: cargo-nextest
+      if: inputs.nextest == 'true' && runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        version=0.9.151
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64)
+                target=x86_64-unknown-linux-gnu
+                sha=1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4 ;;
+            Windows-X64)
+                target=x86_64-pc-windows-msvc
+                sha=e51bdb4b5883df48f335381b287378edb244318fac65ae0adaf6b9e69298246b ;;
+            *) echo "::error::no cargo-nextest pinned for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
+        esac
+        curl -fsSL -o "$RUNNER_TEMP/nextest.tar.gz" \
+          "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-$target.tar.gz"
+        echo "$sha  $RUNNER_TEMP/nextest.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$HOME/.cargo/bin"
+
+    - name: cargo-deny
+      if: inputs.cargo-deny == 'true' && runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        version=0.20.2
+        curl -fsSL -o "$RUNNER_TEMP/deny.tar.gz" \
+          "https://github.com/EmbarkStudios/cargo-deny/releases/download/$version/cargo-deny-$version-x86_64-unknown-linux-musl.tar.gz"
+        echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $RUNNER_TEMP/deny.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/deny.tar.gz" -C "$HOME/.cargo/bin" --strip-components=1 \
+          "cargo-deny-$version-x86_64-unknown-linux-musl/cargo-deny"

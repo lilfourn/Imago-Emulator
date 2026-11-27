@@ -9,8 +9,10 @@ name: Linux and Windows release
 # go on a draft GitHub release of that name, for the Mac's disk image from
 # scripts/macos/release.sh to join by hand before it is published.
 #
-# Windows minutes are paid, so this never runs on pull requests or pushes
-# to a branch.
+# Releases build on GitHub's runners, free for a public repository, and
+# never on the cloud PC's CI runners: a package is built from a clean
+# machine, not from target directories pull requests have written to.
+# It never runs on pull requests or pushes to a branch.
 on:
   workflow_dispatch:
   push:
@@ -31,7 +33,7 @@ jobs:
   # smoke tests play, made once for every job below.
   notices:
     name: Notices
-    runs-on: namespace-profile-default
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -92,11 +94,11 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: namespace-profile-default
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             rustup: 20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
           - arch: aarch64
-            runner: namespace-profile-default-arm64
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             rustup: e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
     runs-on: ${{ matrix.runner }}
@@ -162,7 +164,7 @@ jobs:
           - { format: deb, image: 'ubuntu:24.04', slug: deb-ubuntu-24.04 }
           - { format: AppImage, image: 'ubuntu:22.04', slug: appimage-ubuntu-22.04 }
           - { format: AppImage, image: 'fedora:44', slug: appimage-fedora-44 }
-    runs-on: ${{ matrix.arch == 'x86_64' && 'namespace-profile-default' || 'namespace-profile-default-arm64' }}
+    runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     container: ${{ matrix.system.image }}
     timeout-minutes: 20
     steps:

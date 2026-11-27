@@ -27,7 +27,7 @@ fi
 
 # Only Ubuntu's own packages are needed. GitHub's images list them in
 # ubuntu.sources, beside other repositories that can be out of sync;
-# Namespace's images have no such file, so read everything they list.
+# images without that file (Ubuntu 22.04's) read everything they list.
 if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
     $sudo apt-get update -qq \
         -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" \
