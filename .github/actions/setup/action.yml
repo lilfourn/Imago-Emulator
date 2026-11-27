@@ -76,18 +76,23 @@ runs:
                 sha=e51bdb4b5883df48f335381b287378edb244318fac65ae0adaf6b9e69298246b ;;
             *) echo "::error::no cargo-nextest pinned for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
         esac
-        curl -fsSL -o "$RUNNER_TEMP/nextest.tar.gz" \
+        bin="$HOME/.cargo/bin"
+        # Relative names: Git Bash's tar reads D:\a\... as a remote host.
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o nextest.tar.gz \
           "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-$target.tar.gz"
-        echo "$sha  $RUNNER_TEMP/nextest.tar.gz" | sha256sum -c -
-        tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$HOME/.cargo/bin"
+        echo "$sha  nextest.tar.gz" | sha256sum -c -
+        tar -xzf nextest.tar.gz -C "$bin"
 
     - name: cargo-deny
       if: inputs.cargo-deny == 'true' && runner.environment == 'github-hosted'
       shell: bash
       run: |
         version=0.20.2
-        curl -fsSL -o "$RUNNER_TEMP/deny.tar.gz" \
+        bin="$HOME/.cargo/bin"
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o deny.tar.gz \
           "https://github.com/EmbarkStudios/cargo-deny/releases/download/$version/cargo-deny-$version-x86_64-unknown-linux-musl.tar.gz"
-        echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $RUNNER_TEMP/deny.tar.gz" | sha256sum -c -
-        tar -xzf "$RUNNER_TEMP/deny.tar.gz" -C "$HOME/.cargo/bin" --strip-components=1 \
+        echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  deny.tar.gz" | sha256sum -c -
+        tar -xzf deny.tar.gz -C "$bin" --strip-components=1 \
           "cargo-deny-$version-x86_64-unknown-linux-musl/cargo-deny"

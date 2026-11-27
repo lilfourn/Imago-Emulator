@@ -267,7 +267,9 @@ jobs:
       - name: Determinism
         if: ${{ !cancelled() }}
         continue-on-error: true
-        run: scripts/determinism/check.sh "${CARGO_TARGET_DIR:-target}/debug/emu-headless.exe"
+        run: |
+          cargo build -p emu-headless
+          scripts/determinism/check.sh "${CARGO_TARGET_DIR:-target}/debug/emu-headless.exe"
       - name: Build the app
         if: ${{ !cancelled() }}
         run: cargo build -p emu-app
