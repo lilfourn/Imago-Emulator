@@ -460,10 +460,12 @@ fn counts_the_frames_shown() {
 }
 
 /// A core that records, frame by frame, whether it was told the frame is
-/// looked at. Its frames last a millisecond.
+/// looked at, and the same of each frame its state was saved after. Its
+/// frames last a millisecond.
 struct Watched {
     shown: bool,
     seen: Arc<Mutex<Vec<bool>>>,
+    saved: Arc<Mutex<Vec<bool>>>,
     frames: [Frame; 1],
 }
 
@@ -494,7 +496,9 @@ impl Core for Watched {
 
     fn reset(&mut self) {}
 
-    fn save_state(&self, _: &mut Vec<u8>) {}
+    fn save_state(&self, _: &mut Vec<u8>) {
+        self.saved.lock().expect("unpoisoned").push(self.shown);
+    }
 
     fn load_state(&mut self, _: &[u8]) -> Result<(), StateError> {
         Ok(())
@@ -504,10 +508,12 @@ impl Core for Watched {
 #[test]
 fn fast_forward_shows_only_the_frames_a_display_has_room_for() {
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let saved = Arc::new(Mutex::new(Vec::new()));
     let loaded = Loaded {
         core: Box::new(Watched {
             shown: true,
             seen: Arc::clone(&seen),
+            saved: Arc::clone(&saved),
             frames: [Frame::new(SCREENS[0])],
         }),
         files: vec![GameFiles::of(&PathBuf::from("/nonexistent/watched.gba"))],
@@ -553,6 +559,11 @@ fn fast_forward_shows_only_the_frames_a_display_has_room_for() {
     let reached = published() - before;
     let ran = seen.lock().expect("unpoisoned").len() - ran;
     assert!(reached as usize <= ran / 3 + 1, "{reached} of {ran}");
+    // Rewind records only those too: a state saved after another may
+    // hold an earlier frame's picture.
+    let saved = saved.lock().expect("unpoisoned").clone();
+    assert!(saved.len() >= 20, "{} states", saved.len());
+    assert!(saved.iter().all(|&shown| shown));
 
     // Flat out, about one each millisecond, of frames that take no time.
     emulator.send(Command::SetSpeed(Speed::Unlimited));

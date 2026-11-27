@@ -20,7 +20,9 @@
 //! Fast-forward can run more frames than the display has refreshes for:
 //! three DS frames to two refreshes at 3× and 120 Hz. Only some are then
 //! shown ([`Lock::shown_every`]), evenly spaced where they can be, and
-//! the rest need no picture; the frames shown are what is locked.
+//! the rest need no picture; the frames shown are what is locked. A core
+//! whose pictures are most of its work shows fewer still: as many a
+//! second as at its own speed, however many refreshes there are.
 //!
 //! The margin follows how much the game's frames vary. A frame that takes
 //! longer than usual is ready later, and one that takes less is ready
@@ -290,7 +292,13 @@ impl Lock {
     /// those come no further apart than the system's own frames; and
     /// failing that, the fewest that last a refresh. A display not known
     /// counts as showing the system's own frames.
-    pub fn shown_every(&self, frame: Duration) -> u32 {
+    ///
+    /// `sparing`, for a core whose frames cost much less unseen
+    /// ([`emu_core::Core::unseen_frames_are_cheap`]), shows as few as
+    /// come no further apart than the system's own frames: the most that
+    /// together last a whole number of refreshes, and failing that, the
+    /// most there are.
+    pub fn shown_every(&self, frame: Duration, sparing: bool) -> u32 {
         let refresh = self.refresh.unwrap_or(self.native).as_secs_f64();
         let (frame, native) = (frame.as_secs_f64(), self.native.as_secs_f64());
         if frame <= 0.0 {
@@ -300,15 +308,17 @@ impl Lock {
         // frame's length and `refresh` a display's.
         let least = (refresh * (1.0 - TOLERANCE) / frame).ceil().max(1.0) as u32;
         let most = (native * (1.0 + TOLERANCE) / frame) as u32;
+        let even = |every: &u32| {
+            let refreshes = f64::from(*every) * frame / refresh;
+            (refreshes / refreshes.round() - 1.0).abs() <= TOLERANCE
+        };
+        if sparing {
+            return (least..=most).rev().find(even).unwrap_or(most.max(least));
+        }
         if least == 1 {
             return 1;
         }
-        (least..=most)
-            .find(|&every| {
-                let refreshes = f64::from(every) * frame / refresh;
-                (refreshes / refreshes.round() - 1.0).abs() <= TOLERANCE
-            })
-            .unwrap_or(least)
+        (least..=most).find(even).unwrap_or(least)
     }
 
     /// How long a display not known is taken to show each frame for, or
@@ -404,7 +414,7 @@ mod tests {
         let every = |native, refresh: Option<Duration>, frame| {
             let mut lock = Lock::new(native);
             lock.set_refresh(refresh);
-            lock.shown_every(frame)
+            lock.shown_every(frame, false)
         };
         let hz = |hz: f64| Some(Duration::from_secs_f64(1.0 / hz));
         // A refresh for every frame: all are shown, evenly or not.
@@ -427,6 +437,32 @@ mod tests {
         // A display not known shows the system's own frames.
         assert_eq!(every(DS, None, DS / 3), 3);
         assert_eq!(every(DS, None, DS), 1);
+    }
+
+    #[test]
+    fn a_sparing_core_shows_no_more_frames_than_at_its_own_speed() {
+        let every = |native, refresh: Option<Duration>, frame| {
+            let mut lock = Lock::new(native);
+            lock.set_refresh(refresh);
+            lock.shown_every(frame, true)
+        };
+        let hz = |hz: f64| Some(Duration::from_secs_f64(1.0 / hz));
+        // Sixty DS frames a second at any speed, on any display that has
+        // the refreshes: each for two at 120 Hz, as at its own speed.
+        for speed in [2, 3, 4] {
+            assert_eq!(every(DS, hz(120.0), DS / speed), speed, "{speed}x");
+            assert_eq!(every(DS, hz(240.0), DS / speed), speed, "{speed}x");
+            assert_eq!(every(DS, hz(60.0), DS / speed), speed, "{speed}x");
+            assert_eq!(every(DS, None, DS / speed), speed, "{speed}x");
+        }
+        assert_eq!(every(DS, hz(120.0), DS), 1);
+        // Nothing fits 144 Hz evenly: the system's own, as at its speed.
+        assert_eq!(every(DS, hz(144.0), DS / 3), 3);
+        // Between whole speeds, the most that come no further apart.
+        assert_eq!(every(DS, hz(120.0), DS.mul_f64(0.4)), 2);
+        assert_eq!(every(DS, hz(120.0), DS.mul_f64(2.0 / 3.0)), 1);
+        // A display slower than the system shows no more than it can.
+        assert_eq!(every(DS, hz(30.0), DS / 2), 4);
     }
 
     #[test]

@@ -1264,7 +1264,7 @@ impl Runner {
             trace::event("busy", &[trace::micros(now - turn)]);
             let step = speed.frame_step(frame_duration).map(|frame| {
                 let every = if self.hides_frames() {
-                    self.lock.shown_every(frame)
+                    self.shown_every(frame)
                 } else {
                     1
                 };
@@ -1290,16 +1290,29 @@ impl Runner {
             && self.debug.pending.is_none()
     }
 
+    /// How many of fast-forward's frames, asked to last `frame` each, go
+    /// by for each one shown ([`Lock::shown_every`]).
+    fn shown_every(&self, frame: Duration) -> u32 {
+        let sparing = self.loaded.core.unseen_frames_are_cheap();
+        self.lock.shown_every(frame, sparing)
+    }
+
     /// Whether the frame starting at `now` is shown: every frame, or of
     /// fast-forward's those the display has refreshes for
-    /// ([`Lock::shown_every`]), and flat out one for each refresh.
+    /// ([`Runner::shown_every`]), and flat out one for each refresh, or
+    /// for each of the system's own frames if its unseen ones are cheap.
     fn shows(&mut self, now: Instant, frame_duration: Duration) -> bool {
         let shown = !self.hides_frames()
             || match self.speed.frame_step(frame_duration) {
-                Some(frame) => self.unshown + 1 >= self.lock.shown_every(frame),
-                None => self.shown_at.is_none_or(|at| {
-                    now.saturating_duration_since(at) >= self.lock.refresh_or_native()
-                }),
+                Some(frame) => self.unshown + 1 >= self.shown_every(frame),
+                None => {
+                    let mut apart = self.lock.refresh_or_native();
+                    if self.loaded.core.unseen_frames_are_cheap() {
+                        apart = apart.max(frame_duration);
+                    }
+                    self.shown_at
+                        .is_none_or(|at| now.saturating_duration_since(at) >= apart)
+                }
             };
         if shown {
             self.unshown = 0;
@@ -1609,6 +1622,11 @@ impl Runner {
     /// thread has caught up.
     fn record_for_rewind(&mut self, frame_duration: Duration) {
         if !self.loaded.core.saves_every_frame() {
+            return;
+        }
+        // A frame nobody looked at may leave an earlier frame's picture
+        // in its state, which rewinding to it would show.
+        if !self.showing {
             return;
         }
         let now = Instant::now();

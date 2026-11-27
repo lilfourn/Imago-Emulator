@@ -209,8 +209,18 @@ impl Hardware {
     }
 
     /// Both 2D engines draw `line` into their screens; a running capture
-    /// takes engine A's line.
+    /// takes engine A's line. In a frame nobody looks at, a line is drawn
+    /// only for a capture to take: the screens keep the last frame that
+    /// was looked at, and the 3D engine's line is not asked for.
     pub(crate) fn draw_line(&mut self, line: u16) {
+        let shown = self.gpu3d.shown();
+        if !shown {
+            self.engine_b.skip_line(line);
+            if !self.capturing {
+                self.engine_a.skip_line(line);
+                return;
+            }
+        }
         let index = usize::from(line);
         let vram = &self.vram;
         // POWCNT1 bit 2 powers the 3D rendering engine.
@@ -225,6 +235,9 @@ impl Hardware {
         if self.capturing {
             self.capture(line);
         }
+        if !shown {
+            return;
+        }
         self.engine_b.render_line(
             line,
             &self.vram.engine(Engine::B),
@@ -232,7 +245,7 @@ impl Hardware {
             None,
             &mut self.screen_b.as_chunks_mut().0[index],
         );
-        if self.scaled.scale > 1 && self.gpu3d.shown() {
+        if self.scaled.scale > 1 {
             self.draw_scaled_line(index);
         }
     }
@@ -357,11 +370,11 @@ impl Hardware {
     }
 
     /// Says whether the frames drawn from now on are looked at. The
-    /// larger screens and the larger 3D frame are not drawn for the
-    /// rest, and keep the last frame that was; the native screens, which
-    /// display capture reads and states save, are drawn all the same.
-    /// Say it as a frame starts, before its 3D is drawn (line 214) and
-    /// its lines are: a frame that changes part-way comes out part old.
+    /// screens, native and larger, and the 3D frame are not drawn for
+    /// the rest, and keep the last frame that was, but for what a display
+    /// capture reads, which is drawn as ever. Say it as a frame starts,
+    /// before its 3D is drawn (line 214) and its lines are: a frame that
+    /// changes part-way comes out part old.
     pub(crate) fn show(&mut self, shown: bool) {
         self.gpu3d.show(shown);
     }
@@ -538,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_nobody_looks_at_leaves_the_larger_screens_alone() {
+    fn a_frame_nobody_looks_at_leaves_the_screens_alone() {
         const RED: u32 = 0x001F;
         const GREEN: u32 = 0x03E0;
         let mut seen = drawing_3d();
@@ -559,9 +572,10 @@ mod tests {
         }
         let green = larger_a(&seen);
         assert_eq!(green[192 * 512 + 128], 0xFF00_FF00);
-        // The game's own frame is drawn all the same, for capture and
-        // states; the larger screen keeps the frame looked at last.
-        assert!(unseen.screen_a == seen.screen_a);
+        // Neither the game's own screen nor the larger one is drawn:
+        // both keep the frame looked at last.
+        assert_eq!(seen.screen_a[96 * 256 + 64], 0xFF00_FF00);
+        assert_eq!(unseen.screen_a[96 * 256 + 64], 0xFFFF_0000);
         assert!(larger_a(&unseen) == red);
 
         // Looked at again, the same frame comes out as if every frame
@@ -573,6 +587,32 @@ mod tests {
         }
         assert!(larger_a(&unseen) == green);
         assert!(larger_a(&seen) == green);
+        assert!(unseen.screen_a == seen.screen_a);
+    }
+
+    #[test]
+    fn a_capture_takes_a_frame_nobody_looks_at_all_the_same() {
+        const GREEN: u32 = 0x03E0;
+        let mut seen = drawing_3d();
+        let mut unseen = drawing_3d();
+        unseen.show(false);
+        for hw in [&mut seen, &mut unseen] {
+            hw.arm9_write_8(0x0400_0240, 0x80); // bank A, for the capture
+            send_quad_and_run(hw, GREEN);
+            // The frame that shows the quad, captured whole from the
+            // screen into bank A.
+            hw.arm9_write_32(0x0400_0064, 1 << 31 | 3 << 20);
+            run_frame(hw);
+        }
+        let captured = |hw: &Hardware| -> Vec<u16> {
+            (0..256 * 192)
+                .map(|pixel| hw.vram.read_16(Region::Lcdc, pixel * 2))
+                .collect()
+        };
+        let frame = captured(&seen);
+        assert_eq!(frame[96 * 256 + 64], 0x8000 | GREEN as u16);
+        assert_eq!(frame[96 * 256 + 192], 0x8000 | 0x7C00, "the rear plane");
+        assert!(captured(&unseen) == frame);
     }
 
     #[test]

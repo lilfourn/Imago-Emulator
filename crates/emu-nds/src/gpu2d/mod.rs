@@ -211,6 +211,16 @@ impl Engine2d {
         self.registers.step_affine();
     }
 
+    /// Goes past `line` without drawing it, for a frame nobody looks at:
+    /// all that [`Engine2d::render_line`] leaves behind for the lines
+    /// after it, the affine backgrounds' place.
+    pub(crate) fn skip_line(&mut self, line: u16) {
+        if line == 0 {
+            self.registers.reload_affine();
+        }
+        self.registers.step_affine();
+    }
+
     /// Composes `line`'s BG, 3D and OBJ layers, drawn into `layers`, into
     /// 18-bit colours. Returns whether the 3D layer was drawn as BG0.
     fn graphics_line(
@@ -489,6 +499,12 @@ mod tests {
         assert_eq!(render(&mut engine, &vram, 1)[0], argb(GREEN));
         // Line 0 reloads the reference point.
         assert_eq!(render(&mut engine, &vram, 0)[0], argb(RED));
+        // A line gone past without drawing moves it as a drawn one does.
+        engine.skip_line(0);
+        assert_eq!(render(&mut engine, &vram, 1)[0], argb(GREEN));
+        engine.skip_line(0);
+        engine.skip_line(1);
+        assert_eq!(render(&mut engine, &vram, 2)[0], argb(0));
     }
 
     #[test]

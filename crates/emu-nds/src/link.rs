@@ -243,6 +243,10 @@ impl Core for Linked {
         }
     }
 
+    fn unseen_frames_are_cheap(&self) -> bool {
+        self.players[0].unseen_frames_are_cheap()
+    }
+
     fn reset(&mut self) {
         self.resume = None;
         for nds in &mut self.players {

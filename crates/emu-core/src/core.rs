@@ -70,13 +70,25 @@ pub trait Core: Send {
     /// picture needs, and [`Core::screens`] may keep an earlier frame's.
     ///
     /// This is a display setting, as [`Core::set_render_scale`] is:
-    /// emulation, audio and save states are the same either way, and the
-    /// frames that are looked at come out as if every frame were. Frames
-    /// are looked at until this says otherwise. Say it between frames;
-    /// during one a debugger stopped part-way, it waits for the next.
-    /// Cores with nothing to leave out ignore it.
+    /// emulation and audio are the same either way, and the frames that
+    /// are looked at come out as if every frame were. So do save states,
+    /// but for the picture one may hold to show when it is loaded: after
+    /// a frame not looked at, that may be the last frame's that was, so
+    /// a state whose picture matters is saved after a frame that is.
+    /// Frames are looked at until this says otherwise. Say it between
+    /// frames; during one a debugger stopped part-way, it waits for the
+    /// next. Cores with nothing to leave out ignore it.
     fn set_frames_shown(&mut self, shown: bool) {
         let _ = shown;
+    }
+
+    /// Whether a frame not looked at ([`Core::set_frames_shown`]) costs
+    /// this core much less to run than one that is. Fast-forward then
+    /// shows no more frames a second than the system does at its own
+    /// speed, where for other cores it shows as many as the display has
+    /// refreshes for.
+    fn unseen_frames_are_cheap(&self) -> bool {
+        false
     }
 
     /// Power-cycles the system. The loaded game and its backup memory stay.

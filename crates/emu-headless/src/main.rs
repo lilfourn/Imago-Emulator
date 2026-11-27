@@ -4,7 +4,8 @@
 //! ```text
 //! emu-headless [--system gb|gba|nds|3ds] [--frames N] [--start-time SECS] [--dump DIR]
 //!              [--wav FILE] [--script FILE.lua] [--work-dir DIR] [--state FILE]
-//!              [--backup FILE] [--scale N] [--show-every N] [--time] [--digest] ROM
+//!              [--backup FILE] [--scale N] [--show-every N] [--keys PATTERN] [--time]
+//!              [--digest] ROM
 //! ```
 //!
 //! `--backup FILE` starts the game with a battery save, such as the
@@ -51,6 +52,11 @@
 //!   looked at and the rest are not (`Core::set_frames_shown`). The last
 //!   frame is always looked at, so the screens' lines, like the digest,
 //!   are the same as without it. Not with `--script`;
+//! - `--keys PATTERN` holds buttons, so a checkpoint's player walks
+//!   instead of standing: `left:40,down:40,none:20` holds Left for 40
+//!   frames, Down for 40 and nothing for 20, over and over. Buttons held
+//!   together are joined with `+` (`b+right:30`). Not with `--script`,
+//!   which presses its own;
 //! - `--time` adds a line with how long the frames took to run:
 //!   `elapsed_ms=… ms_per_frame=… fps=…`;
 //! - `--digest` adds a line with the CRC-32s of every sound sample made
@@ -65,13 +71,13 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use emu_core::debug::Stops;
-use emu_core::{Core, Frame, Input, Media, StereoSample, System};
+use emu_core::{Buttons, Core, Frame, Input, Media, StereoSample, System};
 use emu_script::{Output, Script, StateRequest};
 
 const USAGE: &str = "usage: emu-headless [--system gb|gba|nds|3ds] [--frames N] \
                      [--start-time SECS] [--dump DIR] [--wav FILE] [--script FILE.lua] \
                      [--work-dir DIR] [--state FILE] [--backup FILE] [--scale N] \
-                     [--show-every N] [--time] [--digest] ROM";
+                     [--show-every N] [--keys PATTERN] [--time] [--digest] ROM";
 
 struct Args {
     rom: PathBuf,
@@ -86,6 +92,7 @@ struct Args {
     backup: Option<PathBuf>,
     scale: Option<u32>,
     show_every: u64,
+    keys: Vec<Buttons>,
     time: bool,
     digest: bool,
 }
@@ -124,6 +131,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     let mut backup = None;
     let mut scale = None;
     let mut show_every = 1;
+    let mut keys = Vec::new();
     let mut time = false;
     let mut digest = false;
     while let Some(arg) = argv.next() {
@@ -147,6 +155,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
                     bail!("--show-every counts from 1");
                 }
             }
+            "--keys" => keys = parse_keys(&value("--keys")?).context("--keys")?,
             "--time" => time = true,
             "--digest" => digest = true,
             "-h" | "--help" => bail!("help requested"),
@@ -168,9 +177,35 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> anyhow::Result<Args> {
         backup,
         scale,
         show_every,
+        keys,
         time,
         digest,
     })
+}
+
+/// The buttons held in each frame of one round of `pattern`, as `--keys`
+/// takes it: `left:40,b+right:30,none:20`.
+fn parse_keys(pattern: &str) -> anyhow::Result<Vec<Buttons>> {
+    let mut frames = Vec::new();
+    for step in pattern.split(',') {
+        let (names, count) = step
+            .split_once(':')
+            .with_context(|| format!("{step:?} is not BUTTONS:FRAMES"))?;
+        let count: usize = count.parse().with_context(|| format!("{step:?}"))?;
+        let held = if names == "none" {
+            Buttons::NONE
+        } else {
+            names
+                .split('+')
+                .map(str::parse)
+                .collect::<Result<Buttons, _>>()?
+        };
+        frames.extend(std::iter::repeat_n(held, count));
+    }
+    if frames.is_empty() {
+        bail!("no frames in {pattern:?}");
+    }
+    Ok(frames)
 }
 
 fn run(args: &Args) -> anyhow::Result<()> {
@@ -193,9 +228,13 @@ fn run(args: &Args) -> anyhow::Result<()> {
     let frames = match &args.script {
         Some(path) => run_script(path, &mut *core, args, &mut audio, &mut audio_crc, &mut out)?,
         None => {
-            let inputs = vec![Input::default(); core.info().players.max(1)];
+            let mut inputs = vec![Input::default(); core.info().players.max(1)];
+            let mut keys = args.keys.iter().cycle();
             for frame in 1..=args.frames {
                 let keep = audio.len();
+                if let Some(&held) = keys.next() {
+                    inputs[0].buttons = held;
+                }
                 if args.show_every > 1 {
                     let shown = frame % args.show_every == 0 || frame == args.frames;
                     core.set_frames_shown(shown);
@@ -502,4 +541,25 @@ fn write_ppm(path: &Path, frame: &Frame) -> io::Result<()> {
         file.write_all(&[r, g, b])?;
     }
     file.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use emu_core::Button;
+
+    #[test]
+    fn keys_hold_each_step_for_its_frames() {
+        let frames = parse_keys("left:2,b+right:1,none:1").expect("a pattern");
+        let left: Buttons = [Button::Left].into_iter().collect();
+        let both: Buttons = [Button::B, Button::Right].into_iter().collect();
+        assert_eq!(frames, [left, left, both, Buttons::NONE]);
+    }
+
+    #[test]
+    fn keys_refuse_what_they_cannot_read() {
+        for pattern in ["", "left", "left:x", "jump:3", "left:0", "none:0,a:0"] {
+            assert!(parse_keys(pattern).is_err(), "{pattern:?}");
+        }
+    }
 }

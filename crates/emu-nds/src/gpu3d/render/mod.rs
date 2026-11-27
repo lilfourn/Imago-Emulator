@@ -39,9 +39,10 @@
 //! overworld that is 57 frames in 100, and standing still about 85.
 //!
 //! Fast-forward runs frames nobody looks at ([`Renderer::show`]). Their
-//! native frame is drawn all the same, as the game may read it, and their
-//! larger frame is not: it keeps an earlier frame's picture until the
-//! next frame that is looked at.
+//! larger frame is not drawn: it keeps an earlier frame's picture until
+//! the next frame that is looked at. Nor is their native frame, unless
+//! something reads it after all ([`Renderer::line`]), as a display
+//! capture does; it is drawn then, and comes out the same.
 
 mod pixel;
 mod post;
@@ -162,11 +163,14 @@ pub(crate) struct Renderer {
     receiver: Receiver<Drawn>,
     /// Bands out with the workers.
     drawing: usize,
-    /// Whether the native bands hold [`Self::scene`], drawn or being
-    /// drawn: a frame of the same scene then needs no drawing.
+    /// Whether [`Self::frames`] has counted [`Self::scene`]: a frame of
+    /// the same scene then changes nothing.
     current: bool,
-    /// The same for the larger bands, which miss the scenes of frames
-    /// nobody looked at.
+    /// Whether the native bands hold [`Self::scene`], drawn or being
+    /// drawn. They miss the scenes of frames nobody looked at until one
+    /// is read.
+    native_current: bool,
+    /// The same for the larger bands.
     larger_current: bool,
     /// Whether the frame under way is looked at ([`Renderer::show`]).
     shown: bool,
@@ -190,6 +194,7 @@ impl Default for Renderer {
             receiver,
             drawing: 0,
             current: false,
+            native_current: false,
             larger_current: false,
             shown: true,
             frames: 0,
@@ -245,7 +250,8 @@ impl Renderer {
 
     /// Says whether the frames drawn from now on are looked at. While
     /// they are not, [`Renderer::render`] leaves the larger frame as it
-    /// is, an earlier frame's picture.
+    /// is, an earlier frame's picture, and draws the native one only
+    /// once [`Renderer::line`] reads it.
     pub(crate) fn show(&mut self, shown: bool) {
         self.shown = shown;
     }
@@ -256,9 +262,16 @@ impl Renderer {
         self.shown
     }
 
+    /// How many bands are out with the workers.
+    #[cfg(test)]
+    pub(crate) fn drawing(&self) -> usize {
+        self.drawing
+    }
+
     /// Draws `list` with the rendering registers in `config`, reading
     /// textures from `vram` now. The drawing finishes on the workers;
     /// [`Renderer::line`] and [`Renderer::take_scaled_frame`] wait for it.
+    /// A frame nobody looks at is only made ready to draw.
     pub(crate) fn render(&mut self, list: &PolygonList, config: &RenderConfig, vram: &Vram) {
         self.finish();
         if list.polygons.is_empty() && !config.rear_bitmap {
@@ -294,35 +307,48 @@ impl Renderer {
             self.larger_current = false;
         }
         // A game that draws 30 frames a second shows each of them twice:
-        // the bands already hold this one. The larger ones may not, after
-        // frames nobody looked at; they are drawn here without the count
-        // going up, as the lines drawn around them last were around an
-        // earlier frame's.
-        let native = !self.current;
-        let larger = self.shown && self.scale > 1 && !self.larger_current;
-        self.frames += u64::from(native || was_uniform);
+        // the bands already hold this one. They may not, after frames
+        // nobody looked at; they are drawn here without the count going
+        // up, as the lines drawn around them last were around an earlier
+        // frame's.
+        let fresh = !self.current;
+        self.native_current &= !fresh;
+        self.frames += u64::from(fresh || was_uniform);
         self.current = true;
-        self.larger_current |= larger;
         // Native bands first: their lines are needed first.
         let mut jobs = Vec::with_capacity(self.native.len() + self.larger.len());
-        for (resolution, bands, draw) in [
-            (Resolution::Native, &mut self.native, native),
-            (Resolution::Larger, &mut self.larger, larger),
-        ] {
-            if !draw {
-                continue;
-            }
-            for (index, band) in bands.iter_mut().enumerate() {
-                let buffers = band.buffers.take().expect("every band is back");
-                jobs.push(draw_job(
-                    Arc::clone(&self.scene),
-                    buffers,
-                    (resolution, index),
-                    self.sender.clone(),
-                ));
-            }
+        if self.shown && !self.native_current {
+            self.native_current = true;
+            self.band_jobs(Resolution::Native, &mut jobs);
         }
-        self.drawing = jobs.len();
+        if self.shown && self.scale > 1 && !self.larger_current {
+            self.larger_current = true;
+            self.band_jobs(Resolution::Larger, &mut jobs);
+        }
+        self.start(jobs);
+    }
+
+    /// Adds to `jobs` one for each band of the `resolution` frame, drawing
+    /// it from the scene. Every band of it must be back.
+    fn band_jobs(&mut self, resolution: Resolution, jobs: &mut Vec<Job>) {
+        let bands = match resolution {
+            Resolution::Native => &mut self.native,
+            Resolution::Larger => &mut self.larger,
+        };
+        for (index, band) in bands.iter_mut().enumerate() {
+            let buffers = band.buffers.take().expect("every band is back");
+            jobs.push(draw_job(
+                Arc::clone(&self.scene),
+                buffers,
+                (resolution, index),
+                self.sender.clone(),
+            ));
+        }
+    }
+
+    /// Hands `jobs`, each drawing a band, to the workers.
+    fn start(&mut self, jobs: Vec<Job>) {
+        self.drawing += jobs.len();
         if !jobs.is_empty() {
             self.workers.run(jobs);
         }
@@ -336,7 +362,7 @@ impl Renderer {
     }
 
     /// Row `y` of the last frame drawn, waiting for it if it is still
-    /// drawing.
+    /// drawing, and drawing it first if nobody was to look at it.
     pub(crate) fn line(&mut self, y: usize) -> &[u32; WIDTH] {
         static BLANK: [u32; WIDTH] = [0; WIDTH];
         if self.uniform.is_some() {
@@ -345,6 +371,12 @@ impl Renderer {
             } else {
                 &BLANK
             };
+        }
+        if !self.native_current && !self.native.is_empty() {
+            self.native_current = true;
+            let mut jobs = Vec::with_capacity(self.native.len());
+            self.band_jobs(Resolution::Native, &mut jobs);
+            self.start(jobs);
         }
         let Some(index) = self.native.iter().position(|band| band.owned.contains(&y)) else {
             return &BLANK;
@@ -739,17 +771,19 @@ mod tests {
 
     #[test]
     fn a_panic_while_drawing_reaches_the_reader() {
-        let mut renderer = Renderer {
-            native: bands(1, 1),
-            ..Renderer::default()
-        };
         // A drawing order naming a polygon the list does not have.
         let broken = Scene {
             order: vec![7],
             ..Scene::default()
         };
+        // Its one band is out being drawn.
+        let mut renderer = Renderer {
+            native: bands(1, 1),
+            native_current: true,
+            drawing: 1,
+            ..Renderer::default()
+        };
         let buffers = renderer.native[0].buffers.take().expect("not drawing");
-        renderer.drawing = 1;
         let job = draw_job(
             Arc::new(broken),
             buffers,

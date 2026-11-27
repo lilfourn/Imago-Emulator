@@ -128,3 +128,46 @@ refreshes for, and the rest are run without a picture.
   was. In the app at 3× the trace showed 180 frames run and 60 shown a
   second, 16.7 ms apart. Its CPU with the window in view was not
   measured: the bench ran behind other windows, which draw nothing.
+
+Update, 2026-11-27: the owner plays the DS at 4× and found it loading
+the Mac. Walking in randomized HeartGold from a checkpoint, 3D at 2×,
+the core used 2.2 processors' time at 4×: more than half of it drawing
+the larger 3D picture, which at 4× on a 120 Hz display was drawn for
+every scene the game made, as every second frame was shown and the game
+makes a scene every second frame. Two changes.
+- **A core whose unseen frames are cheap is shown fewer.** The DS core
+  says so (`Core::unseen_frames_are_cheap`), and fast-forward then shows
+  it no more frames a second than it has at its own speed, on any
+  display: one in two at 2×, one in three at 3× and one in four at 4×,
+  each for two refreshes at 120 Hz, and flat out one each 16.7 ms
+  (`Lock::shown_every`, sparing). So 4× shows 60 pictures a second where
+  it showed 120, as 3× always has, and a 240 Hz display no longer has
+  every frame of 4× drawn. Other cores gain little from a frame not
+  shown and keep as many as the display has refreshes for.
+- **The DS draws nothing for a frame nobody looks at.** It left out the
+  larger picture; it now leaves out the native screens and native 3D
+  too, and only moves the affine backgrounds' place on
+  (`Engine2d::skip_line`). A display capture still gets its lines: the
+  3D frame is drawn when its first line is read (`Renderer::line`), and
+  engine A draws the lines a capture takes. The cost is in save states,
+  which keep the screens to show when one is loaded: after a frame not
+  shown they hold the last shown frame's, so `Core::set_frames_shown`
+  now promises the same state only after a frame that was shown, and
+  rewind records only those. A state the player saves mid fast-forward
+  holds the picture last on screen, up to three frames old, until the
+  game runs again.
+- **Measured** with `emu-headless --keys` walking the player from the
+  checkpoint, 800 frames, 3D at 2×, as 4× showed them before (`--show-every
+  2`) and shows them now (`4`): 148.0 to 104.6 billion instructions
+  (29% fewer) and 26.1 to 18.9 billion cycles; a wild battle, 116.9 to
+  79.2 billion (32%); standing still, 115.4 to 101.2 billion (12%);
+  Platinum, 87.6 to 75.9 billion (13%). Sound, the final state and the
+  final screens were the same to the bit in every run, at `--show-every`
+  1, 2, 4 and 7. In the app at 4×, behind other windows but drawing,
+  from the owner's own checkpoint (a conversation on a route): 240
+  frames run and 60 shown a second where 120 were, evenly, on 82% of a
+  processor where it took 96%.
+- **Left**: drawing a scene costs about 1,000 instructions a screen
+  pixel at 2×, and that is now two thirds of what a shown frame costs.
+  Keeping the last texel read for the next pixel was tried and gained
+  1.6%. The rasterizer's loop over a row wants restructuring, or the GPU.
