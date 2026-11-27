@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_nobody_looks_at_is_not_drawn_larger() {
+    fn a_frame_nobody_looks_at_is_drawn_only_if_it_is_read() {
         let vram = Vram::default();
         let start = |color: u32| {
             let mut gpu = Gpu3d::new();
@@ -527,16 +527,30 @@ mod tests {
         let mut gpu = start(0x001F);
         let red = scaled_frame(&mut gpu, 2);
         let drawn = gpu.frame_count();
-        // A green frame nobody looks at: the game's own frame is drawn,
-        // and the larger one keeps the red.
+        // A green frame nobody looks at: nothing is drawn. The game's own
+        // frame is once it is read, as a capture reads it, and the larger
+        // one keeps the red.
         gpu.show(false);
         send(&mut gpu, COLOR, &[0x03E0]);
         quad(&mut gpu, [-ONE, -ONE, 0, ONE], 0);
         finish(&mut gpu, &vram);
         assert!(!gpu.shown());
         assert_eq!(gpu.frame_count(), drawn + 1);
+        assert_eq!(gpu.renderer.drawing(), 0);
         assert_eq!(pixel(&mut gpu, 64, 96), opaque([0, 63, 0]));
         assert!(scaled_frame(&mut gpu, 2) == red);
+        // One never read is not drawn at all: the frame after it, looked
+        // at, is the same as if it had been.
+        send(&mut gpu, COLOR, &[0x7C00]);
+        quad(&mut gpu, [-ONE, -ONE, 0, ONE], 0);
+        finish(&mut gpu, &vram);
+        assert_eq!(gpu.frame_count(), drawn + 2);
+        assert_eq!(gpu.renderer.drawing(), 0);
+        send(&mut gpu, COLOR, &[0x03E0]);
+        quad(&mut gpu, [-ONE, -ONE, 0, ONE], 0);
+        finish(&mut gpu, &vram);
+        assert_eq!(gpu.frame_count(), drawn + 3);
+        let drawn = drawn + 2;
         // The same frame, looked at: its larger frame is drawn now, as
         // one looked at from the start is.
         gpu.show(true);

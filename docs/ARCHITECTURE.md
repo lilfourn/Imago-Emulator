@@ -69,6 +69,7 @@ pub trait Core: Send {
     fn set_render_scale(&mut self, scale: u32);        // DS: 3D at N× resolution, display only
     fn set_texture_upscaling(&mut self, upscaling: TextureUpscaling); // 3DS: textures, display only
     fn set_frames_shown(&mut self, shown: bool);       // false: fast-forward frames nobody sees
+    fn unseen_frames_are_cheap(&self) -> bool;         // DS: fast-forward then shows fewer frames
     fn reset(&mut self);
     fn save_state(&self, out: &mut Vec<u8>);
     fn load_state(&mut self, state: &[u8]) -> Result<(), StateError>;
@@ -132,18 +133,22 @@ pub trait Core: Send {
   resolution. Touch points and layouts stay in `CoreInfo::screens` pixels,
   and emulation, audio and state bytes are the same at every scale.
 - **Frames nobody looks at** are configuration as well. Fast-forward runs
-  more frames than the display has refreshes for, and the emulation
-  thread tells the core which ones before each (`set_frames_shown`): one
-  in three for the DS at 3× on a 120 Hz display, where three frames fill
-  two refreshes (`refresh::Lock::shown_every`), and those are the only
-  frames it publishes. A core may leave out what only the picture needs
-  for the rest, and `screens` then keep the last frame shown. The DS core
-  leaves out its larger 3D frame and larger screens, the costliest work
-  it has, and still draws the native frame, which display capture reads
-  and states save. Emulation, audio and state bytes are the same either
-  way, and the frames shown come out as if every frame were. Every frame
-  is shown at normal speed, while a recording or a script runs, and
-  while the debugger is in use.
+  more frames than it shows. The emulation thread tells the core before
+  each frame whether it is shown (`set_frames_shown`) and publishes only
+  those that are (`refresh::Lock::shown_every`). A core may leave out
+  what only the picture needs for the others, and `screens` then keep
+  the last frame shown. The DS core draws nothing for them, neither
+  its screens nor its 3D at any size, but for what a display capture
+  reads; drawing is most of its work, so it says its unseen frames are
+  cheap (`unseen_frames_are_cheap`), and fast-forward then shows it no
+  more frames a second than it has at its own speed: one in four at 4×,
+  on any display. For other cores it shows as many as the display has
+  refreshes for. Emulation and audio are the same either way, and the
+  frames shown come out as if every frame were. So are state bytes
+  after a frame that was shown; after one that was not, a state holds
+  the screens of the last that was, so rewind records only frames shown.
+  Every frame is shown at normal speed, while a recording or a script
+  runs, and while the debugger is in use.
 
 ## Debugging
 

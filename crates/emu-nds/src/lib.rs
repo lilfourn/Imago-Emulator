@@ -450,11 +450,17 @@ impl Core for Nds {
         self.present();
     }
 
-    /// Frames nobody looks at leave the frames as they are, and at a
-    /// larger scale their 3D and screens are not drawn larger. Display
-    /// capture and states still get the native frame.
+    /// Frames nobody looks at leave the frames as they are: neither
+    /// their screens nor their 3D are drawn, at any scale, but for what a
+    /// display capture reads. A state saved after one holds the screens
+    /// of the last frame that was looked at.
     fn set_frames_shown(&mut self, shown: bool) {
         self.shown = shown;
+    }
+
+    /// Drawing is most of a frame's work when it has 3D on screen.
+    fn unseen_frames_are_cheap(&self) -> bool {
+        true
     }
 
     fn reset(&mut self) {
@@ -1153,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_nobody_looks_at_change_the_screens_only() {
+    fn frames_nobody_looks_at_change_no_screens() {
         let rom = white_screen_rom();
         for scale in [1, 2] {
             let mut seen = Nds::new(&Media::new(&rom)).expect("valid header");
@@ -1163,7 +1169,7 @@ mod tests {
             let before = unseen.screens()[0].clone();
             // The program paints the screen white in frames only one
             // console's player looks at: the other's frames stay as they
-            // were, and its sound and state are the same.
+            // were, and its sound is the same.
             unseen.set_frames_shown(false);
             let (mut seen_audio, mut unseen_audio) = (Vec::new(), Vec::new());
             for _ in 0..3 {
@@ -1178,8 +1184,19 @@ mod tests {
                 nds.save_state(&mut state);
                 state
             };
-            assert!(state(&seen) == state(&unseen), "scale {scale}");
-            // Looked at again, its next frame is the one the other has.
+            // So is its state, but for the screens kept in it, which are
+            // those of the last frame looked at.
+            let but_screens = |nds: &Nds| {
+                let mut copy = Nds::new(&Media::new(&rom)).expect("valid header");
+                copy.load_state(&state(nds)).expect("loads");
+                copy.machine.hw.screen_a.fill(0);
+                copy.machine.hw.screen_b.fill(0);
+                state(&copy)
+            };
+            assert!(state(&seen) != state(&unseen), "scale {scale}");
+            assert!(but_screens(&seen) == but_screens(&unseen), "scale {scale}");
+            // Looked at again, its next frame is the one the other has,
+            // and its state the same throughout.
             unseen.set_frames_shown(true);
             seen.run_frame(&[], &mut Vec::new());
             unseen.run_frame(&[], &mut Vec::new());
