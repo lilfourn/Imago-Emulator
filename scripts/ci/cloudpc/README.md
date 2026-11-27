@@ -26,8 +26,10 @@ checkout (`imago-ci-work-SLOT`). The checkout is kept so that files a
 change leaves alone keep their modification times, and cargo rebuilds
 only the crates the change touched. Keeping each role on its own slot
 means each target directory holds one kind of build (clippy's, the tests'
-or the app's) and is always warm for it. The cargo registry and the test
-ROMs are shared. A target directory past 60 GB is cleared before the next
+or the app's) and is always warm for it. `CARGO_HOME` (`imago-ci-cargo`)
+and the test ROMs are shared; cargo's lock lives in `CARGO_HOME`, so jobs
+side by side wait for each other to unpack a crate rather than unpack it
+twice. A target directory past 60 GB is cleared before the next
 job.
 
 ## Isolation

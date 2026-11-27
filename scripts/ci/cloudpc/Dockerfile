@@ -73,17 +73,23 @@ RUN curl -fsSL -o /tmp/rustup-init \
  && cd /tmp/toolchain && rustup toolchain install \
  && rustup default "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" \
  && rm -rf /tmp/toolchain \
- && mkdir -p /home/runner/.cargo/registry /home/runner/.cargo/git \
-      /home/runner/actions-runner/_work /cache/target /cache/test-roms
+ && mkdir -p /home/runner/actions-runner/_work /cache/cargo /cache/target /cache/test-roms
 
-# Volumes supervise.sh mounts: the registry is shared, the rest per slot.
-#   /home/runner/.cargo/registry, /home/runner/.cargo/git  cargo's downloads
+# Volumes supervise.sh mounts: the first and last are shared by every
+# slot, the others are each slot's own.
+#   /cache/cargo    CARGO_HOME from here on: the registry, git checkouts,
+#                   cargo-deny's advisory database, and the lock cargo
+#                   takes while it unpacks a crate, so that jobs side by
+#                   side wait for each other instead of unpacking the same
+#                   crate at once. rustup's proxies stay in the image's
+#                   ~/.cargo/bin.
 #   /cache/target   CARGO_TARGET_DIR
 #   /home/runner/actions-runner/_work  the checkout, kept so that files a
 #                   change leaves alone keep their times and cargo doesn't
 #                   rebuild the crates they belong to
 #   /cache/test-roms  scripts/fetch-test-roms.sh's downloads
-ENV CARGO_TARGET_DIR=/cache/target \
+ENV CARGO_HOME=/cache/cargo \
+    CARGO_TARGET_DIR=/cache/target \
     CARGO_TERM_COLOR=always \
     CARGO_INCREMENTAL=1 \
     IMAGO_CI_CACHE=/cache \

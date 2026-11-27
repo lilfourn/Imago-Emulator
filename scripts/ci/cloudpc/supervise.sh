@@ -13,8 +13,9 @@
 # internet but not this PC, its LAN or the tailnet. GitHub's token stays
 # here: the container gets only the one-job runner configuration.
 #
-# What a job should find warm lives on volumes: the cargo registry and
-# the test ROMs, shared by every slot, and a target directory and checkout
+# What a job should find warm lives on volumes: CARGO_HOME (the registry
+# and the lock cargo takes to unpack into it) and the test ROMs, shared
+# by every slot, and a target directory and checkout
 # of each slot's own, so each role keeps rebuilding only what changed.
 set -euo pipefail
 
@@ -64,8 +65,7 @@ while true; do
         --cgroup-parent imago-ci.slice \
         --cap-drop ALL --security-opt no-new-privileges \
         --pids-limit 16384 --shm-size 2g \
-        -v imago-ci-registry:/home/runner/.cargo/registry \
-        -v imago-ci-git:/home/runner/.cargo/git \
+        -v imago-ci-cargo:/cache/cargo \
         -v imago-ci-roms:/cache/test-roms \
         -v "imago-ci-target-$slot:/cache/target" \
         -v "imago-ci-work-$slot:/home/runner/actions-runner/_work" \

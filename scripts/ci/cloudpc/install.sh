@@ -75,19 +75,28 @@ echo "== The imago-ci network and its firewall"
 docker network inspect imago-ci >/dev/null 2>&1 ||
     docker network create -o com.docker.network.bridge.name=br-imago-ci imago-ci >/dev/null
 sudo install -d "$lib"
-sudo install -m 755 "$here/supervise.sh" "$lib/supervise.sh"
+# Replaced, not rewritten in place: a running bash reads its script as it goes.
+sudo install -m 755 "$here/supervise.sh" "$lib/supervise.sh.new"
+sudo mv -f "$lib/supervise.sh.new" "$lib/supervise.sh"
 sudo tee "$lib/firewall.sh" >/dev/null <<'EOF'
 #!/bin/sh
 # A job's container may reach the internet, and nothing private: not this
 # PC (its T3 server, SSH), the LAN, WSL's Windows host, or the tailnet.
 set -eu
-iptables -N IMAGO-CI 2>/dev/null || iptables -F IMAGO-CI
-iptables -A IMAGO-CI -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+# Built beside the old rules and swapped in, so that running this again
+# never leaves the network unfiltered, even briefly.
+iptables -N IMAGO-CI-NEW 2>/dev/null || iptables -F IMAGO-CI-NEW
+iptables -A IMAGO-CI-NEW -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16; do
-    iptables -A IMAGO-CI -d "$net" -j REJECT
+    iptables -A IMAGO-CI-NEW -d "$net" -j REJECT
 done
-iptables -C DOCKER-USER -i br-imago-ci -j IMAGO-CI 2>/dev/null ||
-    iptables -I DOCKER-USER -i br-imago-ci -j IMAGO-CI
+iptables -I DOCKER-USER -i br-imago-ci -j IMAGO-CI-NEW
+while iptables -D DOCKER-USER -i br-imago-ci -j IMAGO-CI 2>/dev/null; do :; done
+if iptables -L IMAGO-CI -n >/dev/null 2>&1; then
+    iptables -F IMAGO-CI
+    iptables -X IMAGO-CI
+fi
+iptables -E IMAGO-CI-NEW IMAGO-CI
 iptables -C INPUT -i br-imago-ci -j REJECT 2>/dev/null ||
     iptables -I INPUT -i br-imago-ci -j REJECT
 EOF
@@ -143,8 +152,15 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
-sudo systemctl enable --now imago-ci-firewall.service >/dev/null
-sudo systemctl restart imago-ci-firewall.service
+sudo systemctl enable imago-ci-firewall.service >/dev/null
+# The runner units require the firewall unit, so restarting it would
+# restart them too, ending any job they are running: apply the rules
+# directly instead.
+if systemctl is-active --quiet imago-ci-firewall.service; then
+    sudo "$lib/firewall.sh"
+else
+    sudo systemctl start imago-ci-firewall.service
+fi
 
 echo "== Runners"
 mapfile -t running < <(units)
